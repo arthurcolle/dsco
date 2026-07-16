@@ -1,0 +1,8 @@
+{
+  "mode": "local-hash-v2",
+  "dim": 1024,
+  "count": 10512,
+  "source": "/Users/arthurcolle/dsco-emergency/dsco-cli/data/consumer_profile_ontology/facet_definitions_base_with_boundaries.jsonl",
+  "source_sha256": "d2383443a5a20e1b45d711cc8e41b1794c377bc19d38dc55b4eaba75334a2824",
+  "built_at": "2026-07-07T19:28:40Z"
+}

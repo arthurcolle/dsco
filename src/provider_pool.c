@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -16,6 +17,17 @@
 #define POOL_TRIP_MAX_SECS    300
 
 static provider_pool_t g_pool;
+static pthread_mutex_t g_pool_mu = PTHREAD_MUTEX_INITIALIZER;
+
+typedef struct {
+    char   name[64];
+    time_t exhausted_until;
+} pool_limits_record_t;
+
+typedef struct {
+    pool_limits_record_t providers[PROVIDER_POOL_MAX];
+    int                  count;
+} pool_limits_snapshot_t;
 
 provider_pool_t *provider_pool(void) {
     return &g_pool;
@@ -28,7 +40,7 @@ static const char *pool_canon(const char *name) {
     return (c && c[0]) ? c : name;
 }
 
-provider_slot_t *provider_pool_slot(const char *name) {
+static provider_slot_t *provider_pool_slot_unlocked(const char *name) {
     if (!name || !name[0])
         return NULL;
     const char *canon = pool_canon(name);
@@ -39,13 +51,22 @@ provider_slot_t *provider_pool_slot(const char *name) {
     return NULL;
 }
 
+provider_slot_t *provider_pool_slot(const char *name) {
+    pthread_mutex_lock(&g_pool_mu);
+    provider_slot_t *slot = provider_pool_slot_unlocked(name);
+    pthread_mutex_unlock(&g_pool_mu);
+    return slot;
+}
+
 /* Register a slot (without building transport) if not already present. Returns
  * the slot, or NULL if the pool is full. */
 static provider_slot_t *pool_register(const char *name, bool is_subscription) {
-    provider_slot_t *existing = provider_pool_slot(name);
+    provider_slot_t *existing = provider_pool_slot_unlocked(name);
     if (existing) {
-        if (is_subscription)
-            existing->is_subscription = true;
+        /* Auth can change during a process (OAuth removed, PAYG selected,
+         * setup reloaded). Re-initialization must not preserve a stale
+         * zero-marginal label from the previous credential class. */
+        existing->is_subscription = is_subscription;
         return existing;
     }
     if (g_pool.count >= PROVIDER_POOL_MAX)
@@ -124,7 +145,22 @@ static void pool_limits_load(void) {
     free(json);
 }
 
-static void pool_limits_save(void) {
+static void pool_limits_snapshot_unlocked(pool_limits_snapshot_t *snapshot) {
+    if (!snapshot)
+        return;
+    memset(snapshot, 0, sizeof(*snapshot));
+    time_t now = time(NULL);
+    for (int i = 0; i < g_pool.count && snapshot->count < PROVIDER_POOL_MAX; i++) {
+        provider_slot_t *s = &g_pool.slots[i];
+        if (s->exhausted_until <= now)
+            continue;
+        pool_limits_record_t *r = &snapshot->providers[snapshot->count++];
+        snprintf(r->name, sizeof(r->name), "%s", s->name);
+        r->exhausted_until = s->exhausted_until;
+    }
+}
+
+static void pool_limits_save_snapshot(const pool_limits_snapshot_t *snapshot) {
     char path[1024];
     if (!pool_limits_path(path, sizeof(path)))
         return;
@@ -137,10 +173,9 @@ static void pool_limits_save(void) {
     fprintf(f, "{\"version\":1,\"updated_at\":%lld,\"providers\":{",
             (long long)now);
     bool first = true;
-    for (int i = 0; i < g_pool.count; i++) {
-        provider_slot_t *s = &g_pool.slots[i];
-        if (s->exhausted_until <= now)
-            continue;
+    int count = snapshot ? snapshot->count : 0;
+    for (int i = 0; i < count; i++) {
+        const pool_limits_record_t *s = &snapshot->providers[i];
         fprintf(f, "%s\"%s\":{\"exhausted_until\":%lld}", first ? "" : ",",
                 s->name, (long long)s->exhausted_until);
         first = false;
@@ -150,7 +185,8 @@ static void pool_limits_save(void) {
     rename(tmp, path);
 }
 
-/* Build + warm the transport for a slot. Safe to call repeatedly. */
+/* Build the reusable transport container for a slot. The first real request
+ * establishes the connection; later turns can reuse it. Safe to call repeatedly. */
 static void pool_warm(provider_slot_t *s) {
     if (!s)
         return;
@@ -159,7 +195,7 @@ static void pool_warm(provider_slot_t *s) {
     if (!s->provider) {
         s->provider = provider_create(s->name);
         if (s->provider)
-            provider_prepare(s->provider); /* warm DNS/TCP/TLS; no-op if unsupported */
+            provider_prepare(s->provider); /* allocate reusable handle; no-op if unsupported */
     }
     if (!s->provider) {
         s->state = POOL_SLOT_NOKEY; /* uncreatable — treat as unusable */
@@ -212,20 +248,25 @@ static bool pool_refresh_slot(provider_slot_t *s, time_t now, bool warm_if_keyed
 }
 
 void provider_pool_init(const char *session_key) {
+    pthread_mutex_lock(&g_pool_mu);
     if (session_key && session_key[0])
         snprintf(g_pool.session_key, sizeof(g_pool.session_key), "%s", session_key);
 
-    /* The flat-rate/core subscription lanes are always registered so they show
-     * up in /providers even before first use; they are warmed when a credential
-     * is available. openai-codex covers the ChatGPT subscription path. */
+    /* Register subscription-class transports separately from metered API-key
+     * fallbacks. In particular, direct OpenAI API usage is not a ChatGPT
+     * subscription lane; openai-codex owns that allocation. */
+    const char *anthropic_key = provider_resolve_request_api_key("anthropic", session_key);
+    const char *zai_key = provider_resolve_request_api_key("zai", session_key);
     struct {
         const char *name;
         bool        is_sub;
     } core[] = {
-        {"sakana", provider_sakana_current_key_is_subscription()},
-        {"anthropic", true}, {"openai", true},
+        {"sakana", provider_sakana_subscription_request_key() != NULL},
+        {"anthropic", provider_usage_is_included("anthropic", anthropic_key)},
+        {"openai", false},
         {"openai-codex", true},
-        {"zai", true},
+        {"kimi-code", true},
+        {"zai", provider_usage_is_included("zai", zai_key)},
         /* Common metered fallbacks — registered lazily-warm only if keyed. */
         {"openrouter", false}, {"xai", false},      {"moonshot", false},
         {"google", false},
@@ -247,31 +288,50 @@ void provider_pool_init(const char *session_key) {
 
     pool_limits_load();
     g_pool.initialized = true;
+    pthread_mutex_unlock(&g_pool_mu);
 }
 
 provider_t *provider_pool_acquire(const char *name) {
     if (!name || !name[0])
         return NULL;
-    provider_slot_t *s = provider_pool_slot(name);
+    pool_limits_snapshot_t limits_snapshot;
+    bool save_limits = false;
+    pthread_mutex_lock(&g_pool_mu);
+    provider_slot_t *s = provider_pool_slot_unlocked(name);
     if (!s)
         s = pool_register(name, false);
-    if (!s)
+    if (!s) {
+        pthread_mutex_unlock(&g_pool_mu);
         return NULL; /* pool full (unreachable in practice): caller keeps current
                       * provider rather than receiving a non-pool instance */
+    }
     time_t now = time(NULL);
     bool changed = pool_refresh_slot(s, now, true);
-    if (changed)
-        pool_limits_save();
+    if (changed) {
+        pool_limits_snapshot_unlocked(&limits_snapshot);
+        save_limits = true;
+    }
     if (!s->provider)
         pool_warm(s);
     s->last_used = now;
-    return s->provider;
+    /* An open breaker is a routing decision, not merely display state. Never
+     * hand the failed transport back to a caller until its deadline resets. */
+    provider_t *provider = s->state == POOL_SLOT_TRIPPED ? NULL : s->provider;
+    pthread_mutex_unlock(&g_pool_mu);
+    if (save_limits)
+        pool_limits_save_snapshot(&limits_snapshot);
+    return provider;
 }
 
 void provider_pool_report(const char *name, bool ok, double latency_ms) {
-    provider_slot_t *s = provider_pool_slot(name);
-    if (!s)
+    pool_limits_snapshot_t limits_snapshot;
+    bool save_limits = false;
+    pthread_mutex_lock(&g_pool_mu);
+    provider_slot_t *s = provider_pool_slot_unlocked(name);
+    if (!s) {
+        pthread_mutex_unlock(&g_pool_mu);
         return;
+    }
     s->total_requests++;
     if (latency_ms > 0)
         s->last_latency_ms = latency_ms;
@@ -283,7 +343,8 @@ void provider_pool_report(const char *name, bool ok, double latency_ms) {
             clears_subscription_exhaustion = false;
         if (s->is_subscription && s->exhausted_until && clears_subscription_exhaustion) {
             s->exhausted_until = 0;
-            pool_limits_save();
+            pool_limits_snapshot_unlocked(&limits_snapshot);
+            save_limits = true;
         }
         if (s->provider)
             s->state = POOL_SLOT_UP;
@@ -298,54 +359,100 @@ void provider_pool_report(const char *name, bool ok, double latency_ms) {
             s->tripped_until = time(NULL) + backoff;
         }
     }
+    pthread_mutex_unlock(&g_pool_mu);
+    if (save_limits)
+        pool_limits_save_snapshot(&limits_snapshot);
 }
 
 void provider_pool_mark_subscription_exhausted(const char *name, time_t exhausted_until) {
     if (!name || !name[0] || exhausted_until <= 0)
         return;
-    provider_slot_t *s = provider_pool_slot(name);
+    pool_limits_snapshot_t limits_snapshot;
+    pthread_mutex_lock(&g_pool_mu);
+    provider_slot_t *s = provider_pool_slot_unlocked(name);
     if (!s)
         s = pool_register(name, true);
-    if (!s)
+    if (!s) {
+        pthread_mutex_unlock(&g_pool_mu);
         return;
-    if (exhausted_until <= time(NULL))
+    }
+    if (exhausted_until <= time(NULL)) {
+        pthread_mutex_unlock(&g_pool_mu);
         return;
-    if (exhausted_until <= s->exhausted_until)
+    }
+    if (exhausted_until <= s->exhausted_until) {
+        pthread_mutex_unlock(&g_pool_mu);
         return;
+    }
     s->exhausted_until = exhausted_until;
-    pool_limits_save();
+    pool_limits_snapshot_unlocked(&limits_snapshot);
+    pthread_mutex_unlock(&g_pool_mu);
+    pool_limits_save_snapshot(&limits_snapshot);
 }
 
 time_t provider_pool_subscription_exhausted_until(const char *name) {
-    provider_slot_t *s = provider_pool_slot(name);
-    if (!s || !s->is_subscription || !s->exhausted_until)
+    pool_limits_snapshot_t limits_snapshot;
+    bool save_limits = false;
+    pthread_mutex_lock(&g_pool_mu);
+    provider_slot_t *s = provider_pool_slot_unlocked(name);
+    if (!s || !s->is_subscription || !s->exhausted_until) {
+        pthread_mutex_unlock(&g_pool_mu);
         return 0;
+    }
     time_t now = time(NULL);
     if (now >= s->exhausted_until) {
         pool_refresh_slot(s, now, true);
-        pool_limits_save();
+        pool_limits_snapshot_unlocked(&limits_snapshot);
+        save_limits = true;
+        pthread_mutex_unlock(&g_pool_mu);
+        if (save_limits)
+            pool_limits_save_snapshot(&limits_snapshot);
         return 0;
     }
-    return s->exhausted_until;
+    time_t exhausted_until = s->exhausted_until;
+    pthread_mutex_unlock(&g_pool_mu);
+    return exhausted_until;
 }
 
 bool provider_pool_healthy(const char *name) {
-    provider_slot_t *s = provider_pool_slot(name);
-    if (!s)
+    pool_limits_snapshot_t limits_snapshot;
+    bool save_limits = false;
+    pthread_mutex_lock(&g_pool_mu);
+    provider_slot_t *s = provider_pool_slot_unlocked(name);
+    if (!s) {
+        pthread_mutex_unlock(&g_pool_mu);
         return false;
+    }
     time_t now = time(NULL);
-    if (pool_refresh_slot(s, now, true))
-        pool_limits_save();
-    if (!s->provider)
+    if (pool_refresh_slot(s, now, true)) {
+        pool_limits_snapshot_unlocked(&limits_snapshot);
+        save_limits = true;
+    }
+    if (!s->provider) {
+        pthread_mutex_unlock(&g_pool_mu);
+        if (save_limits)
+            pool_limits_save_snapshot(&limits_snapshot);
         return false;
+    }
     if (s->is_subscription && s->exhausted_until) {
-        if (now < s->exhausted_until)
+        if (now < s->exhausted_until) {
+            pthread_mutex_unlock(&g_pool_mu);
+            if (save_limits)
+                pool_limits_save_snapshot(&limits_snapshot);
             return false;
+        }
     }
     if (s->state == POOL_SLOT_TRIPPED) {
+        pthread_mutex_unlock(&g_pool_mu);
+        if (save_limits)
+            pool_limits_save_snapshot(&limits_snapshot);
         return false;
     }
-    return s->state == POOL_SLOT_UP;
+    bool healthy = s->state == POOL_SLOT_UP;
+    pthread_mutex_unlock(&g_pool_mu);
+    if (save_limits)
+        pool_limits_save_snapshot(&limits_snapshot);
+    return healthy;
 }
 
 static const char *pool_state_str(pool_slot_state_t st) {
@@ -365,6 +472,9 @@ static const char *pool_state_str(pool_slot_state_t st) {
 void provider_pool_render(char *out, size_t out_len) {
     if (!out || out_len == 0)
         return;
+    pool_limits_snapshot_t limits_snapshot;
+    bool save_limits = false;
+    pthread_mutex_lock(&g_pool_mu);
     size_t pos = 0;
     int n = snprintf(out + pos, out_len - pos,
                      "  %-14s %-4s %-8s %-16s %8s %7s  %s\n", "provider", "sub", "state",
@@ -376,7 +486,7 @@ void provider_pool_render(char *out, size_t out_len) {
         char fails[32];
         char reset[32] = "-";
         if (pool_refresh_slot(s, time(NULL), false))
-            pool_limits_save();
+            save_limits = true;
         snprintf(fails, sizeof(fails), "%ld/%ld", s->total_failures, s->total_requests);
         if (s->exhausted_until > time(NULL)) {
             struct tm tmv;
@@ -395,9 +505,19 @@ void provider_pool_render(char *out, size_t out_len) {
         out[pos] = '\0';
     else if (out_len > 0)
         out[out_len - 1] = '\0';
+    if (save_limits)
+        pool_limits_snapshot_unlocked(&limits_snapshot);
+    pthread_mutex_unlock(&g_pool_mu);
+    if (save_limits)
+        pool_limits_save_snapshot(&limits_snapshot);
 }
 
 void provider_pool_shutdown(void) {
+    pool_limits_snapshot_t limits_snapshot;
+    bool flush_limits;
+    pthread_mutex_lock(&g_pool_mu);
+    flush_limits = g_pool.initialized || g_pool.count > 0;
+    pool_limits_snapshot_unlocked(&limits_snapshot);
     for (int i = 0; i < g_pool.count; i++) {
         if (g_pool.slots[i].provider) {
             provider_free(g_pool.slots[i].provider);
@@ -407,4 +527,7 @@ void provider_pool_shutdown(void) {
     g_pool.count = 0;
     g_pool.initialized = false;
     g_pool.session_key[0] = '\0';
+    pthread_mutex_unlock(&g_pool_mu);
+    if (flush_limits)
+        pool_limits_save_snapshot(&limits_snapshot);
 }

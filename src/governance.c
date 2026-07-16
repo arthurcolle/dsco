@@ -2,6 +2,7 @@
 #include "error.h"
 #include "rsi_curriculum.h"
 #include "vfs.h"
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/time.h>
@@ -116,6 +117,12 @@ static const struct {
      0, 1, 0},
     {"rsi.cost_regression_max", "Maximum cost-per-success multiplier", RSI_GATE_COST_REGRESSION_MAX,
      1, 10, 0},
+    /* ── Empirical capability tiering ─────────────────────────────────── */
+    {"cap.min_samples", "Min outcomes before a tier can rise above COMPETENT", 8, 1, 1000, 1},
+    {"cap.expert_lb", "Wilson lower bound required for EXPERT", 0.80, 0.5, 0.999, 1},
+    {"cap.proficient_lb", "Wilson lower bound required for PROFICIENT", 0.60, 0.3, 0.95, 1},
+    {"cap.competent_lb", "Wilson lower bound required for COMPETENT", 0.30, 0.05, 0.8, 1},
+    {"cap.upgrade_cooldown", "Seconds between successive tier promotions", 30, 0, 86400, 1},
 };
 
 #define DEFAULT_SOFTCODED_COUNT (sizeof(DEFAULT_SOFTCODED) / sizeof(DEFAULT_SOFTCODED[0]))
@@ -259,6 +266,14 @@ bool governance_register_agent(governance_engine_t *g, const char *agent_id, pri
         gsu_budget > 0 ? gsu_budget : governance_get_param(g, "budget.default_gsu");
     a->budget.rate_limit = governance_get_param(g, "budget.rate_limit");
     a->capability = CAPABILITY_COMPETENT; /* start competent, upgrade with evidence */
+    /* Evidence ledger: no observations yet → tier is provisional, not earned. */
+    a->evidence_successes = 0;
+    a->evidence_failures = 0;
+    a->success_lb = 0.0;
+    a->claimed_capability = CAPABILITY_COMPETENT;
+    a->last_upgrade_at = 0.0;
+    a->last_downgrade_at = 0.0;
+    a->tier_changes = 0;
     a->max_depth = (int)governance_get_param(g, "agent.max_depth");
     a->max_children = (int)governance_get_param(g, "agent.max_children");
     a->max_tools = 128;
@@ -292,6 +307,135 @@ const agent_envelope_t *governance_get_agent(const governance_engine_t *g, const
             return &g->agents[i];
     }
     return NULL;
+}
+
+/* ── Empirical Capability (evidence-based tiering) ────────────────────────
+   The capability layer earns its tier from observed outcomes. We use the
+   Wilson score interval lower bound rather than the raw success ratio so that
+   a lucky 2/2 run does not masquerade as expertise: the bound is pulled toward
+   0.5 when the sample is small and only approaches the true rate as evidence
+   accumulates. This is what makes the hardcoded rule "never claim a tier
+   higher than empirically measured" mechanically true. */
+
+double governance_wilson_lower_bound(int successes, int failures) {
+    int n = successes + failures;
+    if (n <= 0)
+        return 0.0;
+    const double z = 1.96; /* ~95% one-sided-ish two-sided coverage */
+    double phat = (double)successes / (double)n;
+    double z2 = z * z;
+    double denom = 1.0 + z2 / n;
+    double centre = phat + z2 / (2.0 * n);
+    double margin = z * sqrt((phat * (1.0 - phat) + z2 / (4.0 * n)) / n);
+    double lb = (centre - margin) / denom;
+    if (lb < 0.0)
+        lb = 0.0;
+    if (lb > 1.0)
+        lb = 1.0;
+    return lb;
+}
+
+/* Derive a tier from an evidence ledger. Uses default thresholds when no
+   engine params are available (pure/what-if path). */
+capability_tier_t governance_derive_capability(int successes, int failures,
+                                               double *out_success_lb) {
+    double lb = governance_wilson_lower_bound(successes, failures);
+    if (out_success_lb)
+        *out_success_lb = lb;
+    int n = successes + failures;
+    /* Below the sample floor the tier stays provisional (COMPETENT at best);
+       an agent cannot vault to EXPERT/PROFICIENT on a handful of trials. */
+    const int MIN_SAMPLES = 8;
+    if (n >= MIN_SAMPLES && lb >= 0.80)
+        return CAPABILITY_EXPERT;
+    if (n >= MIN_SAMPLES && lb >= 0.60)
+        return CAPABILITY_PROFICIENT;
+    if (lb >= 0.30)
+        return CAPABILITY_COMPETENT;
+    return CAPABILITY_NOVICE;
+}
+
+/* Engine-aware derivation honoring softcoded thresholds + sample floor. */
+static capability_tier_t derive_capability_cfg(const governance_engine_t *g,
+                                               int successes, int failures,
+                                               double *out_lb) {
+    double lb = governance_wilson_lower_bound(successes, failures);
+    if (out_lb)
+        *out_lb = lb;
+    int n = successes + failures;
+    /* governance_get_param takes a non-const engine; we only read, so cast. */
+    governance_engine_t *ng = (governance_engine_t *)g;
+    int min_samples = (int)governance_get_param(ng, "cap.min_samples");
+    double expert = governance_get_param(ng, "cap.expert_lb");
+    double proficient = governance_get_param(ng, "cap.proficient_lb");
+    double competent = governance_get_param(ng, "cap.competent_lb");
+    if (min_samples < 1)
+        min_samples = 1;
+    if (n >= min_samples && lb >= expert)
+        return CAPABILITY_EXPERT;
+    if (n >= min_samples && lb >= proficient)
+        return CAPABILITY_PROFICIENT;
+    if (lb >= competent)
+        return CAPABILITY_COMPETENT;
+    return CAPABILITY_NOVICE;
+}
+
+capability_tier_t governance_record_outcome(governance_engine_t *g,
+                                            const char *agent_id, bool success) {
+    if (!g || !g->initialized || !agent_id)
+        return CAPABILITY_NOVICE;
+    agent_envelope_t *a = find_agent(g, agent_id);
+    if (!a)
+        return CAPABILITY_NOVICE;
+
+    if (success)
+        a->evidence_successes++;
+    else
+        a->evidence_failures++;
+
+    double lb = 0.0;
+    capability_tier_t supported =
+        derive_capability_cfg(g, a->evidence_successes, a->evidence_failures, &lb);
+    a->success_lb = lb;
+
+    /* Lower enum value = MORE capable (EXPERT=0 … NOVICE=3). Asymmetric
+       hysteresis: a drop in supported capability (supported > current, i.e.
+       weaker) applies immediately for safety; a rise (supported < current,
+       i.e. stronger) is gated by a cooldown so noisy streaks don't ratchet
+       the tier up prematurely. */
+    double now = now_sec();
+    capability_tier_t current = a->claimed_capability;
+    if (supported > current) {
+        /* Downgrade — instant. */
+        a->claimed_capability = supported;
+        a->last_downgrade_at = now;
+        a->tier_changes++;
+    } else if (supported < current) {
+        double cooldown = governance_get_param(g, "cap.upgrade_cooldown");
+        if (a->last_upgrade_at == 0.0 || (now - a->last_upgrade_at) >= cooldown) {
+            /* Promote one step at a time — earn each rung. */
+            a->claimed_capability = (capability_tier_t)(current - 1);
+            a->last_upgrade_at = now;
+            a->tier_changes++;
+        }
+    }
+    /* Keep the operational `capability` field aligned with earned evidence. */
+    a->capability = a->claimed_capability;
+    return a->claimed_capability;
+}
+
+bool governance_can_claim_capability(const governance_engine_t *g,
+                                     const char *agent_id,
+                                     capability_tier_t want) {
+    if (!g || !g->initialized || !agent_id)
+        return false;
+    const agent_envelope_t *a = governance_get_agent(g, agent_id);
+    if (!a)
+        return false;
+    /* A claim is legitimate only if it is no stronger than what evidence
+       currently supports. Smaller enum = stronger; so `want` must be >= the
+       claimed (earned) tier. */
+    return want >= a->claimed_capability;
 }
 
 /* ── Hardcoded Rules ──────────────────────────────────────────────────── */

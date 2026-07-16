@@ -25,6 +25,9 @@
 #include <dirent.h>
 #include <time.h>
 #include <errno.h>
+#include <ctype.h>
+#include <limits.h>
+#include <stdatomic.h>
 
 #ifdef HAVE_LIBSODIUM
 #include "mesh.h"
@@ -53,6 +56,8 @@ static const char *home_dir(void) {
 }
 
 /* Run a shell command, capture stdout+stderr, return malloc'd string */
+static bool net_bridge_fanout(const char *input, char *result, size_t rlen);
+
 static char *shell_capture(const char *cmd) {
     FILE *fp = popen(cmd, "r");
     if (!fp)
@@ -62,9 +67,26 @@ static char *shell_capture(const char *cmd) {
     char buf[4096];
     while (fgets(buf, sizeof(buf), fp)) {
         size_t n = strlen(buf);
+        if (n > SIZE_MAX - len - 1) {
+            free(out);
+            pclose(fp);
+            return strdup("");
+        }
         if (len + n + 1 > cap) {
-            cap = (len + n + 1) * 2 + 1024;
-            out = realloc(out, cap);
+            size_t new_cap = (len + n + 1) * 2 + 1024;
+            if (new_cap < len + n + 1) {
+                free(out);
+                pclose(fp);
+                return strdup("");
+            }
+            char *grown = realloc(out, new_cap);
+            if (!grown) {
+                free(out);
+                pclose(fp);
+                return strdup("");
+            }
+            out = grown;
+            cap = new_cap;
         }
         memcpy(out + len, buf, n);
         len += n;
@@ -525,7 +547,7 @@ bool tool_net_dispatch(const char *input, char *result, size_t rlen) {
                  "\"actions\":["
                  "\"mesh/status\",\"mesh/peers\",\"mesh/send\",\"mesh/broadcast\",\"mesh/connect\","
                  "\"http/post\",\"http/status\","
-                 "\"bridge/fleet\",\"bridge/exec\",\"bridge/send\","
+                 "\"bridge/fleet\",\"bridge/exec\",\"bridge/fanout\",\"bridge/send\","
                  "\"bridge/bus_put\",\"bridge/bus_get\","
                  "\"remote\""
                  "]}");
@@ -551,6 +573,8 @@ bool tool_net_dispatch(const char *input, char *result, size_t rlen) {
         ok = net_bridge_fleet(input, result, rlen);
     else if (strcmp(action, "bridge/exec") == 0)
         ok = net_bridge_exec(input, result, rlen);
+    else if (strcmp(action, "bridge/fanout") == 0)
+        ok = net_bridge_fanout(input, result, rlen);
     else if (strcmp(action, "bridge/send") == 0)
         ok = net_bridge_send(input, result, rlen);
     else if (strcmp(action, "bridge/bus_put") == 0)
@@ -565,6 +589,362 @@ bool tool_net_dispatch(const char *input, char *result, size_t rlen) {
 
     free(action);
     return ok;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * NATIVE FLEET FANOUT  (bridge/fanout)
+ *   Run one command across every fleet host concurrently and write a durable
+ *   per-host RESULT.json envelope so a partial-failure run is replayable and
+ *   inspectable. This is the "orchestrate thousands of servers" primitive the
+ *   systems-agent needs — a durable workflow, not a fire-and-forget loop.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+#include <fcntl.h>
+#include <pthread.h>
+#include <stdatomic.h>
+
+#define FANOUT_MAX_HOSTS 4096
+
+typedef enum {
+    FANOUT_TRANSPORT_FLEET = 0, /* fleet.sh over SSH */
+    FANOUT_TRANSPORT_MESH,      /* encrypted mesh: remote `bash` tool via netsrv */
+} fanout_transport_t;
+
+typedef struct {
+    char host[64];
+    char addr[128]; /* resolved ADDR for mesh transport */
+    char cmd[2048];
+    char run_dir[512];
+    fanout_transport_t transport;
+    int mesh_port;
+    int exit_code;
+    double duration_ms;
+    int ok; /* 1 = command ran (exit==0), 0 = failed */
+} fanout_job_t;
+
+/* Parse a "__DSCO_EXIT=<n>" trailer emitted by the remote command, strip it
+   from the captured output in place, and return the exit code (or -1 if absent
+   → treated as unknown but non-fatal for back-compat). */
+static int fanout_parse_exit_trailer(char *out) {
+    if (!out)
+        return -1;
+    char *marker = NULL, *p = out;
+    /* find the LAST occurrence so command output can't spoof an earlier one */
+    while ((p = strstr(p, "__DSCO_EXIT=")) != NULL) {
+        marker = p;
+        p += 12;
+    }
+    if (!marker)
+        return -1;
+    char *num = marker + 12;
+    if (!isdigit((unsigned char)*num))
+        return -1;
+    errno = 0;
+    char *end = NULL;
+    long code = strtol(num, &end, 10);
+    if (errno || end == num || code < 0 || code > 255 || (*end && *end != '\n' && *end != '\r'))
+        return -1;
+    /* trim the marker (and a preceding newline if present) from the output */
+    char *cut = marker;
+    if (cut > out && cut[-1] == '\n')
+        cut--;
+    *cut = '\0';
+    return (int)code;
+}
+
+static bool fanout_host_safe(const char *s) {
+    if (!s || !*s)
+        return false;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (!(isalnum(*p) || *p == '.' || *p == '_' || *p == '-'))
+            return false;
+    }
+    return true;
+}
+
+static bool fanout_shell_single_quote(const char *src, char *dst, size_t dlen) {
+    if (!src || !dst || dlen < 3)
+        return false;
+    size_t o = 0;
+    dst[o++] = '\'';
+    for (const unsigned char *p = (const unsigned char *)src; *p; p++) {
+        if (*p == '\'') {
+            if (o + 4 >= dlen)
+                return false;
+            memcpy(dst + o, "'\\''", 4);
+            o += 4;
+        } else {
+            if (o + 1 >= dlen)
+                return false;
+            dst[o++] = (char)*p;
+        }
+    }
+    if (o + 1 >= dlen)
+        return false;
+    dst[o++] = '\'';
+    dst[o] = '\0';
+    return true;
+}
+
+static double fanout_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+/* Minimal JSON string escaper into a fixed buffer (truncates safely). */
+static void fanout_json_escape(const char *in, char *out, size_t out_len) {
+    size_t o = 0;
+    for (size_t i = 0; in && in[i] && o + 2 < out_len; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == '"' || c == '\\') {
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c == '\n') {
+            out[o++] = '\\';
+            out[o++] = 'n';
+        } else if (c == '\r') {
+            out[o++] = '\\';
+            out[o++] = 'r';
+        } else if (c == '\t') {
+            out[o++] = '\\';
+            out[o++] = 't';
+        } else if (c < 0x20) {
+            /* skip other control chars */
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = '\0';
+}
+
+static _Atomic int g_fanout_next = 0;
+static fanout_job_t *g_fanout_jobs = NULL;
+static int g_fanout_count = 0;
+
+static void fanout_run_one(fanout_job_t *j) {
+    double t0 = fanout_now_ms();
+    char *out = NULL;
+
+    if (j->transport == FANOUT_TRANSPORT_MESH) {
+        /* Mesh-native path: invoke the remote `bash` tool through the native
+           TLS/HTTP server instead of SSH. This uses the same remote tool route
+           as net remote, but with structured exit capture inside the command. */
+        char esc_cmd[4096];
+        fanout_json_escape(j->cmd, esc_cmd, sizeof(esc_cmd));
+        char body[8192];
+        snprintf(body, sizeof(body),
+                 "{\"tool\":\"bash\",\"params\":{\"command\":\"( %s ); "
+                 "_rc=$?; printf '\\n__DSCO_EXIT=%%d\\n' $_rc\"}}",
+                 esc_cmd);
+        uint8_t auth[32] = {0};
+        out = netsrv_client_post(j->addr[0] ? j->addr : j->host, (uint16_t)j->mesh_port,
+                                 "/tool", body, auth, sizeof(auth), false);
+        if (!out)
+            out = strdup("__DSCO_EXIT=255\nmesh remote call failed");
+    } else {
+        /* Fleet/SSH path: append a structured exit trailer to the REMOTE command
+           so popen's lack of child exit status no longer matters. */
+        char sh[8192], quoted_cmd[6144];
+        char remote[4096];
+        snprintf(remote, sizeof(remote), "( %s ); _rc=$?; printf '\\n__DSCO_EXIT=%%d\\n' $_rc", j->cmd);
+        if (!fanout_host_safe(j->host) || !fanout_shell_single_quote(remote, quoted_cmd, sizeof(quoted_cmd))) {
+            out = strdup("__DSCO_EXIT=255\ninvalid fanout host or command too long");
+        } else {
+            snprintf(sh, sizeof(sh), "%s/bridge/plugins/fleet.sh on %s %s 2>&1",
+                     home_dir(), j->host, quoted_cmd);
+            out = shell_capture(sh);
+        }
+    }
+
+    j->duration_ms = fanout_now_ms() - t0;
+    int parsed_exit = fanout_parse_exit_trailer(out);
+    j->exit_code = parsed_exit >= 0 ? parsed_exit : (out ? 0 : 255);
+    j->ok = (j->exit_code == 0);
+
+    /* Durable per-host RESULT.json envelope (atomic tmp+rename+fsync). */
+    char esc_cmd2[4096], esc_out[8192];
+    fanout_json_escape(j->cmd, esc_cmd2, sizeof(esc_cmd2));
+    fanout_json_escape(out ? out : "", esc_out, sizeof(esc_out));
+
+    char env[16384];
+    int n = snprintf(env, sizeof(env),
+                     "{\"host\":\"%s\",\"addr\":\"%s\",\"transport\":\"%s\","
+                     "\"cmd\":\"%s\",\"exit\":%d,\"ok\":%s,"
+                     "\"duration_ms\":%.1f,\"ts\":%ld,\"output\":\"%s\"}\n",
+                     j->host, j->addr, j->transport == FANOUT_TRANSPORT_MESH ? "mesh" : "fleet",
+                     esc_cmd2, j->exit_code, j->ok ? "true" : "false", j->duration_ms,
+                     (long)time(NULL), esc_out);
+    if (n > 0) {
+        char tmp[640], final[640];
+        snprintf(final, sizeof(final), "%s/%s.json", j->run_dir, j->host);
+        snprintf(tmp, sizeof(tmp), "%s/.%s.json.tmp", j->run_dir, j->host);
+        int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            ssize_t wn = write(fd, env, (size_t)n);
+            (void)wn;
+            close(fd);
+            rename(tmp, final);
+        }
+    }
+    free(out);
+}
+
+static void *fanout_worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        int idx = atomic_fetch_add_explicit(&g_fanout_next, 1, memory_order_relaxed);
+        if (idx >= g_fanout_count)
+            break;
+        fanout_run_one(&g_fanout_jobs[idx]);
+    }
+    return NULL;
+}
+
+static bool net_bridge_fanout(const char *input, char *result, size_t rlen) {
+    char *cmd = json_get_str(input, "cmd");
+    if (!cmd || !cmd[0]) {
+        free(cmd);
+        snprintf(result, rlen, "{\"error\":\"cmd required\"}");
+        return false;
+    }
+    char *filter = json_get_str(input, "role"); /* optional ROLES substring filter */
+    char *transport_s = json_get_str(input, "transport"); /* fleet | mesh */
+    fanout_transport_t transport = FANOUT_TRANSPORT_FLEET;
+    if (transport_s && strcmp(transport_s, "mesh") == 0)
+        transport = FANOUT_TRANSPORT_MESH;
+    int mesh_port = json_get_int(input, "mesh_port", 7547);
+    int concurrency = json_get_int(input, "concurrency", 0);
+    if (concurrency <= 0) {
+        const char *ce = getenv("DSCO_FLEET_CONCURRENCY");
+        concurrency = ce ? atoi(ce) : 16;
+    }
+    if (concurrency < 1)
+        concurrency = 1;
+    if (concurrency > 256)
+        concurrency = 256;
+
+    /* Enumerate fleet hosts. */
+    char fleet_dir[512];
+    snprintf(fleet_dir, sizeof(fleet_dir), "%s/bridge/fleet", home_dir());
+    DIR *d = opendir(fleet_dir);
+    if (!d) {
+        free(cmd);
+        free(filter);
+        free(transport_s);
+        snprintf(result, rlen, "{\"error\":\"fleet dir not found: %s\"}", fleet_dir);
+        return false;
+    }
+
+    /* Durable run directory for this fanout. */
+    char run_dir[512];
+    long ts = (long)time(NULL);
+    snprintf(run_dir, sizeof(run_dir), "%s/bridge/fanout/%ld", home_dir(), ts);
+    {
+        char mk[600];
+        snprintf(mk, sizeof(mk), "%s/bridge/fanout", home_dir());
+        mkdir(mk, 0755);
+        mkdir(run_dir, 0755);
+    }
+
+    fanout_job_t *jobs = calloc(FANOUT_MAX_HOSTS, sizeof(fanout_job_t));
+    if (!jobs) {
+        closedir(d);
+        free(cmd);
+        free(filter);
+        free(transport_s);
+        snprintf(result, rlen, "{\"error\":\"oom\"}");
+        return false;
+    }
+    int count = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != NULL && count < FANOUT_MAX_HOSTS) {
+        size_t nl = strlen(ent->d_name);
+        if (nl < 6 || strcmp(ent->d_name + nl - 5, ".host") != 0)
+            continue;
+        char fpath[1024];
+        snprintf(fpath, sizeof(fpath), "%s/%s", fleet_dir, ent->d_name);
+        FILE *f = fopen(fpath, "r");
+        if (!f)
+            continue;
+        char name[64] = "", roles[128] = "", haddr[128] = "";
+        char line[512];
+        while (fgets(line, sizeof(line), f)) {
+            char *hash = strchr(line, '#');
+            if (hash)
+                *hash = '\0';
+            char key[64], val[256];
+            if (sscanf(line, "%63[^=]=\"%255[^\"]\"", key, val) == 2) {
+                if (strcmp(key, "NAME") == 0)
+                    snprintf(name, sizeof(name), "%s", val);
+                else if (strcmp(key, "ROLES") == 0)
+                    snprintf(roles, sizeof(roles), "%s", val);
+                else if (strcmp(key, "ADDR") == 0)
+                    snprintf(haddr, sizeof(haddr), "%s", val);
+            }
+        }
+        fclose(f);
+        if (!name[0])
+            continue;
+        if (filter && filter[0] && !strstr(roles, filter))
+            continue; /* role filter */
+        snprintf(jobs[count].host, sizeof(jobs[count].host), "%s", name);
+        snprintf(jobs[count].addr, sizeof(jobs[count].addr), "%s", haddr);
+        snprintf(jobs[count].cmd, sizeof(jobs[count].cmd), "%s", cmd);
+        snprintf(jobs[count].run_dir, sizeof(jobs[count].run_dir), "%s", run_dir);
+        jobs[count].transport = transport;
+        jobs[count].mesh_port = mesh_port;
+        count++;
+    }
+    closedir(d);
+
+    if (count == 0) {
+        free(jobs);
+        free(cmd);
+        free(filter);
+        free(transport_s);
+        snprintf(result, rlen, "{\"error\":\"no matching fleet hosts\",\"run_dir\":\"%s\"}", run_dir);
+        return false;
+    }
+
+    /* Launch bounded worker pool. */
+    if (concurrency > count)
+        concurrency = count;
+    g_fanout_jobs = jobs;
+    g_fanout_count = count;
+    atomic_store_explicit(&g_fanout_next, 0, memory_order_relaxed);
+
+    double t0 = fanout_now_ms();
+    pthread_t *threads = calloc((size_t)concurrency, sizeof(pthread_t));
+    int spawned = 0;
+    for (int i = 0; i < concurrency; i++) {
+        if (pthread_create(&threads[i], NULL, fanout_worker, NULL) == 0)
+            spawned++;
+    }
+    for (int i = 0; i < spawned; i++)
+        pthread_join(threads[i], NULL);
+    free(threads);
+    double elapsed = fanout_now_ms() - t0;
+
+    int ok_count = 0;
+    for (int i = 0; i < count; i++)
+        if (jobs[i].ok)
+            ok_count++;
+
+    snprintf(result, rlen,
+             "{\"fanout\":true,\"transport\":\"%s\",\"hosts\":%d,\"ok\":%d,\"failed\":%d,"
+             "\"concurrency\":%d,\"elapsed_ms\":%.1f,\"run_dir\":\"%s\",\"note\":\"per-host "
+             "RESULT.json envelopes written; replayable\"}",
+             transport == FANOUT_TRANSPORT_MESH ? "mesh" : "fleet", count, ok_count,
+             count - ok_count, concurrency, elapsed, run_dir);
+
+    g_fanout_jobs = NULL;
+    g_fanout_count = 0;
+    free(jobs);
+    free(cmd);
+    free(filter);
+    free(transport_s);
+    return true;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -938,6 +1318,200 @@ static int sse_send(netsrv_stream_t *s, const char *json) {
     return netsrv_stream_send(s, "\n\n", 2);
 }
 
+/* ── Persistent inference backend (llama-server proxy) ──────────────────
+ *
+ * The legacy path forks a fresh llama-completion per request: full model
+ * reload + full prefill every call — that is the measured 68s "black box".
+ * When llama-server is available we instead keep ONE supervised server
+ * process (continuous batching, parallel slots, automatic prefix/KV cache
+ * reuse) and pass /v1/chat/completions through to it verbatim, streaming
+ * bytes back as they arrive. Fallback: legacy per-request fork.
+ *
+ * Env: DSCO_SERVE_PERSIST=0 disables; DSCO_SERVE_BACKEND_PORT (default 7549);
+ *      DSCO_SERVE_SLOTS (default 4). Model comes from DSCO_SERVE_MODEL. */
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+
+static pid_t s_llsrv_pid = -1;
+static char s_llsrv_model[512] = "";
+
+static int llsrv_backend_port(void) {
+    const char *v = getenv("DSCO_SERVE_BACKEND_PORT");
+    int p = v && v[0] ? atoi(v) : 0;
+    return (p > 0 && p < 65536) ? p : 7549;
+}
+
+static int llsrv_connect(int port, int timeout_ms) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        return -1;
+    struct timeval tv = {.tv_sec = timeout_ms / 1000, .tv_usec = (timeout_ms % 1000) * 1000};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    struct sockaddr_in sa = {0};
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons((uint16_t)port);
+    sa.sin_addr.s_addr = htonl(0x7f000001u); /* 127.0.0.1 (INADDR_LOOPBACK
+                                              * hidden behind _DARWIN_C_SOURCE
+                                              * under strict POSIX flags) */
+    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static bool llsrv_healthy(int port) {
+    int fd = llsrv_connect(port, 1500);
+    if (fd < 0)
+        return false;
+    const char *req = "GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n";
+    bool ok = write(fd, req, strlen(req)) == (ssize_t)strlen(req);
+    char buf[256] = "";
+    if (ok) {
+        ssize_t r = read(fd, buf, sizeof(buf) - 1);
+        ok = r > 0 && strstr(buf, " 200 ") != NULL;
+    }
+    close(fd);
+    return ok;
+}
+
+/* Ensure a llama-server for `model` is up. Returns port, or -1 (errjson set).
+ * Restarts the backend when DSCO_SERVE_MODEL changed since launch. */
+static int llsrv_ensure(const char *model, const char **errjson) {
+    int port = llsrv_backend_port();
+
+    if (s_llsrv_pid > 0 && strcmp(s_llsrv_model, model) != 0) {
+        kill(-s_llsrv_pid, SIGTERM); /* model swap: stop old backend */
+        waitpid(s_llsrv_pid, NULL, 0);
+        s_llsrv_pid = -1;
+    }
+    if (llsrv_healthy(port))
+        return port;
+
+    const char *lb = getenv("DSCO_LLAMACPP_DIR");
+    char lbdef[512];
+    if (!lb || !lb[0]) {
+        const char *home = getenv("HOME");
+        snprintf(lbdef, sizeof(lbdef), "%s/native_tools/llama.cpp/build/bin", home ? home : ".");
+        lb = lbdef;
+    }
+    char srv_bin[600];
+    snprintf(srv_bin, sizeof(srv_bin), "%s/llama-server", lb);
+    if (access(srv_bin, X_OK) != 0) {
+        *errjson = "{\"error\":\"llama-server binary not found; legacy path only\"}";
+        return -1;
+    }
+
+    const char *slots_env = getenv("DSCO_SERVE_SLOTS");
+    int slots = slots_env && slots_env[0] ? atoi(slots_env) : 4;
+    if (slots < 1 || slots > 32)
+        slots = 4;
+
+    char rpc_arg[1200] = "";
+    const char *serve_rpc = getenv("DSCO_SERVE_RPC");
+    if (serve_rpc && serve_rpc[0]) {
+        char eps[1024] = "";
+        if (dsco_cluster_rpc_endpoints(serve_rpc, eps, sizeof(eps), 1) > 0)
+            snprintf(rpc_arg, sizeof(rpc_arg), "--rpc %s ", eps);
+    }
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid();
+        char logp[600];
+        const char *home = getenv("HOME");
+        snprintf(logp, sizeof(logp), "%s/.dsco/llama-server.log", home ? home : "/tmp");
+        char cmd[3200];
+        /* -ngl 99: full Metal offload. --no-warmup: health up sooner.
+         * Prefix/KV cache reuse and continuous batching are server defaults. */
+        snprintf(cmd, sizeof(cmd),
+                 "exec env DYLD_LIBRARY_PATH='%s' LD_LIBRARY_PATH='%s' '%s' -m '%s' "
+                 "--host 127.0.0.1 --port %d -np %d -ngl 99 %s--no-warmup "
+                 ">> '%s' 2>&1",
+                 lb, lb, srv_bin, model, port, slots, rpc_arg, logp);
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+    if (pid < 0) {
+        *errjson = "{\"error\":\"fork failed for llama-server\"}";
+        return -1;
+    }
+    s_llsrv_pid = pid;
+    snprintf(s_llsrv_model, sizeof(s_llsrv_model), "%s", model);
+
+    /* Wait for model load (gpt-oss-20b on Metal ≈ 10-30s; budget 120s). */
+    for (int i = 0; i < 240; i++) {
+        if (llsrv_healthy(port))
+            return port;
+        struct timespec ts = {0, 500 * 1000 * 1000};
+        nanosleep(&ts, NULL);
+        int st;
+        if (waitpid(pid, &st, WNOHANG) == pid) { /* died during load */
+            s_llsrv_pid = -1;
+            break;
+        }
+    }
+    *errjson = "{\"error\":\"llama-server failed to become healthy; see ~/.dsco/llama-server.log\"}";
+    return -1;
+}
+
+/* Pass a /v1/chat/completions request through to the persistent backend and
+ * stream the raw response bytes back. Works for both stream and buffered
+ * bodies because the handler owns the socket end-to-end. Returns false if the
+ * backend connection failed BEFORE any byte was forwarded (safe to fall back). */
+static bool llsrv_proxy_chat(const netsrv_request_t *req, netsrv_stream_t *s, int port) {
+    int fd = llsrv_connect(port, 300000); /* generous read timeout for long gens */
+    if (fd < 0)
+        return false;
+
+    /* Inject "cache_prompt":true (prefix/KV reuse across requests) unless the
+     * client already chose. Body is JSON: splice after the opening brace. */
+    const char *body = req->body ? req->body : "{}";
+    size_t blen = req->body_len ? req->body_len : strlen(body);
+    char *patched = NULL;
+    if (body[0] == '{' && !strstr(body, "\"cache_prompt\"")) {
+        patched = malloc(blen + 32);
+        if (patched) {
+            memcpy(patched, "{\"cache_prompt\":true,", 21);
+            memcpy(patched + 21, body + 1, blen - 1);
+            patched[21 + blen - 1] = '\0';
+            body = patched;
+            blen = 21 + blen - 1;
+        }
+    }
+
+    char hdr[512];
+    int hn = snprintf(hdr, sizeof(hdr),
+                      "POST /v1/chat/completions HTTP/1.0\r\nHost: 127.0.0.1\r\n"
+                      "Content-Type: application/json\r\nContent-Length: %zu\r\n\r\n",
+                      blen);
+    bool sent = write(fd, hdr, (size_t)hn) == (ssize_t)hn &&
+                write(fd, body, blen) == (ssize_t)blen;
+    free(patched);
+    if (!sent) {
+        close(fd);
+        return false;
+    }
+
+    /* Relay response bytes verbatim (status line + headers + SSE/JSON body). */
+    char buf[8192];
+    ssize_t r;
+    bool forwarded_any = false;
+    while ((r = read(fd, buf, sizeof(buf))) > 0) {
+        if (netsrv_stream_send(s, buf, (size_t)r) != 0)
+            break; /* client gone; drop backend conn, slot frees on its EOF */
+        forwarded_any = true;
+    }
+    close(fd);
+    return forwarded_any;
+}
+
 /* Send a chat.completion.chunk content delta for `len` bytes of `text`.
  * Returns 0 on success, -1 if the client connection is gone. */
 static int sse_content(netsrv_stream_t *s, const char *model, const char *text, size_t len) {
@@ -960,6 +1534,23 @@ static int sse_content(netsrv_stream_t *s, const char *model, const char *text, 
  * buffered JSON response.  This handler owns the socket (writes status+headers). */
 static void route_chat_stream(const netsrv_request_t *req, netsrv_stream_t *s, void *ctx) {
     (void)ctx;
+
+    /* Persistent backend first: one llama-server with parallel slots +
+     * KV/prefix cache reuse beats a cold fork+reload per request by the
+     * entire model-load + prefill time. Fall through to the legacy fork
+     * path if the server can't start or refuses the connection. */
+    const char *persist = getenv("DSCO_SERVE_PERSIST");
+    if (!(persist && strcmp(persist, "0") == 0)) {
+        const char *pm = getenv("DSCO_SERVE_MODEL");
+        if (pm && pm[0]) {
+            const char *perr = NULL;
+            int bport = llsrv_ensure(pm, &perr);
+            if (bport > 0 && llsrv_proxy_chat(req, s, bport))
+                return;
+            /* proxy failed pre-byte → legacy path below */
+        }
+    }
+
     char cmd[1700], pf[64];
     const char *model = NULL, *errjson = NULL;
     int ptoks = 0;

@@ -44,6 +44,9 @@ typedef struct {
     long created;
     int multimodal;
     int tool_capable;
+    double intelligence_index;
+    double coding_index;
+    double agentic_index;
 } or_model_t;
 
 /* Open-addressing hash index entry. kind: 0 = exact slug, 1 = normalised. */
@@ -171,6 +174,9 @@ int openrouter_cache_foreach(or_model_cb cb, void *ud) {
             .supports_thinking = m->info.supports_thinking,
             .multimodal = m->multimodal,
             .tool_capable = m->tool_capable,
+            .intelligence_index = m->intelligence_index,
+            .coding_index = m->coding_index,
+            .agentic_index = m->agentic_index,
             .created = m->created,
         };
         cb(&v, ud);
@@ -250,6 +256,9 @@ static void on_model(const char *elem, void *ctx) {
 
     int thinking = 0;
     int tool_capable = 0;
+    double intelligence_index = -1.0;
+    double coding_index = -1.0;
+    double agentic_index = -1.0;
     char *sp = json_get_raw(elem, "supported_parameters");
     if (sp) {
         if (strstr(sp, "\"reasoning\""))
@@ -273,6 +282,18 @@ static void on_model(const char *elem, void *ctx) {
             free(mod);
         }
         free(arch);
+    }
+
+    char *benchmarks = json_get_raw(elem, "benchmarks");
+    if (benchmarks) {
+        char *aa = json_get_raw(benchmarks, "artificial_analysis");
+        if (aa) {
+            intelligence_index = json_get_double(aa, "intelligence_index", -1.0);
+            coding_index = json_get_double(aa, "coding_index", -1.0);
+            agentic_index = json_get_double(aa, "agentic_index", -1.0);
+            free(aa);
+        }
+        free(benchmarks);
     }
 
     char *name = json_get_str(elem, "name");
@@ -315,6 +336,9 @@ static void on_model(const char *elem, void *ctx) {
     m->created = created;
     m->multimodal = multimodal;
     m->tool_capable = tool_capable;
+    m->intelligence_index = intelligence_index;
+    m->coding_index = coding_index;
+    m->agentic_index = agentic_index;
     b->count++;
 }
 

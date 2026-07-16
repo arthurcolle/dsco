@@ -34,8 +34,8 @@ static bool env_truthy(const char *s) {
     for (size_t i = 0; i < n; i++)
         buf[i] = (char)tolower((unsigned char)s[i]);
     buf[n] = '\0';
-    return strcmp(buf, "1") == 0 || strcmp(buf, "true") == 0 ||
-           strcmp(buf, "yes") == 0 || strcmp(buf, "on") == 0;
+    return strcmp(buf, "1") == 0 || strcmp(buf, "true") == 0 || strcmp(buf, "yes") == 0 ||
+           strcmp(buf, "on") == 0;
 }
 
 static void refresh_env_locked(void) {
@@ -114,11 +114,14 @@ bool bg_learn_is_enabled(void) {
 }
 
 int bg_learn_run_once(void) {
-    tools_cooc_edge_t edges[8];
-    int n = tools_cooc_top_edges(edges, 8);
+    /* Wide snapshot: creation uses only the top 8 edges, but pruning must
+     * see every still-qualifying pair or it would delete live skills that
+     * merely fell out of the top 8. */
+    tools_cooc_edge_t edges[32];
+    int n = tools_cooc_top_edges(edges, 32);
     int created = 0;
 
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n && i < 8; i++) {
         if (edges[i].count < 2)
             continue;
         char name[128];
@@ -134,6 +137,34 @@ int bg_learn_run_once(void) {
             snprintf(g_bg_stats.last_skill_write, sizeof(g_bg_stats.last_skill_write), "%s", name);
             pthread_mutex_unlock(&g_bg_mu);
             baseline_log("bg_learn", "skill_created", name, "{\"source\":\"cooc\"}");
+        }
+    }
+
+    /* Prune auto-skills whose tool pair no longer appears among the
+     * qualifying edges. Gentle by design: needs a warm matrix, deletes only
+     * marker-verified auto skills, at most 2 removals per cycle. */
+    if (n >= 4) {
+        char names[32][128];
+        int total = dsco_workspace_list_auto_skills(names, 32);
+        int removed = 0;
+        for (int s = 0; s < total && removed < 2; s++) {
+            bool live = false;
+            for (int i = 0; i < n && !live; i++) {
+                if (edges[i].count < 2)
+                    continue;
+                char en[128];
+                edge_skill_name(&edges[i], en, sizeof(en));
+                live = strcmp(en, names[s]) == 0;
+            }
+            if (live)
+                continue;
+            if (dsco_workspace_delete_skill(names[s], false) > 0) {
+                removed++;
+                pthread_mutex_lock(&g_bg_mu);
+                g_bg_stats.skills_pruned++;
+                pthread_mutex_unlock(&g_bg_mu);
+                baseline_log("bg_learn", "skill_pruned", names[s], "{\"reason\":\"edge_expired\"}");
+            }
         }
     }
 
