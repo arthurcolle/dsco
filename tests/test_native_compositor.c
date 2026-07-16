@@ -4,6 +4,7 @@
 #include "pixel_tui.h"
 #include "pixel_tui_perf.h"
 #include "px_backend.h"
+#include "ui_motion.h"
 #include "vm.h"
 
 #include <stdint.h>
@@ -519,6 +520,270 @@ static void test_populated_fixture_density(void) {
     unlink(path);
 }
 
+/* ── Inline live-operation cards ─────────────────────────────────────── */
+
+static unsigned char *ppm_load(const char *path, int *w_out, int *h_out) {
+    FILE *file = fopen(path, "rb");
+    if (!file) return NULL;
+    char magic[3] = {0};
+    int w = 0, h = 0, max_value = 0;
+    if (fscanf(file, "%2s %d %d %d", magic, &w, &h, &max_value) != 4 ||
+        strcmp(magic, "P6") || max_value != 255 || w < 1 || h < 1) {
+        fclose(file);
+        return NULL;
+    }
+    (void)fgetc(file); /* single whitespace terminating the header */
+    size_t n = (size_t)w * (size_t)h * 3U;
+    unsigned char *pixels = malloc(n);
+    if (!pixels || fread(pixels, 1, n, file) != n) {
+        free(pixels);
+        fclose(file);
+        return NULL;
+    }
+    fclose(file);
+    *w_out = w;
+    *h_out = h;
+    return pixels;
+}
+
+/* Count saturated pixels in a band, split into warm (amber-ish, r > b) and
+ * cool (cyan-ish) channels — the live-op card accent rails. The threshold
+ * sits below the default theme's accent chroma (48, ~40 after the 0.80 rail
+ * alpha over the panel) but above every neutral surface/dim/text tone. */
+static void band_saturation(const unsigned char *pixels, int w, int h,
+                            int x0, int y0, int x1, int y1,
+                            int *warm_out, int *cool_out) {
+    int warm = 0, cool = 0;
+    if (x1 > w) x1 = w;
+    if (y1 > h) y1 = h;
+    for (int y = y0 > 0 ? y0 : 0; y < y1; y++) {
+        for (int x = x0 > 0 ? x0 : 0; x < x1; x++) {
+            const unsigned char *p = pixels + ((size_t)y * (size_t)w +
+                                               (size_t)x) * 3U;
+            int mx = p[0] > p[1] ? p[0] : p[1];
+            if (p[2] > mx) mx = p[2];
+            int mn = p[0] < p[1] ? p[0] : p[1];
+            if (p[2] < mn) mn = p[2];
+            if (mx - mn < 32) continue;
+            if (p[0] > p[2]) warm++;
+            else cool++;
+        }
+    }
+    *warm_out = warm;
+    *cool_out = cool;
+}
+
+static void test_tool_preview_extraction(void) {
+    char out[128];
+    pixel_tui_tool_preview_extract("bash", "{\"command\":\"make -j8\"}",
+                                   out, sizeof(out));
+    CHECK(!strcmp(out, "make -j8"),
+          "command value should be extracted, got '%s'", out);
+    pixel_tui_tool_preview_extract(
+        "read_file", "{\"limit\":5, \"file_path\": \"/tmp/a.c\"}",
+        out, sizeof(out));
+    CHECK(!strcmp(out, "/tmp/a.c"),
+          "file_path value should be extracted, got '%s'", out);
+    pixel_tui_tool_preview_extract(
+        "bash", "{\"command\":\"echo \\\"hi\\\" there\"}", out, sizeof(out));
+    CHECK(!strcmp(out, "echo \"hi\" there"),
+          "escaped quotes should unescape, got '%s'", out);
+    pixel_tui_tool_preview_extract("web_search",
+                                   "{\"query\":\"kitty graphics\"}",
+                                   out, sizeof(out));
+    CHECK(!strcmp(out, "kitty graphics"),
+          "query value should be extracted, got '%s'", out);
+    pixel_tui_tool_preview_extract("bash", "not json at all",
+                                   out, sizeof(out));
+    CHECK(!strcmp(out, "not json at all"),
+          "malformed JSON should fall back to raw text, got '%s'", out);
+    pixel_tui_tool_preview_extract("bash", NULL, out, sizeof(out));
+    CHECK(out[0] == '\0', "NULL input should yield an empty preview");
+}
+
+static void test_live_op_presence_motion(void) {
+    /* The tool_end recipe on the retained timeline: snap presence to 1.0,
+     * then ease to 0.0 over 0.45s (MOTION_KEY_TOOL(seq), prop VALUE). */
+    ui_motion_t motion;
+    ui_motion_init(&motion, false);
+    const uint64_t key = UINT64_C(0x54000000) + 7;
+    const uint16_t presence_prop = 0;
+    double now = 100.0;
+    ui_motion_snap(&motion, key, presence_prop, 1.0);
+    ui_motion_set(&motion, key, presence_prop, 0.0, 0.45,
+                  UI_MOTION_EASE_OUT, now);
+    double at_end = ui_motion_value(&motion, key, presence_prop, now, 0.0);
+    double mid = ui_motion_value(&motion, key, presence_prop, now + 0.2, 0.0);
+    double settled = ui_motion_value(&motion, key, presence_prop,
+                                     now + 0.6, 0.0);
+    CHECK(at_end > 0.98,
+          "card should be fully present the instant the tool ends (%.3f)",
+          at_end);
+    CHECK(mid > 0.02 && mid < 0.98,
+          "collapse should be mid-flight at 0.2s (%.3f)", mid);
+    CHECK(settled < 0.02,
+          "presence should fall below the live threshold within 0.6s (%.3f)",
+          settled);
+}
+
+static void test_live_op_deck_density_and_pixels(void) {
+    bool keep = getenv("DSCO_KEEP_NATIVE_ARTIFACTS") != NULL;
+    enum { MSGS = 40 };
+    static char bodies[MSGS][96];
+    static pixel_tui_fixture_message_t messages[MSGS];
+    for (int i = 0; i < MSGS; i++) {
+        snprintf(bodies[i], sizeof(bodies[i]),
+                 "transcript line %02d probing wrapped capacity under the live deck",
+                 i);
+        messages[i] = (pixel_tui_fixture_message_t){
+            .role = (i % 2) ? "ASSISTANT" : "USER", .text = bodies[i]};
+    }
+    static const pixel_tui_fixture_tool_t running2[] = {
+        {.name = "sandbox_run", .preview = "make -j8 test",
+         .status = 0, .elapsed_s = 3.2},
+        {.name = "read_file", .preview = "src/pixel_tui.c",
+         .status = 0, .elapsed_s = 0.7},
+    };
+    static const pixel_tui_fixture_tool_t running5[] = {
+        {.name = "sandbox_run", .preview = "make test", .status = 0, .elapsed_s = 5.0},
+        {.name = "read_file", .preview = "src/a.c", .status = 0, .elapsed_s = 4.0},
+        {.name = "grep_files", .preview = "MOTION_KEY", .status = 0, .elapsed_s = 3.0},
+        {.name = "web_fetch", .preview = "https://kitty", .status = 0, .elapsed_s = 2.0},
+        {.name = "write_file", .preview = "src/b.c", .status = 0, .elapsed_s = 1.0},
+    };
+    pixel_tui_fixture_t fixture = {
+        .model = "openai-codex/gpt-5.6-luna",
+        .slot_name = "native",
+        .state = PIXEL_TUI_EXECUTING,
+        .messages = messages,
+        .message_count = MSGS,
+        .turn = 4,
+        .tools_used = 2,
+    };
+    char path[6][192];
+    for (int i = 0; i < 6; i++)
+        snprintf(path[i], sizeof(path[i]), "/tmp/dsco-live-ops-%ld-%d.ppm",
+                 (long)getpid(), i);
+
+    pixel_tui_density_metrics_t base = {0}, live = {0}, many = {0}, done = {0};
+    CHECK(pixel_tui_write_fixture_ppm(path[0], 1120, 700, &fixture, &base),
+          "deep fixture without tools should render");
+    fixture.tools = running2;
+    fixture.tool_count = 2;
+    CHECK(pixel_tui_write_fixture_ppm(path[1], 1120, 700, &fixture, &live),
+          "deep fixture with 2 running tools should render");
+    CHECK(live.visible_lines < base.visible_lines,
+          "running ops must reserve the transcript tail (%d -> %d)",
+          base.visible_lines, live.visible_lines);
+    CHECK(live.line_capacity < base.line_capacity,
+          "deck must shrink line capacity (%d -> %d)",
+          base.line_capacity, live.line_capacity);
+
+    fixture.tools = running5;
+    fixture.tool_count = 5;
+    CHECK(pixel_tui_write_fixture_ppm(path[2], 1120, 700, &fixture, &many),
+          "overflowing fixture with 5 running tools should render");
+    CHECK(many.visible_lines >= 3,
+          "deck height clamp must preserve transcript lines (visible=%d)",
+          many.visible_lines);
+    CHECK(many.visible_lines <= live.visible_lines,
+          "overflow chip should cost at least as much as two cards (%d vs %d)",
+          many.visible_lines, live.visible_lines);
+
+    /* Finished tools carry zero presence in reduced-motion fixtures: the
+     * deck releases the tail and the durable TOOL row owns the story. */
+    static const pixel_tui_fixture_tool_t done1[] = {
+        {.name = "sandbox_run", .preview = "make test",
+         .status = 1, .elapsed_s = 2.5},
+    };
+    fixture.tools = done1;
+    fixture.tool_count = 1;
+    CHECK(pixel_tui_write_fixture_ppm(path[3], 1120, 700, &fixture, &done),
+          "fixture with a finished tool should render");
+    CHECK(done.visible_lines == base.visible_lines,
+          "finished cards must release the transcript tail (%d vs %d)",
+          done.visible_lines, base.visible_lines);
+
+    /* Pixel proof: with an empty transcript, saturated warm (amber rail:
+     * sandbox_run) and cool (cyan rail: read_file) channels in the deck band
+     * can only come from live-op cards. */
+    fixture.messages = NULL;
+    fixture.message_count = 0;
+    fixture.tools = NULL;
+    fixture.tool_count = 0;
+    CHECK(pixel_tui_write_fixture_ppm(path[4], 1120, 700, &fixture, NULL),
+          "empty fixture should render");
+    fixture.tools = running2;
+    fixture.tool_count = 2;
+    CHECK(pixel_tui_write_fixture_ppm(path[5], 1120, 700, &fixture, NULL),
+          "empty fixture with running tools should render");
+    int w = 0, h = 0, w2 = 0, h2 = 0;
+    unsigned char *empty_px = ppm_load(path[4], &w, &h);
+    unsigned char *cards_px = ppm_load(path[5], &w2, &h2);
+    CHECK(empty_px && cards_px && w == 1120 && h == 700 && w2 == w && h2 == h,
+          "band fixtures should load as full RGB rasters");
+    if (empty_px && cards_px) {
+        int base_warm = 0, base_cool = 0, warm = 0, cool = 0;
+        band_saturation(empty_px, w, h, 40, 150, 700, 600,
+                        &base_warm, &base_cool);
+        band_saturation(cards_px, w, h, 40, 150, 700, 600, &warm, &cool);
+        CHECK(warm - base_warm >= 30,
+              "amber accent channel should land in the deck band (%d -> %d)",
+              base_warm, warm);
+        CHECK(cool - base_cool >= 30,
+              "cyan accent channel should land in the deck band (%d -> %d)",
+              base_cool, cool);
+    }
+    free(empty_px);
+    free(cards_px);
+    for (int i = 0; i < 6; i++) unlink(path[i]);
+
+    if (keep) {
+        /* Stable design artifact: a populated session with three live ops. */
+        static const pixel_tui_fixture_message_t artifact_messages[] = {
+            {.role = "USER", .text = "Profile the compositor and patch the hot path."},
+            {.role = "THINKING", .text = "Need the frame timings first, then the diff bounds."},
+            {.role = "ASSISTANT", .text =
+                "Running the perf capture now; patching the damage clamp while the "
+                "bench streams so both land in one turn."},
+            {.role = "TOOL", .detail = "read_file src/pixel_tui.c",
+             .text = "4,096 lines / retained-mode session renderer"},
+            {.role = "ASSISTANT", .text =
+                "The patcher already ships bounded rects; extending the clamp to the "
+                "deck band next."},
+        };
+        static const pixel_tui_fixture_tool_t artifact_tools[] = {
+            {.name = "sandbox_run", .preview = "make bench-compositor -j8",
+             .status = 0, .elapsed_s = 4.6},
+            {.name = "grep_files", .preview = "session_animation_fast",
+             .status = 0, .elapsed_s = 1.8},
+            {.name = "web_fetch", .preview = "https://sw.kovidgoyal.net/kitty/graphics-protocol",
+             .status = 0, .elapsed_s = 0.4},
+        };
+        pixel_tui_fixture_t artifact = {
+            .model = "openai-codex/gpt-5.6-luna",
+            .slot_name = "native",
+            .state = PIXEL_TUI_EXECUTING,
+            .messages = artifact_messages,
+            .message_count = 5,
+            .input = "keep the patch rects bounded",
+            .input_cursor = 12,
+            .input_active = true,
+            .turn = 7,
+            .input_tokens = 3200,
+            .output_tokens = 940,
+            .tools_used = 11,
+            .cost_usd = 0.42,
+            .context_percent = 37.0,
+            .tools = artifact_tools,
+            .tool_count = 3,
+        };
+        CHECK(pixel_tui_write_fixture_ppm("/tmp/dsco-live-ops-1120x700.ppm",
+                                          1120, 700, &artifact, NULL),
+              "live-ops design artifact should render");
+    }
+}
+
 static void test_frame_telemetry_aggregation(void) {
     const char *old = getenv("DSCO_PIXEL_TUI_PERF");
     char saved[256];
@@ -707,6 +972,9 @@ int main(void) {
     test_pixel_backend_contract();
     test_headless_session_artifacts();
     test_populated_fixture_density();
+    test_tool_preview_extraction();
+    test_live_op_presence_motion();
+    test_live_op_deck_density_and_pixels();
     test_frame_telemetry_aggregation();
     test_dual_compositor_parity_corpus();
     test_capture_parser_overwrite_semantics();
