@@ -18,12 +18,15 @@ typedef struct {
     bool is_read_only;   /* true = no side effects (safe for streaming exec) */
     bool is_concurrent;  /* true = no shared state (safe for parallel exec) */
     bool is_interactive; /* true = owns the terminal/user turn; no cache/spinner/parallel */
+    const char *output_schema_json;
 } tool_def_t;
 
 typedef enum {
     TOOLS_CORE = 0,
     TOOLS_AGENT,
     TOOLS_FULL,
+    /* Fixed builtin allowlist: Bash, curl_raw, and ssh_command only. */
+    TOOLS_RESTRICTED,
 } tools_init_profile_t;
 
 void tools_init_profile(tools_init_profile_t profile);
@@ -63,11 +66,23 @@ swarm_t *tools_swarm_instance(void);
 const tool_def_t *tools_get_all(int *count);
 bool tools_invoke_by_name(const char *name, const char *input, char *result, size_t rlen);
 bool tools_is_offload_safe(const char *name);
+/* Report a builtin tool's declared read-only flag; *found = registered. */
+bool tools_meta_is_read_only(const char *name, bool *found);
 int tools_get_core_count(void); /* only .core=true tools */
 int tools_builtin_count(void);
 bool tools_execute(const char *name, const char *input_json, char *result, size_t result_len);
+#ifdef DSCO_INTERNAL_TESTS
+bool tools_execute_raw_for_test(const char *name, const char *input_json, char *result,
+                                size_t result_len);
+#endif
 bool tools_execute_for_tier(const char *name, const char *input_json, const char *tier,
                             char *result, size_t result_len);
+/* Governance-model A/B experiment counters: how many times the governance gate
+   ran, how many times it was bypassed (DSCO_GOV_MODEL=none), and cumulative
+   gate latency in ms. Lets a harness measure governance overhead empirically. */
+void tools_governance_experiment_stats(unsigned long *gate_calls,
+                                       unsigned long *bypassed,
+                                       double *gate_ms_total);
 bool tools_is_allowed_for_tier(const char *name, const char *tier, char *reason, size_t reason_len);
 char *tools_normalize_input(const char *name, const char *input_json);
 
@@ -120,9 +135,14 @@ void tool_map_init(tool_map_t *m);
 void tool_map_free(tool_map_t *m);
 void tool_map_insert(tool_map_t *m, const char *name, int index);
 int tool_map_lookup(tool_map_t *m, const char *name); /* returns index or -1 */
+int tools_lookup_index(const char *name);             /* locked lookup in global tool registry */
 
-/* Global tool map — initialized in tools_init() */
+#ifdef DSCO_INTERNAL_TESTS
+/* Test-only inspection of the global tool map. Production code must use the
+ * locked registry APIs below. */
 extern tool_map_t g_tool_map;
+#endif
+void tools_registry_map_free(void);
 
 /* ── MCP tool registration ─────────────────────────────────────────────── */
 
@@ -133,11 +153,19 @@ typedef char *(*external_tool_cb)(const char *name, const char *input_json, void
 
 void tools_register_external(const char *name, const char *description,
                              const char *input_schema_json, external_tool_cb cb, void *ctx);
+void tools_register_external_with_output(const char *name, const char *description,
+                                         const char *input_schema_json,
+                                         const char *output_schema_json,
+                                         external_tool_cb cb, void *ctx);
 void tools_register_external_metadata(const char *name, const char *integration_id,
                                       const char *display_name, const char *distribution_channel,
                                       const char *categories, const char *labels, const char *scope,
                                       unsigned action_flags, const char *catalog_status);
 void tools_reset_external(void);
+const char *tools_default_input_schema_json(void);
+const char *tools_default_output_schema_json(void);
+const char *tools_output_schema_for_def(const tool_def_t *tool);
+const char *tools_output_schema_for_name(const char *name);
 
 #define MAX_EXTERNAL_TOOLS 4096
 
@@ -145,6 +173,7 @@ typedef struct {
     char name[256];
     char description[1024];
     char *input_schema_json;
+    char *output_schema_json;
     external_tool_cb cb;
     void *ctx;
     bool loaded;
@@ -158,8 +187,21 @@ typedef struct {
     char catalog_status[64];
 } external_tool_t;
 
+#ifdef DSCO_INTERNAL_TESTS
 extern external_tool_t g_external_tools[];
 extern int g_external_tool_count;
+#endif
+
+typedef struct {
+    external_tool_t *items;
+    int count;
+} external_tool_snapshot_t;
+
+int tools_external_count(void);
+external_tool_snapshot_t tools_external_snapshot(void);
+void tools_external_snapshot_free(external_tool_snapshot_t *snapshot);
+int tools_rank_external_snapshot(const external_tool_snapshot_t *snapshot, const char *context,
+                                 int *out_indices, int max_indices);
 
 /* ── Concurrency locks ────────────────────────────────────────────────── */
 
@@ -184,17 +226,45 @@ extern dsco_locks_t g_locks;
 
 typedef struct {
     pthread_t thread;
-    volatile int cancelled; /* set by watchdog_stop to terminate watcher */
-    volatile int timed_out; /* set by watcher when deadline expires */
-    double deadline;        /* absolute epoch time */
-    double grace_end;       /* deadline + grace period */
-    pthread_t target;       /* thread to cancel on hard kill */
+    volatile int cancelled;   /* set by watchdog_stop to terminate watcher */
+    volatile int timed_out;   /* set by watcher when deadline expires */
+    volatile double deadline; /* absolute epoch time; renewable via watchdog_renew */
+    volatile double grace_end; /* deadline + grace period */
+    pthread_t target;         /* thread to cancel on hard kill */
     char tool_name[64];
     int timeout_s;
+    /* Renewable-lifetime fields — managed by the process-lifecycle supervisor.
+       The watchdog registers itself on start so a supervisor thread can reach
+       an in-flight call by name/id to extend or inspect its deadline. */
+    double started_at;        /* absolute epoch time watchdog_start ran */
+    int max_lifetime_s;       /* absolute cap across renewals; 0 = unlimited */
+    volatile int renew_count; /* times the deadline has been extended */
+    unsigned long call_id;    /* monotonic id for registry lookup */
 } tool_watchdog_t;
 
 void watchdog_start(tool_watchdog_t *wd, pthread_t target, const char *name, int timeout_s);
 void watchdog_stop(tool_watchdog_t *wd);
+
+/* Renewable deadlines. watchdog_renew extends an in-flight watchdog's deadline
+   to (max(now, deadline) + extra_s), never shortening it, clearing a pending
+   soft-timeout if the grace window has not yet elapsed, and honoring
+   max_lifetime_s when set. Returns 1 if renewed, 0 if the call already ended /
+   passed grace / hit its absolute cap. watchdog_renew_by_name renews every
+   active watchdog whose tool_name matches and returns the count renewed. */
+int watchdog_renew(tool_watchdog_t *wd, int extra_s);
+int watchdog_renew_by_name(const char *name, int extra_s);
+
+/* Supervisory snapshot of an in-flight tool watchdog. */
+typedef struct {
+    unsigned long call_id;
+    char tool_name[64];
+    double remaining_s; /* deadline - now (negative once inside grace) */
+    int timeout_s;
+    int renew_count;
+    int timed_out;
+} watchdog_info_t;
+/* Fill out[] with up to max active watchdogs; returns the number written. */
+int watchdog_active_snapshot(watchdog_info_t *out, int max);
 
 /* Cooperative cancel flag for long-running tools (e.g., bash poll loop) */
 extern _Thread_local volatile int tl_tool_cancelled;
@@ -319,6 +389,14 @@ extern page_telemetry_t g_page_telemetry;
 tool_page_result_t tools_get_paged(const char *context, int max_tools, float budget_ratio);
 void tool_page_result_free(tool_page_result_t *r);
 
+/* Explicit dynamic schema bank populated by load_tools and drained by evict_tools.
+ * These are serialized after the frozen core register so the stable prefix stays
+ * cacheable while newly loaded capabilities become callable on the next turn. */
+int tools_loaded_builtin_indices(int *out_indices, int max_indices);
+int tools_loaded_builtin_count(void);
+bool tools_is_builtin_loaded(const char *name);
+void tools_loaded_builtin_clear(void);
+
 /* ── Co-occurrence → Hint bridge ─────────────────────────────────────── */
 
 /* After tool execution, predict successors from co-occurrence matrix
@@ -404,5 +482,10 @@ void tools_set_agent_context(const char *recent_results, const char *working_mem
  * success); stderr (truncated) is written to `out`. Shared by trading.c and
  * integrations.c for their curl/openssl/pdftotext invocations. */
 int safe_exec_argv(const char *const argv[], char *out, size_t out_len);
+
+#ifdef DSCO_INTERNAL_TESTS
+/* Test hook: JSON structure-aware tool-result truncation. */
+size_t tools_test_truncate_json(const char *json, size_t json_len, char *out, size_t out_len);
+#endif
 
 #endif

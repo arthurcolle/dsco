@@ -75,13 +75,6 @@ static int tm_max_retries(void) {
     return 2;
 }
 
-/* curl_global_init is not thread-safe; do it exactly once before any worker
- * thread spins up its own easy handle. */
-static pthread_once_t s_curl_once = PTHREAD_ONCE_INIT;
-static void tm_curl_global_init(void) {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
-}
-
 /* ── HTTP ──────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -109,7 +102,7 @@ static size_t tm_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
 static long tm_request_once(const char *method, const char *path, const char *body, char **out) {
     if (out)
         *out = NULL;
-    pthread_once(&s_curl_once, tm_curl_global_init);
+    dsco_http_global_init();
 
     CURL *c = curl_easy_init();
     dsco_http_pool_apply(c);
@@ -486,7 +479,7 @@ int toolmgmt_parallel(tm_call_t *calls, int n, int max_concurrency) {
     if (max_concurrency > n)
         max_concurrency = n;
 
-    pthread_once(&s_curl_once, tm_curl_global_init);
+    dsco_http_global_init();
 
     tm_pool_t pool = {calls, n, 0};
     pthread_t *th = calloc((size_t)max_concurrency, sizeof(pthread_t));
@@ -646,6 +639,20 @@ static void tm_reg_cb(const char *el, void *ctx) {
     if (!schema_raw)
         schema_raw = json_get_raw(scope, "schema");
 
+    char *output_schema_raw = json_get_raw(scope, "output_schema");
+    if (!output_schema_raw)
+        output_schema_raw = json_get_raw(scope, "outputSchema");
+    if (!output_schema_raw)
+        output_schema_raw = json_get_raw(scope, "result_schema");
+    if (!output_schema_raw)
+        output_schema_raw = json_get_raw(scope, "resultSchema");
+    if (!output_schema_raw)
+        output_schema_raw = json_get_raw(scope, "response_schema");
+    if (!output_schema_raw)
+        output_schema_raw = json_get_raw(scope, "responseSchema");
+    if (!output_schema_raw)
+        output_schema_raw = json_get_raw(scope, "returns");
+
     jbuf_t schema;
     jbuf_init(&schema, 384);
     if (schema_raw && schema_raw[0]) {
@@ -660,6 +667,28 @@ static void tm_reg_cb(const char *el, void *ctx) {
         jbuf_append(&schema, "},\"required\":[");
         jbuf_append(&schema, sc.req.data ? sc.req.data : "");
         jbuf_append(&schema, "]}");
+        jbuf_free(&sc.props);
+        jbuf_free(&sc.req);
+    }
+
+    jbuf_t output_schema;
+    jbuf_init(&output_schema, 384);
+    if (output_schema_raw && output_schema_raw[0]) {
+        jbuf_append(&output_schema, output_schema_raw);
+    } else {
+        tm_schema_ctx_t sc = {0};
+        jbuf_init(&sc.props, 256);
+        jbuf_init(&sc.req, 64);
+        json_array_foreach(scope, "outputs", tm_input_cb, &sc);
+        if (sc.nprops > 0) {
+            jbuf_append(&output_schema, "{\"type\":\"object\",\"properties\":{");
+            jbuf_append(&output_schema, sc.props.data ? sc.props.data : "");
+            jbuf_append(&output_schema, "},\"required\":[");
+            jbuf_append(&output_schema, sc.req.data ? sc.req.data : "");
+            jbuf_append(&output_schema, "]}");
+        } else {
+            jbuf_append(&output_schema, tools_default_output_schema_json());
+        }
         jbuf_free(&sc.props);
         jbuf_free(&sc.req);
     }
@@ -679,13 +708,16 @@ static void tm_reg_cb(const char *el, void *ctx) {
     if (remote_id && remote_id[0])
         jbuf_appendf(&full_desc, " [tool_id:%s]", remote_id);
 
-    tools_register_external(dsco_name, full_desc.data ? full_desc.data : "", schema.data,
-                            tm_external_cb, safe_strdup(remote_id));
+    tools_register_external_with_output(dsco_name, full_desc.data ? full_desc.data : "",
+                                        schema.data, output_schema.data, tm_external_cb,
+                                        safe_strdup(remote_id));
     rc->count++;
 
     jbuf_free(&full_desc);
     jbuf_free(&schema);
+    jbuf_free(&output_schema);
     free(schema_raw);
+    free(output_schema_raw);
     free(tool_id);
     free(tool_obj);
     free(name);

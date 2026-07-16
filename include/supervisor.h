@@ -64,9 +64,12 @@
  * nonzero code if supervision gave up). */
 int supervisor_run(int child_argc, char **child_argv);
 
-/* Resolve a staged hotswap executable without mutating the current binary. */
-bool supervisor_resolve_hotswap_exec(const char *current_exec, const char *explicit_hotswap,
-                                     char *out_exec, size_t out_exec_len);
+/* Resolve the executable that should be launched for a hotswap without
+ * mutating the current binary or staged file. Explicit path wins; otherwise
+ * returns the executable sibling `dsco-new` when it exists and is executable. */
+bool supervisor_resolve_hotswap_exec(const char *current_path,
+                                     const char *explicit_path,
+                                     char *out, size_t out_len);
 
 /* If dsco is the top-level command in an iTerm session, a voluntary exit would
  * otherwise end the pty and close the tab. This helper execs the user's shell

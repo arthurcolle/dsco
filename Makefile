@@ -59,10 +59,11 @@ BASE_CFLAGS += -flto=thin
 RELEASE_LDFLAGS += -flto=thin
 endif
 LDFLAGS ?=
-LDLIBS ?= -lcurl -lsqlite3 -ldl -lm
+LDLIBS ?= -lcurl -lsqlite3 -ldl -lz -lm
 
 TARGET = dsco
 LITE_TARGET = dsco-lite
+SPINE_TARGET = spine-dsco-slim
 WASM_TARGET = web/static/dsco_wasm.js
 WASM_EXPORTS = '["_dsco_wasm_version","_dsco_wasm_exports_json","_dsco_wasm_models_json","_dsco_wasm_tools_json","_dsco_wasm_route_explain","_dsco_wasm_tool_exec","_dsco_wasm_session_reset","_dsco_wasm_session_add","_dsco_wasm_session_state"]'
 WASM_CACHE_DIR ?= $(BUILD_DIR)/emscripten-cache
@@ -77,33 +78,46 @@ COSMO_TARGET ?= dsco.distributed.systems
 COSMO_LEGACY_TARGET ?= dsco.com
 COSMOCC_VERSION ?= 4.0.2
 
-SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swarm.c tui.c env_config.c \
-	md.c baseline.c chronicle.c setup.c crypto.c eval.c pipeline.c plugin.c \
-			semantic.c hlc.c ipc.c mcp.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c instrumenter.c structured_process.c task_profile.c \
+SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swarm.c tui.c native_ui.c native_ui_json.c native_masthead.c native_composer.c px_backend.c px_theme.c px_widgets.c agent_ui_theme.c agent_ui_components.c agent_ui_canvas.c pixel_tui.c pixel_tui_perf.c compositor_parity.c pixel_fx.c ui_motion.c kitty_graphics.c rich_text.c font_compat.c kitty_tools.c kitty_agent_windows.c env_config.c \
+	md.c baseline.c chronicle.c agent_event.c callbacks.c setup.c crypto.c eval.c pipeline.c plugin.c kitty_banner.c \
+			semantic.c hlc.c ipc.c mcp.c mcp_server.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c instrumenter.c structured_process.c task_profile.c \
 	output_guard.c topology.c workspace.c plan.c stateful_atoms.c recovery.c router.c \
-	pheromone.c ooda.c killswitch.c governance.c memory_tier.c talons.c avian.c \
+		durable_agents.c bus_cli.c \
+	capability.c \
+	pheromone.c ooda.c killswitch.c governance.c gov_experiment.c memory_tier.c talons.c avian.c \
 	arena_alloc.c event_loop.c vm.c scheduler.c waiter.c vfs.c trading.c legion.c \
-	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c \
+	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c harden.c embedded_data.c cstring_unlock.c \
 	se_store.c watchdog.c audit_log.c heartbeat.c env_guard.c peer_bootstrap.c presence.c \
 	project.c project_mux.c project_grid.c \
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
-	fingerprint.c trust.c toolmgmt.c connector.c integration_fabric.c codex_app_directory.c openrouter_cache.c codex_cache.c dcr.c \
-	openai_oauth.c local_llm.c \
-	startup.c plot.c anim.c fractal.c shadeexpr.c face_sdf.c avatar.c self_improve.c bg_learn.c rsi_curriculum.c pets.c img_util.c supervisor.c \
+	fingerprint.c trust.c toolmgmt.c connector.c integration_fabric.c codex_app_directory.c openrouter_cache.c codex_cache.c codex_usage.c dcr.c \
+	openai_oauth.c kimi_oauth.c local_llm.c \
+	startup.c plot.c anim.c fractal.c shadeexpr.c face_sdf.c avatar.c self_improve.c bg_learn.c autoresearch.c rsi_curriculum.c pets.c img_util.c supervisor.c \
 	graphsub_client.c graphsub_tools.c \
+	openai_images.c \
+	webhook_security.c \
 	extension/backend.c extension/numerical_gsl.c extension/skill_requirements.c \
 	extension/eigen_backend.c extension/fftw_backend.c extension/backend_selftest.c \
 	control_flow.c \
 	introspect.c \
 	learned_cost.c \
+	spend_governor.c \
+	frontier.c \
+	executive.c \
+	strategy.c \
+	command_plane.c \
+	plan_dag.c \
 	session_memory.c \
-	provider_pool.c \
+	provider_pool.c subscription_gate.c subscription_bench.c \
+	dsco_swim.c weather_batch.c openrouter_lanes.c sequence_state.c \
 	math_fastpath.c \
 	http_pool.c \
 	realtime.c \
 	remote_cli.c \
 	cluster.c \
+	activation_lease.c \
 	json_fast.c \
+	construct.c prompt_pool.c rl_hooks.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
@@ -114,7 +128,11 @@ GSL_DEBUG_OBJS = $(GSL_SRCS:gsl/src/%.c=$(DEBUG_OBJ_DIR)/gsl_%.o)
 GSL_TEST_OBJS = $(GSL_SRCS:gsl/src/%.c=$(TEST_OBJ_DIR)/gsl_%.o)
 GSL_COVERAGE_OBJS = $(GSL_SRCS:gsl/src/%.c=$(TEST_COVERAGE_OBJ_DIR)/gsl_%.o)
 GSL_ASAN_OBJS = $(GSL_SRCS:gsl/src/%.c=$(ASAN_OBJ_DIR)/gsl_%.o)
+GSL_ASAN_TEST_OBJS = $(GSL_SRCS:gsl/src/%.c=$(ASAN_TEST_OBJ_DIR)/gsl_%.o)
 GSL_UBSAN_OBJS = $(GSL_SRCS:gsl/src/%.c=$(UBSAN_OBJ_DIR)/gsl_%.o)
+GSL_UBSAN_TEST_OBJS = $(GSL_SRCS:gsl/src/%.c=$(UBSAN_TEST_OBJ_DIR)/gsl_%.o)
+GSL_TSAN_TEST_OBJS = $(GSL_SRCS:gsl/src/%.c=$(TSAN_TEST_OBJ_DIR)/gsl_%.o)
+GSL_ASAN_UBSAN_TEST_OBJS = $(GSL_SRCS:gsl/src/%.c=$(ASAN_UBSAN_TEST_OBJ_DIR)/gsl_%.o)
 # Test links against all src objects except main.c and agent.c
 LIB_SRCS = $(filter-out $(SRC_DIR)/main.c $(SRC_DIR)/agent.c $(SRC_DIR)/orchestrator.c, $(SRCS))
 
@@ -126,6 +144,8 @@ ASAN_OBJ_DIR := $(BUILD_DIR)/asan
 UBSAN_OBJ_DIR := $(BUILD_DIR)/ubsan
 ASAN_TEST_OBJ_DIR := $(BUILD_DIR)/asan-test
 UBSAN_TEST_OBJ_DIR := $(BUILD_DIR)/ubsan-test
+TSAN_TEST_OBJ_DIR := $(BUILD_DIR)/tsan-test
+ASAN_UBSAN_TEST_OBJ_DIR := $(BUILD_DIR)/asan-ubsan-test
 
 OBJS = $(SRC_NAMES:%.c=$(OBJ_DIR)/%.o)
 OBJS += $(GENERATED_OBJS)
@@ -137,13 +157,23 @@ ASAN_OBJS = $(SRC_NAMES:%.c=$(ASAN_OBJ_DIR)/%.o)
 UBSAN_OBJS = $(SRC_NAMES:%.c=$(UBSAN_OBJ_DIR)/%.o)
 ASAN_TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(ASAN_TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(ASAN_TEST_OBJ_DIR)/%)
 UBSAN_TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(UBSAN_TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(UBSAN_TEST_OBJ_DIR)/%)
+TSAN_TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(TSAN_TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(TSAN_TEST_OBJ_DIR)/%)
+ASAN_UBSAN_TEST_OBJS = $(TEST_SRC_NAMES:%.c=$(ASAN_UBSAN_TEST_OBJ_DIR)/%.o) $(LIB_OBJS:$(OBJ_DIR)/%=$(ASAN_UBSAN_TEST_OBJ_DIR)/%)
 
-ASAN_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=address
+SANITIZER_BASE_CFLAGS = $(filter-out -D_FORTIFY_SOURCE=2,$(BASE_CFLAGS))
+
+ASAN_CFLAGS = $(SANITIZER_BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=address
 override ASAN_CFLAGS += -DDSCO_INTERNAL_TESTS
 ASAN_LDFLAGS = -fsanitize=address
-UBSAN_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=undefined -fno-sanitize-recover=all
+UBSAN_CFLAGS = $(SANITIZER_BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=undefined -fno-sanitize-recover=all
 override UBSAN_CFLAGS += -DDSCO_INTERNAL_TESTS
 UBSAN_LDFLAGS = -fsanitize=undefined -fno-sanitize-recover=all
+TSAN_CFLAGS = $(SANITIZER_BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=thread
+override TSAN_CFLAGS += -DDSCO_INTERNAL_TESTS
+TSAN_LDFLAGS = -fsanitize=thread
+ASAN_UBSAN_CFLAGS = $(SANITIZER_BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -fsanitize=address,undefined -fno-sanitize-recover=all
+override ASAN_UBSAN_CFLAGS += -DDSCO_INTERNAL_TESTS
+ASAN_UBSAN_LDFLAGS = -fsanitize=address,undefined -fno-sanitize-recover=all
 DEBUG_CFLAGS = $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline -DDSCO_DEV_BINARY
 PROFILE_COVERAGE_FLAGS = -finstrument-functions -fsanitize-coverage=trace-pc-guard,trace-cmp,indirect-calls,trace-div,trace-gep
 PROFILE_CFLAGS = $(BASE_CFLAGS) -O1 -g -fno-omit-frame-pointer -fno-inline \
@@ -158,11 +188,9 @@ override COVERAGE_CFLAGS += -DDSCO_INTERNAL_TESTS
 COVERAGE_LDFLAGS = --coverage
 # Leak checking is off on every platform until a dedicated leak burndown:
 # the suite has never run under LSan and end-of-process leaks would drown the
-# address-error signal ASan is here for. Override: make asan-test
-# ASAN_RUNTIME_OPTIONS=detect_leaks=1
-ASAN_RUNTIME_OPTIONS = detect_leaks=0
+# address-error signal ASan is here for. `make leak-test` enables it explicitly.
+ASAN_RUNTIME_OPTIONS ?= detect_leaks=0
 ifeq ($(UNAME_S),Darwin)
-ASAN_RUNTIME_OPTIONS = detect_leaks=0
 # Secure Enclave + PAC + Touch ID + presence detection. Disabled for the
 # Cosmopolitan lane: cosmocc targets the APE portable ABI, not Darwin
 # Objective-C frameworks / Metal / LocalAuthentication.
@@ -173,7 +201,7 @@ ifeq ($(UNAME_M),arm64)
 BASE_CFLAGS += -mbranch-protection=standard
 endif
 LDLIBS      += -framework Security -framework CoreFoundation -framework IOKit \
-               -framework CoreGraphics -framework LocalAuthentication \
+               -framework CoreGraphics -framework CoreText -framework LocalAuthentication \
                -framework Foundation -framework Metal -framework MetalKit \
                -framework Accelerate -framework AudioToolbox
 
@@ -285,7 +313,7 @@ endif
 # Pizza-box: baked data blobs get their own flat obj names. Derive this from
 # data/ rather than src/generated/, because src/generated/ may not exist until
 # the bake step runs.
-BAKED_DATA       := $(shell find data -maxdepth 1 -type f -print 2>/dev/null | sort)
+BAKED_DATA       := $(shell find data -maxdepth 1 -type f ! -name '.*' -print 2>/dev/null | sort)
 BAKED_DATA_SYMS  := $(subst -,_,$(subst .,_,$(notdir $(BAKED_DATA))))
 GENERATED_C      := $(addprefix src/generated/embedded_,$(addsuffix .c,$(BAKED_DATA_SYMS)))
 GENERATED_REGISTRY := $(INC_DIR)/embedded_data_registry.h
@@ -310,9 +338,78 @@ endif
 # end of the link line so clang does not emit duplicate-library notices.
 LDLIBS := $(filter-out -lm,$(LDLIBS)) -lm
 
-all: $(TARGET) dsc dsco-new $(LITE_TARGET)
+# ── Hardened release switch (HARDEN=1) ──────────────────────────────────────
+# Compile the anti-RE bodies in (-DDSCO_HARDENED), obfuscate sensitive string
+# literals (-DDSCO_USE_OBF_SECRETS), drop debug info (-g) and the compiler ident
+# string, and strip local/debug symbols at link. The `harden` target drives this
+# into an isolated build dir, then strips + hardened-signs the result. Placed
+# after all platform BASE_CFLAGS mutations so the filter-out sees the final set.
+ifeq ($(HARDEN),1)
+BASE_CFLAGS := $(filter-out -g,$(BASE_CFLAGS)) -DDSCO_HARDENED -DDSCO_USE_OBF_SECRETS -fno-ident
+ifeq ($(UNAME_S),Darwin)
+RELEASE_LDFLAGS += -Wl,-x -Wl,-S
+else
+RELEASE_LDFLAGS += -Wl,-x -Wl,-s -Wl,--build-id=none -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
+endif
+# Extra layer (HARDEN_CSTRING=1, driven by `make harden-max`, macOS only):
+# relocate __TEXT,__cstring into the writable __DATA segment so a post-link tool
+# can encrypt it and src/cstring_unlock.c can decrypt it in place at load.
+ifeq ($(HARDEN_CSTRING),1)
+BASE_CFLAGS += -DDSCO_HARDEN_CSTRING
+RELEASE_LDFLAGS += -Wl,-rename_section,__TEXT,__cstring,__DATA,__cstring
+endif
+endif
+
+all: $(TARGET) dsc dsco-new $(LITE_TARGET) $(SPINE_TARGET)
 debug: $(DEBUG_TARGET)
 dev: $(DEBUG_TARGET)
+
+# ── Hardened, ship-ready binary ─────────────────────────────────────────────
+# Builds the anti-RE profile into an isolated obj dir (keeps dev objects warm),
+# strips all local/debug symbols, and applies a hardened-runtime code signature
+# (blocks debugger attach + dyld injection for non-root). No .dbg is emitted.
+# Override the signing identity: `make harden DSCO_CODESIGN_ID="Developer ID..."`.
+DSCO_CODESIGN_ID ?= -
+.PHONY: harden harden-verify
+harden:
+	@echo "── building hardened dsco (anti-RE) ──"
+	rm -f $(TARGET)
+	$(MAKE) HARDEN=1 BUILD_DIR=build-harden $(TARGET)
+	strip -x $(TARGET) 2>/dev/null || strip $(TARGET)
+ifeq ($(UNAME_S),Darwin)
+	@codesign --remove-signature $(TARGET) 2>/dev/null || true
+	codesign --force --options runtime --entitlements scripts/harden.entitlements --sign "$(DSCO_CODESIGN_ID)" $(TARGET)
+endif
+	@$(MAKE) --no-print-directory harden-verify
+
+harden-verify:
+	@echo "── hardened build report ──"
+	@ls -la $(TARGET)
+	@printf 'symbols:      '; nm $(TARGET) 2>/dev/null | wc -l | tr -d ' '
+	@printf 'local syms:   '; nm $(TARGET) 2>/dev/null | grep -cE ' [tdb] ' || echo 0
+ifeq ($(UNAME_S),Darwin)
+	@printf 'codesign:     '; codesign -dv $(TARGET) 2>&1 | grep -iE 'flags' || echo '(unsigned)'
+endif
+	@printf 'string leak:  '; strings $(TARGET) 2>/dev/null | grep -cE '"env":|"comment":|api\.anthropic|oauth' | sed 's/$$/ sensitive strings (lower is better)/'
+	@printf 'total strings: '; strings $(TARGET) 2>/dev/null | wc -l | tr -d ' '
+
+# ── Maximum hardening: everything in `harden` PLUS __cstring encryption ──────
+# The C string-literal pool is relocated to a writable segment, encrypted at
+# rest post-link, and decrypted at load by a constructor. This is what drops the
+# raw `strings`/Ghidra count from tens of thousands to near-zero. macOS only.
+.PHONY: harden-max
+harden-max:
+	@echo "── building MAX-hardened dsco (anti-RE + __cstring encryption) ──"
+	rm -f $(TARGET)
+	python3 scripts/gen_cstring_key.py include/cstring_key.gen.h build/.cstring_key
+	$(MAKE) HARDEN=1 HARDEN_CSTRING=1 BUILD_DIR=build-hardenmax $(TARGET)
+	strip -x $(TARGET) 2>/dev/null || strip $(TARGET)
+	python3 scripts/encrypt_cstring.py $(TARGET) build/.cstring_key
+ifeq ($(UNAME_S),Darwin)
+	@codesign --remove-signature $(TARGET) 2>/dev/null || true
+	codesign --force --options runtime --entitlements scripts/harden.entitlements --sign "$(DSCO_CODESIGN_ID)" $(TARGET)
+endif
+	@$(MAKE) --no-print-directory harden-verify
 
 profile-instrumented:
 	$(MAKE) BUILD_DIR=build/instrumented TARGET=$(PROFILE_TARGET) PROFILE_BUILD=1 $(PROFILE_TARGET)
@@ -426,11 +523,63 @@ endif
 dsc: dsc.c
 	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -o $@ $< -lcurl -lreadline
 
+# Standalone animated Distributed Systems wordmark (Kitty graphics protocol).
+dsco-banner: $(SRC_DIR)/kitty_banner_main.c $(SRC_DIR)/kitty_banner.c \
+		$(SRC_DIR)/kitty_graphics.c $(SRC_DIR)/px_theme.c \
+		$(INC_DIR)/kitty_banner.h $(INC_DIR)/kitty_banner_mask.h \
+		$(INC_DIR)/kitty_graphics.h $(INC_DIR)/px_theme.h
+	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -I$(INC_DIR) \
+		-o $@ $(SRC_DIR)/kitty_banner_main.c $(SRC_DIR)/kitty_banner.c \
+		$(SRC_DIR)/kitty_graphics.c $(SRC_DIR)/px_theme.c -lz -lm
+
+# Native semantic surface gallery. Use `--ppm /tmp/dsco-lab.ppm` headlessly,
+# or run `./dsco-kitty-lab --animate` inside Kitty/Ghostty/WezTerm.
+dsco-kitty-lab: $(SRC_DIR)/kitty_lab_main.c $(SRC_DIR)/kitty_lab.c \
+		$(SRC_DIR)/kitty_graphics.c $(INC_DIR)/kitty_lab.h $(INC_DIR)/kitty_graphics.h
+	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -I$(INC_DIR) \
+		-o $@ $(SRC_DIR)/kitty_lab_main.c $(SRC_DIR)/kitty_lab.c \
+		$(SRC_DIR)/kitty_graphics.c -lz -lm
+
+# Eight-direction native compositor taste study. The board is rendered in C,
+# can be exported headlessly, and uses the shared compressed Kitty transport.
+KITTY_TASTE_LIBS = -lz -lm
+ifeq ($(UNAME_S),Darwin)
+KITTY_TASTE_LIBS += -framework CoreFoundation -framework CoreGraphics -framework CoreText
+endif
+dsco-kitty-tastes: $(SRC_DIR)/kitty_taste_grid_main.c $(SRC_DIR)/kitty_taste_grid.c \
+		$(SRC_DIR)/kitty_graphics.c $(SRC_DIR)/font_compat.c \
+		$(INC_DIR)/kitty_taste_grid.h $(INC_DIR)/kitty_graphics.h $(INC_DIR)/font_compat.h
+	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -I$(INC_DIR) \
+		-o $@ $(SRC_DIR)/kitty_taste_grid_main.c $(SRC_DIR)/kitty_taste_grid.c \
+		$(SRC_DIR)/kitty_graphics.c $(SRC_DIR)/font_compat.c $(KITTY_TASTE_LIBS)
+
+# Full retained component library storybook. Live mode owns the terminal's
+# exact backing store; --ppm emits a deterministic headless proof frame.
+AGENT_UI_GALLERY_SRCS = $(SRC_DIR)/agent_ui_gallery_main.c \
+	$(SRC_DIR)/agent_ui_gallery.c $(SRC_DIR)/agent_ui_canvas.c \
+	$(SRC_DIR)/agent_ui_components.c $(SRC_DIR)/agent_ui_theme.c \
+	$(SRC_DIR)/px_theme.c $(SRC_DIR)/px_widgets.c \
+	$(SRC_DIR)/native_ui.c $(SRC_DIR)/px_backend.c \
+	$(SRC_DIR)/kitty_graphics.c $(SRC_DIR)/font_compat.c
+dsco-agent-ui-gallery: $(AGENT_UI_GALLERY_SRCS) \
+		$(INC_DIR)/agent_ui_gallery.h $(INC_DIR)/agent_ui_canvas.h \
+		$(INC_DIR)/agent_ui_components.h $(INC_DIR)/agent_ui_theme.h \
+		$(INC_DIR)/px_theme.h $(INC_DIR)/px_widgets.h
+	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -I$(INC_DIR) \
+		-o $@ $(AGENT_UI_GALLERY_SRCS) $(KITTY_TASTE_LIBS)
+
 $(DEBUG_TARGET): $(DEBUG_OBJS) $(GSL_DEBUG_OBJS)
 	$(CC) $(DEBUG_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
 $(TARGET): $(OBJS) $(GSL_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(RELEASE_LDFLAGS) $(LDLIBS)
+ifeq ($(UNAME_S),Darwin)
+	@# Any post-link mutation invalidates Mach-O's linker signature and macOS
+	@# terminates the process with an opaque SIGKILL. Seal and verify the final
+	@# artifact here so a successful build always leaves an executable binary.
+	codesign --force --sign - $@
+	codesign --verify --strict $@
+endif
 
 # dsco-new is a twin of dsco — same code, same composer, distinct name.
 dsco-new: $(TARGET)
@@ -439,6 +588,13 @@ dsco-new: $(TARGET)
 $(LITE_TARGET): $(SRC_DIR)/lite_main.c $(INC_DIR)/config.h
 	$(CC) $(LITE_CFLAGS) -o $@ $<
 	-strip -x $@ 2>/dev/null || true
+
+$(SPINE_TARGET): $(SRC_DIR)/spine_dsco_slim.c $(LIB_OBJS) $(GSL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(RELEASE_LDFLAGS) $(LDLIBS)
+
+.PHONY: test-spine-dsco-slim
+test-spine-dsco-slim: $(SPINE_TARGET)
+	sh $(TEST_DIR)/test_spine_dsco_slim.sh ./$(SPINE_TARGET)
 
 # Source compilation rules
 # ── Pizza box: bake data/ blobs before generated .o files are compiled ──
@@ -477,9 +633,30 @@ $(ASAN_TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(ASAN_TEST_OB
 $(UBSAN_TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(UBSAN_TEST_OBJ_DIR)
 	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
 
+$(TSAN_TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(TSAN_TEST_OBJ_DIR)
+	$(CC) $(TSAN_CFLAGS) -c -o $@ $<
+
+$(ASAN_UBSAN_TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(ASAN_UBSAN_TEST_OBJ_DIR)
+	$(CC) $(ASAN_UBSAN_CFLAGS) -c -o $@ $<
+
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# embedded_data.c pulls in the generated key header + registry; bake first.
+$(OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h | bake_data
+$(DEBUG_OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h | bake_data
+$(TEST_OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h | bake_data
+
+# The __cstring decryptor runs at constructor priority 101 — before libSystem
+# initializes __stack_chk_guard — so it must be stack-protector-free (a canary
+# check against an uninitialized guard SIGTRAPs). It is self-contained (inlined
+# SHA-256), so -fno-builtin/-fno-stack-protector are safe and have no other cost.
+$(OBJ_DIR)/cstring_unlock.o: CFLAGS := $(filter-out -fstack-protector-strong -D_FORTIFY_SOURCE=2,$(CFLAGS)) -fno-stack-protector -fno-builtin
+# Force recompile whenever the per-build key header changes (only exists under HARDEN_CSTRING).
+ifeq ($(HARDEN_CSTRING),1)
+$(OBJ_DIR)/cstring_unlock.o: include/cstring_key.gen.h
+endif
 
 ifeq ($(PROFILE_BUILD),1)
 $(OBJ_DIR)/instrumenter.o: CFLAGS := $(filter-out $(PROFILE_COVERAGE_FLAGS),$(CFLAGS)) -fsanitize-coverage=0
@@ -524,6 +701,18 @@ $(ASAN_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(ASAN_OBJ_DIR)
 
 $(UBSAN_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(UBSAN_OBJ_DIR)
 	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
+
+$(ASAN_TEST_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(ASAN_TEST_OBJ_DIR)
+	$(CC) $(ASAN_CFLAGS) -c -o $@ $<
+
+$(UBSAN_TEST_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(UBSAN_TEST_OBJ_DIR)
+	$(CC) $(UBSAN_CFLAGS) -c -o $@ $<
+
+$(TSAN_TEST_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(TSAN_TEST_OBJ_DIR)
+	$(CC) $(TSAN_CFLAGS) -c -o $@ $<
+
+$(ASAN_UBSAN_TEST_OBJ_DIR)/gsl_%.o: gsl/src/%.c | $(ASAN_UBSAN_TEST_OBJ_DIR)
+	$(CC) $(ASAN_UBSAN_CFLAGS) -c -o $@ $<
 
 $(DEBUG_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(DEBUG_OBJ_DIR)
 	@mkdir -p $(@D)
@@ -597,10 +786,35 @@ $(UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(UBSAN_TEST_OBJ_DIR)
 	@mkdir -p $(@D)
 	$(CC) $(UBSAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
 
+$(TSAN_TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(TSAN_TEST_OBJ_DIR)
+	$(CC) $(TSAN_CFLAGS) -c -o $@ $<
+
+$(TSAN_TEST_OBJ_DIR)/test_%.o: $(TEST_DIR)/test_%.c | $(TSAN_TEST_OBJ_DIR)
+	$(CC) $(TSAN_CFLAGS) -c -o $@ $<
+
+$(TSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(TSAN_TEST_OBJ_DIR)
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_CFLAGS) -c -o $@ $<
+
+$(TSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(TSAN_TEST_OBJ_DIR)
+	@mkdir -p $(@D)
+	$(CC) $(TSAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
+
+$(ASAN_UBSAN_TEST_OBJ_DIR)/test.o: $(TEST_DIR)/test.c | $(ASAN_UBSAN_TEST_OBJ_DIR)
+	$(CC) $(ASAN_UBSAN_CFLAGS) -c -o $@ $<
+
+$(ASAN_UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(ASAN_UBSAN_TEST_OBJ_DIR)
+	@mkdir -p $(@D)
+	$(CC) $(ASAN_UBSAN_CFLAGS) -c -o $@ $<
+
+$(ASAN_UBSAN_TEST_OBJ_DIR)/%.o: $(SRC_DIR)/%.m | $(ASAN_UBSAN_TEST_OBJ_DIR)
+	@mkdir -p $(@D)
+	$(CC) $(ASAN_UBSAN_CFLAGS) -fobjc-arc -x objective-c -c -o $@ $<
+
 $(BUILD_DIR):
 	mkdir -p $@
 
-$(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_DIR) $(UBSAN_OBJ_DIR) $(ASAN_TEST_OBJ_DIR) $(UBSAN_TEST_OBJ_DIR):
+$(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_DIR) $(UBSAN_OBJ_DIR) $(ASAN_TEST_OBJ_DIR) $(UBSAN_TEST_OBJ_DIR) $(TSAN_TEST_OBJ_DIR) $(ASAN_UBSAN_TEST_OBJ_DIR):
 	mkdir -p $@
 	mkdir -p $@/extension
 
@@ -611,11 +825,59 @@ $(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_
 # a stale binary.
 -include $(wildcard $(BUILD_DIR)/*/*.d)
 
-test: test_runner
+# test_runner's dsco-subgoal integration case fork/execs ./dsco; build the
+# shipped binary first so `make test` never relies on a stale local artifact.
+test: $(TARGET) test_runner
 	./test_runner
+
+test-fast: $(TARGET) test_runner test_command_plane
+	./test_command_plane
+	DSCO_TEST_QUICK=1 ./test_runner
+
+test-cli-flags: $(TARGET)
+	bash tests/test_cli_global_flags.sh ./$(TARGET)
 
 test_runner: $(TEST_OBJS) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+.PHONY: asan-test leak-test ubsan-test asan-ubsan-test tsan-test sanitizer-test
+
+test_runner_tsan: $(TSAN_TEST_OBJS) $(GSL_TSAN_TEST_OBJS)
+	$(CC) $(TSAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(TSAN_LDFLAGS) $(LDLIBS)
+
+test_runner_asan: $(ASAN_TEST_OBJS) $(GSL_ASAN_TEST_OBJS)
+	$(CC) $(ASAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(ASAN_LDFLAGS) $(LDLIBS)
+
+test_runner_ubsan: $(UBSAN_TEST_OBJS) $(GSL_UBSAN_TEST_OBJS)
+	$(CC) $(UBSAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(UBSAN_LDFLAGS) $(LDLIBS)
+
+test_runner_asan_ubsan: $(ASAN_UBSAN_TEST_OBJS) $(GSL_ASAN_UBSAN_TEST_OBJS)
+	$(CC) $(ASAN_UBSAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(ASAN_UBSAN_LDFLAGS) $(LDLIBS)
+
+asan-test: test_runner_asan
+	ASAN_OPTIONS='$(ASAN_RUNTIME_OPTIONS):halt_on_error=1:abort_on_error=1' ./test_runner_asan
+
+# Dedicated leak lane. On runtimes that do not implement LeakSanitizer this
+# target fails rather than silently certifying the tree; macOS also has the
+# native `leaks-test` smoke lane below.
+leak-test: test_runner_asan
+	ASAN_OPTIONS='detect_leaks=1:halt_on_error=1:abort_on_error=1' ./test_runner_asan
+
+ubsan-test: test_runner_ubsan
+	UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1' ./test_runner_ubsan
+
+asan-ubsan-test: test_runner_asan_ubsan
+	ASAN_OPTIONS='$(ASAN_RUNTIME_OPTIONS):halt_on_error=1:abort_on_error=1' \
+	UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1' ./test_runner_asan_ubsan
+
+tsan-test: test_runner_tsan test_plan_cache_tsan
+	TSAN_OPTIONS='halt_on_error=1:second_deadlock_stack=1' ./test_runner_tsan
+	TSAN_OPTIONS='halt_on_error=1:second_deadlock_stack=1' ./test_plan_cache_tsan
+
+sanitizer-test: asan-ubsan-test tsan-test
+
+model-resolution-sim: $(TARGET)
+	python3 scripts/model_resolution_sim.py --dsco ./$(TARGET)
 
 # ── TUI snapshot tests (Integument golden tests) ─────────────────────────
 # Headless golden tests for deterministic render primitives. These link the
@@ -633,7 +895,54 @@ test_tui_theme_snapshot: $(TEST_OBJ_DIR)/test_tui_theme_snapshot.o $(TUI_TEST_LI
 	$(CC) $(TEST_CFLAGS) -fcommon -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
 	$(BUILD_DIR)/$@
 
-test_tui_snapshots: test_tui_snapshot test_tui_theme_snapshot
+test_tui_snapshots: test_tui_snapshot test_tui_theme_snapshot test_pixel_plan
+
+# Pixel compositor geometry/DPR tests (headless; public native_ui API only)
+.PHONY: test_pixel_geometry
+test_pixel_geometry: $(TEST_OBJ_DIR)/test_pixel_geometry.o $(TUI_TEST_LIB_OBJS)
+	$(CC) $(TEST_CFLAGS) -fcommon -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+# Retained masthead/composer, semantic pixel adapter, damage, and session PPMs.
+.PHONY: test_native_compositor
+test_native_compositor: $(TEST_OBJ_DIR)/test_native_compositor.o $(TUI_TEST_LIB_OBJS)
+	$(CC) $(TEST_CFLAGS) -fcommon -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+# Shared theme registry, low-level pixel widgets, high-level agent components,
+# every storybook page, stable action keys, and a 2x backing-store proof.
+AGENT_UI_TEST_OBJS = $(TEST_OBJ_DIR)/test_agent_ui_components.o \
+	$(TEST_OBJ_DIR)/agent_ui_gallery.o $(TEST_OBJ_DIR)/agent_ui_canvas.o \
+	$(TEST_OBJ_DIR)/agent_ui_components.o $(TEST_OBJ_DIR)/agent_ui_theme.o \
+	$(TEST_OBJ_DIR)/px_theme.o $(TEST_OBJ_DIR)/px_widgets.o \
+	$(TEST_OBJ_DIR)/native_ui.o $(TEST_OBJ_DIR)/px_backend.o \
+	$(TEST_OBJ_DIR)/kitty_graphics.o $(TEST_OBJ_DIR)/font_compat.o
+.PHONY: test_agent_ui_components
+test_agent_ui_components: $(AGENT_UI_TEST_OBJS)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+# Headless native plan tree/action-DAG rendering artifacts.
+.PHONY: test_pixel_plan
+test_pixel_plan: $(TEST_OBJ_DIR)/test_pixel_plan.o $(TUI_TEST_LIB_OBJS)
+	$(CC) $(TEST_CFLAGS) -fcommon -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+# Headless Kitty APC framing, query, and terminal-hint contract tests.
+.PHONY: test_kitty_graphics
+test_kitty_graphics: $(TEST_OBJ_DIR)/test_kitty_graphics.o \
+	$(TEST_OBJ_DIR)/kitty_graphics.o
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+.PHONY: test_pixel
+test_pixel: test_pixel_geometry test_native_compositor test_agent_ui_components test_pixel_plan test_kitty_graphics
+
+.PHONY: test_kitty_lab
+test_kitty_lab: $(TEST_OBJ_DIR)/test_kitty_lab.o \
+	$(TEST_OBJ_DIR)/kitty_lab.o $(TEST_OBJ_DIR)/kitty_graphics.o
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
 
 # Priority 7 standalone test binary
 RECOVERY_TEST_OBJS = $(TEST_OBJ_DIR)/test_recovery.o \
@@ -675,11 +984,23 @@ test_plan_cache: $(TEST_OBJ_DIR)/test_plan_cache.o \
 	$(TEST_OBJ_DIR)/arena_alloc.o
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
 
+test_plan_cache_tsan: $(TSAN_TEST_OBJ_DIR)/test_plan_cache.o \
+	$(TSAN_TEST_OBJ_DIR)/plan_cache.o $(TSAN_TEST_OBJ_DIR)/json_util.o \
+	$(TSAN_TEST_OBJ_DIR)/arena_alloc.o
+	$(CC) $(TSAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(TSAN_LDFLAGS) -lm
+
 $(TEST_OBJ_DIR)/test_learned_cost.o: $(TEST_DIR)/test_learned_cost.c | $(TEST_OBJ_DIR)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 test_learned_cost: $(TEST_OBJ_DIR)/test_learned_cost.o \
 	$(TEST_OBJ_DIR)/learned_cost.o
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+
+$(TEST_OBJ_DIR)/test_ooda_calibration.o: $(TEST_DIR)/test_ooda_calibration.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_ooda_calibration: $(TEST_OBJ_DIR)/test_ooda_calibration.o \
+	$(TEST_OBJ_DIR)/ooda.o $(TEST_OBJ_DIR)/scheduler.o $(TEST_OBJ_DIR)/error.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lm
+	./$@
 
 $(TEST_OBJ_DIR)/test_session_memory.o: $(TEST_DIR)/test_session_memory.c | $(TEST_OBJ_DIR)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
@@ -692,6 +1013,24 @@ $(TEST_OBJ_DIR)/test_memory_keep_score.o: $(TEST_DIR)/test_memory_keep_score.c |
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 # memory_keep_score pulls in vecstore + tools_embed_text via memory_tier.c; link full lib set.
 test_memory_keep_score: $(TEST_OBJ_DIR)/test_memory_keep_score.o \
+	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+$(TEST_OBJ_DIR)/test_memory_classification.o: $(TEST_DIR)/test_memory_classification.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+# classification gates live in memory_tier.c; same full lib-set link as keep_score.
+test_memory_classification: $(TEST_OBJ_DIR)/test_memory_classification.o \
+	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+$(TEST_OBJ_DIR)/test_command_plane.o: $(TEST_DIR)/test_command_plane.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_command_plane: $(TEST_OBJ_DIR)/test_command_plane.o $(TEST_OBJ_DIR)/command_plane.o $(TEST_OBJ_DIR)/error.o
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) -lsqlite3 -lm
+
+$(TEST_OBJ_DIR)/test_net_fanout.o: $(TEST_DIR)/test_net_fanout.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+test_net_fanout: $(TEST_OBJ_DIR)/test_net_fanout.o \
 	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
@@ -747,14 +1086,16 @@ test_math_corpus: $(TEST_OBJ_DIR)/test_math_corpus.o \
 # Build + run every standalone priority test in sequence.
 .PHONY: test_priorities
 test_priorities: test_recovery test_stateful_atoms test_plan_optimizer test_plan_cache \
-	test_learned_cost test_session_memory test_memory_keep_score test_wasm_core test_control_flow test_avian test_waiter test_math_corpus
+	test_learned_cost test_ooda_calibration test_session_memory test_memory_keep_score test_memory_classification test_wasm_core test_control_flow test_avian test_waiter test_math_corpus
 	./test_recovery
 	./test_stateful_atoms
 	./test_plan_optimizer
 	./test_plan_cache
 	./test_learned_cost
+	./test_ooda_calibration
 	./test_session_memory
 	./test_memory_keep_score
+	./test_memory_classification
 	./test_wasm_core
 	./test_control_flow
 	./test_avian
@@ -777,18 +1118,6 @@ $(TARGET)-asan: $(ASAN_OBJS) $(GSL_ASAN_OBJS) $(GENERATED_OBJS)
 ubsan: $(TARGET)-ubsan
 
 $(TARGET)-ubsan: $(UBSAN_OBJS) $(GSL_UBSAN_OBJS) $(GENERATED_OBJS)
-	$(CC) $(UBSAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(UBSAN_LDFLAGS) $(LDLIBS)
-
-asan-test: asan-test_runner
-	ASAN_OPTIONS=$(ASAN_RUNTIME_OPTIONS) ./asan-test_runner
-
-asan-test_runner: $(ASAN_TEST_OBJS) $(GSL_ASAN_OBJS)
-	$(CC) $(ASAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(ASAN_LDFLAGS) $(LDLIBS)
-
-ubsan-test: ubsan-test_runner
-	UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 ./ubsan-test_runner
-
-ubsan-test_runner: $(UBSAN_TEST_OBJS) $(GSL_UBSAN_OBJS)
 	$(CC) $(UBSAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(UBSAN_LDFLAGS) $(LDLIBS)
 
 format:
@@ -888,7 +1217,7 @@ release-hardened-native: $(TARGET)
 lint: format-check docs-check check-version
 
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET) $(LITE_TARGET) $(DEBUG_TARGET) $(PROFILE_TARGET) dsc test_runner coverage_runner $(TARGET)-asan $(TARGET)-ubsan asan-test_runner ubsan-test_runner
+	rm -rf $(BUILD_DIR) $(TARGET) $(LITE_TARGET) $(DEBUG_TARGET) $(PROFILE_TARGET) dsc test_runner coverage_runner $(TARGET)-asan $(TARGET)-ubsan asan-test_runner ubsan-test_runner test_runner_asan test_runner_ubsan test_runner_asan_ubsan test_runner_tsan
 
 install: $(TARGET) dsco-new $(LITE_TARGET) dsc
 	install -d $(PREFIX)/bin
@@ -925,7 +1254,9 @@ ui: $(TARGET) ui-deps
 
 .PHONY: all debug dev clean install uninstall test coverage docs docs-check \
 	profile profile-instrumented \
-	asan ubsan asan-test ubsan-test format format-check \
+	asan ubsan asan-test ubsan-test test_runner_tsan test_plan_cache_tsan test_runner_asan format format-check \
+	test-cli-flags \
+	model-resolution-sim \
 	fast fast-build fast-test fast-quick fast-syntax fast-changed fast-bench fast-doctor \
 	changed-tests compile-commands build-report build-cache-doctor fast-objects time-trace ninja-file ninja-build \
 	lint clang-tidy cppcheck static-analysis check-version \
