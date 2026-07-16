@@ -2,6 +2,7 @@
 
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdlib.h>
 
 /* ── Process-wide cURL share handle ───────────────────────────────────────
  * Pools DNS and TLS session cache across all easy handles. The share handle
@@ -14,10 +15,32 @@
 
 static CURLSH *g_share = NULL;
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
+static pthread_once_t g_curl_once = PTHREAD_ONCE_INIT;
+static bool g_curl_initialized = false;
 
 static pthread_mutex_t g_lock_dns = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_lock_ssl = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_lock_other = PTHREAD_MUTEX_INITIALIZER;
+
+static void http_cleanup_at_exit(void);
+
+static void curl_init_once(void) {
+    if (curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK) {
+        g_curl_initialized = true;
+        (void)atexit(http_cleanup_at_exit);
+    }
+}
+
+void dsco_http_global_init(void) {
+    pthread_once(&g_curl_once, curl_init_once);
+}
+
+void dsco_http_global_cleanup(void) {
+    if (!g_curl_initialized)
+        return;
+    curl_global_cleanup();
+    g_curl_initialized = false;
+}
 
 static pthread_mutex_t *lock_for(curl_lock_data data) {
     switch (data) {
@@ -45,6 +68,7 @@ static void share_unlock_cb(CURL *handle, curl_lock_data data, void *userptr) {
 }
 
 static void share_init_once(void) {
+    dsco_http_global_init();
     CURLSH *sh = curl_share_init();
     if (!sh)
         return;
@@ -76,4 +100,9 @@ void dsco_http_pool_cleanup(void) {
         curl_share_cleanup(g_share);
         g_share = NULL;
     }
+}
+
+static void http_cleanup_at_exit(void) {
+    dsco_http_pool_cleanup();
+    dsco_http_global_cleanup();
 }

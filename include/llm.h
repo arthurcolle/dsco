@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <time.h>
+#include <curl/curl.h>
 #include "json_util.h"
 
 typedef enum { ROLE_USER, ROLE_ASSISTANT } msg_role_t;
@@ -58,13 +59,14 @@ typedef struct {
     double tls_ms;
     double ttfb_ms;
     double total_ms;
+    long   new_connections;  /* cURL connections created for this transfer */
 } llm_latency_breakdown_t;
 
 typedef struct {
     double ttft_ms;           /* time to first token (ms) */
     double ttft_tool_ms;      /* time to first tool_use (ms) */
     double total_ms;          /* total streaming duration (ms) */
-    double tokens_per_sec;    /* output token throughput */
+    double tokens_per_sec;    /* output decode throughput after first token */
     int    thinking_tokens;   /* tokens spent on thinking */
     llm_latency_breakdown_t latency;  /* F40: cURL timing phases */
 } stream_telemetry_t;
@@ -73,6 +75,9 @@ typedef struct {
 typedef void (*stream_text_cb)(const char *text, void *ctx);
 /* Called when a tool_use block starts */
 typedef void (*stream_tool_start_cb)(const char *name, const char *id, void *ctx);
+/* Called with raw incremental tool argument JSON fragments as they arrive. */
+typedef void (*stream_tool_arg_delta_cb)(const char *name, const char *id,
+                                         const char *delta, void *ctx);
 /* Called with thinking text deltas (extended thinking / interleaved thinking) */
 typedef void (*stream_thinking_cb)(const char *text, void *ctx);
 
@@ -83,6 +88,8 @@ typedef struct {
     stream_telemetry_t telemetry;
     int                http_status;
     bool               ok;
+    bool               retryable;         /* transient provider failure may be retried */
+    long               retry_after_ms;     /* provider-requested retry delay; 0 = backoff */
     bool               context_overflow;  /* provider rejected prompt as too long → reactive compaction can retry */
     double             cost_usd;           /* authoritative per-turn cost reported by provider (OpenRouter usage.cost); 0 = not reported, fall back to token math */
     time_t             credit_reset_at;    /* provider-supplied epoch seconds when exhausted subscription/rate window reopens */
@@ -125,10 +132,11 @@ typedef struct {
     int    total_cache_read_tokens;
     int    total_cache_write_tokens;
     int    turn_count;
-    /* Authoritative session cost. Accumulates the provider-reported cost
+    /* Accounted session cost. Accumulates the provider-reported cost
      * (OpenRouter usage.cost) when present, else the per-turn token-math
-     * estimate. Used for budget enforcement so caching discounts are
-     * reflected instead of billing every cached token at full input price. */
+     * estimate. Subscription-included turns contribute an authoritative zero.
+     * Used for budget enforcement so caching discounts are reflected instead
+     * of billing every cached token at full input price. */
     double total_reported_cost_usd;
     /* Most recent API response's input usage (single turn, not cumulative).
      * Used by conv_token_estimate to calibrate the rough estimate against
@@ -176,6 +184,11 @@ typedef struct {
     double total_ttft_ms;
     double total_stream_ms;
     int    telemetry_samples;
+    /* Tokens from only turns with a valid streaming timing sample.  Do not
+     * derive rates from session totals: failed/non-streaming turns otherwise
+     * corrupt the denominator. */
+    int    telemetry_input_tokens;
+    int    telemetry_output_tokens;
     bool   topology_auto;
     /* Tool paging: budget ratio for adaptive tool set sizing */
     float  tool_budget_ratio;  /* 0.0–1.0, 1.0 = full budget, updated each turn */
@@ -226,6 +239,18 @@ void  conv_add_user_document(conversation_t *c, const char *media_type,
 void  conv_pop_last(conversation_t *c);
 bool  conv_pop_last_turn(conversation_t *c);
 void  conv_ensure_tool_results(conversation_t *c);
+
+typedef struct {
+    bool ok;
+    int  missing_tool_use;
+    int  missing_tool_result;
+    int  duplicate_tool_use;
+    int  out_of_order_result;
+    char first_error[256];
+} tool_integrity_result_t;
+
+tool_integrity_result_t conv_validate_tool_call_integrity(const conversation_t *c,
+                                                           bool allow_pending_last);
 void  conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars);
 bool  conv_compact_recent_tool_turn(conversation_t *c, int max_chars, int protect_tail);
 
@@ -390,8 +415,18 @@ bool  llm_anthropic_uses_claude_code_auth(const char *credential);
 stream_result_t llm_stream(const char *api_key, const char *request_json,
                            stream_text_cb text_cb,
                            stream_tool_start_cb tool_cb,
+                           stream_tool_arg_delta_cb tool_delta_cb,
                            stream_thinking_cb thinking_cb,
                            void *cb_ctx);
+/* Anthropic provider path with a caller-owned reusable easy handle. The
+ * handle must not be used concurrently and remains owned by the caller. */
+stream_result_t llm_stream_reuse(CURL *curl, const char *api_key,
+                                 const char *request_json,
+                                 stream_text_cb text_cb,
+                                 stream_tool_start_cb tool_cb,
+                                 stream_tool_arg_delta_cb tool_delta_cb,
+                                 stream_thinking_cb thinking_cb,
+                                 void *cb_ctx);
 void dsco_strip_terminal_controls_inplace(char *s);
 
 /* ── Per-tool metrics ──────────────────────────────────────────────────── */

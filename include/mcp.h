@@ -52,6 +52,7 @@ typedef struct {
     char  remote_name[256];     /* exact MCP tool name to send in tools/call */
     char  description[1024];
     char  input_schema[16384];  /* JSON schema string */
+    char  output_schema[8192];  /* Optional JSON schema string */
     int   server_idx;          /* which server owns this tool */
 } mcp_tool_t;
 

@@ -577,6 +577,56 @@ void plan_cache_store(const char *task, const char *topology_name, const char *r
     pthread_mutex_unlock(&s_mu);
 }
 
+void plan_cache_feedback(const char *task, bool success) {
+    if (!task || !task[0])
+        return;
+
+    uint32_t *grams = NULL;
+    int ng = build_ngrams(task, &grams);
+    uint64_t th = fnv64(task);
+
+    pthread_mutex_lock(&s_mu);
+    load_locked();
+
+    float best = 0.0f;
+    int bidx = -1;
+    for (int i = 0; i < PLAN_CACHE_MAX; i++) {
+        plan_cache_entry_t *e = &s_cache.entries[i];
+        if (!e->occupied)
+            continue;
+        float sim;
+        if (th == e->task_hash) {
+            sim = 1.0f;
+        } else if (ng > 0) {
+            uint32_t *eg = NULL;
+            int en = build_ngrams(e->task_text, &eg);
+            sim = jaccard(grams, ng, eg, en);
+            free(eg);
+        } else {
+            sim = 0.0f;
+        }
+        if (sim >= PLAN_CACHE_MIN_SIM && sim > best) {
+            best = sim;
+            bidx = i;
+        }
+    }
+
+    if (bidx >= 0) {
+        plan_cache_entry_t *e = &s_cache.entries[bidx];
+        if (success) {
+            e->fit_score = e->fit_score + 0.03f > 0.99f ? 0.99f : e->fit_score + 0.03f;
+        } else {
+            e->fit_score -= 0.15f;
+            if (e->fit_score < 0.5f)
+                evict_entry(bidx);
+        }
+        persist_locked();
+    }
+
+    pthread_mutex_unlock(&s_mu);
+    free(grams);
+}
+
 void plan_cache_store_json(const char *task, const char *plan_json) {
     if (!task || !plan_json)
         return;
@@ -782,32 +832,50 @@ static char *str_replace_all(const char *src, const char *from, const char *to) 
     return out;
 }
 
-char *plan_cache_adapt(const plan_cache_entry_t *entry, const char *new_task) {
+char *plan_cache_adapt(const plan_cache_entry_t *entry, uint64_t expected_task_hash,
+                       const char *new_task) {
     if (!entry || !new_task)
         return NULL;
 
-    /* Load plan_json lazily if not in memory */
-    char *pj = entry->plan_json;
-    char *pj_loaded = NULL;
-    if (!pj && entry->task_hash) {
-        pj = pj_loaded = load_plan_json(entry->task_hash);
+    char old_task[sizeof(entry->task_text)];
+    char *plan_json = NULL;
+
+    pthread_mutex_lock(&s_mu);
+    load_locked();
+
+    const plan_cache_entry_t *live = NULL;
+    for (int i = 0; i < PLAN_CACHE_MAX; i++) {
+        if (&s_cache.entries[i] == entry && s_cache.entries[i].occupied &&
+            s_cache.entries[i].task_hash == expected_task_hash) {
+            live = &s_cache.entries[i];
+            break;
+        }
     }
-    if (!pj)
+    if (live) {
+        plan_cache_entry_t *mutable_live = (plan_cache_entry_t *)live;
+        if (!mutable_live->plan_json && mutable_live->task_hash) {
+            mutable_live->plan_json = load_plan_json(mutable_live->task_hash);
+        }
+        snprintf(old_task, sizeof(old_task), "%s", mutable_live->task_text);
+        if (mutable_live->plan_json)
+            plan_json = strdup(mutable_live->plan_json);
+    }
+
+    pthread_mutex_unlock(&s_mu);
+
+    if (!live || !plan_json)
         return NULL;
 
     /* Extract entities from both tasks */
     char old_ents[MAX_ENTITIES][32];
     char new_ents[MAX_ENTITIES][32];
-    int n_old = extract_entities(entry->task_text, old_ents, MAX_ENTITIES);
+    int n_old = extract_entities(old_task, old_ents, MAX_ENTITIES);
     int n_new = extract_entities(new_task, new_ents, MAX_ENTITIES);
 
     int n_pairs = (n_old < n_new) ? n_old : n_new;
 
     /* Apply substitutions iteratively */
-    char *result = strdup(pj);
-    free(pj_loaded);
-    if (!result)
-        return NULL;
+    char *result = plan_json;
 
     for (int i = 0; i < n_pairs; i++) {
         if (strcmp(old_ents[i], new_ents[i]) == 0)

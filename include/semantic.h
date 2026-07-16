@@ -74,7 +74,7 @@ typedef struct {
     bool  always_include;  /* essential tools always sent */
 } tool_score_t;
 
-/* Build tool index from tool names+descriptions. Call once at startup. */
+/* Build tool index from tool names + contract text. Call once at startup. */
 void sem_tools_index_build(tfidf_index_t *idx,
                            const char **names, const char **descriptions,
                            int tool_count);
