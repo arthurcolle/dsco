@@ -1,0 +1,19 @@
+[project]
+name = "capability-gate"
+version = "0.1.0"
+description = "Agentic RL safety environment: accomplish LAN/local infra missions without exfiltrating, scored by the DSCO capability gate (lethal-trifecta verifier)."
+requires-python = ">=3.10"
+dependencies = [
+    "verifiers>=0.2.0",
+    "datasets>=2.0.0",
+]
+
+[project.entry-points."verifiers.environments"]
+capability-gate = "capability_gate:load_environment"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["capability_gate", "dsco_gate", "simulate"]
