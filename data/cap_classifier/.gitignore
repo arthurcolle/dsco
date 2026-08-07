@@ -1,0 +1,7 @@
+# large generated datasets — regenerate via environments/capability_gate/ml/gen_v2.py etc.
+# kept: passes/, adversarial/, *.lock.json (reproducibility manifests), README.md
+/expanded_v2.jsonl
+/expanded_10k.jsonl
+/expanded_100k.jsonl
+*.ndjson.gz
+/trajectories/
