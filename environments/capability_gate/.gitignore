@@ -1,0 +1,9 @@
+# generated / vendored / large artifacts — reproducible from the code, do not commit
+ml/.venv/
+ml/corpora/
+ml/plots/
+ml/cache/
+ml/*.joblib
+ml/*.pt
+**/__pycache__/
+*.pyc
