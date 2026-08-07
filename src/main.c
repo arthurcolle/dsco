@@ -84,6 +84,7 @@ extern void dsco_net_routes_register(void *srv_opaque);
 #include "startup.h"
 
 int dsco_bus_cli(int argc, char **argv);
+int dsco_skills_cli(int argc, char **argv);
 #include "local_llm.h"
 #include "structured_process.h"
 #include "command_plane.h"
@@ -3567,6 +3568,7 @@ static bool main_is_dispatch_subcommand(const char *arg) {
             strcmp(arg, "command") == 0 ||
             strcmp(arg, "agents") == 0 ||
             strcmp(arg, "bus") == 0 ||
+            strcmp(arg, "skills") == 0 ||
             strcmp(arg, "autoresearch") == 0 ||
             strcmp(arg, "runtime") == 0 ||
             strcmp(arg, "mcp") == 0 ||
@@ -3689,6 +3691,8 @@ static int main_dispatch_subcommand_normalized(int argc, char **argv,
         rc = durable_agents_cli(nargc, nargv);
     else if (strcmp(sub, "bus") == 0)
         rc = dsco_bus_cli(nargc, nargv);
+    else if (strcmp(sub, "skills") == 0)
+        rc = dsco_skills_cli(nargc, nargv);
     else if (strcmp(sub, "autoresearch") == 0)
         rc = autoresearch_cli(nargc, nargv);
     else if (strcmp(sub, "runtime") == 0)
