@@ -1,0 +1,44 @@
+DSCO JSON hot-path optimization — Apple Silicon M4 Max, clang -O3 -march=native
+Every agent turn parses the LLM response and re-serializes the full conversation
+(escaping every message) to build the next request. Both paths were scalar,
+byte-at-a-time. These two changes are pure CPU wins on that per-turn, per-agent
+loop — i.e. they lower the floor for large-scale swarms.
+
+[1] json_get_* multi-field pull  (find_key: kill per-key malloc)
+    Before find_key decoded EVERY scanned key into a fresh 256B heap buffer just
+    to strcmp it — O(fields x keys) allocations. Now escape-free keys (the ~100%
+    case) compare in place via memcmp; escaped keys still use the exact decoding
+    fallback. Differential-tested byte-identical incl. prefix/escaped/empty keys.
+      baseline  2504 ns/iter
+      optimized  902 ns/iter        -> 2.8x
+    Reproduce: cc -O3 -Iinclude bench/bench_json_getkey.c src/json_util.c -o /tmp/bjk && /tmp/bjk
+
+[2] jbuf_append_json_str  (SIMD escape run-scan; include/simd.h)
+    New dsco_simd_json_safe_run() (NEON + SSE2 + scalar) finds the next byte that
+    actually needs escaping so safe ASCII runs bulk-copy via jbuf_append_len
+    instead of one jbuf_append_char (bounds-checked) per byte. 400k-case
+    differential fuzz vs the original: byte-identical (controls, quotes, UTF-8,
+    invalid sequences, DEL 0x7f, surrogates all covered).
+      baseline  15986 ns/call   0.51 GB/s
+      optimized  1758 ns/call   4.66 GB/s   -> 9.2x
+
+Correctness: full suite 5221/5222 (the 1 failure, trace_enabled level filtering,
+is pre-existing on clean HEAD and unrelated to JSON). No regressions.
+
+[3] parse_string / json_get_str decode  (SIMD aligned run-scan; include/simd.h)
+    Read-side twin of [2]: JSON string VALUES were decoded byte-at-a-time. New
+    dsco_simd_json_unescaped_run() bulk-copies to the next '"' / '\' / NUL using
+    16-byte-ALIGNED loads (glibc-strlen trick) so it is page-safe with no known
+    length. Verified: 200k-case differential fuzz byte-identical (escapes, \u,
+    lone + paired surrogates, high bytes); guard-page test 32 boundary
+    placements, zero faults.
+      baseline  15700 ns/call   0.51 GB/s
+      optimized   517 ns/call   15.5 GB/s   -> 30x
+
+Whole-binary notes:
+  - `dsco --version` does 0.07ms of dsco work; its ~4ms wall is dyld/framework
+    load (Metal/MetalKit/Accelerate/AudioToolbox/curl/sqlite/...). Startup code
+    is not the bottleneck; dylib count is.
+  - topology_registry_init (66KB) runs only for --topology, not startup.
+  - Next (higher-risk, needs live API): provider.c SSE stream parser re-scans +
+    json_get_raw subtree-copies on every chunk -> parse-once json_view.
