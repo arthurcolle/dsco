@@ -1,4 +1,5 @@
 #include "json_util.h"
+#include "simd.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -145,7 +146,18 @@ void jbuf_append_char(jbuf_t *b, char c) {
 void jbuf_append_json_str(jbuf_t *b, const char *s) {
     jbuf_append_char(b, '"');
     const unsigned char *p = (const unsigned char *)s;
-    while (*p) {
+    const unsigned char *end = p + strlen(s);
+    while (p < end) {
+        /* Fast path: bulk-copy the run of bytes that need no escaping. The bulk
+         * of prompt/response text is plain ASCII, so this collapses the per-byte
+         * append loop into a SIMD run-scan + one memcpy per run. */
+        size_t run = dsco_simd_json_safe_run((const char *)p, (size_t)(end - p));
+        if (run) {
+            jbuf_append_len(b, (const char *)p, run);
+            p += run;
+            if (p >= end)
+                break;
+        }
         if (*p == '"') {
             jbuf_append(b, "\\\"");
             p++;
@@ -320,7 +332,13 @@ static const char *parse_string(const char *p, char **out) {
                     break;
             }
         } else {
-            jbuf_append_char(&b, *p);
+            /* Fast path: bulk-copy the run of ordinary characters up to the next
+             * '"', '\\', or NUL. Escape-free plain text is the common case, so
+             * this turns a per-char append loop into a SIMD scan + one memcpy. */
+            size_t run = dsco_simd_json_unescaped_run(p);
+            jbuf_append_len(&b, p, run);
+            p += run;
+            continue; /* p already advanced; skip the trailing p++ */
         }
         p++;
     }
@@ -403,25 +421,57 @@ static const char *extract_raw_value(const char *p, const char **start, const ch
     return *end;
 }
 
+/* Scan past a JSON string literal at `p` (which points at the opening quote).
+ * Returns the position just past the closing quote, or at the terminating NUL
+ * if the literal is unterminated. On return [*cstart, *cend) spans the raw
+ * (still-encoded) content, and *simple is true iff it contained no backslash
+ * escape — in which case the raw span is byte-identical to the decoded value. */
+static const char *scan_string(const char *p, const char **cstart, const char **cend,
+                               bool *simple) {
+    p++; /* past opening quote */
+    *cstart = p;
+    bool esc = false;
+    while (*p && *p != '"') {
+        if (*p == '\\') {
+            esc = true;
+            p++;
+            if (!*p)
+                break; /* truncated escape at end of input */
+        }
+        p++;
+    }
+    *cend = p;
+    *simple = !esc;
+    return (*p == '"') ? p + 1 : p;
+}
+
 static const char *find_key(const char *p, const char *key) {
+    size_t keylen = strlen(key);
     p = skip_ws(p);
     while (*p && *p != '}') {
         if (*p == '"') {
-            char *k = NULL;
-            const char *after = parse_string(p, &k);
-            if (!after || after <= p) {
+            const char *cs, *ce;
+            bool simple;
+            const char *after = scan_string(p, &cs, &ce, &simple);
+            /* Compare in place: JSON keys are almost always escape-free, so the
+             * common path is a length check + memcmp with zero allocation. Only
+             * the rare escaped key falls back to the decoding parser. This kills
+             * the malloc/free per skipped key that dominated multi-field reads. */
+            bool matched;
+            if (simple) {
+                matched = ((size_t)(ce - cs) == keylen) && memcmp(cs, key, keylen) == 0;
+            } else {
+                char *k = NULL;
+                parse_string(p, &k);
+                matched = (k && strcmp(k, key) == 0);
                 free(k);
-                return NULL;
             }
             after = skip_ws(after);
             if (*after == ':')
                 after++;
             after = skip_ws(after);
-            if (k && strcmp(k, key) == 0) {
-                free(k);
+            if (matched)
                 return after;
-            }
-            free(k);
             const char *before_skip = after;
             after = skip_value(after);
             /* Guard: if skip_value didn't advance, bail to prevent infinite loop */
