@@ -35,6 +35,9 @@ BASE_CFLAGS = -Wall -Wextra -O3 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C
 	-DBUILD_DATE='"$(BUILD_DATE)"' -DGIT_HASH='"$(GIT_HASH)"' \
 	-fstack-protector-strong -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security \
 	-Wno-error=format-security
+# Keep caller-provided hardening/issuer flags on every compilation lane.
+# `BASE_CFLAGS` feeds normal, test, sanitizer, debug, and profile builds.
+BASE_CFLAGS += $(CFLAGS_EXTRA)
 CFLAGS ?= $(BASE_CFLAGS)
 TEST_CFLAGS ?= $(BASE_CFLAGS) -O0 -g -fno-omit-frame-pointer -fno-inline
 override TEST_CFLAGS += -DDSCO_INTERNAL_TESTS
@@ -78,20 +81,20 @@ COSMO_TARGET ?= dsco.distributed.systems
 COSMO_LEGACY_TARGET ?= dsco.com
 COSMOCC_VERSION ?= 4.0.2
 
-SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swarm.c tui.c native_ui.c native_ui_json.c pixel_tui.c pixel_fx.c ui_motion.c kitty_graphics.c rich_text.c font_compat.c kitty_tools.c kitty_agent_windows.c env_config.c \
+SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swarm.c tui.c native_ui.c native_ui_json.c native_masthead.c native_composer.c px_backend.c px_theme.c px_widgets.c agent_ui_theme.c agent_ui_components.c agent_ui_canvas.c pixel_tui.c pixel_tui_perf.c compositor_parity.c compositor_stream_bench.c pixel_fx.c ui_motion.c kitty_graphics.c rich_text.c font_compat.c kitty_tools.c kitty_agent_windows.c env_config.c \
 	md.c baseline.c chronicle.c agent_event.c callbacks.c setup.c crypto.c eval.c pipeline.c plugin.c kitty_banner.c \
-			semantic.c hlc.c ipc.c mcp.c mcp_server.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c instrumenter.c structured_process.c task_profile.c \
+			semantic.c hlc.c ipc.c mcp.c mcp_server.c acp_server.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c instrumenter.c structured_process.c task_profile.c \
 	output_guard.c topology.c workspace.c plan.c stateful_atoms.c recovery.c router.c \
-		durable_agents.c bus_cli.c \
-	capability.c \
+		durable_agents.c bus_cli.c skills_cli.c skill_index.c \
+	capability.c cap_model.c \
 	pheromone.c ooda.c killswitch.c governance.c gov_experiment.c memory_tier.c talons.c avian.c \
 	arena_alloc.c event_loop.c vm.c scheduler.c waiter.c vfs.c trading.c legion.c \
 	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c harden.c embedded_data.c cstring_unlock.c \
 	se_store.c watchdog.c audit_log.c heartbeat.c env_guard.c peer_bootstrap.c presence.c \
 	project.c project_mux.c project_grid.c \
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
-	fingerprint.c trust.c toolmgmt.c connector.c integration_fabric.c codex_app_directory.c openrouter_cache.c codex_cache.c codex_usage.c dcr.c \
-	openai_oauth.c local_llm.c \
+	fingerprint.c trust.c toolmgmt.c connector.c integration_fabric.c codex_app_directory.c openrouter_cache.c model_pricing.c codex_cache.c codex_usage.c dcr.c \
+	openai_oauth.c kimi_oauth.c local_llm.c \
 	startup.c plot.c anim.c fractal.c shadeexpr.c face_sdf.c avatar.c self_improve.c bg_learn.c autoresearch.c rsi_curriculum.c pets.c img_util.c supervisor.c \
 	graphsub_client.c graphsub_tools.c \
 	openai_images.c \
@@ -108,14 +111,15 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	command_plane.c \
 	plan_dag.c \
 	session_memory.c \
-	provider_pool.c \
+	context_fabric.c \
+	provider_pool.c subscription_gate.c subscription_bench.c \
 	dsco_swim.c weather_batch.c openrouter_lanes.c sequence_state.c \
 	math_fastpath.c \
 	http_pool.c \
 	realtime.c \
 	remote_cli.c \
 	cluster.c \
-	activation_lease.c \
+	activation_lease.c cloud_runtime.c \
 	json_fast.c \
 	construct.c prompt_pool.c rl_hooks.c \
 	$(OPTIONAL_SRCS)
@@ -525,11 +529,12 @@ dsc: dsc.c
 
 # Standalone animated Distributed Systems wordmark (Kitty graphics protocol).
 dsco-banner: $(SRC_DIR)/kitty_banner_main.c $(SRC_DIR)/kitty_banner.c \
-		$(SRC_DIR)/kitty_graphics.c $(INC_DIR)/kitty_banner.h \
-		$(INC_DIR)/kitty_banner_mask.h $(INC_DIR)/kitty_graphics.h
+		$(SRC_DIR)/kitty_graphics.c $(SRC_DIR)/px_theme.c \
+		$(INC_DIR)/kitty_banner.h $(INC_DIR)/kitty_banner_mask.h \
+		$(INC_DIR)/kitty_graphics.h $(INC_DIR)/px_theme.h
 	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -I$(INC_DIR) \
 		-o $@ $(SRC_DIR)/kitty_banner_main.c $(SRC_DIR)/kitty_banner.c \
-		$(SRC_DIR)/kitty_graphics.c -lz -lm
+		$(SRC_DIR)/kitty_graphics.c $(SRC_DIR)/px_theme.c -lz -lm
 
 # Native semantic surface gallery. Use `--ppm /tmp/dsco-lab.ppm` headlessly,
 # or run `./dsco-kitty-lab --animate` inside Kitty/Ghostty/WezTerm.
@@ -538,6 +543,34 @@ dsco-kitty-lab: $(SRC_DIR)/kitty_lab_main.c $(SRC_DIR)/kitty_lab.c \
 	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -I$(INC_DIR) \
 		-o $@ $(SRC_DIR)/kitty_lab_main.c $(SRC_DIR)/kitty_lab.c \
 		$(SRC_DIR)/kitty_graphics.c -lz -lm
+
+# Eight-direction native compositor taste study. The board is rendered in C,
+# can be exported headlessly, and uses the shared compressed Kitty transport.
+KITTY_TASTE_LIBS = -lz -lm
+ifeq ($(UNAME_S),Darwin)
+KITTY_TASTE_LIBS += -framework CoreFoundation -framework CoreGraphics -framework CoreText
+endif
+dsco-kitty-tastes: $(SRC_DIR)/kitty_taste_grid_main.c $(SRC_DIR)/kitty_taste_grid.c \
+		$(SRC_DIR)/kitty_graphics.c $(SRC_DIR)/font_compat.c \
+		$(INC_DIR)/kitty_taste_grid.h $(INC_DIR)/kitty_graphics.h $(INC_DIR)/font_compat.h
+	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -I$(INC_DIR) \
+		-o $@ $(SRC_DIR)/kitty_taste_grid_main.c $(SRC_DIR)/kitty_taste_grid.c \
+		$(SRC_DIR)/kitty_graphics.c $(SRC_DIR)/font_compat.c $(KITTY_TASTE_LIBS)
+
+# Full retained component library storybook. Live mode owns the terminal's
+# exact backing store; --ppm emits a deterministic headless proof frame.
+AGENT_UI_GALLERY_SRCS = $(SRC_DIR)/agent_ui_gallery_main.c \
+	$(SRC_DIR)/agent_ui_gallery.c $(SRC_DIR)/agent_ui_canvas.c \
+	$(SRC_DIR)/agent_ui_components.c $(SRC_DIR)/agent_ui_theme.c \
+	$(SRC_DIR)/px_theme.c $(SRC_DIR)/px_widgets.c \
+	$(SRC_DIR)/native_ui.c $(SRC_DIR)/px_backend.c \
+	$(SRC_DIR)/kitty_graphics.c $(SRC_DIR)/font_compat.c
+dsco-agent-ui-gallery: $(AGENT_UI_GALLERY_SRCS) \
+		$(INC_DIR)/agent_ui_gallery.h $(INC_DIR)/agent_ui_canvas.h \
+		$(INC_DIR)/agent_ui_components.h $(INC_DIR)/agent_ui_theme.h \
+		$(INC_DIR)/px_theme.h $(INC_DIR)/px_widgets.h
+	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -I$(INC_DIR) \
+		-o $@ $(AGENT_UI_GALLERY_SRCS) $(KITTY_TASTE_LIBS)
 
 $(DEBUG_TARGET): $(DEBUG_OBJS) $(GSL_DEBUG_OBJS)
 	$(CC) $(DEBUG_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
@@ -563,9 +596,53 @@ $(LITE_TARGET): $(SRC_DIR)/lite_main.c $(INC_DIR)/config.h
 $(SPINE_TARGET): $(SRC_DIR)/spine_dsco_slim.c $(LIB_OBJS) $(GSL_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(RELEASE_LDFLAGS) $(LDLIBS)
 
+# ── SOTA typed layer: Thrift IDL keystone + Rust core over C via FFI ──────────
+# libdsco.a bundles the runtime object set (everything minus main/agent/
+# orchestrator) so the typed Rust crate can link down to the C fabric.
+LIBDSCO_A  = libdsco.a
+RUST_CRATE = crates/dsco-core
+THRIFT_IDL = idl/context_fabric.thrift
+THRIFT_OUT = $(BUILD_DIR)/thrift
+
+$(LIBDSCO_A): $(LIB_OBJS) $(GSL_OBJS)
+	ar rcs $@ $(LIB_OBJS) $(GSL_OBJS)
+
+.PHONY: libdsco dsco-core rust-test thrift sota
+libdsco: $(LIBDSCO_A)
+
+dsco-core:
+	cd $(RUST_CRATE) && cargo build --release
+
+# Full FFI link: exercises the typed Rust wrapper against the real C fabric.
+rust-test: $(LIBDSCO_A)
+	cd $(RUST_CRATE) && cargo test --release
+
+thrift: $(THRIFT_IDL)
+	@mkdir -p $(THRIFT_OUT)
+	thrift -out $(THRIFT_OUT) --gen erl    $(THRIFT_IDL)
+	thrift -out $(THRIFT_OUT) --gen c_glib $(THRIFT_IDL)
+	@echo "thrift stubs → $(THRIFT_OUT)"
+
+# One shot: C binary + link archive + typed Rust core + Thrift stubs.
+sota: $(TARGET) $(LIBDSCO_A) dsco-core thrift
+
 .PHONY: test-spine-dsco-slim
 test-spine-dsco-slim: $(SPINE_TARGET)
 	sh $(TEST_DIR)/test_spine_dsco_slim.sh ./$(SPINE_TARGET)
+
+test-pixel-fold-entrypoint:
+	bash $(TEST_DIR)/test_pixel_fold_entrypoint.sh
+
+# Capability-gate hardening parity: assert the C gate (src/capability.c) agrees with the
+# hardened Python reference gate (environments/capability_gate/dsco_gate.py) on the ported
+# hardening cases (homoglyph folding, input-driven net detection, spawn-laundering, IPv6 +
+# cloud-metadata SSRF classification). Standalone TU with stubs; links the compiled model.
+.PHONY: test-cap-hardening
+test-cap-hardening:
+	$(CC) -O2 -std=c11 -Wall -Wextra -I$(INC_DIR) -I$(SRC_DIR) \
+		tools/test_capability_hardening.c $(SRC_DIR)/capability.c $(SRC_DIR)/cap_model.c \
+		-lm -o build/test_capability_hardening
+	./build/test_capability_hardening
 
 # Source compilation rules
 # ── Pizza box: bake data/ blobs before generated .o files are compiled ──
@@ -808,6 +885,55 @@ test-fast: $(TARGET) test_runner test_command_plane
 test-cli-flags: $(TARGET)
 	bash tests/test_cli_global_flags.sh ./$(TARGET)
 
+test-acp-server: $(TARGET)
+	python3 tests/test_acp_server.py
+
+# Deployment smoke: use a short-lived, externally issued lease and a pinned
+# P-256 key. Neither the key nor the lease is written into the repository.
+.PHONY: test-activation-lease-smoke
+test-activation-lease-smoke:
+	@test -n "$(LEASE_ISSUER_P256_B64)" || (echo "LEASE_ISSUER_P256_B64 is required"; exit 2)
+	@test -n "$(LEASE_FILE)" || (echo "LEASE_FILE is required"; exit 2)
+	$(CC) $(TEST_CFLAGS) -DDSCO_ACTIVATION_ISSUER_P256_B64=\"$(LEASE_ISSUER_P256_B64)\" -DDSCO_RUNTIME_SPEC_SHA256=\"$(LEASE_RUNTIME_SPEC_SHA256)\" \
+		-o $(BUILD_DIR)/test_activation_lease_smoke $(TEST_DIR)/test_activation_lease_smoke.c \
+		$(SRC_DIR)/activation_lease.c $(SRC_DIR)/crypto.c $(LDLIBS)
+	$(BUILD_DIR)/test_activation_lease_smoke "$(LEASE_FILE)"
+
+.PHONY: test-cloud-runtime-ceilings
+test-cloud-runtime-ceilings:
+	$(CC) $(TEST_CFLAGS) -DDSCO_CLOUD_ALLOWED_HOSTS=\"api.example.com\" -DDSCO_CLOUD_ALLOWED_PROVIDERS=\"openai,local\" -DDSCO_CLOUD_ALLOWED_MODELS=\"openai/codex-default,local/auto\" -DDSCO_CLOUD_ALLOWED_TOOLS=\"repository,shell,web\" -DDSCO_CLOUD_TOOL_ALLOWLIST=\"Read,Bash,WebSearch\" -DDSCO_CLOUD_PRIMARY_PROVIDER=\"openai\" -DDSCO_CLOUD_PRIMARY_MODEL=\"openai/codex-default\" -DDSCO_CLOUD_DISABLE_CROSS_PROVIDER_ROUTING=\"0\" -DDSCO_CLOUD_SESSION_BUDGET_USD=\"12\" \
+		-o $(BUILD_DIR)/test_cloud_runtime_ceilings $(TEST_DIR)/test_cloud_runtime_ceilings.c \
+		$(SRC_DIR)/cloud_runtime.c $(SRC_DIR)/activation_lease.c $(SRC_DIR)/crypto.c $(LDLIBS)
+	$(BUILD_DIR)/test_cloud_runtime_ceilings
+
+.PHONY: test-cloud-runtime-supported-ceilings
+test-cloud-runtime-supported-ceilings:
+	$(CC) $(TEST_CFLAGS) -DDSCO_CLOUD_ALLOWED_HOSTS=\"api.example.com\" -DDSCO_CLOUD_ALLOWED_PROVIDERS=\"openai,local\" -DDSCO_CLOUD_ALLOWED_MODELS=\"openai/codex-default,local/auto\" -DDSCO_CLOUD_ALLOWED_TOOLS=\"repository,web\" -DDSCO_CLOUD_TOOL_ALLOWLIST=\"Read,WebSearch\" -DDSCO_CLOUD_PRIMARY_PROVIDER=\"openai\" -DDSCO_CLOUD_PRIMARY_MODEL=\"openai/codex-default\" -DDSCO_CLOUD_DISABLE_CROSS_PROVIDER_ROUTING=\"0\" -DDSCO_CLOUD_SESSION_BUDGET_USD=\"12\" -o $(BUILD_DIR)/test_cloud_runtime_supported_ceilings $(TEST_DIR)/test_cloud_runtime_ceilings.c $(SRC_DIR)/cloud_runtime.c $(SRC_DIR)/activation_lease.c $(SRC_DIR)/crypto.c $(LDLIBS)
+	$(BUILD_DIR)/test_cloud_runtime_supported_ceilings
+
+# A cloud binary must never reuse objects compiled with a different issuer
+# pin. This target forces an isolated, complete rebuild and accepts only
+# base64url values, avoiding shell quoting hazards in compiler string macros.
+CLOUD_BUILD_DIR ?= $(BUILD_DIR)/cloud
+CLOUD_TARGET ?= $(CLOUD_BUILD_DIR)/dsco-cloud
+.PHONY: cloud-build
+cloud-build:
+	@test -n "$(CLOUD_ISSUER_P256_B64)" || (echo "CLOUD_ISSUER_P256_B64 is required"; exit 2)
+	@test -n "$(CLOUD_PLUGIN_REQUIREMENT_B64)" || (echo "CLOUD_PLUGIN_REQUIREMENT_B64 is required"; exit 2)
+	@test -n "$(CLOUD_RUNTIME_SPEC_SHA256)" || (echo "CLOUD_RUNTIME_SPEC_SHA256 is required"; exit 2)
+	@test -n "$(CLOUD_ALLOWED_HOSTS_CSV)" || (echo "CLOUD_ALLOWED_HOSTS_CSV is required"; exit 2)
+	@test -n "$(CLOUD_ALLOWED_PROVIDERS_CSV)" || (echo "CLOUD_ALLOWED_PROVIDERS_CSV is required"; exit 2)
+	@test -n "$(CLOUD_ALLOWED_MODELS_CSV)" || (echo "CLOUD_ALLOWED_MODELS_CSV is required"; exit 2)
+	@test -n "$(CLOUD_ALLOWED_TOOLS_CSV)" || (echo "CLOUD_ALLOWED_TOOLS_CSV is required"; exit 2)
+	@test -n "$(CLOUD_TOOL_ALLOWLIST_CSV)" || (echo "CLOUD_TOOL_ALLOWLIST_CSV is required"; exit 2)
+	@test -n "$(CLOUD_PRIMARY_PROVIDER)" || (echo "CLOUD_PRIMARY_PROVIDER is required"; exit 2)
+	@test -n "$(CLOUD_PRIMARY_MODEL)" || (echo "CLOUD_PRIMARY_MODEL is required"; exit 2)
+	@test -n "$(CLOUD_DISABLE_CROSS_PROVIDER_ROUTING)" || (echo "CLOUD_DISABLE_CROSS_PROVIDER_ROUTING is required"; exit 2)
+	@test -n "$(CLOUD_SESSION_BUDGET_USD)" || (echo "CLOUD_SESSION_BUDGET_USD is required"; exit 2)
+	$(MAKE) -B BUILD_DIR="$(CLOUD_BUILD_DIR)" TARGET="$(CLOUD_TARGET)" \
+		CFLAGS_EXTRA="-DDSCO_ACTIVATION_ISSUER_P256_B64=\\\"$(CLOUD_ISSUER_P256_B64)\\\" -DDSCO_PLUGIN_SIGNING_REQUIREMENT_B64=\\\"$(CLOUD_PLUGIN_REQUIREMENT_B64)\\\" -DDSCO_RUNTIME_SPEC_SHA256=\\\"$(CLOUD_RUNTIME_SPEC_SHA256)\\\" -DDSCO_CLOUD_ALLOWED_HOSTS=\\\"$(CLOUD_ALLOWED_HOSTS_CSV)\\\" -DDSCO_CLOUD_ALLOWED_PROVIDERS=\\\"$(CLOUD_ALLOWED_PROVIDERS_CSV)\\\" -DDSCO_CLOUD_ALLOWED_MODELS=\\\"$(CLOUD_ALLOWED_MODELS_CSV)\\\" -DDSCO_CLOUD_ALLOWED_TOOLS=\\\"$(CLOUD_ALLOWED_TOOLS_CSV)\\\" -DDSCO_CLOUD_TOOL_ALLOWLIST=\\\"$(CLOUD_TOOL_ALLOWLIST_CSV)\\\" -DDSCO_CLOUD_PRIMARY_PROVIDER=\\\"$(CLOUD_PRIMARY_PROVIDER)\\\" -DDSCO_CLOUD_PRIMARY_MODEL=\\\"$(CLOUD_PRIMARY_MODEL)\\\" -DDSCO_CLOUD_DISABLE_CROSS_PROVIDER_ROUTING=\\\"$(CLOUD_DISABLE_CROSS_PROVIDER_ROUTING)\\\" -DDSCO_CLOUD_SESSION_BUDGET_USD=\\\"$(CLOUD_SESSION_BUDGET_USD)\\\"" \
+		"$(CLOUD_TARGET)"
+
 test_runner: $(TEST_OBJS) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
@@ -874,6 +1000,25 @@ test_pixel_geometry: $(TEST_OBJ_DIR)/test_pixel_geometry.o $(TUI_TEST_LIB_OBJS)
 	$(CC) $(TEST_CFLAGS) -fcommon -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
 	$(BUILD_DIR)/$@
 
+# Retained masthead/composer, semantic pixel adapter, damage, and session PPMs.
+.PHONY: test_native_compositor
+test_native_compositor: $(TEST_OBJ_DIR)/test_native_compositor.o $(TUI_TEST_LIB_OBJS)
+	$(CC) $(TEST_CFLAGS) -fcommon -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+# Shared theme registry, low-level pixel widgets, high-level agent components,
+# every storybook page, stable action keys, and a 2x backing-store proof.
+AGENT_UI_TEST_OBJS = $(TEST_OBJ_DIR)/test_agent_ui_components.o \
+	$(TEST_OBJ_DIR)/agent_ui_gallery.o $(TEST_OBJ_DIR)/agent_ui_canvas.o \
+	$(TEST_OBJ_DIR)/agent_ui_components.o $(TEST_OBJ_DIR)/agent_ui_theme.o \
+	$(TEST_OBJ_DIR)/px_theme.o $(TEST_OBJ_DIR)/px_widgets.o \
+	$(TEST_OBJ_DIR)/native_ui.o $(TEST_OBJ_DIR)/px_backend.o \
+	$(TEST_OBJ_DIR)/kitty_graphics.o $(TEST_OBJ_DIR)/font_compat.o
+.PHONY: test_agent_ui_components
+test_agent_ui_components: $(AGENT_UI_TEST_OBJS)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
 # Headless native plan tree/action-DAG rendering artifacts.
 .PHONY: test_pixel_plan
 test_pixel_plan: $(TEST_OBJ_DIR)/test_pixel_plan.o $(TUI_TEST_LIB_OBJS)
@@ -886,6 +1031,9 @@ test_kitty_graphics: $(TEST_OBJ_DIR)/test_kitty_graphics.o \
 	$(TEST_OBJ_DIR)/kitty_graphics.o
 	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
 	$(BUILD_DIR)/$@
+
+.PHONY: test_pixel
+test_pixel: test_pixel_geometry test_native_compositor test_agent_ui_components test_pixel_plan test_kitty_graphics
 
 .PHONY: test_kitty_lab
 test_kitty_lab: $(TEST_OBJ_DIR)/test_kitty_lab.o \
@@ -1167,6 +1315,8 @@ lint: format-check docs-check check-version
 
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET) $(LITE_TARGET) $(DEBUG_TARGET) $(PROFILE_TARGET) dsc test_runner coverage_runner $(TARGET)-asan $(TARGET)-ubsan asan-test_runner ubsan-test_runner test_runner_asan test_runner_ubsan test_runner_asan_ubsan test_runner_tsan
+	rm -f $(LIBDSCO_A)
+	rm -rf $(RUST_CRATE)/target
 
 install: $(TARGET) dsco-new $(LITE_TARGET) dsc
 	install -d $(PREFIX)/bin
@@ -1201,7 +1351,7 @@ ui-deps:
 ui: $(TARGET) ui-deps
 	./$(TARGET) --ui
 
-.PHONY: all debug dev clean install uninstall test coverage docs docs-check \
+.PHONY: all debug dev clean install uninstall test coverage docs docs-check test-pixel-fold-entrypoint \
 	profile profile-instrumented \
 	asan ubsan asan-test ubsan-test test_runner_tsan test_plan_cache_tsan test_runner_asan format format-check \
 	test-cli-flags \
