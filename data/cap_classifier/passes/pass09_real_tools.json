@@ -1,0 +1,1340 @@
+{
+  "tools": [
+    {
+      "name": "place_order",
+      "backend": "distributed-finance",
+      "capability_class": "exec",
+      "egress_direction": "none",
+      "example_input": "{\"symbol\": \"AAPL\", \"quantity\": 100, \"price\": 150.50, \"type\": \"limit\"}",
+      "reason": "Name pattern 'place_order' classified as exec, description: Tool in distributed-finance: place order"
+    },
+    {
+      "name": "cancel_order",
+      "backend": "distributed-finance",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"order_id\": \"12345\", \"quantity\": 50}",
+      "reason": "Name pattern 'cancel_order' classified as write, description: Tool in distributed-finance: cancel order"
+    },
+    {
+      "name": "get_positions",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'get_positions' classified as net-ingress, description: Tool in distributed-finance: get positions"
+    },
+    {
+      "name": "get_balances",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'get_balances' classified as net-ingress, description: Tool in distributed-finance: get balances"
+    },
+    {
+      "name": "execute_trade",
+      "backend": "distributed-finance",
+      "capability_class": "exec",
+      "egress_direction": "none",
+      "example_input": "{\"symbol\": \"AAPL\", \"quantity\": 100, \"price\": 150.50, \"type\": \"limit\"}",
+      "reason": "Name pattern 'execute_trade' classified as exec, description: Tool in distributed-finance: execute trade"
+    },
+    {
+      "name": "place_market_order",
+      "backend": "distributed-finance",
+      "capability_class": "exec",
+      "egress_direction": "none",
+      "example_input": "{\"symbol\": \"AAPL\", \"quantity\": 100, \"price\": 150.50, \"type\": \"limit\"}",
+      "reason": "Name pattern 'place_market_order' classified as exec, description: Tool in distributed-finance: place market order"
+    },
+    {
+      "name": "place_limit_order",
+      "backend": "distributed-finance",
+      "capability_class": "exec",
+      "egress_direction": "none",
+      "example_input": "{\"symbol\": \"AAPL\", \"quantity\": 100, \"price\": 150.50, \"type\": \"limit\"}",
+      "reason": "Name pattern 'place_limit_order' classified as exec, description: Tool in distributed-finance: place limit order"
+    },
+    {
+      "name": "modify_order",
+      "backend": "distributed-finance",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"order_id\": \"12345\", \"quantity\": 50}",
+      "reason": "Name pattern 'modify_order' classified as write, description: Tool in distributed-finance: modify order"
+    },
+    {
+      "name": "get_order_status",
+      "backend": "distributed-finance",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{}",
+      "reason": "Name pattern 'get_order_status' classified as net-ingress, description: Tool in distributed-finance: get order status"
+    },
+    {
+      "name": "get_fills",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'get_fills' classified as net-ingress, description: Tool in distributed-finance: get fills"
+    },
+    {
+      "name": "get_portfolio",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'get_portfolio' classified as net-ingress, description: Tool in distributed-finance: get portfolio"
+    },
+    {
+      "name": "calculate_greeks",
+      "backend": "unknown",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'calculate_greeks' classified as benign, description: Tool in distributed-finance: calculate greeks"
+    },
+    {
+      "name": "get_market_data",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'get_market_data' classified as net-ingress, description: Tool in distributed-finance: get market data"
+    },
+    {
+      "name": "stream_prices",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"symbol\": \"AAPL\", \"interval\": \"1min\"}",
+      "reason": "Name pattern 'stream_prices' classified as net-ingress, description: Tool in distributed-finance: stream prices"
+    },
+    {
+      "name": "subscribe_quotes",
+      "backend": "unknown",
+      "capability_class": "read",
+      "egress_direction": "none",
+      "example_input": "{\"symbol\": \"AAPL\", \"interval\": \"1min\"}",
+      "reason": "Name pattern 'subscribe_quotes' classified as read, description: Tool in distributed-finance: subscribe quotes"
+    },
+    {
+      "name": "send_trade_alert",
+      "backend": "distributed-finance",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"to\": \"user@example.com\", \"subject\": \"Test\", \"body\": \"Message\"}",
+      "reason": "Name pattern 'send_trade_alert' classified as egress, description: Tool in distributed-finance: send trade alert"
+    },
+    {
+      "name": "publish_trade_event",
+      "backend": "distributed-finance",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"topic\": \"channel\", \"message\": \"content\"}",
+      "reason": "Name pattern 'publish_trade_event' classified as egress, description: Tool in distributed-finance: publish trade event"
+    },
+    {
+      "name": "upload_trade_file",
+      "backend": "distributed-finance",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"file\": \"data.csv\", \"destination\": \"path\"}",
+      "reason": "Name pattern 'upload_trade_file' classified as egress, description: Tool in distributed-finance: upload trade file"
+    },
+    {
+      "name": "get_settlement_price",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'get_settlement_price' classified as net-ingress, description: Tool in distributed-finance: get settlement price"
+    },
+    {
+      "name": "execute_settlement",
+      "backend": "unknown",
+      "capability_class": "exec",
+      "egress_direction": "none",
+      "example_input": "{\"symbol\": \"AAPL\", \"quantity\": 100, \"price\": 150.50, \"type\": \"limit\"}",
+      "reason": "Name pattern 'execute_settlement' classified as exec, description: Tool in distributed-finance: execute settlement"
+    },
+    {
+      "name": "hedge_position",
+      "backend": "unknown",
+      "capability_class": "exec",
+      "egress_direction": "none",
+      "example_input": "{\"position_id\": \"pos-123\", \"percentage\": 50}",
+      "reason": "Name pattern 'hedge_position' classified as exec, description: Tool in distributed-finance: hedge position"
+    },
+    {
+      "name": "transfer_funds",
+      "backend": "unknown",
+      "capability_class": "exec",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'transfer_funds' classified as exec, description: Tool in distributed-finance: transfer funds"
+    },
+    {
+      "name": "initiate_wire",
+      "backend": "unknown",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{}",
+      "reason": "Name pattern 'initiate_wire' classified as egress, description: Tool in distributed-finance: initiate wire"
+    },
+    {
+      "name": "get_cash_balance",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'get_cash_balance' classified as net-ingress, description: Tool in distributed-finance: get cash balance"
+    },
+    {
+      "name": "get_credit_limit",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'get_credit_limit' classified as net-ingress, description: Tool in distributed-finance: get credit limit"
+    },
+    {
+      "name": "apply_margin",
+      "backend": "unknown",
+      "capability_class": "exec",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'apply_margin' classified as exec, description: Tool in distributed-finance: apply margin"
+    },
+    {
+      "name": "liquidate_position",
+      "backend": "unknown",
+      "capability_class": "exec",
+      "egress_direction": "none",
+      "example_input": "{\"position_id\": \"pos-123\", \"percentage\": 50}",
+      "reason": "Name pattern 'liquidate_position' classified as exec, description: Tool in distributed-finance: liquidate position"
+    },
+    {
+      "name": "roll_contract",
+      "backend": "unknown",
+      "capability_class": "exec",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'roll_contract' classified as exec, description: Tool in distributed-finance: roll contract"
+    },
+    {
+      "name": "exercise_option",
+      "backend": "unknown",
+      "capability_class": "exec",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'exercise_option' classified as exec, description: Tool in distributed-finance: exercise option"
+    },
+    {
+      "name": "get_earnings",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'get_earnings' classified as net-ingress, description: Tool in distributed-finance: get earnings"
+    },
+    {
+      "name": "get_dividends",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'get_dividends' classified as net-ingress, description: Tool in distributed-finance: get dividends"
+    },
+    {
+      "name": "get_corporate_actions",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'get_corporate_actions' classified as net-ingress, description: Tool in distributed-finance: get corporate actions"
+    },
+    {
+      "name": "analyze_volatility",
+      "backend": "unknown",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'analyze_volatility' classified as benign, description: Tool in distributed-finance: analyze volatility"
+    },
+    {
+      "name": "send_email",
+      "backend": "distributed-integration",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"to\": \"user@example.com\", \"subject\": \"Test\", \"body\": \"Message\"}",
+      "reason": "Name pattern 'send_email' classified as egress, description: Tool in distributed-integration: send email"
+    },
+    {
+      "name": "send_slack_message",
+      "backend": "unknown",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"to\": \"user@example.com\", \"subject\": \"Test\", \"body\": \"Message\"}",
+      "reason": "Name pattern 'send_slack_message' classified as egress, description: Tool in distributed-integration: send slack message"
+    },
+    {
+      "name": "create_calendar_event",
+      "backend": "distributed-timeline",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"name\": \"New Item\", \"data\": {}}",
+      "reason": "Name pattern 'create_calendar_event' classified as write, description: Tool in distributed-integration: create calendar event"
+    },
+    {
+      "name": "send_notification",
+      "backend": "unknown",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"to\": \"user@example.com\", \"subject\": \"Test\", \"body\": \"Message\"}",
+      "reason": "Name pattern 'send_notification' classified as egress, description: Tool in distributed-integration: send notification"
+    },
+    {
+      "name": "publish_event",
+      "backend": "distributed-timeline",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"topic\": \"channel\", \"message\": \"content\"}",
+      "reason": "Name pattern 'publish_event' classified as egress, description: Tool in distributed-integration: publish event"
+    },
+    {
+      "name": "trigger_webhook",
+      "backend": "distributed-integration",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"url\": \"https://example.com/webhook\", \"data\": {\"action\": \"event\"}}",
+      "reason": "Name pattern 'trigger_webhook' classified as egress, description: Tool in distributed-integration: trigger webhook"
+    },
+    {
+      "name": "create_webhook",
+      "backend": "distributed-integration",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"url\": \"https://example.com/webhook\", \"data\": {\"action\": \"event\"}}",
+      "reason": "Name pattern 'create_webhook' classified as egress, description: Tool in distributed-integration: create webhook"
+    },
+    {
+      "name": "delete_webhook",
+      "backend": "distributed-integration",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"url\": \"https://example.com/webhook\", \"data\": {\"action\": \"event\"}}",
+      "reason": "Name pattern 'delete_webhook' classified as egress, description: Tool in distributed-integration: delete webhook"
+    },
+    {
+      "name": "list_webhooks",
+      "backend": "distributed-integration",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"url\": \"https://example.com/webhook\", \"data\": {\"action\": \"event\"}}",
+      "reason": "Name pattern 'list_webhooks' classified as egress, description: Tool in distributed-integration: list webhooks"
+    },
+    {
+      "name": "update_webhook",
+      "backend": "distributed-integration",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"url\": \"https://example.com/webhook\", \"data\": {\"action\": \"event\"}}",
+      "reason": "Name pattern 'update_webhook' classified as egress, description: Tool in distributed-integration: update webhook"
+    },
+    {
+      "name": "post_to_channel",
+      "backend": "unknown",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{}",
+      "reason": "Name pattern 'post_to_channel' classified as egress, description: Tool in distributed-integration: post to channel"
+    },
+    {
+      "name": "create_subscription",
+      "backend": "unknown",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"name\": \"New Item\", \"data\": {}}",
+      "reason": "Name pattern 'create_subscription' classified as write, description: Tool in distributed-integration: create subscription"
+    },
+    {
+      "name": "queue_message",
+      "backend": "unknown",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{}",
+      "reason": "Name pattern 'queue_message' classified as egress, description: Tool in distributed-integration: queue message"
+    },
+    {
+      "name": "emit_signal",
+      "backend": "unknown",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{}",
+      "reason": "Name pattern 'emit_signal' classified as egress, description: Tool in distributed-integration: emit signal"
+    },
+    {
+      "name": "syndicate_content",
+      "backend": "unknown",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{}",
+      "reason": "Name pattern 'syndicate_content' classified as egress, description: Tool in distributed-integration: syndicate content"
+    },
+    {
+      "name": "publish_article",
+      "backend": "distributed-publish",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"topic\": \"channel\", \"message\": \"content\"}",
+      "reason": "Name pattern 'publish_article' classified as egress, description: Tool in distributed-integration: publish article"
+    },
+    {
+      "name": "post_social_media",
+      "backend": "unknown",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{}",
+      "reason": "Name pattern 'post_social_media' classified as egress, description: Tool in distributed-integration: post social media"
+    },
+    {
+      "name": "create_folder",
+      "backend": "unknown",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"name\": \"New Item\", \"data\": {}}",
+      "reason": "Name pattern 'create_folder' classified as write, description: Tool in distributed-integration: create folder"
+    },
+    {
+      "name": "upload_file",
+      "backend": "unknown",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"file\": \"data.csv\", \"destination\": \"path\"}",
+      "reason": "Name pattern 'upload_file' classified as egress, description: Tool in distributed-integration: upload file"
+    },
+    {
+      "name": "download_file",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{}",
+      "reason": "Name pattern 'download_file' classified as net-ingress, description: Tool in distributed-integration: download file"
+    },
+    {
+      "name": "sync_folder",
+      "backend": "unknown",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'sync_folder' classified as write, description: Tool in distributed-integration: sync folder"
+    },
+    {
+      "name": "create_contact",
+      "backend": "unknown",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"name\": \"New Item\", \"data\": {}}",
+      "reason": "Name pattern 'create_contact' classified as write, description: Tool in distributed-integration: create contact"
+    },
+    {
+      "name": "update_contact",
+      "backend": "unknown",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"id\": \"resource-id\", \"updates\": {}}",
+      "reason": "Name pattern 'update_contact' classified as write, description: Tool in distributed-integration: update contact"
+    },
+    {
+      "name": "merge_contacts",
+      "backend": "unknown",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"id\": \"resource-id\", \"updates\": {}}",
+      "reason": "Name pattern 'merge_contacts' classified as write, description: Tool in distributed-integration: merge contacts"
+    },
+    {
+      "name": "delete_contact",
+      "backend": "unknown",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"id\": \"resource-id\"}",
+      "reason": "Name pattern 'delete_contact' classified as write, description: Tool in distributed-integration: delete contact"
+    },
+    {
+      "name": "list_contacts",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{}",
+      "reason": "Name pattern 'list_contacts' classified as net-ingress, description: Tool in distributed-integration: list contacts"
+    },
+    {
+      "name": "search_contacts",
+      "backend": "distributed-search",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'search_contacts' classified as net-ingress, description: Tool in distributed-integration: search contacts"
+    },
+    {
+      "name": "export_contacts",
+      "backend": "unknown",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'export_contacts' classified as benign, description: Tool in distributed-integration: export contacts"
+    },
+    {
+      "name": "import_contacts",
+      "backend": "unknown",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'import_contacts' classified as benign, description: Tool in distributed-integration: import contacts"
+    },
+    {
+      "name": "research_topic",
+      "backend": "distributed-research",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'research_topic' classified as net-ingress, description: Tool in distributed-research: research topic"
+    },
+    {
+      "name": "find_entities",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{}",
+      "reason": "Name pattern 'find_entities' classified as net-ingress, description: Tool in distributed-research: find entities"
+    },
+    {
+      "name": "entity_search",
+      "backend": "distributed-research",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'entity_search' classified as benign, description: Tool in distributed-research: entity search"
+    },
+    {
+      "name": "extract_data",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{}",
+      "reason": "Name pattern 'extract_data' classified as net-ingress, description: Tool in distributed-research: extract data"
+    },
+    {
+      "name": "summarize_content",
+      "backend": "unknown",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'summarize_content' classified as benign, description: Tool in distributed-research: summarize content"
+    },
+    {
+      "name": "classify_entities",
+      "backend": "unknown",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'classify_entities' classified as benign, description: Tool in distributed-research: classify entities"
+    },
+    {
+      "name": "find_all_entities",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{}",
+      "reason": "Name pattern 'find_all_entities' classified as net-ingress, description: Tool in distributed-research: find all entities"
+    },
+    {
+      "name": "enrich_findall_run",
+      "backend": "unknown",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'enrich_findall_run' classified as benign, description: Tool in distributed-research: enrich findall run"
+    },
+    {
+      "name": "extend_findall_run",
+      "backend": "unknown",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'extend_findall_run' classified as benign, description: Tool in distributed-research: extend findall run"
+    },
+    {
+      "name": "entity_insights",
+      "backend": "distributed-research",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'entity_insights' classified as benign, description: Tool in distributed-research: entity insights"
+    },
+    {
+      "name": "search_index",
+      "backend": "distributed-search",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'search_index' classified as net-ingress, description: Tool in distributed-search: search index"
+    },
+    {
+      "name": "semantic_search",
+      "backend": "distributed-search",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'semantic_search' classified as net-ingress, description: Tool in distributed-search: semantic search"
+    },
+    {
+      "name": "search_all",
+      "backend": "distributed-search",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'search_all' classified as net-ingress, description: Tool in distributed-search: search all"
+    },
+    {
+      "name": "search_beliefs",
+      "backend": "distributed-search",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'search_beliefs' classified as net-ingress, description: Tool in distributed-search: search beliefs"
+    },
+    {
+      "name": "find_related",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{}",
+      "reason": "Name pattern 'find_related' classified as net-ingress, description: Tool in distributed-search: find related"
+    },
+    {
+      "name": "expand_context",
+      "backend": "unknown",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'expand_context' classified as benign, description: Tool in distributed-search: expand context"
+    },
+    {
+      "name": "query_database",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'query_database' classified as net-ingress, description: Tool in distributed-search: query database"
+    },
+    {
+      "name": "full_text_search",
+      "backend": "distributed-search",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'full_text_search' classified as benign, description: Tool in distributed-search: full text search"
+    },
+    {
+      "name": "filter_results",
+      "backend": "unknown",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'filter_results' classified as benign, description: Tool in distributed-search: filter results"
+    },
+    {
+      "name": "faceted_search",
+      "backend": "distributed-search",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'faceted_search' classified as benign, description: Tool in distributed-search: faceted search"
+    },
+    {
+      "name": "append_event",
+      "backend": "distributed-timeline",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'append_event' classified as benign, description: Tool in distributed-timeline: append event"
+    },
+    {
+      "name": "update_event",
+      "backend": "distributed-timeline",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"id\": \"resource-id\", \"updates\": {}}",
+      "reason": "Name pattern 'update_event' classified as write, description: Tool in distributed-timeline: update event"
+    },
+    {
+      "name": "get_timeline",
+      "backend": "distributed-timeline",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'get_timeline' classified as net-ingress, description: Tool in distributed-timeline: get timeline"
+    },
+    {
+      "name": "list_events",
+      "backend": "distributed-timeline",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{}",
+      "reason": "Name pattern 'list_events' classified as net-ingress, description: Tool in distributed-timeline: list events"
+    },
+    {
+      "name": "subscribe_events",
+      "backend": "distributed-timeline",
+      "capability_class": "read",
+      "egress_direction": "none",
+      "example_input": "{\"symbol\": \"AAPL\", \"interval\": \"1min\"}",
+      "reason": "Name pattern 'subscribe_events' classified as read, description: Tool in distributed-timeline: subscribe events"
+    },
+    {
+      "name": "observe_timeline",
+      "backend": "distributed-timeline",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'observe_timeline' classified as benign, description: Tool in distributed-timeline: observe timeline"
+    },
+    {
+      "name": "timeline_stats",
+      "backend": "distributed-timeline",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'timeline_stats' classified as benign, description: Tool in distributed-timeline: timeline stats"
+    },
+    {
+      "name": "get_stream_events",
+      "backend": "distributed-timeline",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'get_stream_events' classified as net-ingress, description: Tool in distributed-timeline: get stream events"
+    },
+    {
+      "name": "poll_stream",
+      "backend": "unknown",
+      "capability_class": "read",
+      "egress_direction": "none",
+      "example_input": "{\"symbol\": \"AAPL\", \"interval\": \"1min\"}",
+      "reason": "Name pattern 'poll_stream' classified as read, description: Tool in distributed-timeline: poll stream"
+    },
+    {
+      "name": "watch_stream",
+      "backend": "unknown",
+      "capability_class": "read",
+      "egress_direction": "none",
+      "example_input": "{\"symbol\": \"AAPL\", \"interval\": \"1min\"}",
+      "reason": "Name pattern 'watch_stream' classified as read, description: Tool in distributed-timeline: watch stream"
+    },
+    {
+      "name": "recall_episodes",
+      "backend": "distributed-memory",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{}",
+      "reason": "Name pattern 'recall_episodes' classified as egress, description: Tool in distributed-memory: recall episodes"
+    },
+    {
+      "name": "query_beliefs",
+      "backend": "distributed-memory",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'query_beliefs' classified as net-ingress, description: Tool in distributed-memory: query beliefs"
+    },
+    {
+      "name": "list_memories",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{}",
+      "reason": "Name pattern 'list_memories' classified as net-ingress, description: Tool in distributed-memory: list memories"
+    },
+    {
+      "name": "find_related_beliefs",
+      "backend": "distributed-memory",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{}",
+      "reason": "Name pattern 'find_related_beliefs' classified as net-ingress, description: Tool in distributed-memory: find related beliefs"
+    },
+    {
+      "name": "add_observation",
+      "backend": "unknown",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'add_observation' classified as benign, description: Tool in distributed-memory: add observation"
+    },
+    {
+      "name": "update_memory",
+      "backend": "distributed-memory",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"id\": \"resource-id\", \"updates\": {}}",
+      "reason": "Name pattern 'update_memory' classified as write, description: Tool in distributed-memory: update memory"
+    },
+    {
+      "name": "delete_memory",
+      "backend": "distributed-memory",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"id\": \"resource-id\"}",
+      "reason": "Name pattern 'delete_memory' classified as write, description: Tool in distributed-memory: delete memory"
+    },
+    {
+      "name": "get_memory",
+      "backend": "distributed-memory",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'get_memory' classified as net-ingress, description: Tool in distributed-memory: get memory"
+    },
+    {
+      "name": "search_memories",
+      "backend": "distributed-search",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'search_memories' classified as net-ingress, description: Tool in distributed-memory: search memories"
+    },
+    {
+      "name": "export_memories",
+      "backend": "unknown",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'export_memories' classified as benign, description: Tool in distributed-memory: export memories"
+    },
+    {
+      "name": "import_memories",
+      "backend": "unknown",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'import_memories' classified as benign, description: Tool in distributed-memory: import memories"
+    },
+    {
+      "name": "broadcast_message",
+      "backend": "distributed-publish",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"topic\": \"channel\", \"message\": \"content\"}",
+      "reason": "Name pattern 'broadcast_message' classified as egress, description: Tool in distributed-publish: broadcast message"
+    },
+    {
+      "name": "dispatch_task",
+      "backend": "unknown",
+      "capability_class": "spawn",
+      "egress_direction": "out",
+      "example_input": "{}",
+      "reason": "Name pattern 'dispatch_task' classified as spawn, description: Tool in distributed-publish: dispatch task"
+    },
+    {
+      "name": "notify_subscribers",
+      "backend": "unknown",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"symbol\": \"AAPL\", \"interval\": \"1min\"}",
+      "reason": "Name pattern 'notify_subscribers' classified as egress, description: Tool in distributed-publish: notify subscribers"
+    },
+    {
+      "name": "queue_task",
+      "backend": "unknown",
+      "capability_class": "spawn",
+      "egress_direction": "out",
+      "example_input": "{}",
+      "reason": "Name pattern 'queue_task' classified as spawn, description: Tool in distributed-publish: queue task"
+    },
+    {
+      "name": "schedule_task",
+      "backend": "unknown",
+      "capability_class": "spawn",
+      "egress_direction": "out",
+      "example_input": "{}",
+      "reason": "Name pattern 'schedule_task' classified as spawn, description: Tool in distributed-publish: schedule task"
+    },
+    {
+      "name": "cancel_task",
+      "backend": "unknown",
+      "capability_class": "spawn",
+      "egress_direction": "out",
+      "example_input": "{\"order_id\": \"12345\", \"quantity\": 50}",
+      "reason": "Name pattern 'cancel_task' classified as spawn, description: Tool in distributed-publish: cancel task"
+    },
+    {
+      "name": "list_tool_names",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{}",
+      "reason": "Name pattern 'list_tool_names' classified as net-ingress, description: Tool in tm: list tool names"
+    },
+    {
+      "name": "search_tools",
+      "backend": "distributed-search",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'search_tools' classified as net-ingress, description: Tool in tm: search tools"
+    },
+    {
+      "name": "get_tool",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'get_tool' classified as net-ingress, description: Tool in tm: get tool"
+    },
+    {
+      "name": "list_tools_paginated",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{}",
+      "reason": "Name pattern 'list_tools_paginated' classified as net-ingress, description: Tool in tm: list tools paginated"
+    },
+    {
+      "name": "list_tool_categories",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{}",
+      "reason": "Name pattern 'list_tool_categories' classified as net-ingress, description: Tool in tm: list tool categories"
+    },
+    {
+      "name": "batch_get_tools",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'batch_get_tools' classified as net-ingress, description: Tool in tm: batch get tools"
+    },
+    {
+      "name": "execute_tool",
+      "backend": "unknown",
+      "capability_class": "exec",
+      "egress_direction": "none",
+      "example_input": "{\"symbol\": \"AAPL\", \"quantity\": 100, \"price\": 150.50, \"type\": \"limit\"}",
+      "reason": "Name pattern 'execute_tool' classified as exec, description: Tool in tm: execute tool"
+    },
+    {
+      "name": "batch_execute",
+      "backend": "unknown",
+      "capability_class": "benign",
+      "egress_direction": "none",
+      "example_input": "{}",
+      "reason": "Name pattern 'batch_execute' classified as benign, description: Tool in tm: batch execute"
+    },
+    {
+      "name": "query_tools",
+      "backend": "unknown",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'query_tools' classified as net-ingress, description: Tool in tm: query tools"
+    },
+    {
+      "name": "mcp_finance_send_notification",
+      "backend": "mcp-finance",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"to\": \"user@example.com\", \"subject\": \"Test\", \"body\": \"Message\"}",
+      "reason": "Name pattern 'mcp_finance_send_notification' classified as egress, description: MCP wrapper: mcp finance send notification"
+    },
+    {
+      "name": "mcp_integration_send_notification",
+      "backend": "mcp-integration",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"to\": \"user@example.com\", \"subject\": \"Test\", \"body\": \"Message\"}",
+      "reason": "Name pattern 'mcp_integration_send_notification' classified as egress, description: MCP wrapper: mcp integration send notification"
+    },
+    {
+      "name": "mcp_research_send_notification",
+      "backend": "mcp-research",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"to\": \"user@example.com\", \"subject\": \"Test\", \"body\": \"Message\"}",
+      "reason": "Name pattern 'mcp_research_send_notification' classified as egress, description: MCP wrapper: mcp research send notification"
+    },
+    {
+      "name": "mcp_finance_publish_event",
+      "backend": "mcp-finance",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"topic\": \"channel\", \"message\": \"content\"}",
+      "reason": "Name pattern 'mcp_finance_publish_event' classified as egress, description: MCP wrapper: mcp finance publish event"
+    },
+    {
+      "name": "mcp_integration_publish_event",
+      "backend": "mcp-integration",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"topic\": \"channel\", \"message\": \"content\"}",
+      "reason": "Name pattern 'mcp_integration_publish_event' classified as egress, description: MCP wrapper: mcp integration publish event"
+    },
+    {
+      "name": "mcp_research_publish_event",
+      "backend": "mcp-research",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"topic\": \"channel\", \"message\": \"content\"}",
+      "reason": "Name pattern 'mcp_research_publish_event' classified as egress, description: MCP wrapper: mcp research publish event"
+    },
+    {
+      "name": "mcp_finance_trigger_webhook",
+      "backend": "mcp-finance",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"url\": \"https://example.com/webhook\", \"data\": {\"action\": \"event\"}}",
+      "reason": "Name pattern 'mcp_finance_trigger_webhook' classified as egress, description: MCP wrapper: mcp finance trigger webhook"
+    },
+    {
+      "name": "mcp_integration_trigger_webhook",
+      "backend": "mcp-integration",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"url\": \"https://example.com/webhook\", \"data\": {\"action\": \"event\"}}",
+      "reason": "Name pattern 'mcp_integration_trigger_webhook' classified as egress, description: MCP wrapper: mcp integration trigger webhook"
+    },
+    {
+      "name": "mcp_research_trigger_webhook",
+      "backend": "mcp-research",
+      "capability_class": "egress",
+      "egress_direction": "out",
+      "example_input": "{\"url\": \"https://example.com/webhook\", \"data\": {\"action\": \"event\"}}",
+      "reason": "Name pattern 'mcp_research_trigger_webhook' classified as egress, description: MCP wrapper: mcp research trigger webhook"
+    },
+    {
+      "name": "mcp_finance_fetch_data",
+      "backend": "mcp-finance",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'mcp_finance_fetch_data' classified as net-ingress, description: MCP wrapper: mcp finance fetch data"
+    },
+    {
+      "name": "mcp_integration_fetch_data",
+      "backend": "mcp-integration",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'mcp_integration_fetch_data' classified as net-ingress, description: MCP wrapper: mcp integration fetch data"
+    },
+    {
+      "name": "mcp_research_fetch_data",
+      "backend": "mcp-research",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'mcp_research_fetch_data' classified as net-ingress, description: MCP wrapper: mcp research fetch data"
+    },
+    {
+      "name": "mcp_finance_get_",
+      "backend": "mcp-finance",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'mcp_finance_get_' classified as net-ingress, description: MCP wrapper: mcp finance get "
+    },
+    {
+      "name": "mcp_integration_get_",
+      "backend": "mcp-integration",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'mcp_integration_get_' classified as net-ingress, description: MCP wrapper: mcp integration get "
+    },
+    {
+      "name": "mcp_research_get_",
+      "backend": "mcp-research",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"id\": \"resource-id\", \"params\": {}}",
+      "reason": "Name pattern 'mcp_research_get_' classified as net-ingress, description: MCP wrapper: mcp research get "
+    },
+    {
+      "name": "mcp_finance_read_",
+      "backend": "mcp-finance",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{}",
+      "reason": "Name pattern 'mcp_finance_read_' classified as net-ingress, description: MCP wrapper: mcp finance read "
+    },
+    {
+      "name": "mcp_integration_read_",
+      "backend": "mcp-integration",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{}",
+      "reason": "Name pattern 'mcp_integration_read_' classified as net-ingress, description: MCP wrapper: mcp integration read "
+    },
+    {
+      "name": "mcp_research_read_",
+      "backend": "mcp-research",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'mcp_research_read_' classified as net-ingress, description: MCP wrapper: mcp research read "
+    },
+    {
+      "name": "mcp_finance_search_",
+      "backend": "mcp-finance",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'mcp_finance_search_' classified as net-ingress, description: MCP wrapper: mcp finance search "
+    },
+    {
+      "name": "mcp_integration_search_",
+      "backend": "mcp-integration",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'mcp_integration_search_' classified as net-ingress, description: MCP wrapper: mcp integration search "
+    },
+    {
+      "name": "mcp_research_search_",
+      "backend": "mcp-research",
+      "capability_class": "net-ingress",
+      "egress_direction": "in",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'mcp_research_search_' classified as net-ingress, description: MCP wrapper: mcp research search "
+    },
+    {
+      "name": "mcp_finance_create_",
+      "backend": "mcp-finance",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"name\": \"New Item\", \"data\": {}}",
+      "reason": "Name pattern 'mcp_finance_create_' classified as write, description: MCP wrapper: mcp finance create "
+    },
+    {
+      "name": "mcp_integration_create_",
+      "backend": "mcp-integration",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"name\": \"New Item\", \"data\": {}}",
+      "reason": "Name pattern 'mcp_integration_create_' classified as write, description: MCP wrapper: mcp integration create "
+    },
+    {
+      "name": "mcp_research_create_",
+      "backend": "mcp-research",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'mcp_research_create_' classified as write, description: MCP wrapper: mcp research create "
+    },
+    {
+      "name": "mcp_finance_delete_",
+      "backend": "mcp-finance",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"id\": \"resource-id\"}",
+      "reason": "Name pattern 'mcp_finance_delete_' classified as write, description: MCP wrapper: mcp finance delete "
+    },
+    {
+      "name": "mcp_integration_delete_",
+      "backend": "mcp-integration",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"id\": \"resource-id\"}",
+      "reason": "Name pattern 'mcp_integration_delete_' classified as write, description: MCP wrapper: mcp integration delete "
+    },
+    {
+      "name": "mcp_research_delete_",
+      "backend": "mcp-research",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'mcp_research_delete_' classified as write, description: MCP wrapper: mcp research delete "
+    },
+    {
+      "name": "mcp_finance_update_",
+      "backend": "mcp-finance",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"id\": \"resource-id\", \"updates\": {}}",
+      "reason": "Name pattern 'mcp_finance_update_' classified as write, description: MCP wrapper: mcp finance update "
+    },
+    {
+      "name": "mcp_integration_update_",
+      "backend": "mcp-integration",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"id\": \"resource-id\", \"updates\": {}}",
+      "reason": "Name pattern 'mcp_integration_update_' classified as write, description: MCP wrapper: mcp integration update "
+    },
+    {
+      "name": "mcp_research_update_",
+      "backend": "mcp-research",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"q\": \"search term\", \"limit\": 10}",
+      "reason": "Name pattern 'mcp_research_update_' classified as write, description: MCP wrapper: mcp research update "
+    },
+    {
+      "name": "mcp_finance_modify_",
+      "backend": "mcp-finance",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"order_id\": \"12345\", \"quantity\": 50}",
+      "reason": "Name pattern 'mcp_finance_modify_' classified as write, description: MCP wrapper: mcp finance modify "
+    },
+    {
+      "name": "mcp_integration_modify_",
+      "backend": "mcp-integration",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"order_id\": \"12345\", \"quantity\": 50}",
+      "reason": "Name pattern 'mcp_integration_modify_' classified as write, description: MCP wrapper: mcp integration modify "
+    },
+    {
+      "name": "mcp_research_modify_",
+      "backend": "mcp-research",
+      "capability_class": "write",
+      "egress_direction": "none",
+      "example_input": "{\"order_id\": \"12345\", \"quantity\": 50}",
+      "reason": "Name pattern 'mcp_research_modify_' classified as write, description: MCP wrapper: mcp research modify "
+    }
+  ],
+  "gate_coverage_gaps": [
+    {
+      "name": "mcp_finance_send_notification",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "egress",
+      "reason": "MCP/TM prefix tool does egress but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_integration_send_notification",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "egress",
+      "reason": "MCP/TM prefix tool does egress but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_research_send_notification",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "egress",
+      "reason": "MCP/TM prefix tool does egress but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_finance_publish_event",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "egress",
+      "reason": "MCP/TM prefix tool does egress but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_integration_publish_event",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "egress",
+      "reason": "MCP/TM prefix tool does egress but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_research_publish_event",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "egress",
+      "reason": "MCP/TM prefix tool does egress but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_finance_trigger_webhook",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "egress",
+      "reason": "MCP/TM prefix tool does egress but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_integration_trigger_webhook",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "egress",
+      "reason": "MCP/TM prefix tool does egress but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_research_trigger_webhook",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "egress",
+      "reason": "MCP/TM prefix tool does egress but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_finance_create_",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "write",
+      "reason": "MCP/TM prefix tool does write but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_integration_create_",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "write",
+      "reason": "MCP/TM prefix tool does write but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_research_create_",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "write",
+      "reason": "MCP/TM prefix tool does write but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_finance_delete_",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "write",
+      "reason": "MCP/TM prefix tool does write but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_integration_delete_",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "write",
+      "reason": "MCP/TM prefix tool does write but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_research_delete_",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "write",
+      "reason": "MCP/TM prefix tool does write but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_finance_update_",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "write",
+      "reason": "MCP/TM prefix tool does write but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_integration_update_",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "write",
+      "reason": "MCP/TM prefix tool does write but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_research_update_",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "write",
+      "reason": "MCP/TM prefix tool does write but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_finance_modify_",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "write",
+      "reason": "MCP/TM prefix tool does write but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_integration_modify_",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "write",
+      "reason": "MCP/TM prefix tool does write but gate would only flag as untrusted-in"
+    },
+    {
+      "name": "mcp_research_modify_",
+      "current_gate_class": "net-ingress-only",
+      "should_be": "write",
+      "reason": "MCP/TM prefix tool does write but gate would only flag as untrusted-in"
+    }
+  ]
+}
