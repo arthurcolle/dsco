@@ -5416,50 +5416,10 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     if (len > 0)
         composer_history_push(buf);
 
-    /* Echo the submitted input into scrollback. Truecolor gradient on the
-     * chevron, bright text, and a dim continuation glyph for multi-line input.
-     * Built into one stack buffer and emitted with a single fwrite — keeps the
-     * commit-to-scroll transition crisp and tear-free even on slow PTYs. */
-    if (len > 0) {
-        bool truecolor = tui_detect_color_level() >= TUI_COLOR_TRUECOLOR;
-        char outbuf[TUI_COMPOSER_BUF_CAP + 1024];
-        int op = 0;
-
-        const char *opener = truecolor ? "\033[38;2;255;110;199m❯\033[0m \033[38;2;245;245;245m"
-                                       : "\033[1;38;5;213m❯\033[0m \033[1;37m";
-        const char *cont = truecolor ? "\033[0m\033[38;2;90;90;90m│\033[0m \033[38;2;235;235;235m"
-                                     : "\033[2;37m│\033[0m \033[37m";
-        const char *reset_nl = "\033[0m\n";
-        int ol = (int)strlen(opener);
-        int cl = (int)strlen(cont);
-        int rl = (int)strlen(reset_nl);
-
-        if (op + ol < (int)sizeof(outbuf)) {
-            memcpy(outbuf + op, opener, (size_t)ol);
-            op += ol;
-        }
-        for (size_t i = 0; i < (size_t)len; i++) {
-            if (buf[i] == '\n') {
-                if (op + rl < (int)sizeof(outbuf)) {
-                    memcpy(outbuf + op, reset_nl, (size_t)rl);
-                    op += rl;
-                }
-                if (i + 1 < (size_t)len && op + cl < (int)sizeof(outbuf)) {
-                    memcpy(outbuf + op, cont, (size_t)cl);
-                    op += cl;
-                }
-            } else if (op + 1 < (int)sizeof(outbuf)) {
-                outbuf[op++] = buf[i];
-            }
-        }
-        if (op + rl < (int)sizeof(outbuf)) {
-            memcpy(outbuf + op, reset_nl, (size_t)rl);
-            op += rl;
-        }
-
-        fwrite(outbuf, 1, (size_t)op, stderr);
-        fflush(stderr);
-    }
+    /* Submission rendering belongs to the semantic chat loop, which commits a
+     * labeled USER message after sanitization. Echoing raw composer bytes here
+     * loses the role label, duplicates native USER events, and can preserve
+     * terminal-control bytes that the chat loop subsequently strips. */
 
     /* Copy into output buffer */
     size_t copy_n = len < out_sz - 1 ? len : out_sz - 1;

@@ -4653,6 +4653,33 @@ static void print_role_header(const char *role, bool ok, const char *trail) {
     fflush(stderr);
 }
 
+static void print_user_text_block(const char *text) {
+    if (!text || !text[0])
+        return;
+
+    tui_term_lock();
+    if (pixel_tui_session_active()) {
+        pixel_tui_session_add_message(stderr, "USER", text);
+        tui_term_unlock();
+        return;
+    }
+
+    /* Commit submitted input as a real transcript message. The composer only
+     * edits bytes; rendering the user turn here, after terminal controls have
+     * been stripped, keeps role ordering intact and avoids an unsafe raw echo. */
+    tui_prepare_external_output_locked();
+    print_role_header("user", true, NULL);
+    fputs("  ", stderr);
+    for (const char *p = text; *p; p++) {
+        fputc(*p, stderr);
+        if (*p == '\n' && p[1] != '\0')
+            fputs("  ", stderr);
+    }
+    fputc('\n', stderr);
+    fflush(stderr);
+    tui_term_unlock();
+}
+
 static void print_assistant_text_block(const char *text) {
     if (!text || !text[0])
         return;
@@ -5554,10 +5581,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         len = strlen(input_buf);
         if (len == 0)
             continue;
-        if (pixel_session) {
+        if (pixel_session)
             pixel_tui_session_set_turn(stderr, session.turn_count + 1);
-            pixel_tui_session_add_message(stderr, "USER", input_buf);
-        }
+        print_user_text_block(input_buf);
 
         /* Detect multi-line paste (newlines in input) */
         {
