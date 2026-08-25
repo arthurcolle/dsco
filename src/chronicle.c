@@ -699,6 +699,182 @@ static void runs_dir_path(char *out, size_t out_len) {
     }
 }
 
+/* Recursively delete a run directory: one level of regular files/symlinks then
+ * the dir itself. Run dirs are flat (journal.wal, manifest.json, events.jsonl),
+ * so a shallow walk suffices; nested dirs are recursed one extra level for
+ * safety. Never follows symlinks out of the tree (unlink removes the link). */
+static bool run_dir_remove(const char *dir) {
+    if (!dir || !dir[0] || !path_is_safe_dir(dir)) return false;
+    struct stat lst;
+    if (lstat(dir, &lst) != 0) return false;
+    if (!S_ISDIR(lst.st_mode) || S_ISLNK(lst.st_mode)) return false;
+    DIR *d = opendir(dir);
+    if (!d) return false;
+    struct dirent *ent;
+    bool ok = true;
+    while ((ent = readdir(d))) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        char child[PATH_MAX];
+        if ((size_t)snprintf(child, sizeof(child), "%s/%s", dir, ent->d_name) >= sizeof(child)) { ok = false; continue; }
+        struct stat cst;
+        if (lstat(child, &cst) != 0) { ok = false; continue; }
+        if (S_ISDIR(cst.st_mode) && !S_ISLNK(cst.st_mode)) {
+            if (!run_dir_remove(child)) ok = false;
+        } else {
+            if (unlink(child) != 0) ok = false;
+        }
+    }
+    closedir(d);
+    if (rmdir(dir) != 0) ok = false;
+    return ok;
+}
+
+/* Sum sizes of regular files directly under a run dir (one level). */
+static unsigned long long run_dir_bytes(const char *dir) {
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    unsigned long long total = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d))) {
+        if (ent->d_name[0] == '.') continue;
+        char child[PATH_MAX];
+        if ((size_t)snprintf(child, sizeof(child), "%s/%s", dir, ent->d_name) >= sizeof(child)) continue;
+        struct stat st;
+        if (lstat(child, &st) == 0 && S_ISREG(st.st_mode)) total += (unsigned long long)st.st_size;
+    }
+    closedir(d);
+    return total;
+}
+
+/* Read manifest status; returns true and fills is_running when a manifest with
+ * "status": "running" is present. Absent/unreadable manifest => not running. */
+static bool run_manifest_is_running(const char *run_dir) {
+    char path[PATH_MAX];
+    if ((size_t)snprintf(path, sizeof(path), "%s/manifest.json", run_dir) >= sizeof(path)) return false;
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return false;
+    char buf[4096];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    buf[n] = 0;
+    const char *s = strstr(buf, "\"status\"");
+    if (!s) return false;
+    s = strchr(s, ':');
+    if (!s) return false;
+    s++;
+    while (*s == ' ' || *s == '\t' || *s == '"') s++;
+    return strncmp(s, "running", 7) == 0;
+}
+
+typedef struct {
+    char name[256];
+    char path[PATH_MAX];
+    time_t mtime;
+    unsigned long long bytes;
+    bool running;
+} gc_run_entry_t;
+
+static int gc_entry_cmp_mtime(const void *a, const void *b) {
+    const gc_run_entry_t *ea = (const gc_run_entry_t *)a;
+    const gc_run_entry_t *eb = (const gc_run_entry_t *)b;
+    if (ea->mtime < eb->mtime) return -1;   /* oldest first */
+    if (ea->mtime > eb->mtime) return 1;
+    return 0;
+}
+
+int chronicle_runs_gc(const char *runs_dir, const chronicle_gc_opts_t *opts,
+                      chronicle_gc_stats_t *out) {
+    chronicle_gc_stats_t stats;
+    memset(&stats, 0, sizeof(stats));
+    if (!opts) { if (out) *out = stats; return 2; }
+    if (opts->older_than_secs <= 0 && opts->max_total_bytes <= 0) {
+        if (out) *out = stats;
+        return 2; /* no policy: refuse to delete anything */
+    }
+    char runs[PATH_MAX];
+    if (runs_dir && runs_dir[0]) snprintf(runs, sizeof(runs), "%s", runs_dir);
+    else runs_dir_path(runs, sizeof(runs));
+
+    DIR *d = opendir(runs);
+    if (!d) { if (out) *out = stats; return 1; }
+
+    /* Collect entries. */
+    size_t cap = 256, count = 0;
+    gc_run_entry_t *entries = (gc_run_entry_t *)malloc(cap * sizeof(*entries));
+    if (!entries) { closedir(d); if (out) *out = stats; return 1; }
+    const char *active = chronicle_ready() ? chronicle_run_id() : NULL;
+
+    struct dirent *ent;
+    while ((ent = readdir(d))) {
+        if (ent->d_name[0] == '.') continue;
+        char rp[PATH_MAX];
+        if ((size_t)snprintf(rp, sizeof(rp), "%s/%s", runs, ent->d_name) >= sizeof(rp)) continue;
+        struct stat st;
+        if (lstat(rp, &st) != 0) continue;
+        if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) continue;
+        if (count == cap) {
+            cap *= 2;
+            gc_run_entry_t *ne = (gc_run_entry_t *)realloc(entries, cap * sizeof(*entries));
+            if (!ne) break;
+            entries = ne;
+        }
+        gc_run_entry_t *e = &entries[count++];
+        snprintf(e->name, sizeof(e->name), "%s", ent->d_name);
+        snprintf(e->path, sizeof(e->path), "%s", rp);
+        e->mtime = st.st_mtime;
+        e->bytes = run_dir_bytes(rp);
+        e->running = run_manifest_is_running(rp);
+        if (active && active[0] && strcmp(active, ent->d_name) == 0) e->running = true;
+        stats.scanned++;
+        stats.bytes_before += e->bytes;
+    }
+    closedir(d);
+
+    qsort(entries, count, sizeof(*entries), gc_entry_cmp_mtime);
+
+    time_t now = time(NULL);
+    bool *deleted = (bool *)calloc(count ? count : 1, sizeof(bool));
+    if (!deleted) { free(entries); if (out) *out = stats; return 1; }
+
+    /* Pass 1: age policy. */
+    if (opts->older_than_secs > 0) {
+        time_t cutoff = now - (time_t)opts->older_than_secs;
+        for (size_t i = 0; i < count; i++) {
+            if (deleted[i]) continue;
+            if (entries[i].running) { stats.skipped_active++; continue; }
+            if (entries[i].mtime < cutoff) {
+                bool ok = opts->dry_run ? true : run_dir_remove(entries[i].path);
+                if (ok) { deleted[i] = true; stats.deleted++; stats.bytes_reclaimed += entries[i].bytes; }
+            }
+        }
+    }
+
+    /* Pass 2: size budget, oldest-first among survivors. */
+    if (opts->max_total_bytes > 0) {
+        unsigned long long remaining = stats.bytes_before - stats.bytes_reclaimed;
+        for (size_t i = 0; i < count && remaining > (unsigned long long)opts->max_total_bytes; i++) {
+            if (deleted[i]) continue;
+            if (entries[i].running) { continue; }
+            bool ok = opts->dry_run ? true : run_dir_remove(entries[i].path);
+            if (ok) {
+                deleted[i] = true; stats.deleted++;
+                stats.bytes_reclaimed += entries[i].bytes;
+                remaining -= entries[i].bytes;
+            }
+        }
+        /* Count still-protected running runs that would otherwise be cut. */
+        if (remaining > (unsigned long long)opts->max_total_bytes) {
+            for (size_t i = 0; i < count; i++)
+                if (!deleted[i] && entries[i].running) { stats.skipped_active++; break; }
+        }
+    }
+
+    free(deleted);
+    free(entries);
+    if (out) *out = stats;
+    return 0;
+}
+
 int chronicle_runs_cli(int argc, char **argv) {
     const char *cmd = argc >= 3 ? argv[2] : "list";
     char runs[PATH_MAX];
@@ -731,8 +907,40 @@ int chronicle_runs_cli(int argc, char **argv) {
         return rc < 0 ? 1 : rc;
     }
     if (strcmp(cmd, "gc") == 0) {
-        fprintf(stderr, "dsco runs gc: not implemented yet (Wave B P1.3)\n");
-        return 2;
+        chronicle_gc_opts_t opts;
+        memset(&opts, 0, sizeof(opts));
+        for (int i = 3; i < argc; i++) {
+            const char *a = argv[i];
+            if ((strcmp(a, "--older-than") == 0 || strcmp(a, "--older-than-days") == 0) && i + 1 < argc) {
+                double days = atof(argv[++i]);
+                if (days > 0) opts.older_than_secs = (long long)(days * 86400.0);
+            } else if (strcmp(a, "--older-than-secs") == 0 && i + 1 < argc) {
+                opts.older_than_secs = strtoll(argv[++i], NULL, 10);
+            } else if (strcmp(a, "--max-bytes") == 0 && i + 1 < argc) {
+                opts.max_total_bytes = strtoll(argv[++i], NULL, 10);
+            } else if (strcmp(a, "--max-mb") == 0 && i + 1 < argc) {
+                opts.max_total_bytes = (long long)(atof(argv[++i]) * 1024.0 * 1024.0);
+            } else if (strcmp(a, "--dry-run") == 0 || strcmp(a, "-n") == 0) {
+                opts.dry_run = true;
+            } else {
+                fprintf(stderr, "dsco runs gc: unknown option '%s'\n", a);
+                return 2;
+            }
+        }
+        if (opts.older_than_secs <= 0 && opts.max_total_bytes <= 0) {
+            fprintf(stderr,
+                "usage: dsco runs gc (--older-than-days N | --older-than-secs N | --max-bytes N | --max-mb N) [--dry-run]\n"
+                "  a retention policy is required; running/active runs are always kept\n");
+            return 2;
+        }
+        chronicle_gc_stats_t st;
+        int rc = chronicle_runs_gc(runs, &opts, &st);
+        if (rc != 0) { fprintf(stderr, "dsco runs gc: failed (rc=%d)\n", rc); return rc; }
+        printf("%s: scanned %llu, %s %llu run(s), reclaimed %llu bytes (kept %llu active)\n",
+               opts.dry_run ? "gc[dry-run]" : "gc",
+               st.scanned, opts.dry_run ? "would remove" : "removed",
+               st.deleted, st.bytes_reclaimed, st.skipped_active);
+        return 0;
     }
     fprintf(stderr, "usage: dsco runs [list|show <run-id>|check <run-id>|gc]\n");
     return 2;
