@@ -69,6 +69,8 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <utime.h>
+#include <zlib.h>
 #include <pthread.h>
 #include <stdatomic.h>
 
@@ -9991,6 +9993,196 @@ static void test_chronicle_local_event_blob_roundtrip(void) {
 
     chronicle_stop();
     ASSERT(!chronicle_ready(), "chronicle not ready after stop");
+    test_rm_rf(root);
+    test_restore_env_list(envs, sizeof(envs) / sizeof(envs[0]));
+    PASS();
+}
+
+/* Wave B P1 crash-safety + retention tests -------------------------------- */
+
+/* Write one length-prefixed CRC32 journal frame: [u32 len][u32 crc][bytes].
+ * Uses zlib crc32 which matches chronicle's 0xEDB88320 reflected CRC-32. */
+static void wal_write_frame(FILE *fp, const char *json) {
+    size_t len = strlen(json);
+    uint32_t l = (uint32_t)len;
+    uint32_t c = (uint32_t)crc32(0L, (const unsigned char *)json, (uInt)len);
+    unsigned char hdr[8];
+    hdr[0] = (unsigned char)(l & 0xff); hdr[1] = (unsigned char)((l >> 8) & 0xff);
+    hdr[2] = (unsigned char)((l >> 16) & 0xff); hdr[3] = (unsigned char)((l >> 24) & 0xff);
+    hdr[4] = (unsigned char)(c & 0xff); hdr[5] = (unsigned char)((c >> 8) & 0xff);
+    hdr[6] = (unsigned char)((c >> 16) & 0xff); hdr[7] = (unsigned char)((c >> 24) & 0xff);
+    fwrite(hdr, 1, sizeof(hdr), fp);
+    fwrite(json, 1, len, fp);
+}
+
+/* Count intact frames in a WAL via `dsco runs check`-equivalent read. We invoke
+ * the same reader used by the CLI by pointing DSCO_RUNS_DIR at a temp tree and
+ * calling chronicle_runs_cli check, capturing its "N records" summary. */
+static long wal_count_records(const char *runs_dir, const char *run_id) {
+    char *args[] = {(char *)"dsco", (char *)"runs", (char *)"check", (char *)run_id};
+    /* Redirect stdout to a temp file to parse the "N records" summary. */
+    setenv("DSCO_RUNS_DIR", runs_dir, 1);
+    fflush(stdout);
+    int saved = dup(STDOUT_FILENO);
+    FILE *tmp = tmpfile();
+    if (!tmp) { return -1; }
+    dup2(fileno(tmp), STDOUT_FILENO);
+    chronicle_runs_cli(4, args);
+    fflush(stdout);
+    dup2(saved, STDOUT_FILENO);
+    close(saved);
+    rewind(tmp);
+    char buf[256] = {0};
+    if (!fgets(buf, sizeof(buf), tmp)) { fclose(tmp); return -1; }
+    fclose(tmp);
+    return strtol(buf, NULL, 10);
+}
+
+static void test_chronicle_journal_crash_safety(void) {
+    TEST("chronicle journal crash-safety (torn tail / crc)");
+    test_env_snapshot_t envs[] = {{"DSCO_RUNS_DIR", "", false}};
+    test_capture_env_list(envs, sizeof(envs) / sizeof(envs[0]));
+
+    char root[128];
+    snprintf(root, sizeof(root), "/tmp/dsco_wal_crash_%d", (int)getpid());
+    test_rm_rf(root);
+    mkdir(root, 0700);
+
+    /* Case A: three clean frames -> 3 records. */
+    char rd[192];
+    snprintf(rd, sizeof(rd), "%s/runA", root);
+    mkdir(rd, 0700);
+    char wal[256];
+    snprintf(wal, sizeof(wal), "%s/journal.wal", rd);
+    FILE *fp = fopen(wal, "wb");
+    ASSERT(fp, "open runA wal");
+    wal_write_frame(fp, "{\"seq\":1}");
+    wal_write_frame(fp, "{\"seq\":2}");
+    wal_write_frame(fp, "{\"seq\":3}");
+    fclose(fp);
+    ASSERT(wal_count_records(root, "runA") == 3, "clean wal reads 3 records");
+
+    /* Case B: two good frames + a torn (truncated) third frame -> 2 records. */
+    snprintf(rd, sizeof(rd), "%s/runB", root);
+    mkdir(rd, 0700);
+    snprintf(wal, sizeof(wal), "%s/journal.wal", rd);
+    fp = fopen(wal, "wb");
+    ASSERT(fp, "open runB wal");
+    wal_write_frame(fp, "{\"seq\":1}");
+    wal_write_frame(fp, "{\"seq\":2}");
+    /* torn: valid header claiming 32 bytes but only 4 bytes of payload */
+    {
+        const char *partial = "{\"se";
+        uint32_t l = 32;
+        uint32_t c = 0xdeadbeef;
+        unsigned char hdr[8] = {
+            (unsigned char)(l & 0xff), (unsigned char)((l >> 8) & 0xff),
+            (unsigned char)((l >> 16) & 0xff), (unsigned char)((l >> 24) & 0xff),
+            (unsigned char)(c & 0xff), (unsigned char)((c >> 8) & 0xff),
+            (unsigned char)((c >> 16) & 0xff), (unsigned char)((c >> 24) & 0xff)};
+        fwrite(hdr, 1, sizeof(hdr), fp);
+        fwrite(partial, 1, strlen(partial), fp);
+    }
+    fclose(fp);
+    ASSERT(wal_count_records(root, "runB") == 2, "torn tail ignored, 2 records survive");
+
+    /* Case C: one good frame + a full frame whose CRC is wrong -> 1 record. */
+    snprintf(rd, sizeof(rd), "%s/runC", root);
+    mkdir(rd, 0700);
+    snprintf(wal, sizeof(wal), "%s/journal.wal", rd);
+    fp = fopen(wal, "wb");
+    ASSERT(fp, "open runC wal");
+    wal_write_frame(fp, "{\"seq\":1}");
+    {
+        const char *body = "{\"seq\":2}";
+        uint32_t l = (uint32_t)strlen(body);
+        uint32_t c = 0x00000000; /* deliberately wrong crc */
+        unsigned char hdr[8] = {
+            (unsigned char)(l & 0xff), (unsigned char)((l >> 8) & 0xff),
+            (unsigned char)((l >> 16) & 0xff), (unsigned char)((l >> 24) & 0xff),
+            (unsigned char)(c & 0xff), (unsigned char)((c >> 8) & 0xff),
+            (unsigned char)((c >> 16) & 0xff), (unsigned char)((c >> 24) & 0xff)};
+        fwrite(hdr, 1, sizeof(hdr), fp);
+        fwrite(body, 1, strlen(body), fp);
+    }
+    fclose(fp);
+    ASSERT(wal_count_records(root, "runC") == 1, "crc-corrupt frame rejected, 1 record survives");
+
+    test_rm_rf(root);
+    test_restore_env_list(envs, sizeof(envs) / sizeof(envs[0]));
+    PASS();
+}
+
+static void test_chronicle_runs_gc(void) {
+    TEST("chronicle runs gc (age/size/protect/dry-run)");
+    test_env_snapshot_t envs[] = {{"DSCO_RUNS_DIR", "", false}};
+    test_capture_env_list(envs, sizeof(envs) / sizeof(envs[0]));
+
+    char root[128];
+    snprintf(root, sizeof(root), "/tmp/dsco_gc_runs_%d", (int)getpid());
+    test_rm_rf(root);
+    mkdir(root, 0700);
+
+    time_t now = time(NULL);
+    /* old-completed: 10 days old, no running manifest -> eligible */
+    /* new-completed: fresh -> not age-eligible */
+    /* old-running: 10 days old but manifest status running -> protected */
+    struct { const char *name; int age_days; const char *status; } spec[] = {
+        {"old_done", 10, "completed"},
+        {"new_done", 0, "completed"},
+        {"old_running", 10, "running"},
+    };
+    for (size_t i = 0; i < 3; i++) {
+        char rd[192];
+        snprintf(rd, sizeof(rd), "%s/%s", root, spec[i].name);
+        mkdir(rd, 0700);
+        char wal[256];
+        snprintf(wal, sizeof(wal), "%s/journal.wal", rd);
+        FILE *fp = fopen(wal, "wb");
+        wal_write_frame(fp, "{\"seq\":1}");
+        fclose(fp);
+        char man[256];
+        snprintf(man, sizeof(man), "%s/manifest.json", rd);
+        fp = fopen(man, "wb");
+        fprintf(fp, "{\"schema\":\"dsco.run_manifest.v1\",\"status\":\"%s\"}\n", spec[i].status);
+        fclose(fp);
+        /* backdate mtime */
+        time_t t = now - (time_t)spec[i].age_days * 86400;
+        struct utimbuf ut = {t, t};
+        utime(rd, &ut);
+        utime(wal, &ut);
+        utime(man, &ut);
+    }
+
+    /* dry-run age policy: would remove old_done only (old_running protected). */
+    chronicle_gc_opts_t opts = {.older_than_secs = 5 * 86400, .max_total_bytes = 0, .dry_run = true};
+    chronicle_gc_stats_t st;
+    ASSERT(chronicle_runs_gc(root, &opts, &st) == 0, "gc dry-run returns ok");
+    ASSERT(st.scanned == 3, "gc scanned 3 runs");
+    ASSERT(st.deleted == 1, "gc dry-run would delete exactly 1 (old_done)");
+    ASSERT(st.skipped_active == 1, "gc dry-run protects 1 running run");
+
+    /* dry-run must NOT touch disk */
+    struct stat chk;
+    char old_done[192];
+    snprintf(old_done, sizeof(old_done), "%s/old_done", root);
+    ASSERT(lstat(old_done, &chk) == 0, "dry-run left old_done on disk");
+
+    /* no-policy call refuses to delete */
+    chronicle_gc_opts_t nopol = {0};
+    ASSERT(chronicle_runs_gc(root, &nopol, &st) == 2, "gc without policy is refused");
+
+    /* real age GC: removes old_done, keeps new_done + old_running */
+    opts.dry_run = false;
+    ASSERT(chronicle_runs_gc(root, &opts, &st) == 0, "gc real run ok");
+    ASSERT(st.deleted == 1, "gc removed exactly 1");
+    ASSERT(lstat(old_done, &chk) != 0, "old_done deleted from disk");
+    char new_done[192], old_running[192];
+    snprintf(new_done, sizeof(new_done), "%s/new_done", root);
+    snprintf(old_running, sizeof(old_running), "%s/old_running", root);
+    ASSERT(lstat(new_done, &chk) == 0, "new_done preserved");
+    ASSERT(lstat(old_running, &chk) == 0, "old_running (running) preserved");
+
     test_rm_rf(root);
     test_restore_env_list(envs, sizeof(envs) / sizeof(envs[0]));
     PASS();
@@ -22813,6 +23005,8 @@ int main(void) {
     test_codex_app_directory_importer_and_integration_discovery();
     test_integration_discovery_profiles_pagination_and_doctor_flags();
     test_chronicle_local_event_blob_roundtrip();
+    test_chronicle_journal_crash_safety();
+    test_chronicle_runs_gc();
     test_chronicle_modes_and_delta_policy();
     test_tools_execute_mcp_double_underscore_alias();
     test_tools_execute_mcp_legacy_alias_to_canonical();

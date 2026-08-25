@@ -51,6 +51,31 @@ const char *chronicle_run_dir(void);
 bool chronicle_journal_append(const char *record_type, const char *payload_json, bool durable);
 int chronicle_runs_cli(int argc, char **argv);
 
+/* Run retention / garbage collection (Wave B P1.3).
+ * Deletes run directories under the runs root by age and/or total-size budget.
+ * A policy is REQUIRED: at least one of older_than_secs>0 or max_total_bytes>0,
+ * otherwise nothing is deleted (no surprise mass deletion). Size enforcement
+ * removes oldest runs first until the total fits max_total_bytes. The currently
+ * active run and any run whose manifest status is "running" are never deleted.
+ * When dry_run is true, candidates are counted but nothing is removed.
+ * Returns 0 on success. Out params may be NULL. */
+typedef struct {
+    long long older_than_secs;   /* delete runs with mtime older than now-this; 0 = disabled */
+    long long max_total_bytes;   /* cap total runs-dir bytes, oldest-first; 0 = disabled */
+    bool dry_run;                /* count only, delete nothing */
+} chronicle_gc_opts_t;
+
+typedef struct {
+    unsigned long long scanned;         /* run dirs examined */
+    unsigned long long deleted;         /* run dirs removed (or would-remove in dry-run) */
+    unsigned long long skipped_active;  /* protected running/active runs */
+    unsigned long long bytes_before;    /* total bytes across scanned runs */
+    unsigned long long bytes_reclaimed; /* bytes freed (or would-free in dry-run) */
+} chronicle_gc_stats_t;
+
+int chronicle_runs_gc(const char *runs_dir, const chronicle_gc_opts_t *opts,
+                      chronicle_gc_stats_t *out);
+
 /* Budget ledger summaries derived from llm.response.completed events. */
 typedef struct {
     double cost_usd;
