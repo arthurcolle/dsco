@@ -66,7 +66,17 @@ jobs:
             }
           fi
 
-          gh release view "v${NPM_VERSION}" --json assets --jq '.assets[].name' > /tmp/release_assets.txt
+          # release-workflow attaches installer assets after the "published" event;
+          # poll so concurrent runs don't fail on the upload window.
+          for i in $(seq 1 60); do
+            gh release view "v${NPM_VERSION}" --json assets --jq '.assets[].name' > /tmp/release_assets.txt 2>/dev/null || true
+            ok=1
+            for asset in dsco-darwin-arm64.tar.gz dsco-darwin-x64.tar.gz dsco-linux-x64.tar.gz; do
+              grep -Fx "$asset" /tmp/release_assets.txt >/dev/null || { ok=0; break; }
+            done
+            [[ "$ok" == 1 ]] && break
+            sleep 5
+          done
           for asset in dsco-darwin-arm64.tar.gz dsco-darwin-x64.tar.gz dsco-linux-x64.tar.gz; do
             grep -Fx "$asset" /tmp/release_assets.txt >/dev/null || {
               echo "GitHub release v${NPM_VERSION} is missing npm installer asset $asset" >&2
