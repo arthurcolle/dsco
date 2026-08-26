@@ -825,6 +825,10 @@ test-fast: $(TARGET) test_runner test_command_plane
 	./test_command_plane
 	DSCO_TEST_QUICK=1 ./test_runner
 
+# Client SDK: unit tests (framing/correlation, no binary needed) + live e2e vs ./dsco
+test-sdk: $(TARGET)
+	cd npm/dsco-sdk && node --test test/unit.test.mjs && DSCO_BIN=$(CURDIR)/dsco node --test test/e2e.test.mjs
+
 test-cli-flags: $(TARGET)
 	bash tests/test_cli_global_flags.sh ./$(TARGET)
 
