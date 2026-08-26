@@ -3,13 +3,30 @@
 This file is auto-generated from header declarations in `include/`.
 
 - Generator: `./scripts/gen_api_reference.sh`
-- Headers scanned: 134
+- Headers scanned: 143
 
 ## Regeneration
 
 ```bash
 ./scripts/gen_api_reference.sh
 ```
+
+## `activation_lease.h`
+
+Function-like declarations: 10
+
+### Declarations
+
+- `bool activation_lease_default_path(char *out, size_t out_len);`
+- `activation_lease_status_t activation_lease_validate(const activation_lease_t *lease, int64_t now_unix, char *err, size_t err_len);`
+- `int activation_lease_to_json(const activation_lease_t *lease, char *out, size_t out_len);`
+- `activation_lease_status_t activation_lease_from_json(const char *json, activation_lease_t *out);`
+- `activation_lease_status_t activation_lease_save_file(const char *path, const activation_lease_t *lease);`
+- `activation_lease_status_t activation_lease_load_file(const char *path, activation_lease_t *out, char *err, size_t err_len);`
+- `activation_lease_status_t activation_lease_remove_file(const char *path);`
+- `activation_lease_status_t activation_lease_acquire_file(const char *path, const activation_lease_t *lease, bool replace_expired, char *err, size_t err_len);`
+- `activation_lease_status_t activation_lease_renew_file(const char *path, const char *lease_id, int64_t new_expires_at, char *err, size_t err_len);`
+- `activation_lease_status_t activation_lease_release_file(const char *path, const char *lease_id, char *err, size_t err_len);`
 
 ## `agent.h`
 
@@ -20,6 +37,15 @@ Function-like declarations: 3
 - `void agent_set_launch_argv(int argc, char **argv);`
 - `bool agent_run(const char *api_key, const char *model, const char *topology_name, bool topology_auto, const char *provider_override);`
 - `bool agent_run_orchestrated(const char *api_key, const char *chat_model, const char *worker_model, const char *provider_override);`
+
+## `agent_event.h`
+
+Function-like declarations: 2
+
+### Declarations
+
+- `bool agent_event_emit(const agent_event_ctx_t *ctx, const char *event_name, const char *status, const char *payload_json, agent_event_flags_t flags);`
+- `bool agent_event_emit_simple(const char *event_name, const char *status, const char *payload_json, agent_event_flags_t flags);`
 
 ## `agent_profile.h`
 
@@ -191,9 +217,36 @@ Function-like declarations: 6
 - `int bg_learn_run_once(void);`
 - `void bg_learn_stats(bg_learn_stats_t *out);`
 
+## `callbacks.h`
+
+Function-like declarations: 4
+
+### Declarations
+
+- `bool callback_policy_from_env(callback_policy_t *out);`
+- `bool callback_event_matches(const callback_policy_t *policy, const char *event_name);`
+- `bool callback_outbox_enqueue(const callback_policy_t *policy, const char *run_id, const char *event_name, const char *event_json);`
+- `int callbacks_cli(int argc, char **argv);`
+
+## `capability.h`
+
+Function-like declarations: 9
+
+### Declarations
+
+- `unsigned dsco_caps_for_tool(const char *name, const char *input_json);`
+- `bool dsco_cap_granted(dsco_cap_t cap, const char *tier);`
+- `void dsco_flow_reset(void);`
+- `void dsco_flow_note(unsigned caps);`
+- `bool dsco_flow_tainted_untrusted(void);`
+- `bool dsco_flow_accessed_private(void);`
+- `bool dsco_flow_would_exfiltrate(unsigned caps);`
+- `dsco_cap_decision_t dsco_capability_gate(const char *name, const char *input_json, const char *tier, char *reason, size_t reason_len);`
+- `void dsco_capability_to_string(unsigned caps, char *out, size_t out_len);`
+
 ## `chronicle.h`
 
-Function-like declarations: 28
+Function-like declarations: 33
 
 ### Declarations
 
@@ -205,6 +258,11 @@ Function-like declarations: 28
 - `const char *chronicle_session_id(void);`
 - `const char *chronicle_root(void);`
 - `const char *chronicle_db_path(void);`
+- `const char *chronicle_run_id(void);`
+- `const char *chronicle_journal_path(void);`
+- `const char *chronicle_run_dir(void);`
+- `bool chronicle_journal_append(const char *record_type, const char *payload_json, bool durable);`
+- `int chronicle_runs_cli(int argc, char **argv);`
 - `bool chronicle_cost_totals_for_session(const char *session_id, chronicle_cost_totals_t *out);`
 - `bool chronicle_cost_totals_today(chronicle_cost_totals_t *out);`
 - `void chronicle_new_id(char *out, size_t out_len);`
@@ -265,6 +323,22 @@ Function-like declarations: 10
 - `const char *codex_cache_default_effort(const char *model);`
 - `bool codex_cache_model_supported(const char *model);`
 
+## `command_plane.h`
+
+Function-like declarations: 9
+
+### Declarations
+
+- `int command_plane_open(command_plane_t *cp, const char *path);`
+- `void command_plane_close(command_plane_t *cp);`
+- `command_plane_begin_t command_plane_begin(command_plane_t *cp, command_record_t *out, const char *kind, const char *idempotency_key, const char *request_hash);`
+- `int command_plane_get_by_id(command_plane_t *cp, const char *command_id, command_record_t *out);`
+- `int command_plane_get_by_idempotency_key(command_plane_t *cp, const char *idempotency_key, command_record_t *out);`
+- `int command_plane_complete(command_plane_t *cp, const char *command_id, const char *result_json);`
+- `int command_plane_fail(command_plane_t *cp, const char *command_id, const char *error);`
+- `const char *command_plane_status_name(command_plane_status_t status);`
+- `command_plane_status_t command_plane_status_from_name(const char *status);`
+
 ## `compute.h`
 
 Function-like declarations: 2
@@ -276,11 +350,12 @@ Function-like declarations: 2
 
 ## `config.h`
 
-Function-like declarations: 24
+Function-like declarations: 25
 
 ### Declarations
 
-- `static inline int dsco_max_tokens(void) { return dsco_env_int("DSCO_MAX_TOKENS", MAX_TOKENS, 1, 100000);`
+- `const char *v = getenv("DSCO_SWARM_DEFAULT_MINI");`
+- `} static inline int dsco_max_tokens(void) { return dsco_env_int("DSCO_MAX_TOKENS", MAX_TOKENS, 1, 100000);`
 - `} static inline int dsco_max_agent_turns(void) { return dsco_env_int("DSCO_MAX_AGENT_TURNS", MAX_AGENT_TURNS, 1, 999999);`
 - `} static inline int dsco_hard_turn_ceiling(void) { return dsco_env_int("DSCO_HARD_TURN_CEILING", HARD_TURN_CEILING, 1, 100000000);`
 - `const model_info_t *openrouter_cache_lookup(const char *slug);`
@@ -579,6 +654,15 @@ Function-like declarations: 14
 - `bool dsco_swim_ack(dsco_swim_t *swim, const uint8_t target[MESH_PUBKEY_LEN]);`
 - `bool dsco_swim_handle_message(dsco_swim_t *swim, const uint8_t from[MESH_PUBKEY_LEN], const void *data, size_t len);`
 
+## `durable_agents.h`
+
+Function-like declarations: 2
+
+### Declarations
+
+- `void durable_agents_default_db_path(char *out, size_t len);`
+- `int durable_agents_cli(int argc, char **argv);`
+
 ## `embedded_data_registry.h`
 
 Function-like declarations: 0
@@ -810,9 +894,29 @@ Function-like declarations: 5
 - `double frontier_waste_ratio(const frontier_ledger_t *l);`
 - `const char *frontier_report(const frontier_ledger_t *l, char *buf, int buf_len);`
 
+## `gov_experiment.h`
+
+Function-like declarations: 13
+
+### Declarations
+
+- `gov_model_t gov_experiment_model(void);`
+- `const char *gov_model_name(gov_model_t m);`
+- `const char *gov_stage_name(gov_stage_t s);`
+- `bool gov_experiment_bypass_all(void);`
+- `bool gov_stage_active(gov_model_t m, gov_stage_t s);`
+- `bool gov_stage_enforces(gov_model_t m, gov_stage_t s);`
+- `bool gov_shadow_all_tools(gov_model_t m);`
+- `void gov_stage_record(gov_stage_t s, double ms, bool would_deny, bool enforced);`
+- `void gov_experiment_note_gate_run(void);`
+- `void gov_experiment_note_bypass(void);`
+- `void gov_experiment_reset(void);`
+- `size_t gov_experiment_report_json(char *buf, size_t len);`
+- `void gov_experiment_totals(unsigned long *gate_calls, unsigned long *bypassed, double *gate_ms_total);`
+
 ## `governance.h`
 
-Function-like declarations: 26
+Function-like declarations: 30
 
 ### Declarations
 
@@ -821,6 +925,10 @@ Function-like declarations: 26
 - `bool governance_register_agent(governance_engine_t *g, const char *agent_id, principal_tier_t tier, double gsu_budget);`
 - `bool governance_deregister_agent(governance_engine_t *g, const char *agent_id);`
 - `const agent_envelope_t *governance_get_agent(const governance_engine_t *g, const char *agent_id);`
+- `capability_tier_t governance_record_outcome(governance_engine_t *g, const char *agent_id, bool success);`
+- `capability_tier_t governance_derive_capability(int successes, int failures, double *out_success_lb);`
+- `bool governance_can_claim_capability(const governance_engine_t *g, const char *agent_id, capability_tier_t want);`
+- `double governance_wilson_lower_bound(int successes, int failures);`
 - `bool governance_authorize(governance_engine_t *g, const char *agent_id, const char *action, double gsu_cost);`
 - `bool governance_can_do(const governance_engine_t *g, const char *agent_id, const char *action, double gsu_cost);`
 - `bool governance_charge_gsu(governance_engine_t *g, const char *agent_id, double amount);`
@@ -1205,7 +1313,7 @@ Function-like declarations: 2
 
 ## `ipc.h`
 
-Function-like declarations: 37
+Function-like declarations: 41
 
 ### Declarations
 
@@ -1218,6 +1326,7 @@ Function-like declarations: 37
 - `const char *ipc_db_path(void);`
 - `void ipc_set_event_loop(ev_loop_t *loop);`
 - `bool ipc_register(const char *parent_id, int depth, const char *role, const char *toolkit);`
+- `bool ipc_agent_define(const char *agent_id, const char *parent_id, int depth, const char *role, const char *model, const char *toolkit);`
 - `bool ipc_set_status(ipc_agent_status_t status, const char *current_task);`
 - `bool ipc_heartbeat(void);`
 - `int ipc_list_agents(ipc_agent_info_t *out, int max);`
@@ -1227,6 +1336,9 @@ Function-like declarations: 37
 - `bool ipc_send(const char *to_agent, const char *topic, const char *body);`
 - `int ipc_recv(ipc_message_t *out, int max);`
 - `int ipc_recv_topic(const char *topic, ipc_message_t *out, int max);`
+- `int ipc_list_inbox(const char *agent_id, bool unread_only, bool mark_read, ipc_message_t *out, int max);`
+- `int ipc_list_sent(const char *agent_id, ipc_message_t *out, int max);`
+- `int ipc_list_bus(ipc_message_t *out, int max);`
 - `int ipc_unread_count(void);`
 - `int ipc_task_submit(const char *description, int priority, int parent_task_id);`
 - `bool ipc_task_claim(ipc_task_t *out);`
@@ -1348,7 +1460,7 @@ Function-like declarations: 12
 
 ## `llm.h`
 
-Function-like declarations: 63
+Function-like declarations: 64
 
 ### Declarations
 
@@ -1374,6 +1486,7 @@ Function-like declarations: 63
 - `void conv_pop_last(conversation_t *c);`
 - `bool conv_pop_last_turn(conversation_t *c);`
 - `void conv_ensure_tool_results(conversation_t *c);`
+- `tool_integrity_result_t conv_validate_tool_call_integrity(const conversation_t *c, bool allow_pending_last);`
 - `void conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars);`
 - `bool conv_compact_recent_tool_turn(conversation_t *c, int max_chars, int protect_tail);`
 - `void compact_config_init(compact_config_t *cfg);`
@@ -1466,6 +1579,14 @@ Function-like declarations: 4
 - `void dsco_mcp_build_tool_name(const char *server_name, const char *tool_name, char *out, size_t out_len);`
 - `bool dsco_mcp_is_canonical_tool_name(const char *name);`
 - `void dsco_mcp_legacy_alias_from_canonical(const char *name, char *out, size_t out_len);`
+
+## `mcp_server.h`
+
+Function-like declarations: 1
+
+### Declarations
+
+- `int mcp_server_run(const char *toolsets_csv, const char *tier);`
 
 ## `md.h`
 
@@ -2398,7 +2519,7 @@ Function-like declarations: 4
 
 ## `swarm.h`
 
-Function-like declarations: 44
+Function-like declarations: 47
 
 ### Declarations
 
@@ -2446,6 +2567,9 @@ Function-like declarations: 44
 - `int swarm_status_json(swarm_t *s, char *buf, size_t len);`
 - `int swarm_child_output(swarm_t *s, int child_id, char *buf, size_t len);`
 - `int swarm_group_status_json(swarm_t *s, int group_id, char *buf, size_t len);`
+- `int swarm_group_persist_run(swarm_t *s, int group_id, const char *run_id, const char *topology, const char *user_prompt, const char *coordinator_output, char *out_dir, size_t out_dir_len);`
+- `int swarm_group_render_frame(swarm_t *s, int group_id, const char *run_id, const char *topology, char *buf, size_t len);`
+- `int swarm_group_ensure_durable_run(swarm_t *s, int group_id, const char *topology, const char *suggested_run_id);`
 
 ## `talons.h`
 
@@ -2544,7 +2668,7 @@ Function-like declarations: 14
 
 ## `tools.h`
 
-Function-like declarations: 101
+Function-like declarations: 107
 
 ### Declarations
 
@@ -2573,11 +2697,13 @@ Function-like declarations: 101
 - `const tool_def_t *tools_get_all(int *count);`
 - `bool tools_invoke_by_name(const char *name, const char *input, char *result, size_t rlen);`
 - `bool tools_is_offload_safe(const char *name);`
+- `bool tools_meta_is_read_only(const char *name, bool *found);`
 - `int tools_get_core_count(void);`
 - `int tools_builtin_count(void);`
 - `bool tools_execute(const char *name, const char *input_json, char *result, size_t result_len);`
 - `bool tools_execute_raw_for_test(const char *name, const char *input_json, char *result, size_t result_len);`
 - `bool tools_execute_for_tier(const char *name, const char *input_json, const char *tier, char *result, size_t result_len);`
+- `void tools_governance_experiment_stats(unsigned long *gate_calls, unsigned long *bypassed, double *gate_ms_total);`
 - `bool tools_is_allowed_for_tier(const char *name, const char *tier, char *reason, size_t reason_len);`
 - `char *tools_normalize_input(const char *name, const char *input_json);`
 - `bool dsco_run_ask_dialog(const char *spec_json, char *result, size_t result_len);`
@@ -2633,6 +2759,10 @@ Function-like declarations: 101
 - `int tools_cooc_top_edges(tools_cooc_edge_t *out, int max);`
 - `tool_page_result_t tools_get_paged(const char *context, int max_tools, float budget_ratio);`
 - `void tool_page_result_free(tool_page_result_t *r);`
+- `int tools_loaded_builtin_indices(int *out_indices, int max_indices);`
+- `int tools_loaded_builtin_count(void);`
+- `bool tools_is_builtin_loaded(const char *name);`
+- `void tools_loaded_builtin_clear(void);`
 - `void tools_cooc_inject_hints(const char **tool_names, int n);`
 - `void tools_cooc_decay(float factor);`
 - `void tool_quorum_gate_api(const char *context, const char *api_key);`
@@ -3094,7 +3224,7 @@ Function-like declarations: 3
 
 ## `vfs.h`
 
-Function-like declarations: 26
+Function-like declarations: 30
 
 ### Declarations
 
@@ -3123,6 +3253,10 @@ Function-like declarations: 26
 - `char *vfs_result_get(vfs_db_t *db, const char *key);`
 - `int vfs_result_evict(vfs_db_t *db);`
 - `char **vfs_result_list(vfs_db_t *db, int *out_count);`
+- `bool vfs_pin_put(vfs_db_t *db, const char *key, const char *namespace_, const char *reason, const char *owner, int ttl_seconds);`
+- `bool vfs_pin_delete(vfs_db_t *db, const char *key);`
+- `bool vfs_pin_is_active(vfs_db_t *db, const char *key);`
+- `int vfs_pin_evict_expired(vfs_db_t *db);`
 - `int vfs_maintain(vfs_db_t *db, int64_t max_db_bytes);`
 
 ## `vm.h`
@@ -3187,6 +3321,17 @@ Function-like declarations: 4
 - `int watchdog_uninstall(const char *label);`
 - `int watchdog_status(const char *label, char *buf, size_t buf_len);`
 - `void watchdog_ping(void);`
+
+## `webhook_security.h`
+
+Function-like declarations: 4
+
+### Declarations
+
+- `bool webhook_verify_hmac_sha256_hex(const uint8_t *secret, size_t secret_len, const uint8_t *body, size_t body_len, const char *signature_header);`
+- `bool webhook_hmac_sha256_header(const uint8_t *secret, size_t secret_len, const uint8_t *body, size_t body_len, char *out, size_t out_len);`
+- `webhook_ssrf_decision_t webhook_ssrf_guard_url(const char *url, char *reason, size_t reason_len);`
+- `bool webhook_egress_url_allowed(const char *url, char *reason, size_t reason_len);`
 
 ## `workspace.h`
 

@@ -20,6 +20,12 @@
  *   2. exposure to untrusted input -> CAP_UNTRUSTED_IN
  *   3. ability to exfiltrate       -> CAP_NET | CAP_EXEC
  * All three reachable in one session == exfiltration risk.
+ *
+ * Default policy (owner-directed): trifecta egress is WARN-AND-ALLOW. The gate
+ * emits a loud RED stderr advisory but does not block, so a local sovereign
+ * runtime can exercise its own egress paths (gateway self-tests, MCP worker
+ * swarms). Restore fail-closed with DSCO_ALLOW_EXFIL=0; silence the advisory
+ * with DSCO_ALLOW_EXFIL=1.
  * ───────────────────────────────────────────────────────────────────────── */
 
 typedef enum {

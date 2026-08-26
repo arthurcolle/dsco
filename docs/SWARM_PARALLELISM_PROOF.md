@@ -28,7 +28,7 @@ Date: 2026-06-26
 Working directory:
 
 ```text
-/Users/arthurcolle/dsco-cli
+~/dsco-cli
 ```
 
 Command shape:

@@ -10,15 +10,17 @@ typedef enum {
     TIER_HAIKU  = 0,   /* fast / cheap / classifier / executor */
     TIER_SONNET = 1,   /* mid-tier / implementer / analyst */
     TIER_OPUS   = 2,   /* strategic / planner / synthesizer */
+    TIER_FABLE  = 3,   /* root / frontier delegator */
 } model_tier_t;
 
 static inline const char *tier_model_id(model_tier_t t) {
     switch (t) {
-        case TIER_HAIKU:  return "claude-haiku-4-5-20251001";
-        case TIER_SONNET: return "claude-sonnet-4-6";
-        case TIER_OPUS:   return "claude-opus-4-6";
+        case TIER_HAIKU:  return "claude-haiku-4-5";
+        case TIER_SONNET: return "claude-sonnet-5";
+        case TIER_OPUS:   return "claude-opus-4-8";
+        case TIER_FABLE:  return "claude-fable-5";
     }
-    return "claude-sonnet-4-6";
+    return "claude-sonnet-5";
 }
 
 static inline const char *tier_label(model_tier_t t) {
@@ -26,6 +28,7 @@ static inline const char *tier_label(model_tier_t t) {
         case TIER_HAIKU:  return "H";
         case TIER_SONNET: return "S";
         case TIER_OPUS:   return "O";
+        case TIER_FABLE:  return "F";
     }
     return "?";
 }
@@ -148,6 +151,40 @@ typedef struct {
     char   final_node_tag[TOPO_MAX_TAG];
 } topology_run_stats_t;
 
+/* ── Per-node model-instance bindings ───────────────────────────────────
+ *
+ * A topology describes work/dataflow, not a provider hierarchy.  These
+ * optional bindings attach a concrete model instance to a named node (or node
+ * id) for one execution.  Empty fields inherit the normal provider-aware
+ * resolver.  A binding may pin any DSCO-routable provider/model pair and may
+ * carry the same per-instance controls accepted by swarm workers.
+ *
+ * `node_tag` takes precedence when supplied.  `node_id` is zero-based and is
+ * used only when node_tag is empty. */
+#define TOPO_MAX_BINDINGS  TOPO_MAX_NODES
+#define TOPO_PROVIDER_LEN  64
+#define TOPO_MODEL_LEN     128
+#define TOPO_INSTANCE_PROMPT_LEN 1024
+
+typedef struct {
+    int    node_id;                         /* -1 when selecting by tag */
+    char   node_tag[TOPO_MAX_TAG];
+    char   provider[TOPO_PROVIDER_LEN];      /* optional provider pin */
+    char   model[TOPO_MODEL_LEN];            /* optional model pin */
+    char   effort[16];
+    double temperature;                      /* <0: provider default */
+    double top_p;                            /* <0: provider default */
+    int    top_k;                            /* <=0: provider default */
+    int    thinking_budget;                  /* <=0: adaptive/default */
+    char   tool_choice[128];
+    char   system_prompt[TOPO_INSTANCE_PROMPT_LEN];
+} topology_node_binding_t;
+
+typedef struct {
+    const topology_node_binding_t *bindings;
+    int                            binding_count;
+} topology_run_options_t;
+
 typedef enum {
     TOPO_TASK_GENERAL = 0,
     TOPO_TASK_CODE,
@@ -195,6 +232,16 @@ bool             topology_plan_run(const topology_plan_t *plan,
                                    char *result, size_t rlen,
                                    topology_run_stats_t *stats);
 
+/* Execute with optional per-node provider/model/instance bindings. Existing
+ * callers use topology_plan_run(), the no-options wrapper. */
+bool topology_plan_run_with_options(const topology_plan_t *plan,
+                                    const char *api_key,
+                                    const char *coordinator_model,
+                                    const char *task,
+                                    const topology_run_options_t *options,
+                                    char *result, size_t rlen,
+                                    topology_run_stats_t *stats);
+
 /* Utility: render ASCII diagram of a topology */
 int  topology_render_ascii(const topology_t *t, char *buf, size_t buflen);
 /* Utility: estimate cost for a given input size */
@@ -223,6 +270,13 @@ bool topology_run(const topology_t *t,
                   const char *task,
                   char *result, size_t rlen,
                   topology_run_stats_t *stats);
+bool topology_run_with_options(const topology_t *t,
+                               const char *api_key,
+                               const char *coordinator_model,
+                               const char *task,
+                               const topology_run_options_t *options,
+                               char *result, size_t rlen,
+                               topology_run_stats_t *stats);
 
 /* ── Cooperative scheduler integration ─────────────────────────────── */
 

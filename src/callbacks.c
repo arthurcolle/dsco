@@ -4,6 +4,7 @@
 #include "json_util.h"
 #include "http_pool.h"
 #include "crypto.h"
+#include "webhook_security.h"
 
 #include <curl/curl.h>
 
@@ -351,6 +352,25 @@ static int callbacks_drain_run(const char *run) {
         char *delivery_id = json_get_string_dup_simple(body, "delivery_id");
         if (!url || !url[0]) { free(body); free(url); free(delivery_id); failed++; continue; }
         char err[256];
+        const char *allow_private = getenv("DSCO_WEBHOOK_ALLOW_PRIVATE");
+        bool private_override = allow_private &&
+                                (strcmp(allow_private, "1") == 0 ||
+                                 strcasecmp(allow_private, "true") == 0);
+        if (!private_override && !webhook_egress_url_allowed(url, err, sizeof(err))) {
+            jbuf_t denied; jbuf_init(&denied, 512);
+            attempts++;
+            jbuf_appendf(&denied,
+                         "{\"state\":\"dead_lettered\",\"attempts\":%d,"
+                         "\"last_http_status\":0,\"next_attempt_ms\":0,\"last_error\":",
+                         attempts);
+            jbuf_append_json_str(&denied, err[0] ? err : "callback URL denied by SSRF policy");
+            jbuf_append(&denied, "}\n");
+            write_file_atomic(state, denied.data);
+            jbuf_free(&denied);
+            free(body); free(url); free(delivery_id);
+            failed++;
+            continue;
+        }
         long code = post_callback_json(url, body, delivery_id, err, sizeof(err));
         jbuf_t sb; jbuf_init(&sb, 512);
         attempts++;

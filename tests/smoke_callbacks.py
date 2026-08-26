@@ -122,6 +122,8 @@ def main() -> int:
                     "DSCO_CALLBACK_EVENTS": "run.*",
                     "DSCO_CALLBACK_SECRET": SECRET,
                     "DSCO_CALLBACK_MAX_ATTEMPTS": "1",
+                    # Explicit local-test escape hatch. Production defaults deny loopback/private egress.
+                    "DSCO_WEBHOOK_ALLOW_PRIVATE": "1",
                     # Keep unrelated runtime state inside the temp tree if the binary consults HOME.
                     "HOME": str(tmp / "home"),
                 }

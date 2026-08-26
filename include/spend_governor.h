@@ -22,6 +22,10 @@
  *                        binary strip, strong downshift recommendation.
  *   EXHAUSTED ≥ 100%  — block the turn (same contract as check_cost_budget).
  *
+ * Quality-critical work (governance/doctrine/self-modification) must not be
+ * silently degraded in ORANGE/RED. The governor preserves reasoning/output
+ * quality and asks the caller to checkpoint user intent before spending.
+ *
  * Cache economics: the governor watches the session cache hit ratio and the
  * inter-turn cadence. Slow cadence (> ~4 min between requests) with a poor
  * hit ratio means 5-minute cache entries are expiring between turns — it then
@@ -53,6 +57,7 @@ typedef struct {
     int context_used_tokens;
     int context_window_tokens; /* effective (output-aware) window */
     int turns;
+    bool quality_critical_work; /* high-stakes self-mod/governance work */
 } spend_signals_t;
 
 /* Parameter plan for the next turn. */
@@ -79,6 +84,8 @@ typedef struct {
     bool recommend_1h_cache; /* slow cadence + poor hit ratio on 5m TTL */
     /* Escalation. */
     bool suggest_model_downshift; /* leaf-work should move to a cheaper model */
+    bool preserve_quality;        /* don't downshift/cap reasoning silently */
+    bool require_user_checkpoint; /* pause before high-stakes spend */
     bool block_turn;              /* EXHAUSTED: refuse to spend */
     char reason[192];             /* one-line human explanation */
 } spend_plan_t;

@@ -275,7 +275,9 @@ debug files can contain prompts, documents, tool results, and provider payloads.
 | `SAKANA_API_KEY`, `FISH_API_KEY`, `SAKANA_TOKEN` | Accepted aliases for `FUGU_API_KEY`. Prefer migrating durable config to `FUGU_API_KEY`. |
 | `FUGU_BASE_URL`, `FUGU_API_BASE`, `SAKANA_API_BASE`, `SAKANA_BASE_URL` | Sakana endpoint override. Leave unset for production; set only for staging, proxy, or compatibility tests. |
 | Other `*_API_KEY`, `*_TOKEN`, `*_SECRET` | Setup can auto-detect many provider/tool credentials. Use canonical provider names where known; generic names work for custom providers when paired with a base URL. |
-| `<LOCAL_SERVER>_HOST` | Local model host override, for example `LMSTUDIO_HOST=http://127.0.0.1:1234`. Supported server names include `OLLAMA`, `LMSTUDIO`, `MLX`, `VLLM`, `LLAMACPP`, `JAN`, `GPT4ALL`, `KOBOLDCPP`, `TEXTGEN`, `TGI`, and `SGLANG`. |
+| `<LOCAL_SERVER>_API_BASE`, `<LOCAL_SERVER>_BASE_URL`, `<LOCAL_SERVER>_HOST` | Local model endpoint override, for example `OLLAMA_API_BASE=http://matrix:11434/v1`. Supported server names include `OLLAMA`, `LMSTUDIO`, `MLX`, `VLLM`, `LLAMACPP`, `JAN`, `GPT4ALL`, `KOBOLDCPP`, `TEXTGEN`, `TGI`, and `SGLANG`. |
+| `DSCO_LOCAL_FALLBACK_MODEL` | Optional final fallback lane, for example `ollama:qwen3.6:27b-mlx`. It replaces the last credential-backed candidate when the chain is full and is ignored when the primary is already local. |
+| `DSCO_LOCAL_STREAM_IDLE_TIMEOUT_S` | Silent-prefill timeout for local OpenAI-compatible servers. Default `900`; valid overrides are `30..7200` seconds. |
 | `DSCO_DEBUG_AUTH` | Prints provider/model/auth-mode diagnostics without revealing keys. Good first step for routing bugs. |
 | `DSCO_DEBUG_REQUEST` | Saves request JSON for provider debugging. Treat output as sensitive because prompts and tool data may be included. |
 
