@@ -616,10 +616,16 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-# embedded_data.c pulls in the generated key header + registry; bake first.
-$(OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h | bake_data
-$(DEBUG_OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h | bake_data
-$(TEST_OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h | bake_data
+# Fresh clones have no baked artifacts yet; make must be able to resolve these
+# targets BEFORE dispatching bakes, so give the generated headers real rules.
+# bake_data.py is idempotent (skips up-to-date blobs, reuses build/.embed_key).
+include/embedded_data_registry.h include/embedded_key.gen.h:
+	@python3 scripts/bake_data.py
+
+# embedded_data.c pulls in the generated key header + registry.
+$(OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h
+$(DEBUG_OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h
+$(TEST_OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h
 
 # The __cstring decryptor runs at constructor priority 101 — before libSystem
 # initializes __stack_chk_guard — so it must be stack-protector-free (a canary
