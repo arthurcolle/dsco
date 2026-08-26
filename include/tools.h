@@ -25,6 +25,8 @@ typedef enum {
     TOOLS_CORE = 0,
     TOOLS_AGENT,
     TOOLS_FULL,
+    /* Fixed builtin allowlist: Bash, curl_raw, and ssh_command only. */
+    TOOLS_RESTRICTED,
 } tools_init_profile_t;
 
 void tools_init_profile(tools_init_profile_t profile);
@@ -200,6 +202,22 @@ external_tool_snapshot_t tools_external_snapshot(void);
 void tools_external_snapshot_free(external_tool_snapshot_t *snapshot);
 int tools_rank_external_snapshot(const external_tool_snapshot_t *snapshot, const char *context,
                                  int *out_indices, int max_indices);
+
+/* Unified capability retrieval across builtin and external/MCP contracts.
+ * Coarse recall is local BM25/TF-IDF over full contracts; when JINA_API_KEY is
+ * present, the candidate pool is cross-encoder reranked by jina-reranker-v3. */
+typedef struct {
+    char name[256];
+    char source[16]; /* builtin | mcp */
+    int index;
+    double recall_score;
+    double rerank_score;
+    bool loaded;
+} tool_retrieval_hit_t;
+
+int tools_retrieve_capabilities(const char *query, int candidate_limit,
+                                tool_retrieval_hit_t *out_hits, int max_hits,
+                                bool *out_reranked);
 
 /* ── Concurrency locks ────────────────────────────────────────────────── */
 

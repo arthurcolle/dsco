@@ -1514,6 +1514,7 @@ static void load_toml_config(mcp_registry_t *reg, const char *path, const char *
         return;
     }
     int parsed_count = 0;
+    bool disabled[MCP_MAX_SERVERS] = {0};
     int current = -1;
     enum { SEC_NONE, SEC_ROOT, SEC_ENV, SEC_HEADERS } section = SEC_NONE;
 
@@ -1612,7 +1613,19 @@ static void load_toml_config(mcp_registry_t *reg, const char *path, const char *
             free(v);
         } else if (strcmp(key, "disabled") == 0) {
             if (strncmp(val, "true", 4) == 0)
-                srv->command[0] = '\0';
+                disabled[current] = true;
+        } else if (strcmp(key, "enabled") == 0) {
+            if (strncmp(val, "false", 5) == 0)
+                disabled[current] = true;
+        } else if (strcmp(key, "bearer_token_env_var") == 0) {
+            const char *vp = val;
+            char *env_name = parse_toml_string_at(&vp);
+            if (env_name && env_name[0]) {
+                char header[1152];
+                snprintf(header, sizeof(header), "Bearer $%s", env_name);
+                add_server_kv(srv, true, "Authorization", header);
+            }
+            free(env_name);
         }
         if (starts_http(srv->command)) {
             normalize_http_url(srv->command, srv->url, sizeof(srv->url));
@@ -1621,6 +1634,8 @@ static void load_toml_config(mcp_registry_t *reg, const char *path, const char *
     }
 
     for (int i = 0; i < parsed_count; i++) {
+        if (disabled[i])
+            continue;
         if (parsed[i].transport == MCP_TRANSPORT_HTTP && !parsed[i].url[0])
             normalize_http_url(parsed[i].command, parsed[i].url, sizeof(parsed[i].url));
         start_configured_server(reg, &parsed[i]);

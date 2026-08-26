@@ -20,6 +20,7 @@
 #include "codex_cache.h"
 #include "dcr.h"
 #include "env_config.h"
+#include "tool_call_normalizer.h"
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -54,6 +55,7 @@ static char *codex_exec_build_request(provider_t *p, conversation_t *conv, sessi
 static stream_result_t codex_exec_stream(provider_t *p, const char *api_key,
                                          const char *request_json, stream_text_cb text_cb,
                                          stream_tool_start_cb tool_cb,
+                                         stream_tool_arg_delta_cb tool_delta_cb,
                                          stream_thinking_cb thinking_cb, void *cb_ctx);
 static bool provider_is_sakana(const provider_t *p);
 
@@ -122,10 +124,12 @@ static struct curl_slist *unsupported_build_headers(provider_t *p, const char *a
 static stream_result_t unsupported_stream(provider_t *p, const char *api_key,
                                           const char *request_json, stream_text_cb text_cb,
                                           stream_tool_start_cb tool_cb,
+                                          stream_tool_arg_delta_cb tool_delta_cb,
                                           stream_thinking_cb thinking_cb, void *cb_ctx) {
     (void)api_key;
     (void)request_json;
     (void)tool_cb;
+    (void)tool_delta_cb;
     (void)thinking_cb;
     stream_result_t result = {0};
     result.ok = false;
@@ -182,9 +186,10 @@ static struct curl_slist *anthropic_build_headers(provider_t *p, const char *api
 static stream_result_t anthropic_stream(provider_t *p, const char *api_key,
                                         const char *request_json, stream_text_cb text_cb,
                                         stream_tool_start_cb tool_cb,
+                                        stream_tool_arg_delta_cb tool_delta_cb,
                                         stream_thinking_cb thinking_cb, void *cb_ctx) {
     (void)p;
-    return llm_stream(api_key, request_json, text_cb, tool_cb, thinking_cb, cb_ctx);
+    return llm_stream(api_key, request_json, text_cb, tool_cb, tool_delta_cb, thinking_cb, cb_ctx);
 }
 
 /* ── OpenRouter Provider ────────────────────────────────────────────────── */
@@ -262,6 +267,11 @@ static double provider_now_sec(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
+}
+
+static bool provider_stream_terminal_abort(CURLcode res, bool stream_done) {
+    return stream_done && (res == CURLE_WRITE_ERROR || res == CURLE_ABORTED_BY_CALLBACK ||
+                           res == CURLE_RECV_ERROR);
 }
 
 bool provider_debug_auth_enabled(void) {
@@ -1760,12 +1770,33 @@ static bool openai_tools_disabled(void) {
     return false;
 }
 
+static bool openai_tool_name_in_csv(const char *csv, const char *name) {
+    if (!csv || !csv[0] || !name || !name[0])
+        return false;
+    size_t name_len = strlen(name);
+    const char *p = csv;
+    while (*p) {
+        while (*p == ',' || isspace((unsigned char)*p))
+            p++;
+        const char *start = p;
+        while (*p && *p != ',')
+            p++;
+        const char *end = p;
+        while (end > start && isspace((unsigned char)end[-1]))
+            end--;
+        if ((size_t)(end - start) == name_len && strncmp(start, name, name_len) == 0)
+            return true;
+    }
+    return false;
+}
+
 static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv, session_state_t *session) {
     if (openai_tools_disabled())
         return false;
     const char *family = provider_model_family(session ? session->model : NULL);
     bool modal_endpoint = family && strcmp(family, "modal") == 0;
 
+    const int provider_tool_limit = 128;
     int max_tools_send = 128;
     const char *mt_env = getenv("DSCO_OR_MAX_TOOLS");
     if (mt_env && mt_env[0]) {
@@ -1784,6 +1815,8 @@ static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv, session_st
         if (model && strstr(model, "/"))
             max_tools_send = 48; /* OpenRouter: tighter cap */
     }
+    if (max_tools_send > provider_tool_limit)
+        max_tools_send = provider_tool_limit;
 
     int filtered_count = 0;
     const tool_def_t **filtered = NULL;
@@ -1808,16 +1841,21 @@ static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv, session_st
     bool want_cache = provider_model_supports_cache_control(session ? session->model : NULL);
 
     /* Pre-count total tools to identify the last one for cache marking. */
-    bool allowlist_active = getenv("DSCO_TOOL_ALLOWLIST") && getenv("DSCO_TOOL_ALLOWLIST")[0];
+    const char *tool_allowlist = getenv("DSCO_TOOL_ALLOWLIST");
+    bool allowlist_active = tool_allowlist && tool_allowlist[0];
     int loaded_ext_pre = 0;
-    for (int i = 0; !allowlist_active && i < ext.count; i++)
-        if (ext.items[i].loaded)
+    for (int i = 0; i < ext.count; i++)
+        if ((allowlist_active &&
+             openai_tool_name_in_csv(tool_allowlist, ext.items[i].name)) ||
+            (!allowlist_active && ext.items[i].loaded))
             loaded_ext_pre++;
-    int ext_budget_pre = loaded_ext_pre > 0 ? loaded_ext_pre : 16;
+    int remaining_pre = provider_tool_limit - filtered_count;
+    int ext_budget_pre = remaining_pre > 0 ? (loaded_ext_pre > 0 ? loaded_ext_pre : 16) : 0;
     if (ext_budget_pre > 32)
         ext_budget_pre = 32;
-    int ext_total_pre =
-        allowlist_active ? 0 : (ext_budget_pre < ext.count ? ext_budget_pre : ext.count);
+    if (ext_budget_pre > remaining_pre)
+        ext_budget_pre = remaining_pre;
+    int ext_total_pre = ext_budget_pre < loaded_ext_pre ? ext_budget_pre : loaded_ext_pre;
     int total_tools = filtered_count + ext_total_pre;
 
     jbuf_append(b, ",\"tools\":[");
@@ -1835,21 +1873,30 @@ static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv, session_st
     free((void *)filtered);
 
     int loaded_ext_count = 0;
-    for (int i = 0; !allowlist_active && i < ext.count; i++)
-        if (ext.items[i].loaded)
+    for (int i = 0; i < ext.count; i++)
+        if ((allowlist_active &&
+             openai_tool_name_in_csv(tool_allowlist, ext.items[i].name)) ||
+            (!allowlist_active && ext.items[i].loaded))
             loaded_ext_count++;
-    int ext_budget = loaded_ext_count > 0 ? loaded_ext_count : 16;
+    int remaining = provider_tool_limit - emitted;
+    int ext_budget = remaining > 0 ? (loaded_ext_count > 0 ? loaded_ext_count : 16) : 0;
     if (ext_budget > 32)
         ext_budget = 32;
+    if (ext_budget > remaining)
+        ext_budget = remaining;
     int ext_written = 0;
-    for (int pass = 0; !allowlist_active && pass < 2 && ext_written < ext_budget; pass++) {
+    for (int pass = 0; pass < (allowlist_active ? 1 : 2) && ext_written < ext_budget; pass++) {
         bool want_loaded = (pass == 0);
         for (int oi = 0; oi < ext_order_count && ext_written < ext_budget; oi++) {
             int i = ext_order[oi];
             if (i < 0 || i >= ext.count)
                 continue;
-            if ((bool)ext.items[i].loaded != want_loaded)
+            if (allowlist_active) {
+                if (!openai_tool_name_in_csv(tool_allowlist, ext.items[i].name))
+                    continue;
+            } else if ((bool)ext.items[i].loaded != want_loaded) {
                 continue;
+            }
             if (wrote_any)
                 jbuf_append(b, ",");
             bool is_last = want_cache && (emitted == total_tools - 1);
@@ -1931,18 +1978,17 @@ static void openai_append_text_content(jbuf_t *b, message_t *m) {
 }
 
 /* Emit an assistant message with tool_calls in OpenAI format */
-static void openai_append_assistant_msg(jbuf_t *b, message_t *m) {
+static void openai_append_assistant_msg(jbuf_t *b, message_t *m,
+                                        bool preserve_reasoning_details,
+                                        const char *request_model) {
+    static const char detail_type[] = "openrouter_reasoning_details";
     jbuf_append(b, ",{\"role\":\"assistant\"");
 
-    /* Collect text content and provider-specific reasoning replay content.
-     * Moonshot/Kimi multi-step tool calling requires preserving prior
-     * reasoning_content in conversation context. We store it internally as a
-     * content block of type="thinking" and replay it on resend only for
-     * OpenAI-compatible providers that understand reasoning_content. */
     jbuf_t text;
     jbuf_t reasoning;
     jbuf_init(&text, 1024);
     jbuf_init(&reasoning, 1024);
+    const char *reasoning_details = NULL;
     for (int j = 0; j < m->content_count; j++) {
         msg_content_t *mc = &m->content[j];
         if (mc->type && strcmp(mc->type, "text") == 0 && mc->text) {
@@ -1953,20 +1999,36 @@ static void openai_append_assistant_msg(jbuf_t *b, message_t *m) {
             if (reasoning.len > 0)
                 jbuf_append(&reasoning, "\n");
             jbuf_append(&reasoning, mc->text);
+        } else if (preserve_reasoning_details && mc->type && mc->text &&
+                   strncmp(mc->type, detail_type, sizeof(detail_type) - 1) == 0) {
+            const char *issuer = mc->type + sizeof(detail_type) - 1;
+            if ((!issuer[0] || (issuer[0] == ':' && request_model &&
+                                strcmp(issuer + 1, request_model) == 0)) &&
+                !reasoning_details) {
+                reasoning_details = mc->text;
+            }
         }
     }
+
     if (text.len > 0) {
         jbuf_append(b, ",\"content\":");
         jbuf_append_json_str(b, text.data);
+    } else {
+        jbuf_append(b, ",\"content\":null");
     }
-    if (reasoning.len > 0) {
+    const char *details = reasoning_details;
+    while (details && *details && isspace((unsigned char)*details))
+        details++;
+    if (details && *details == '[' && json_is_valid_container(details)) {
+        jbuf_append(b, ",\"reasoning_details\":");
+        jbuf_append(b, details);
+    } else if (reasoning.len > 0) {
         jbuf_append(b, ",\"reasoning_content\":");
         jbuf_append_json_str(b, reasoning.data);
     }
     jbuf_free(&text);
     jbuf_free(&reasoning);
 
-    /* Emit tool_calls array for tool_use blocks */
     if (msg_has_tool_use(m)) {
         jbuf_append(b, ",\"tool_calls\":[");
         bool first_tool = true;
@@ -1982,7 +2044,6 @@ static void openai_append_assistant_msg(jbuf_t *b, message_t *m) {
             jbuf_append(b, ",\"type\":\"function\",\"function\":{\"name\":");
             jbuf_append_json_str(b, mc->tool_name ? mc->tool_name : "unknown");
             jbuf_append(b, ",\"arguments\":");
-            /* OpenAI/OpenRouter require arguments as a JSON *string*, not object */
             jbuf_append_json_str(b, mc->tool_input ? mc->tool_input : "{}");
             jbuf_append(b, "}}");
         }
@@ -2165,6 +2226,13 @@ bool provider_model_supports_cache_control(const char *model) {
     return false;
 }
 
+static bool provider_model_is_gpt56(const char *model) {
+    const char *m = provider_model_strip_explicit_openrouter_prefix(model);
+    if (m && strncmp(m, "openai/", 7) == 0)
+        m += 7;
+    return m && strncmp(m, "gpt-5.6", 7) == 0;
+}
+
 bool provider_model_supports_prompt_cache_retention(const char *model) {
     if (!model)
         return false;
@@ -2173,7 +2241,9 @@ bool provider_model_supports_prompt_cache_retention(const char *model) {
         "gpt-", "o1", "o3", "o4", "chatgpt-", "openai/gpt-", "openai/o", NULL
     };
     static const char *const azure_prefixes[] = {"azure/", "azure-foundry/", "microsoft/", NULL};
-    return provider_model_has_any_prefix(m, openai_prefixes) || provider_model_has_any_prefix(m, azure_prefixes);
+    return !provider_model_is_gpt56(m) &&
+           (provider_model_has_any_prefix(m, openai_prefixes) ||
+            provider_model_has_any_prefix(m, azure_prefixes));
 }
 
 bool provider_model_supports_prompt_cache_key(const char *model) {
@@ -2271,6 +2341,38 @@ static void openai_append_extra_param_if_present(jbuf_t *b, const char *extra, c
     free(raw);
 }
 
+static const char *openai_family_request_model(const char *provider_name,
+                                               const char *request_model) {
+    const char *canonical =
+        provider_name && provider_name[0] ? provider_profile_canonical_name(provider_name) : NULL;
+    const char *m = request_model ? request_model : "";
+    if (!canonical)
+        return NULL;
+
+    if (strcmp(canonical, "openai") == 0) {
+        return strncmp(m, "openai/", 7) == 0 ? m + 7 : m;
+    }
+    if (strcmp(canonical, "openrouter") == 0 && strncmp(m, "openai/", 7) == 0) {
+        return m + 7;
+    }
+    return NULL;
+}
+
+static bool openai_model_uses_max_completion_tokens(const char *provider_name,
+                                                    const char *request_model) {
+    const char *m = openai_family_request_model(provider_name, request_model);
+    if (!m)
+        return false;
+    return strncmp(m, "gpt-5", 5) == 0 || strncmp(m, "o1", 2) == 0 ||
+           strncmp(m, "o3", 2) == 0 || strncmp(m, "o4", 2) == 0;
+}
+
+static bool openai_model_is_gpt56(const char *provider_name, const char *request_model) {
+    const char *m = openai_family_request_model(provider_name, request_model);
+    return m && strncmp(m, "gpt-5.6", 7) == 0;
+}
+
+
 static void provider_append_structured_output_prompt(jbuf_t *sys, session_state_t *session) {
     if (!sys || !session || !session->structured_output)
         return;
@@ -2314,10 +2416,9 @@ static void openai_append_extra_request_params(jbuf_t *b, const char *extra,
                                                bool suppress_reasoning_params) {
     if (!extra)
         return;
-    /* Chat Completions + current OpenAI-compatible extensions. Ownership fields
-     * (model/messages/stream/tools/tool_choice/token limit) are emitted by dsco
-     * itself; everything below is safe request policy or output-shaping surface.
-     * Use DSCO_OPENAI_PARAMS='{"response_format":{"type":"json_object"},...}'. */
+    /* Chat Completions request-policy and output-shaping fields. Core transport
+     * fields (model/messages/stream/tools/tool_choice/token limit) remain owned
+     * by dsco; explicitly supplied cache/safety fields are forwarded verbatim. */
     static const char *const keys[] = {
         "audio",
         "frequency_penalty",
@@ -2327,13 +2428,18 @@ static void openai_append_extra_request_params(jbuf_t *b, const char *extra,
         "logprobs",
         "metadata",
         "modalities",
+        "moderation",
         "n",
         "parallel_tool_calls",
         "prediction",
         "presence_penalty",
+        "prompt_cache_key",
+        "prompt_cache_options",
+        "prompt_cache_retention",
         "reasoning",
         "reasoning_effort",
         "response_format",
+        "safety_identifier",
         "seed",
         "skip_special_tokens",
         "service_tier",
@@ -2392,7 +2498,7 @@ static const char *provider_strip_profile_namespace(const char *provider_name,
 }
 
 static const char *provider_request_model_id(const char *provider_name, const char *model) {
-    if (!model || !model[0])
+    if (!model || !model[0] || strcmp(model, "\"\"") == 0 || strcmp(model, "''") == 0)
         return DEFAULT_MODEL;
     const char *canonical =
         provider_name && provider_name[0] ? provider_profile_canonical_name(provider_name) : NULL;
@@ -2478,20 +2584,38 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
     const char *request_model =
         provider_request_model_id(p ? p->name : NULL, session ? session->model : DEFAULT_MODEL);
     jbuf_append_json_str(&b, request_model);
+    bool direct_openai = provider_name && strcmp(provider_name, "openai") == 0;
+    bool direct_openai_gpt56 = direct_openai && openai_model_is_gpt56(provider_name, request_model);
+    bool openrouter_gpt56 = provider_name && strcmp(provider_name, "openrouter") == 0 &&
+                            openai_model_is_gpt56(provider_name, request_model);
+    bool max_completion_tokens =
+        sakana_endpoint || openai_model_uses_max_completion_tokens(provider_name, request_model);
     if (extra_params && openai_extra_has_param(extra_params, "max_completion_tokens")) {
         openai_append_extra_param_if_present(&b, extra_params, "max_completion_tokens");
     } else if (extra_params && openai_extra_has_param(extra_params, "max_tokens")) {
-        openai_append_extra_param_if_present(&b, extra_params, "max_tokens");
+        if (max_completion_tokens) {
+            char *raw = json_get_raw(extra_params, "max_tokens");
+            if (raw) {
+                openai_append_raw_param(&b, "max_completion_tokens", raw);
+                free(raw);
+            }
+        } else {
+            openai_append_extra_param_if_present(&b, extra_params, "max_tokens");
+        }
     } else {
-        if (provider_name && strcmp(provider_name, "sakana") == 0)
+        if (max_completion_tokens)
             jbuf_append(&b, ",\"max_completion_tokens\":");
         else
             jbuf_append(&b, ",\"max_tokens\":");
         jbuf_append_int(&b, max_tokens);
     }
     jbuf_append(&b, ",\"stream\":true");
+    if (direct_openai && !(extra_params && openai_extra_has_param(extra_params, "store")))
+        jbuf_append(&b, ",\"store\":false");
 
-    if (provider_model_supports_prompt_cache_key(session ? session->model : request_model)) {
+    if (!openrouter_gpt56 &&
+        provider_model_supports_prompt_cache_key(session ? session->model : request_model) &&
+        !(extra_params && openai_extra_has_param(extra_params, "prompt_cache_key"))) {
         const char *cache_key = (session && session->prompt_cache_key[0]) ? session->prompt_cache_key
                               : getenv("DSCO_PROMPT_CACHE_KEY");
         if (!cache_key || !cache_key[0])
@@ -2499,14 +2623,28 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
         jbuf_append(&b, ",\"prompt_cache_key\":");
         jbuf_append_json_str(&b, cache_key);
     }
-    if (provider_model_supports_prompt_cache_retention(session ? session->model : request_model)) {
+    if (!(extra_params &&
+          (openai_extra_has_param(extra_params, "prompt_cache_options") ||
+           openai_extra_has_param(extra_params, "prompt_cache_retention")))) {
         const char *retention = (session && session->prompt_cache_retention[0])
                                     ? session->prompt_cache_retention
                                     : getenv("DSCO_PROMPT_CACHE_RETENTION");
         if (!retention || !retention[0])
             retention = "24h";
-        jbuf_append(&b, ",\"prompt_cache_retention\":");
-        jbuf_append_json_str(&b, retention);
+        if (direct_openai_gpt56) {
+            /* GPT-5.6 accepts only a 30-minute minimum TTL.  Older DSCO
+             * defaults used 24h, which the API rejects and therefore silently
+             * prevented request delivery/caching for this family. */
+            if (strcmp(retention, "30m") != 0)
+                retention = "30m";
+            jbuf_append(&b, ",\"prompt_cache_options\":{\"mode\":\"explicit\",\"ttl\":");
+            jbuf_append_json_str(&b, retention);
+            jbuf_append(&b, "}");
+        } else if (provider_model_supports_prompt_cache_retention(
+                       session ? session->model : request_model)) {
+            jbuf_append(&b, ",\"prompt_cache_retention\":");
+            jbuf_append_json_str(&b, retention);
+        }
     }
 
     /* Moonshot/Kimi K2.7 Code requires thinking mode and rejects explicit
@@ -2534,19 +2672,6 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
             !(extra_params && openai_extra_has_param(extra_params, "top_p"))) {
             jbuf_appendf(&b, ",\"top_p\":%.6g", session->top_p);
         }
-        if (!modal_endpoint && !sakana_endpoint && session && session->effort[0] &&
-            !(extra_params && (openai_extra_has_param(extra_params, "reasoning_effort") ||
-                               openai_extra_has_param(extra_params, "reasoning")))) {
-            char effort_buf[32];
-            const char *effort = dcr_reasoning_effort_normalize(
-                p ? p->name : NULL, session->model, session->effort, effort_buf,
-                sizeof(effort_buf));
-            if (effort && effort[0]) {
-                jbuf_append(&b, ",\"reasoning_effort\":");
-                jbuf_append_json_str(&b, effort);
-            }
-        }
-        openai_append_extra_request_params(&b, extra_params, sakana_endpoint);
     }
     openai_append_structured_output_param(&b, session, extra_params);
 
@@ -2554,6 +2679,10 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
      * (default) or as a single-block array carrying a cache_control breakpoint
      * (Claude via OpenRouter) so the static tools+system prefix gets cached. */
     bool cache_ctrl = provider_model_supports_cache_control(session ? session->model : NULL);
+    /* GPT-5.6 requires an explicit content-block breakpoint when the request
+     * uses explicit cache mode.  Keep this separate from Anthropic's
+     * cache_control shape: the two APIs use different marker names. */
+    bool openai_gpt56_cache = direct_openai_gpt56;
     const char *custom = llm_get_custom_system_prompt();
     jbuf_t sys;
     jbuf_init(&sys, 4096);
@@ -2570,10 +2699,14 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
     provider_append_structured_output_prompt(&sys, session);
 
     jbuf_append(&b, ",\"messages\":[{\"role\":\"system\",\"content\":");
-    if (cache_ctrl) {
+    if (cache_ctrl || openai_gpt56_cache) {
         jbuf_append(&b, "[{\"type\":\"text\",\"text\":");
         jbuf_append_json_str(&b, sys.data ? sys.data : base_system);
-        jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}}]");
+        if (openai_gpt56_cache)
+            jbuf_append(&b, ",\"prompt_cache_breakpoint\":{\"mode\":\"explicit\"}");
+        else
+            jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
+        jbuf_append(&b, "}]");
     } else {
         jbuf_append_json_str(&b, sys.data ? sys.data : base_system);
     }
@@ -2598,7 +2731,9 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
         message_t *m = &conv->msgs[i];
 
         if (m->role == ROLE_ASSISTANT) {
-            openai_append_assistant_msg(&b, m);
+            openai_append_assistant_msg(&b, m,
+                                        provider_name && strcmp(provider_name, "openrouter") == 0,
+                                        request_model);
         } else {
             /* User message: emit tool_results first, then remaining user content */
             if (msg_has_tool_result(m)) {
@@ -2629,6 +2764,51 @@ static char *openai_build_request(provider_t *p, conversation_t *conv, session_s
     openai_append_tool_choice_json(&b, session, has_tools);
     if (has_tools && openai_should_append_parallel_tool_calls(provider_name, extra_params))
         jbuf_append(&b, ",\"parallel_tool_calls\":true");
+
+    /* LM Studio supports request-scoped speculative decoding. Keep this
+     * provider-specific so the non-standard field never reaches cloud APIs
+     * while LM Studio is configured as the final fallback lane. */
+    if (provider_name && strcmp(provider_name, "lmstudio") == 0) {
+        const char *draft_model = getenv("LMSTUDIO_DRAFT_MODEL");
+        if (draft_model && draft_model[0]) {
+            jbuf_append(&b, ",\"draft_model\":");
+            jbuf_append_json_str(&b, draft_model);
+        }
+    }
+    if (!moonshot_fixed_sampling) {
+        /* GPT-5.6 rejects function tools plus active reasoning on Chat Completions.
+         * Force the only compatible value, including when an explicit extra param
+         * or an empty session effort would otherwise bypass normalization. */
+        bool gpt56_tools_chat = direct_openai_gpt56 && has_tools;
+        bool suppress_reasoning_params = sakana_endpoint || gpt56_tools_chat;
+        if (gpt56_tools_chat) {
+            jbuf_append(&b, ",\"reasoning_effort\":\"none\"");
+        } else if (!modal_endpoint && !sakana_endpoint && session && session->effort[0] &&
+                   !(extra_params && (openai_extra_has_param(extra_params, "reasoning_effort") ||
+                                      openai_extra_has_param(extra_params, "reasoning")))) {
+            char effort_buf[32];
+            const char *effort = dcr_reasoning_effort_normalize(
+                p ? p->name : NULL, session->model, session->effort, effort_buf,
+                sizeof(effort_buf));
+            if (effort && effort[0]) {
+                if (direct_openai_gpt56) {
+                    if (strcmp(effort, "minimal") == 0)
+                        effort = "low";
+                    else if (strcmp(effort, "xhigh") == 0 || strcmp(effort, "max") == 0)
+                        effort = "high";
+                }
+                if (provider_name && strcmp(provider_name, "openrouter") == 0) {
+                    jbuf_append(&b, ",\"reasoning\":{\"effort\":");
+                    jbuf_append_json_str(&b, effort);
+                    jbuf_append(&b, "}");
+                } else {
+                    jbuf_append(&b, ",\"reasoning_effort\":");
+                    jbuf_append_json_str(&b, effort);
+                }
+            }
+        }
+        openai_append_extra_request_params(&b, extra_params, suppress_reasoning_params);
+    }
 
     /* Top-level automatic cache_control for Anthropic/Qwen via OpenRouter.
      * In "automatic" mode OR/Anthropic caches everything up to the last
@@ -2810,14 +2990,28 @@ static bool codex_exec_write_all(int fd, const char *data) {
     return true;
 }
 
+static void codex_exec_emit_log_chunk(stream_thinking_cb thinking_cb, void *cb_ctx,
+                                      const char *buf, ssize_t len) {
+    if (!thinking_cb || !buf || len <= 0)
+        return;
+    char *chunk = safe_malloc((size_t)len + 1);
+    memcpy(chunk, buf, (size_t)len);
+    chunk[len] = '\0';
+    dsco_strip_terminal_controls_inplace(chunk);
+    if (chunk[0])
+        thinking_cb(chunk, cb_ctx);
+    free(chunk);
+}
+
 static stream_result_t codex_exec_stream(provider_t *p, const char *api_key,
                                          const char *request_json, stream_text_cb text_cb,
                                          stream_tool_start_cb tool_cb,
+                                         stream_tool_arg_delta_cb tool_delta_cb,
                                          stream_thinking_cb thinking_cb, void *cb_ctx) {
     (void)p;
     (void)api_key;
     (void)tool_cb;
-    (void)thinking_cb;
+    (void)tool_delta_cb;
 
     stream_result_t result;
     char *model = json_get_str(request_json, "model");
@@ -2925,6 +3119,7 @@ static stream_result_t codex_exec_stream(provider_t *p, const char *api_key,
             while ((n = read(log_pipe[0], buf, sizeof(buf) - 1)) > 0) {
                 buf[n] = '\0';
                 jbuf_append(&logs, buf);
+                codex_exec_emit_log_chunk(thinking_cb, cb_ctx, buf, n);
             }
         }
 
@@ -2953,6 +3148,7 @@ static stream_result_t codex_exec_stream(provider_t *p, const char *api_key,
     while ((dn = read(log_pipe[0], drain, sizeof(drain) - 1)) > 0) {
         drain[dn] = '\0';
         jbuf_append(&logs, drain);
+        codex_exec_emit_log_chunk(thinking_cb, cb_ctx, drain, dn);
     }
     close(log_pipe[0]);
 
@@ -3009,22 +3205,38 @@ typedef struct {
 } oai_tool_call_state_t;
 
 typedef struct {
+    uint64_t hash;
+    size_t offset;
+    size_t len;
+} oai_reasoning_detail_seen_t;
+
+typedef struct {
     jbuf_t line_buf;
+    jbuf_t raw_body; /* non-SSE content (HTTP error bodies) for diagnostics */
     jbuf_t text_accum;
     jbuf_t reasoning_accum;
+    jbuf_t reasoning_details_accum;
+    oai_reasoning_detail_seen_t *reasoning_details_seen;
+    size_t reasoning_details_seen_count;
+    size_t reasoning_details_seen_cap;
+    bool preserve_reasoning_details;
+    bool promote_reasoning_tool_xml;
     stream_text_cb text_cb;
     stream_tool_start_cb tool_cb;
+    stream_tool_arg_delta_cb tool_delta_cb;
     stream_thinking_cb thinking_cb;
     void *cb_ctx;
     usage_t usage;
     char *stop_reason;
     bool got_error;
     bool credit_too_low; /* 402 / "credit balance too low" / insufficient funds */
+    bool stream_done;
     char *error_msg;
     time_t credit_reset_at;
     /* OpenRouter-specific */
     char *generation_id;  /* x-generation-id from response */
     char *actual_model;   /* model actually used (may differ from requested) */
+    char *request_model;  /* issuer for opaque reasoning replay */
     double cost_usd;      /* total cost from usage.cost */
     int cached_tokens;    /* input_tokens_details.cached_tokens */
     int reasoning_tokens; /* output_tokens_details.reasoning_tokens */
@@ -3404,6 +3616,54 @@ static const char *oai_tool_state_id(oai_tool_call_state_t *slot) {
     return fallback;
 }
 
+static void oai_emit_tool_progress(oai_sse_state_t *s, oai_tool_call_state_t *slot,
+                                   const char *arg_delta) {
+    if (!s || !slot)
+        return;
+
+    if (slot->tool_name && !slot->announced) {
+        slot->announced = true;
+        if (s->telemetry_first_tool <= 0.0)
+            s->telemetry_first_tool = provider_now_sec();
+        if (!s->telemetry_got_first) {
+            s->telemetry_got_first = true;
+            s->telemetry_first_delta = s->telemetry_first_tool;
+        }
+        if (s->tool_cb)
+            s->tool_cb(slot->tool_name, oai_tool_state_id(slot), s->cb_ctx);
+    }
+
+    /* Emit native tool-argument deltas. Older callers without this callback
+     * keep the historical TTY-only preview fallback via text_cb. */
+    if (s->tool_delta_cb && arg_delta && arg_delta[0]) {
+        s->tool_delta_cb(slot->tool_name, oai_tool_state_id(slot), arg_delta, s->cb_ctx);
+    } else if (s->text_cb && isatty(STDOUT_FILENO) &&
+               slot->tool_args.data && slot->tool_args.len > slot->streamed_prefix) {
+        size_t start = slot->streamed_prefix;
+        size_t avail = slot->tool_args.len - start;
+        /* Cap single-delta size so a giant argument string does not starve
+         * the heartbeat and so we don't flood the terminal on one packet. */
+        if (avail > 256)
+            avail = 256;
+        char chunk[320];
+        size_t pos = 0;
+        if (start == 0) {
+            const char *prefix = "\033[2m ⋯ \033[0m";
+            size_t plen = strlen(prefix);
+            if (plen < sizeof(chunk)) {
+                memcpy(chunk, prefix, plen);
+                pos = plen;
+            }
+        }
+        if (pos + avail >= sizeof(chunk))
+            avail = sizeof(chunk) - pos - 1;
+        memcpy(chunk + pos, slot->tool_args.data + start, avail);
+        chunk[pos + avail] = '\0';
+        s->text_cb(chunk, s->cb_ctx);
+        slot->streamed_prefix = start + avail;
+    }
+}
+
 typedef struct {
     oai_sse_state_t *state;
 } oai_tool_delta_ctx_t;
@@ -3443,60 +3703,376 @@ static void oai_handle_tool_call_delta(const char *tc_elem, void *ctx) {
     if (fargs && fargs[0]) {
         jbuf_append(&slot->tool_args, fargs);
     }
-    free(fargs);
     free(fn_raw);
 
-    if (slot->tool_name && !slot->announced) {
-        slot->announced = true;
-        if (s->telemetry_first_tool <= 0.0)
-            s->telemetry_first_tool = provider_now_sec();
-        if (!s->telemetry_got_first) {
-            s->telemetry_got_first = true;
-            s->telemetry_first_delta = s->telemetry_first_tool;
-        }
-        if (s->tool_cb) {
-            s->tool_cb(slot->tool_name, oai_tool_state_id(slot), s->cb_ctx);
-        }
+    oai_emit_tool_progress(s, slot, fargs);
+    free(fargs);
+}
+
+static void oai_handle_legacy_function_call_delta(oai_sse_state_t *s, const char *fn_raw) {
+    if (!s || !fn_raw)
+        return;
+
+    oai_tool_call_state_t *slot = oai_tool_state_for(s, 0, "call_0");
+    if (!slot)
+        return;
+    if (!slot->tool_id || !slot->tool_id[0]) {
+        free(slot->tool_id);
+        slot->tool_id = safe_strdup("call_0");
     }
 
-    /* Stream newly-arrived argument bytes as dim text so the user sees
-     * tool inputs populate in real time instead of appearing all at once
-     * at the end of the turn. We route through text_cb because that is
-     * the only always-wired sink on the OpenAI-compat path. The bytes
-     * are visually distinguished with a leading "  ⋯ " marker on the
-     * first chunk; subsequent chunks just append. */
-    if (s->text_cb && slot->tool_args.data && slot->tool_args.len > slot->streamed_prefix) {
-        size_t start = slot->streamed_prefix;
-        size_t avail = slot->tool_args.len - start;
-        /* Cap single-delta size so a giant argument string does not starve
-         * the heartbeat and so we don't flood the terminal on one packet. */
-        if (avail > 256)
-            avail = 256;
-        char chunk[320];
-        size_t pos = 0;
-        if (start == 0) {
-            const char *prefix = "\033[2m ⋯ \033[0m";
-            size_t plen = strlen(prefix);
-            if (plen < sizeof(chunk)) {
-                memcpy(chunk, prefix, plen);
-                pos = plen;
-            }
-        }
-        if (pos + avail >= sizeof(chunk))
-            avail = sizeof(chunk) - pos - 1;
-        memcpy(chunk + pos, slot->tool_args.data + start, avail);
-        chunk[pos + avail] = '\0';
-        s->text_cb(chunk, s->cb_ctx);
-        slot->streamed_prefix = start + avail;
+    char *fname = json_get_str(fn_raw, "name");
+    if (fname && (!slot->tool_name || !slot->tool_name[0])) {
+        slot->tool_name = fname;
+        fname = NULL;
+    }
+    free(fname);
+
+    char *fargs = json_get_str(fn_raw, "arguments");
+    if (fargs && fargs[0])
+        jbuf_append(&slot->tool_args, fargs);
+
+    oai_emit_tool_progress(s, slot, fargs);
+    free(fargs);
+}
+
+static void oai_emit_reasoning_delta(oai_sse_state_t *s, const char *reasoning) {
+    if (!s || !reasoning || !reasoning[0])
+        return;
+    jbuf_append(&s->reasoning_accum, reasoning);
+    if (s->thinking_cb) {
+        s->thinking_cb(reasoning, s->cb_ctx);
+    } else if (s->text_cb) {
+        /* Fallback visualization: wrap in dim ANSI so markdown does not
+         * try to format reasoning and it stays distinct from final text. */
+        char wrapped[1024];
+        int n = snprintf(wrapped, sizeof(wrapped), "\033[2m%.960s\033[0m", reasoning);
+        if (n > 0)
+            s->text_cb(wrapped, s->cb_ctx);
     }
 }
 
+static void oai_emit_text_delta(oai_sse_state_t *s, const char *text) {
+    if (!s || !text || !text[0])
+        return;
+    if (!s->telemetry_got_first) {
+        s->telemetry_got_first = true;
+        s->telemetry_first_delta = provider_now_sec();
+    }
+    jbuf_append(&s->text_accum, text);
+    if (s->text_cb)
+        s->text_cb(text, s->cb_ctx);
+}
+
+/* LM Studio currently streams Qwen3.5 thinking-mode tool calls as XML inside
+ * reasoning_content instead of OpenAI tool_calls. Promote that narrow wire
+ * shape at the compatibility boundary so the agent loop still receives a
+ * governed tool_use block without disabling model reasoning. */
+static bool oai_reasoning_xml_append_value(jbuf_t *args, const char *start, size_t len) {
+    while (len > 0 && isspace((unsigned char)*start)) {
+        start++;
+        len--;
+    }
+    while (len > 0 && isspace((unsigned char)start[len - 1]))
+        len--;
+
+    char *value = safe_malloc(len + 1);
+    memcpy(value, start, len);
+    value[len] = '\0';
+
+    bool raw = false;
+    if ((value[0] == '{' || value[0] == '[') && json_is_valid_container(value)) {
+        raw = true;
+    } else if (strcmp(value, "true") == 0 || strcmp(value, "false") == 0 ||
+               strcmp(value, "null") == 0) {
+        raw = true;
+    } else if (value[0]) {
+        char *end = NULL;
+        (void)strtod(value, &end);
+        raw = end && end > value && *end == '\0';
+    }
+
+    if (raw)
+        jbuf_append(args, value);
+    else
+        jbuf_append_json_str(args, value);
+    free(value);
+    return true;
+}
+
+static int oai_promote_local_tool_calls(oai_sse_state_t *s) {
+    if (!s || !s->promote_reasoning_tool_xml) return 0;
+    const char *sources[] = {s->reasoning_accum.data, s->text_accum.data};
+    for (size_t source = 0; source < sizeof(sources) / sizeof(sources[0]); source++) {
+        normalized_tool_calls_t calls;
+        if (!tool_calls_normalize(sources[source], &calls)) continue;
+        int promoted = 0;
+        for (size_t i = 0; i < calls.count && s->tool_slots_used < MAX_CONTENT_BLOCKS; i++) {
+            oai_tool_call_state_t *slot = oai_tool_state_for(s, -1, NULL);
+            if (!slot) break;
+            slot->tool_name = safe_strdup(calls.calls[i].name);
+            char call_id[64];
+            snprintf(call_id, sizeof(call_id), "call_local_normalized_%zu", i);
+            slot->tool_id = safe_strdup(call_id);
+            jbuf_append(&slot->tool_args, calls.calls[i].arguments);
+            oai_emit_tool_progress(s, slot, calls.calls[i].arguments);
+            promoted++;
+        }
+        tool_calls_normalized_free(&calls);
+        if (promoted > 0) {
+            free(s->stop_reason);
+            s->stop_reason = safe_strdup("tool_use");
+            return promoted;
+        }
+    }
+    return 0;
+}
+
+static int oai_promote_reasoning_tool_xml(oai_sse_state_t *s) {
+    if (!s || !s->promote_reasoning_tool_xml || !s->reasoning_accum.data ||
+        !strstr(s->reasoning_accum.data, "<tool_call>"))
+        return 0;
+
+    const char *cursor = s->reasoning_accum.data;
+    jbuf_t cleaned;
+    jbuf_init(&cleaned, s->reasoning_accum.len + 1);
+    int promoted = 0;
+
+    while (*cursor) {
+        const char *call = strstr(cursor, "<tool_call>");
+        if (!call) {
+            jbuf_append(&cleaned, cursor);
+            break;
+        }
+        const char *call_end = strstr(call, "</tool_call>");
+        const char *fn = strstr(call, "<function=");
+        if (!call_end || !fn || fn > call_end) {
+            jbuf_append(&cleaned, cursor);
+            break;
+        }
+        const char *name_start = fn + strlen("<function=");
+        const char *name_end = strchr(name_start, '>');
+        const char *fn_end = name_end ? strstr(name_end + 1, "</function>") : NULL;
+        if (!name_end || !fn_end || fn_end > call_end) {
+            jbuf_append_len(&cleaned, cursor, (size_t)((call + 1) - cursor));
+            cursor = call + 1;
+            continue;
+        }
+
+        while (name_start < name_end && isspace((unsigned char)*name_start))
+            name_start++;
+        while (name_end > name_start && isspace((unsigned char)name_end[-1]))
+            name_end--;
+        if (name_end > name_start + 1 &&
+            ((*name_start == '"' && name_end[-1] == '"') ||
+             (*name_start == '\'' && name_end[-1] == '\''))) {
+            name_start++;
+            name_end--;
+        }
+        if (name_start == name_end) {
+            jbuf_append_len(&cleaned, cursor, (size_t)((call + 1) - cursor));
+            cursor = call + 1;
+            continue;
+        }
+
+        jbuf_t args;
+        jbuf_init(&args, 256);
+        jbuf_append(&args, "{");
+        bool first = true;
+        const char *param_cursor = name_end + 1;
+        while (param_cursor < fn_end) {
+            const char *param = strstr(param_cursor, "<parameter=");
+            if (!param || param >= fn_end)
+                break;
+            const char *param_name = param + strlen("<parameter=");
+            const char *param_tag_end = strchr(param_name, '>');
+            const char *param_name_end = param_tag_end;
+            const char *param_end = param_tag_end
+                                        ? strstr(param_tag_end + 1, "</parameter>")
+                                        : NULL;
+            if (!param_name_end || !param_end || param_end > fn_end)
+                break;
+            while (param_name < param_name_end && isspace((unsigned char)*param_name))
+                param_name++;
+            while (param_name_end > param_name &&
+                   isspace((unsigned char)param_name_end[-1]))
+                param_name_end--;
+            if (param_name_end > param_name) {
+                if (!first)
+                    jbuf_append(&args, ",");
+                char *key = safe_malloc((size_t)(param_name_end - param_name) + 1);
+                memcpy(key, param_name, (size_t)(param_name_end - param_name));
+                key[param_name_end - param_name] = '\0';
+                jbuf_append_json_str(&args, key);
+                free(key);
+                jbuf_append(&args, ":");
+                oai_reasoning_xml_append_value(
+                    &args, param_tag_end + 1,
+                    (size_t)(param_end - (param_tag_end + 1)));
+                first = false;
+            }
+            param_cursor = param_end + strlen("</parameter>");
+        }
+        jbuf_append(&args, "}");
+
+        oai_tool_call_state_t *slot = oai_tool_state_for(s, -1, NULL);
+        if (!slot) {
+            jbuf_free(&args);
+            jbuf_append(&cleaned, cursor);
+            break;
+        }
+        slot->tool_name = safe_malloc((size_t)(name_end - name_start) + 1);
+        memcpy(slot->tool_name, name_start, (size_t)(name_end - name_start));
+        slot->tool_name[name_end - name_start] = '\0';
+        char call_id[48];
+        snprintf(call_id, sizeof(call_id), "call_lmstudio_reasoning_%d", promoted);
+        slot->tool_id = safe_strdup(call_id);
+        jbuf_append(&slot->tool_args, args.data);
+        oai_emit_tool_progress(s, slot, args.data);
+        jbuf_free(&args);
+
+        jbuf_append_len(&cleaned, cursor, (size_t)(call - cursor));
+        cursor = call_end + strlen("</tool_call>");
+        promoted++;
+    }
+
+    if (promoted > 0) {
+        while (cleaned.len > 0 && isspace((unsigned char)cleaned.data[cleaned.len - 1]))
+            cleaned.data[--cleaned.len] = '\0';
+        jbuf_free(&s->reasoning_accum);
+        s->reasoning_accum = cleaned;
+        free(s->stop_reason);
+        s->stop_reason = safe_strdup("tool_use");
+    } else {
+        jbuf_free(&cleaned);
+    }
+    return promoted;
+}
+
+typedef struct {
+    oai_sse_state_t *state;
+    bool emit_text;
+} oai_reasoning_detail_ctx_t;
+
+static size_t oai_reasoning_detail_span(const char *detail) {
+    if (!detail || (*detail != '{' && *detail != '['))
+        return 0;
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (size_t i = 0; detail[i]; i++) {
+        char c = detail[i];
+        if (in_string) {
+            if (escaped)
+                escaped = false;
+            else if (c == '\\')
+                escaped = true;
+            else if (c == '"')
+                in_string = false;
+            continue;
+        }
+        if (c == '"')
+            in_string = true;
+        else if (c == '{' || c == '[')
+            depth++;
+        else if (c == '}' || c == ']') {
+            depth--;
+            if (depth == 0)
+                return i + 1;
+            if (depth < 0)
+                return 0;
+        }
+    }
+    return 0;
+}
+
+static bool oai_record_reasoning_detail(oai_sse_state_t *s, const char *detail) {
+    if (!s || !detail)
+        return false;
+    size_t len = oai_reasoning_detail_span(detail);
+    if (len == 0)
+        return false;
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (size_t i = 0; i < len; i++)
+        hash = (hash ^ (unsigned char)detail[i]) * UINT64_C(1099511628211);
+    for (size_t i = 0; i < s->reasoning_details_seen_count; i++) {
+        oai_reasoning_detail_seen_t *seen = &s->reasoning_details_seen[i];
+        if (seen->hash == hash && seen->len == len && s->reasoning_details_accum.data &&
+            memcmp(s->reasoning_details_accum.data + seen->offset, detail, len) == 0)
+            return false;
+    }
+    if (s->reasoning_details_seen_count == s->reasoning_details_seen_cap) {
+        size_t next_cap = s->reasoning_details_seen_cap ? s->reasoning_details_seen_cap * 2 : 16;
+        s->reasoning_details_seen = safe_realloc(
+            s->reasoning_details_seen, next_cap * sizeof(*s->reasoning_details_seen));
+        s->reasoning_details_seen_cap = next_cap;
+    }
+    if (s->reasoning_details_accum.len > 0)
+        jbuf_append(&s->reasoning_details_accum, ",");
+    oai_reasoning_detail_seen_t *seen =
+        &s->reasoning_details_seen[s->reasoning_details_seen_count++];
+    seen->hash = hash;
+    seen->offset = s->reasoning_details_accum.len;
+    seen->len = len;
+    jbuf_append_len(&s->reasoning_details_accum, detail, len);
+    return true;
+}
+
+static void oai_handle_reasoning_detail(const char *detail, void *ctx) {
+    oai_reasoning_detail_ctx_t *detail_ctx = (oai_reasoning_detail_ctx_t *)ctx;
+    bool new_detail = oai_record_reasoning_detail(detail_ctx->state, detail);
+
+    if (!new_detail || !detail_ctx->emit_text)
+        return;
+    char *type = json_get_str(detail, "type");
+    char *text = NULL;
+    if (type && strcmp(type, "reasoning.summary") == 0)
+        text = json_get_str(detail, "summary");
+    else if (type && strcmp(type, "reasoning.text") == 0)
+        text = json_get_str(detail, "text");
+    if (text && text[0])
+        oai_emit_reasoning_delta(detail_ctx->state, text);
+    free(text);
+    free(type);
+}
+
+static void oai_append_reasoning_details_block(oai_sse_state_t *s) {
+    if (!s || !s->preserve_reasoning_details || s->reasoning_details_accum.len == 0 ||
+        s->block_count >= MAX_CONTENT_BLOCKS)
+        return;
+    content_block_t *block = &s->blocks[s->block_count++];
+    jbuf_t type;
+    jbuf_t details;
+    jbuf_init(&type, 96);
+    jbuf_init(&details, s->reasoning_details_accum.len + 3);
+    jbuf_append(&type, "openrouter_reasoning_details");
+    if (s->request_model && s->request_model[0]) {
+        jbuf_append(&type, ":");
+        jbuf_append(&type, s->request_model);
+    }
+    jbuf_append(&details, "[");
+    jbuf_append(&details, s->reasoning_details_accum.data);
+    jbuf_append(&details, "]");
+    block->type = type.data;
+    block->text = details.data;
+}
+
 static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
-    if (strncmp(line, "data: ", 6) != 0)
+    if (strncmp(line, "data:", 5) != 0) {
+        if (line[0] && line[0] != ':') {
+            if (s->raw_body.len > 0)
+                jbuf_append(&s->raw_body, "\n");
+            jbuf_append(&s->raw_body, line);
+        }
         return;
-    const char *data = line + 6;
-    if (strcmp(data, "[DONE]") == 0)
+    }
+    const char *data = line + 5;
+    while (*data == ' ' || *data == '\t')
+        data++;
+    if (strcmp(data, "[DONE]") == 0) {
+        s->stream_done = true;
         return;
+    }
 
     /* Check for top-level error object (OpenRouter sends errors mid-stream) */
     char *err_raw = json_get_raw(data, "error");
@@ -3507,6 +4083,7 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
         int err_code = json_get_int(err_raw, "code", 0);
         if (err_msg) {
             s->got_error = true;
+            s->stream_done = true;
             free(s->error_msg);
             s->error_msg = err_msg;
             if (err_code == 402 || err_code == 429 || provider_msg_is_credit_too_low(err_msg))
@@ -3576,13 +4153,22 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
             int v = json_get_int(in_detail, "cached_tokens", 0);
             if (v > s->cached_tokens)
                 s->cached_tokens = v;
+            /* GPT-5.6 Responses-compatible usage may place explicit cache
+             * writes here. Preserve the largest final/chunk value just as we
+             * do for Anthropic cache_creation_input_tokens. */
+            int w = json_get_int(in_detail, "cache_write_tokens", 0);
+            if (w > s->usage.cache_creation_input_tokens)
+                s->usage.cache_creation_input_tokens = w;
         }
-        /* OpenRouter normalisation alias */
+        /* OpenAI Chat Completions and OpenRouter normalisation alias. */
         char *pt_detail = json_get_raw(usage_raw, "prompt_tokens_details");
         if (pt_detail) {
             int v = json_get_int(pt_detail, "cached_tokens", 0);
             if (v > s->cached_tokens)
                 s->cached_tokens = v;
+            int w = json_get_int(pt_detail, "cache_write_tokens", 0);
+            if (w > s->usage.cache_creation_input_tokens)
+                s->usage.cache_creation_input_tokens = w;
             free(pt_detail);
         }
         /* DeepSeek / Moonshot / Alibaba top-level cache hit field */
@@ -3632,6 +4218,8 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
             s->stop_reason = safe_strdup("end_turn");
         else if (strcmp(fr, "tool_calls") == 0)
             s->stop_reason = safe_strdup("tool_use");
+        else if (strcmp(fr, "function_call") == 0)
+            s->stop_reason = safe_strdup("tool_use");
         else if (strcmp(fr, "length") == 0)
             s->stop_reason = safe_strdup("max_tokens");
         else if (strcmp(fr, "error") == 0) {
@@ -3656,33 +4244,17 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
 
     /* Content delta — streaming text */
     char *content = json_get_str(delta_raw, "content");
-    if (content && content[0]) {
-        if (!s->telemetry_got_first) {
-            s->telemetry_got_first = true;
-            s->telemetry_first_delta = provider_now_sec();
-        }
-        jbuf_append(&s->text_accum, content);
-        if (s->text_cb)
-            s->text_cb(content, s->cb_ctx);
-    }
+    oai_emit_text_delta(s, content);
     free(content);
 
-    /* Reasoning delta — streaming "thinking"/chain-of-thought output.
-     *
-     * Different providers emit this under different keys:
-     *   - xAI (grok-3-mini, grok-4):       delta.reasoning_content
-     *   - OpenRouter reasoning models:     delta.reasoning    (string)
-     *                                  or  delta.reasoning    (object with .content)
-     *   - Deepseek reasoner:               delta.reasoning_content
-     *   - Moonshot thinking:               delta.reasoning_content
-     *
-     * We parse both, accumulate them into reasoning_accum, and route them
-     * through thinking_cb when the caller supplied one. If no thinking_cb
-     * is wired, we surface the reasoning as dim text via text_cb so the
-     * user still sees *something* during the pre-output thinking phase,
-     * instead of a long silent pause. This is intentional "show the
-     * thinking even if we throw most of it away" behavior.
-     */
+    /* Refusal deltas are text-bearing output too. Without this, providers can
+     * stream a completed refusal and DSCO treats it as an empty response. */
+    char *refusal = json_get_str(delta_raw, "refusal");
+    oai_emit_text_delta(s, refusal);
+    free(refusal);
+
+    /* Keep structured reasoning opaque for replay while using the scalar form
+     * for display when both representations are present. */
     {
         char *reasoning = json_get_str(delta_raw, "reasoning_content");
         if (!reasoning || !reasoning[0]) {
@@ -3690,8 +4262,10 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
             reasoning = json_get_str(delta_raw, "reasoning");
         }
         if (!reasoning || !reasoning[0]) {
-            /* OpenRouter sometimes sends delta.reasoning as an object:
-             * {"reasoning":{"content":"..."}}. Handle that shape too. */
+            free(reasoning);
+            reasoning = json_get_str(delta_raw, "reasoning_text");
+        }
+        if (!reasoning || !reasoning[0]) {
             free(reasoning);
             reasoning = NULL;
             char *rraw = json_get_raw(delta_raw, "reasoning");
@@ -3700,20 +4274,15 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
                 free(rraw);
             }
         }
-        if (reasoning && reasoning[0]) {
-            jbuf_append(&s->reasoning_accum, reasoning);
-            if (s->thinking_cb) {
-                s->thinking_cb(reasoning, s->cb_ctx);
-            } else if (s->text_cb) {
-                /* Fallback visualization: wrap in dim ANSI so markdown
-                 * doesn't try to format it and it visually separates from
-                 * final text. */
-                char wrapped[1024];
-                int n = snprintf(wrapped, sizeof(wrapped), "\033[2m%.960s\033[0m", reasoning);
-                if (n > 0)
-                    s->text_cb(wrapped, s->cb_ctx);
-            }
-        }
+        bool have_scalar_reasoning = reasoning && reasoning[0];
+        if (have_scalar_reasoning)
+            oai_emit_reasoning_delta(s, reasoning);
+        oai_reasoning_detail_ctx_t detail_ctx = {
+            .state = s,
+            .emit_text = !have_scalar_reasoning,
+        };
+        json_array_foreach(delta_raw, "reasoning_details", oai_handle_reasoning_detail,
+                           &detail_ctx);
         free(reasoning);
     }
 
@@ -3731,6 +4300,15 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
         free(tool_calls_raw);
     }
 
+    /* Legacy OpenAI-compatible streams may still emit a single
+     * delta.function_call object instead of delta.tool_calls[]. Keep this path
+     * separate so modern tool_calls without provider ids remain invalid. */
+    char *legacy_fn_raw = json_get_raw(delta_raw, "function_call");
+    if (legacy_fn_raw) {
+        oai_handle_legacy_function_call_delta(s, legacy_fn_raw);
+        free(legacy_fn_raw);
+    }
+
     free(delta_raw);
     free(choices_raw);
 }
@@ -3745,6 +4323,8 @@ static size_t oai_sse_write_cb(void *ptr, size_t size, size_t nmemb, void *userd
             if (s->line_buf.len > 0) {
                 oai_handle_sse_line(s, s->line_buf.data);
                 jbuf_reset(&s->line_buf);
+                if (s->stream_done)
+                    return 0;
             }
         } else if (p[i] != '\r') {
             jbuf_append_char(&s->line_buf, p[i]);
@@ -3753,8 +4333,206 @@ static size_t oai_sse_write_cb(void *ptr, size_t size, size_t nmemb, void *userd
     return total;
 }
 
+static bool oai_stream_terminal_success(const oai_sse_state_t *state) {
+    return state && state->stop_reason && !state->got_error;
+}
+
+static bool oai_validate_completed_turn(oai_sse_state_t *s);
+
+#ifdef DSCO_INTERNAL_TESTS
+typedef struct {
+    jbuf_t reasoning;
+    jbuf_t tool_args;
+} provider_test_stream_capture_t;
+
+static void provider_test_capture_openai_reasoning(const char *delta, void *ctx) {
+    provider_test_stream_capture_t *capture = (provider_test_stream_capture_t *)ctx;
+    if (capture)
+        jbuf_append(&capture->reasoning, delta);
+}
+
+static void provider_test_capture_openai_tool_arg_delta(const char *name, const char *id,
+                                                        const char *delta, void *ctx) {
+    (void)name; (void)id;
+    provider_test_stream_capture_t *capture = (provider_test_stream_capture_t *)ctx;
+    if (capture)
+        jbuf_append(&capture->tool_args, delta);
+}
+
+bool provider_test_parse_openai_sse_for_model(const char *bytes, size_t len,
+                                              const char *source_provider,
+                                              const char *request_model,
+                                              provider_test_openai_sse_result_t *out) {
+    if (!bytes || !out)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+    oai_sse_state_t state = {0};
+    provider_test_stream_capture_t capture;
+    jbuf_init(&state.line_buf, 256);
+    jbuf_init(&state.raw_body, 1024);
+    jbuf_init(&state.text_accum, 256);
+    jbuf_init(&state.reasoning_accum, 256);
+    jbuf_init(&state.reasoning_details_accum, 256);
+    jbuf_init(&capture.reasoning, 256);
+    jbuf_init(&capture.tool_args, 256);
+    state.request_model = request_model ? safe_strdup(request_model) : NULL;
+    const char *canonical_source =
+        source_provider ? provider_profile_canonical_name(source_provider) : NULL;
+    state.preserve_reasoning_details =
+        canonical_source && strcmp(canonical_source, "openrouter") == 0;
+    state.promote_reasoning_tool_xml =
+        canonical_source && strcmp(canonical_source, "lmstudio") == 0;
+    state.thinking_cb = provider_test_capture_openai_reasoning;
+    state.tool_delta_cb = provider_test_capture_openai_tool_arg_delta;
+    state.cb_ctx = &capture;
+
+    (void)oai_sse_write_cb((void *)bytes, 1, len, &state);
+
+    if (oai_promote_local_tool_calls(&state) == 0)
+        (void)oai_promote_reasoning_tool_xml(&state);
+    oai_append_reasoning_details_block(&state);
+    for (int i = 0; i < state.tool_slots_used; i++) {
+        oai_tool_call_state_t *slot = &state.tool_calls[i];
+        if (!slot->used || !slot->tool_name || state.block_count >= MAX_CONTENT_BLOCKS)
+            continue;
+        content_block_t *block = &state.blocks[state.block_count++];
+        block->type = safe_strdup("tool_use");
+        block->tool_name = safe_strdup(slot->tool_name);
+        block->tool_id = safe_strdup(oai_tool_state_id(slot));
+        block->tool_input = safe_strdup(
+            (slot->tool_args.data && slot->tool_args.data[0]) ? slot->tool_args.data : "{}");
+    }
+    if (state.text_accum.len > 0 && state.block_count < MAX_CONTENT_BLOCKS) {
+        content_block_t *block = &state.blocks[state.block_count++];
+        block->type = safe_strdup("text");
+        block->text = safe_strdup(state.text_accum.data);
+    }
+    if (state.reasoning_accum.len > 0 && state.block_count < MAX_CONTENT_BLOCKS) {
+        content_block_t *block = &state.blocks[state.block_count++];
+        block->type = safe_strdup(state.block_count == 1 ? "text" : "thinking");
+        block->text = safe_strdup(state.reasoning_accum.data);
+    }
+
+    out->parsed.count = state.block_count;
+    out->parsed.blocks =
+        safe_malloc((state.block_count > 0 ? state.block_count : 1) * sizeof(content_block_t));
+    memcpy(out->parsed.blocks, state.blocks, state.block_count * sizeof(content_block_t));
+    out->terminal_success =
+        oai_validate_completed_turn(&state) && oai_stream_terminal_success(&state);
+    out->parsed.stop_reason = state.stop_reason;
+    state.stop_reason = NULL;
+    out->reasoning_stream = safe_strdup(capture.reasoning.data ? capture.reasoning.data : "");
+    out->tool_arg_delta_stream = safe_strdup(capture.tool_args.data ? capture.tool_args.data : "");
+    out->done = state.stream_done;
+
+    free(state.stop_reason);
+    free(state.error_msg);
+    free(state.actual_model);
+    free(state.generation_id);
+    free(state.request_model);
+    free(state.reasoning_details_seen);
+    for (int i = 0; i < state.tool_slots_used; i++) {
+        free(state.tool_calls[i].tool_name);
+        free(state.tool_calls[i].tool_id);
+        jbuf_free(&state.tool_calls[i].tool_args);
+    }
+    jbuf_free(&state.raw_body);
+    jbuf_free(&state.line_buf);
+    jbuf_free(&state.text_accum);
+    jbuf_free(&state.reasoning_accum);
+    jbuf_free(&state.reasoning_details_accum);
+    jbuf_free(&capture.reasoning);
+    jbuf_free(&capture.tool_args);
+    return true;
+}
+
+bool provider_test_parse_openai_sse(const char *bytes, size_t len,
+                                    provider_test_openai_sse_result_t *out) {
+    return provider_test_parse_openai_sse_for_model(bytes, len, NULL, NULL, out);
+}
+
+void provider_test_free_openai_sse_result(provider_test_openai_sse_result_t *result) {
+    if (!result)
+        return;
+    json_free_response(&result->parsed);
+    free(result->reasoning_stream);
+    free(result->tool_arg_delta_stream);
+    memset(result, 0, sizeof(*result));
+}
+#endif
+
+static void oai_protocol_error(oai_sse_state_t *s, const char *reason, const char *message) {
+    if (!s || s->got_error)
+        return;
+    s->got_error = true;
+    free(s->stop_reason);
+    s->stop_reason = safe_strdup(reason);
+    free(s->error_msg);
+    s->error_msg = safe_strdup(message);
+}
+
+static bool oai_validate_completed_turn(oai_sse_state_t *s) {
+    if (!s)
+        return false;
+    if (!s->stop_reason)
+        oai_protocol_error(s, "incomplete_stream", "stream ended without finish_reason");
+
+    bool has_tool = false;
+    int tool_count = 0;
+    for (int i = 0; i < s->tool_slots_used && !s->got_error; i++) {
+        oai_tool_call_state_t *slot = &s->tool_calls[i];
+        if (!slot->used)
+            continue;
+        if (!slot->tool_name || !slot->tool_name[0]) {
+            oai_protocol_error(s, "invalid_tool_call", "tool call ended without a function name");
+            break;
+        }
+        if (!slot->tool_id || !slot->tool_id[0]) {
+            oai_protocol_error(s, "invalid_tool_call", "tool call ended without a provider call ID");
+            break;
+        }
+        const char *args = (slot->tool_args.data && slot->tool_args.data[0])
+                               ? slot->tool_args.data
+                               : "{}";
+        while (*args && isspace((unsigned char)*args))
+            args++;
+        if (*args != '{' || !json_is_valid_container(args)) {
+            oai_protocol_error(s, "invalid_tool_arguments",
+                               "tool call ended with malformed JSON arguments");
+            break;
+        }
+        for (int j = 0; j < i; j++) {
+            oai_tool_call_state_t *prior = &s->tool_calls[j];
+            if (prior->used && prior->tool_id && strcmp(prior->tool_id, slot->tool_id) == 0) {
+                oai_protocol_error(s, "duplicate_tool_call_id",
+                                   "stream returned duplicate tool call IDs");
+                break;
+            }
+        }
+        has_tool = true;
+        tool_count++;
+    }
+    if (!s->got_error && s->stop_reason && strcmp(s->stop_reason, "tool_use") == 0 && !has_tool)
+        oai_protocol_error(s, "invalid_tool_call", "tool_calls finish had no complete tool call");
+    if (!s->got_error && !has_tool && s->text_accum.len == 0 && s->reasoning_accum.len == 0)
+        oai_protocol_error(s, "empty_response", "model stream completed without output");
+    if (!s->got_error) {
+        int required_blocks = tool_count;
+        required_blocks += s->text_accum.len > 0 ? 1 : 0;
+        required_blocks += s->reasoning_accum.len > 0 ? 1 : 0;
+        required_blocks +=
+            s->preserve_reasoning_details && s->reasoning_details_accum.len > 0 ? 1 : 0;
+        if (required_blocks > MAX_CONTENT_BLOCKS)
+            oai_protocol_error(s, "response_too_large",
+                               "stream response exceeded the content block limit");
+    }
+    return !s->got_error;
+}
+
 static stream_result_t openai_stream(provider_t *p, const char *api_key, const char *request_json,
                                      stream_text_cb text_cb, stream_tool_start_cb tool_cb,
+                                     stream_tool_arg_delta_cb tool_delta_cb,
                                      stream_thinking_cb thinking_cb, void *cb_ctx) {
     openai_data_t *od = (openai_data_t *)p->data;
     stream_result_t result = {0};
@@ -3792,9 +4570,18 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
     oai_sse_state_t state = {0};
     jbuf_init(&state.line_buf, 4096);
     jbuf_init(&state.text_accum, 4096);
+    jbuf_init(&state.raw_body, 1024);
     jbuf_init(&state.reasoning_accum, 1024);
+    jbuf_init(&state.reasoning_details_accum, 1024);
+    state.request_model = json_get_str(request_json, "model");
+    const char *source_provider = p && p->name ? provider_profile_canonical_name(p->name) : NULL;
+    state.preserve_reasoning_details =
+        source_provider && strcmp(source_provider, "openrouter") == 0;
+    state.promote_reasoning_tool_xml =
+        source_provider && strcmp(source_provider, "lmstudio") == 0;
     state.text_cb = text_cb;
     state.tool_cb = tool_cb;
+    state.tool_delta_cb = tool_delta_cb;
     state.thinking_cb = thinking_cb;
     state.cb_ctx = cb_ctx;
     state.telemetry_start = provider_now_sec();
@@ -3807,7 +4594,20 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
     curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, provider_credit_header_cb);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, &state.credit_reset_at);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
-    if (provider_is_sakana(p) || dcr_provider_find(p ? p->name : NULL)) {
+    if (provider_is_local_endpoint(p ? p->name : NULL)) {
+        /* Dense local models can spend several minutes ingesting a full agent
+         * prompt before emitting the first SSE byte. Treat silence as healthy
+         * prefill for longer than hosted APIs, while retaining a finite bound. */
+        long idle_s = 900L;
+        const char *idle_env = getenv("DSCO_LOCAL_STREAM_IDLE_TIMEOUT_S");
+        if (idle_env && idle_env[0]) {
+            long configured = atol(idle_env);
+            if (configured >= 30L && configured <= 7200L)
+                idle_s = configured;
+        }
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, idle_s);
+    } else if (provider_is_sakana(p) || dcr_provider_find(p ? p->name : NULL)) {
         /* Slow multi-agent / imported providers can legitimately stay quiet
          * during reasoning. DCR can carry provider-specific idle policy learned
          * from Codex/provider docs; Sakana defaults to 2h. */
@@ -3831,6 +4631,13 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
         llm_debug_save_request(request_json, 0);
 
     CURLcode res = curl_easy_perform(curl);
+    if (provider_stream_terminal_abort(res, state.stream_done))
+        res = CURLE_OK;
+    /* Flush remaining partial line so the full error body reaches raw_body. */
+    if (state.line_buf.len > 0) {
+        oai_handle_sse_line(&state, state.line_buf.data);
+        jbuf_reset(&state.line_buf);
+    }
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     {
@@ -3854,31 +4661,30 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
     result.http_status = (int)http_code;
 
     if (res == CURLE_OK && http_code == 200) {
-        result.ok = true;
+        if (oai_promote_local_tool_calls(&state) == 0)
+        (void)oai_promote_reasoning_tool_xml(&state);
+        result.ok = oai_validate_completed_turn(&state) &&
+                    oai_stream_terminal_success(&state);
 
+        oai_append_reasoning_details_block(&state);
         /* Finalize every accumulated tool call in index order. */
         for (int i = 0; i < state.tool_slots_used; i++) {
             oai_tool_call_state_t *slot = &state.tool_calls[i];
-            if (!slot->used || !slot->tool_name)
+            if (!slot->used || !slot->tool_name || state.block_count >= MAX_CONTENT_BLOCKS)
                 continue;
-            int bi = state.block_count++;
-            if (bi < MAX_CONTENT_BLOCKS) {
-                state.blocks[bi].type = safe_strdup("tool_use");
-                state.blocks[bi].tool_name = safe_strdup(slot->tool_name);
-                state.blocks[bi].tool_id = safe_strdup(oai_tool_state_id(slot));
-                state.blocks[bi].tool_input = safe_strdup(
-                    (slot->tool_args.data && slot->tool_args.data[0]) ? slot->tool_args.data
-                                                                      : "{}");
-            }
+            content_block_t *block = &state.blocks[state.block_count++];
+            block->type = safe_strdup("tool_use");
+            block->tool_name = safe_strdup(slot->tool_name);
+            block->tool_id = safe_strdup(oai_tool_state_id(slot));
+            block->tool_input = safe_strdup(
+                (slot->tool_args.data && slot->tool_args.data[0]) ? slot->tool_args.data : "{}");
         }
 
         /* Add text block if we accumulated text */
-        if (state.text_accum.len > 0) {
-            int bi = state.block_count++;
-            if (bi < MAX_CONTENT_BLOCKS) {
-                state.blocks[bi].type = safe_strdup("text");
-                state.blocks[bi].text = safe_strdup(state.text_accum.data);
-            }
+        if (state.text_accum.len > 0 && state.block_count < MAX_CONTENT_BLOCKS) {
+            content_block_t *block = &state.blocks[state.block_count++];
+            block->type = safe_strdup("text");
+            block->text = safe_strdup(state.text_accum.data);
         }
 
         /* Reasoning-only turn fallback. Some upstreams (notably OpenRouter
@@ -3893,10 +4699,10 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
          * Moonshot/Kimi) that require replaying prior reasoning during
          * multi-step tool calling. Keep it as an internal 'thinking' block;
          * request builders may serialize it provider-specifically. */
-        if (state.reasoning_accum.len > 0) {
-            int bi = state.block_count++;
-            state.blocks[bi].type = safe_strdup(state.block_count == 1 ? "text" : "thinking");
-            state.blocks[bi].text = safe_strdup(state.reasoning_accum.data);
+        if (state.reasoning_accum.len > 0 && state.block_count < MAX_CONTENT_BLOCKS) {
+            content_block_t *block = &state.blocks[state.block_count++];
+            block->type = safe_strdup(state.block_count == 1 ? "text" : "thinking");
+            block->text = safe_strdup(state.reasoning_accum.data);
         }
 
         /* Build result */
@@ -3927,15 +4733,12 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
         }
     } else {
         result.ok = false;
-        /* Extract a parseable error body from the last partial line (HTTP
-         * errors arrive as a JSON blob, not as SSE). This lets us surface
-         * a structured, actionable message to the agent layer — critical
-         * for the credit-too-low fallback path. */
-        if (state.line_buf.len > 0 && !state.error_msg) {
+        /* Extract error from the full raw_body, not just the last partial line. */
+        if (state.raw_body.len > 0 && !state.error_msg) {
             state.credit_reset_at = provider_reset_max(
                 state.credit_reset_at,
-                provider_credit_reset_at_from_text(state.line_buf.data, time(NULL)));
-            char *err_obj = json_get_raw(state.line_buf.data, "error");
+                provider_credit_reset_at_from_text(state.raw_body.data, time(NULL)));
+            char *err_obj = json_get_raw(state.raw_body.data, "error");
             if (err_obj) {
                 state.credit_reset_at = provider_reset_max(
                     state.credit_reset_at,
@@ -3986,13 +4789,25 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
             }
         } else if (state.got_error && state.error_msg) {
             fprintf(stderr, "dsco: HTTP %d: %s\n", (int)http_code, state.error_msg);
-        } else if (state.line_buf.len > 0) {
+        } else if (state.raw_body.len > 0) {
             fprintf(stderr, "dsco: HTTP %d: %.*s\n", (int)http_code,
-                    (int)(state.line_buf.len < 500 ? state.line_buf.len : 500),
-                    state.line_buf.data);
+                    (int)(state.raw_body.len < 500 ? state.raw_body.len : 500),
+                    state.raw_body.data);
         } else {
             fprintf(stderr, "dsco: request failed HTTP %d (url: %s)\n", (int)http_code,
                     od->api_url);
+        }
+        /* Store error in result.parsed so the caller survives fallback destruction. */
+        const char *err_text = state.error_msg ? state.error_msg :
+            state.raw_body.len > 0 ? state.raw_body.data : NULL;
+        if (err_text) {
+            result.parsed.stop_reason = safe_strdup(
+                state.credit_too_low ? "credit_too_low" : "error");
+            result.parsed.blocks = safe_malloc(sizeof(content_block_t));
+            memset(&result.parsed.blocks[0], 0, sizeof(content_block_t));
+            result.parsed.count = 1;
+            result.parsed.blocks[0].type = safe_strdup("text");
+            result.parsed.blocks[0].text = safe_strdup(err_text);
         }
         free(state.stop_reason);
     }
@@ -4027,14 +4842,18 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key, const c
      * for structural symmetry. */
     free(state.actual_model);
     free(state.generation_id);
+    free(state.request_model);
+    free(state.reasoning_details_seen);
     for (int i = 0; i < state.tool_slots_used; i++) {
         free(state.tool_calls[i].tool_name);
         free(state.tool_calls[i].tool_id);
         jbuf_free(&state.tool_calls[i].tool_args);
     }
+    jbuf_free(&state.raw_body);
     jbuf_free(&state.line_buf);
     jbuf_free(&state.text_accum);
     jbuf_free(&state.reasoning_accum);
+    jbuf_free(&state.reasoning_details_accum);
 
     return result;
 }
@@ -4327,16 +5146,19 @@ static struct curl_slist *chatgpt_native_build_headers(provider_t *p, const char
 /* ── Responses API SSE parser ───────────────────────────────────────────── */
 typedef struct {
     jbuf_t line_buf;
+    jbuf_t raw_body; /* non-SSE content (HTTP error bodies) for diagnostics */
     jbuf_t text_accum;
     jbuf_t reasoning_accum;
     stream_text_cb text_cb;
     stream_tool_start_cb tool_cb;
+    stream_tool_arg_delta_cb tool_delta_cb;
     stream_thinking_cb thinking_cb;
     void *cb_ctx;
     usage_t usage;
     char *stop_reason;
     bool got_error;
     bool credit_too_low;
+    bool stream_done;
     char *error_msg;
     time_t credit_reset_at;
     content_block_t tool_blocks[MAX_CONTENT_BLOCKS];
@@ -4371,14 +5193,47 @@ static void chatgpt_announce_tool(chatgpt_sse_state_t *s, const char *name,
         s->tool_cb(name, id, s->cb_ctx);
 }
 
-static void chatgpt_handle_event(chatgpt_sse_state_t *s, const char *data) {
-    if (!data || !data[0] || strcmp(data, "[DONE]") == 0)
+static void chatgpt_import_usage(chatgpt_sse_state_t *s, const char *usage) {
+    if (!s || !usage)
         return;
+    s->usage.input_tokens = json_get_int(usage, "input_tokens", s->usage.input_tokens);
+    s->usage.output_tokens = json_get_int(usage, "output_tokens", s->usage.output_tokens);
+    char *itd = json_get_raw(usage, "input_tokens_details");
+    if (itd) {
+        int c = json_get_int(itd, "cached_tokens", 0);
+        if (c > 0)
+            s->usage.cache_read_input_tokens = c;
+        free(itd);
+    }
+}
+
+static void chatgpt_import_response_usage(chatgpt_sse_state_t *s, const char *data) {
+    if (!s || !data)
+        return;
+    char *resp = json_get_raw(data, "response");
+    char *usage = resp ? json_get_raw(resp, "usage") : NULL;
+    if (!usage)
+        usage = json_get_raw(data, "usage");
+    if (usage) {
+        chatgpt_import_usage(s, usage);
+        free(usage);
+    }
+    free(resp);
+}
+
+static void chatgpt_handle_event(chatgpt_sse_state_t *s, const char *data) {
+    if (!data || !data[0])
+        return;
+    if (strcmp(data, "[DONE]") == 0) {
+        s->stream_done = true;
+        return;
+    }
     char *type = json_get_str(data, "type");
     if (!type)
         return;
 
-    if (strcmp(type, "response.output_text.delta") == 0) {
+    if (strcmp(type, "response.output_text.delta") == 0 ||
+        strcmp(type, "response.refusal.delta") == 0) {
         char *delta = json_get_str(data, "delta");
         if (delta && delta[0]) {
             jbuf_append(&s->text_accum, delta);
@@ -4386,9 +5241,24 @@ static void chatgpt_handle_event(chatgpt_sse_state_t *s, const char *data) {
                 s->text_cb(delta, s->cb_ctx);
         }
         free(delta);
-    } else if (strcmp(type, "response.reasoning_summary_text.delta") == 0 ||
-               strcmp(type, "response.reasoning_text.delta") == 0) {
+    } else if (strcmp(type, "response.function_call_arguments.delta") == 0) {
         char *delta = json_get_str(data, "delta");
+        if (delta && delta[0] && s->tool_delta_cb) {
+            char *call_id = json_get_str(data, "call_id");
+            char *item_id = json_get_str(data, "item_id");
+            const char *id = (call_id && call_id[0]) ? call_id : item_id;
+            s->tool_delta_cb(NULL, id, delta, s->cb_ctx);
+            free(call_id);
+            free(item_id);
+        }
+        free(delta);
+    } else if (strcmp(type, "response.reasoning_summary_text.delta") == 0 ||
+               strcmp(type, "response.reasoning_text.delta") == 0 ||
+               strcmp(type, "response.reasoning_summary.delta") == 0 ||
+               strcmp(type, "response.reasoning.delta") == 0) {
+        char *delta = json_get_str(data, "delta");
+        if (!delta)
+            delta = json_get_str(data, "text");
         if (delta && delta[0]) {
             jbuf_append(&s->reasoning_accum, delta);
             if (s->thinking_cb)
@@ -4422,28 +5292,14 @@ static void chatgpt_handle_event(chatgpt_sse_state_t *s, const char *data) {
             free(itype);
             free(item);
         }
-    } else if (strcmp(type, "response.completed") == 0) {
-        char *resp = json_get_raw(data, "response");
-        if (resp) {
-            char *usage = json_get_raw(resp, "usage");
-            if (usage) {
-                s->usage.input_tokens = json_get_int(usage, "input_tokens", s->usage.input_tokens);
-                s->usage.output_tokens =
-                    json_get_int(usage, "output_tokens", s->usage.output_tokens);
-                char *itd = json_get_raw(usage, "input_tokens_details");
-                if (itd) {
-                    int c = json_get_int(itd, "cached_tokens", 0);
-                    if (c > 0)
-                        s->usage.cache_read_input_tokens = c;
-                    free(itd);
-                }
-                free(usage);
-            }
-            free(resp);
-        }
+    } else if (strcmp(type, "response.completed") == 0 ||
+               strcmp(type, "response.done") == 0) {
+        chatgpt_import_response_usage(s, data);
         if (!s->stop_reason)
             s->stop_reason = safe_strdup(s->tool_block_count > 0 ? "tool_use" : "end_turn");
+        s->stream_done = true;
     } else if (strcmp(type, "response.failed") == 0 || strcmp(type, "error") == 0) {
+        s->stream_done = true;
         s->credit_reset_at = provider_reset_max(
             s->credit_reset_at, provider_credit_reset_at_from_text(data, time(NULL)));
         char *resp = json_get_raw(data, "response");
@@ -4468,8 +5324,14 @@ static void chatgpt_handle_event(chatgpt_sse_state_t *s, const char *data) {
 }
 
 static void chatgpt_sse_process_line(chatgpt_sse_state_t *s, const char *line) {
-    if (strncmp(line, "data:", 5) != 0)
+    if (strncmp(line, "data:", 5) != 0) {
+        if (line[0] && line[0] != ':') {
+            if (s->raw_body.len > 0)
+                jbuf_append(&s->raw_body, "\n");
+            jbuf_append(&s->raw_body, line);
+        }
         return;
+    }
     const char *data = line + 5;
     while (*data == ' ')
         data++;
@@ -4485,6 +5347,8 @@ static size_t chatgpt_sse_write_cb(void *ptr, size_t size, size_t nmemb, void *u
             if (s->line_buf.len > 0) {
                 chatgpt_sse_process_line(s, s->line_buf.data);
                 jbuf_reset(&s->line_buf);
+                if (s->stream_done)
+                    return 0;
             }
         } else if (p[i] != '\r') {
             jbuf_append_char(&s->line_buf, p[i]);
@@ -4496,6 +5360,7 @@ static size_t chatgpt_sse_write_cb(void *ptr, size_t size, size_t nmemb, void *u
 static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
                                              const char *request_json, stream_text_cb text_cb,
                                              stream_tool_start_cb tool_cb,
+                                             stream_tool_arg_delta_cb tool_delta_cb,
                                              stream_thinking_cb thinking_cb, void *cb_ctx) {
     stream_result_t result = {0};
     CURL *curl = curl_easy_init();
@@ -4511,12 +5376,16 @@ static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
     chatgpt_sse_state_t state = {0};
     jbuf_init(&state.line_buf, 4096);
     jbuf_init(&state.text_accum, 4096);
+    jbuf_init(&state.raw_body, 1024);
     jbuf_init(&state.reasoning_accum, 1024);
     state.text_cb = text_cb;
     state.tool_cb = tool_cb;
+    state.tool_delta_cb = tool_delta_cb;
     state.thinking_cb = thinking_cb;
     state.cb_ctx = cb_ctx;
 
+    if (provider_env_truthy(getenv("DSCO_DEBUG_REQUEST")))
+        llm_debug_save_request(request_json, 0);
     const char *url = chatgpt_backend_url();
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
@@ -4532,6 +5401,13 @@ static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
 
     CURLcode res = curl_easy_perform(curl);
+    if (provider_stream_terminal_abort(res, state.stream_done))
+        res = CURLE_OK;
+    /* Flush remaining partial line so the full error body reaches raw_body. */
+    if (state.line_buf.len > 0) {
+        chatgpt_sse_process_line(&state, state.line_buf.data);
+        jbuf_reset(&state.line_buf);
+    }
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     curl_slist_free_all(hdrs);
@@ -4561,13 +5437,35 @@ static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
         result.usage = state.usage;
     } else {
         result.ok = false;
-        /* free any collected tool blocks we won't return */
         for (int i = 0; i < state.tool_block_count; i++) {
             free(state.tool_blocks[i].type);
             free(state.tool_blocks[i].tool_name);
             free(state.tool_blocks[i].tool_id);
             free(state.tool_blocks[i].tool_input);
         }
+        /* Extract error from the full raw_body, not just the last partial line. */
+        if (state.raw_body.len > 0 && !state.error_msg) {
+            state.credit_reset_at = provider_reset_max(
+                state.credit_reset_at,
+                provider_credit_reset_at_from_text(state.raw_body.data, time(NULL)));
+            char *err_obj = json_get_raw(state.raw_body.data, "error");
+            if (err_obj) {
+                state.credit_reset_at = provider_reset_max(
+                    state.credit_reset_at,
+                    provider_credit_reset_at_from_text(err_obj, time(NULL)));
+                char *msg = json_get_str(err_obj, "message");
+                if (msg) {
+                    state.got_error = true;
+                    state.error_msg = msg;
+                    if (provider_msg_is_credit_too_low(msg) || http_code == 402 ||
+                        http_code == 429)
+                        state.credit_too_low = true;
+                }
+                free(err_obj);
+            }
+        }
+        if (http_code == 402 || http_code == 429)
+            state.credit_too_low = true;
         if (http_code == 401 || http_code == 403) {
             fprintf(stderr,
                     "  \033[31m✗ ChatGPT auth failed (HTTP %ld).\033[0m "
@@ -4585,12 +5483,24 @@ static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
             }
         } else if (state.error_msg) {
             fprintf(stderr, "dsco: ChatGPT HTTP %ld: %s\n", http_code, state.error_msg);
-        } else if (state.line_buf.len > 0) {
+        } else if (state.raw_body.len > 0) {
             fprintf(stderr, "dsco: ChatGPT HTTP %ld: %.*s\n", http_code,
-                    (int)(state.line_buf.len < 500 ? state.line_buf.len : 500),
-                    state.line_buf.data);
+                    (int)(state.raw_body.len < 500 ? state.raw_body.len : 500),
+                    state.raw_body.data);
         } else {
             fprintf(stderr, "dsco: ChatGPT request failed (HTTP %ld)\n", http_code);
+        }
+        /* Store error in result.parsed so the caller survives fallback destruction. */
+        const char *err_text = state.error_msg ? state.error_msg :
+            state.raw_body.len > 0 ? state.raw_body.data : NULL;
+        if (err_text) {
+            result.parsed.stop_reason = safe_strdup(
+                state.credit_too_low ? "credit_too_low" : "error");
+            result.parsed.blocks = safe_malloc(sizeof(content_block_t));
+            memset(&result.parsed.blocks[0], 0, sizeof(content_block_t));
+            result.parsed.count = 1;
+            result.parsed.blocks[0].type = safe_strdup("text");
+            result.parsed.blocks[0].text = safe_strdup(err_text);
         }
         free(state.stop_reason);
     }
@@ -4602,6 +5512,7 @@ static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
     }
 
     free(state.error_msg);
+    jbuf_free(&state.raw_body);
     jbuf_free(&state.line_buf);
     jbuf_free(&state.text_accum);
     jbuf_free(&state.reasoning_accum);
@@ -5212,6 +6123,7 @@ bool provider_prepare(provider_t *p) {
 
 stream_result_t provider_stream_reuse(provider_t *p, const char *api_key, const char *request_json,
                                       stream_text_cb text_cb, stream_tool_start_cb tool_cb,
+                                      stream_tool_arg_delta_cb tool_delta_cb,
                                       stream_thinking_cb thinking_cb, void *cb_ctx) {
     stream_result_t result = {0};
     if (!p || !p->stream)
@@ -5219,7 +6131,7 @@ stream_result_t provider_stream_reuse(provider_t *p, const char *api_key, const 
     if (p->data && p->stream == openai_stream) {
         (void)provider_prepare(p);
     }
-    return p->stream(p, api_key, request_json, text_cb, tool_cb, thinking_cb, cb_ctx);
+    return p->stream(p, api_key, request_json, text_cb, tool_cb, tool_delta_cb, thinking_cb, cb_ctx);
 }
 
 void provider_reset_connection(provider_t *p) {
@@ -5484,9 +6396,9 @@ static const char *provider_family_primary_model(const char *family, bool prefer
         return provider_openai_primary_model(prefer_code);
     if (strcmp(family, "anthropic") == 0) {
         if (provider_has_usable_key("anthropic", NULL))
-            return "claude-sonnet-4-6";
+            return "claude-sonnet-5";
         if (provider_has_usable_key("openrouter", NULL))
-            return "openrouter/anthropic/claude-sonnet-4.6";
+            return "openrouter/anthropic/claude-sonnet-5";
         return NULL;
     }
     if (strcmp(family, "google") == 0) {
@@ -5632,6 +6544,28 @@ static const char *provider_openai_subscription_fallback_model(bool prefer_code)
     return provider_openai_primary_model(prefer_code);
 }
 
+static int provider_append_configured_local_fallback(const char *requested_model,
+                                                     char out_models[][128], int count,
+                                                     int max_models) {
+    const char *candidate = getenv("DSCO_LOCAL_FALLBACK_MODEL");
+    if (!candidate || !candidate[0] || !out_models || max_models <= 0)
+        return count;
+
+    const char *resolved = model_resolve_alias(candidate);
+    const char *provider = provider_detect(resolved, NULL);
+    if (!provider_is_local_endpoint(provider))
+        return count;
+
+    /* The local lane is the last resort. Reserve the final slot when the
+     * credential-backed chain already filled the caller's capacity. */
+    if (count >= max_models) {
+        count = max_models - 1;
+        out_models[count][0] = '\0';
+    }
+    provider_append_unique_model(out_models, &count, max_models, requested_model, candidate);
+    return count;
+}
+
 int provider_build_default_fallback_models(const char *model, char out_models[][128],
                                            int max_models) {
     if (!out_models || max_models <= 0)
@@ -5664,7 +6598,8 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
         provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_family_primary_model("deepseek", false));
         provider_append_unique_model(out_models, &count, max_models, requested_model, xai_last);
-        return count;
+        return provider_append_configured_local_fallback(requested_model, out_models, count,
+                                                         max_models);
     }
 
     if (strcmp(family, "openai") == 0) {
@@ -5681,7 +6616,8 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
         provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_family_primary_model("deepseek", false));
         provider_append_unique_model(out_models, &count, max_models, requested_model, xai_last);
-        return count;
+        return provider_append_configured_local_fallback(requested_model, out_models, count,
+                                                         max_models);
     }
 
     if (strcmp(family, "xai") == 0) {
@@ -5697,7 +6633,8 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
                                      provider_family_primary_model("google", false));
         provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("deepseek", false));
-        return count;
+        return provider_append_configured_local_fallback(requested_model, out_models, count,
+                                                         max_models);
     }
 
     const char *xai_last = provider_xai_primary_model(prefer_code);
@@ -5715,7 +6652,8 @@ int provider_build_default_fallback_models(const char *model, char out_models[][
     provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                  provider_family_primary_model("qwen", false));
     provider_append_unique_model(out_models, &count, max_models, requested_model, xai_last);
-    return count;
+    return provider_append_configured_local_fallback(requested_model, out_models, count,
+                                                     max_models);
 }
 
 const char *provider_select_default_primary_model(bool prefer_code) {
@@ -6015,8 +6953,19 @@ bool provider_has_usable_key(const char *provider_name, const char *fallback_api
 
 const char *provider_route_for_model(const char *model, const char *fallback_api_key,
                                      const char *provider_override) {
-    if (provider_override && provider_override[0])
-        return provider_profile_canonical_name(provider_override);
+    if (provider_override && provider_override[0]) {
+        const char *override_name = provider_profile_canonical_name(provider_override);
+        /* `openai` names the provider family, not necessarily the API-key
+         * billing lane. Prefer the already-authorized Codex subscription for
+         * supported OpenAI models, exactly as automatic routing does. Operators
+         * can force the API lane with DSCO_DISABLE_CODEX_OAUTH_DISCOVERY=1. */
+        if (override_name && strcmp(override_name, "openai") == 0 &&
+            !provider_env_truthy(getenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY")) &&
+            provider_has_usable_key("openai-codex", NULL) &&
+            codex_cache_model_supported(model))
+            return "openai-codex";
+        return override_name;
+    }
 
     const char *provider_name = provider_detect(model, fallback_api_key);
     bool explicit_native_namespace =

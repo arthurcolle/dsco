@@ -99,7 +99,7 @@
           "audio_token_usage",
           "duration_estimates"
         ],
-        "dsco_status": "metadata_only",
+        "dsco_status": "partial_direct_generation_tool",
         "endpoints": [
           "/audio/speech",
           "/audio/transcriptions",
@@ -114,6 +114,7 @@
         "cost_hooks": [
           "image_input_tokens",
           "image_output_price",
+          "image_output_tokens",
           "batch_video_image_price"
         ],
         "dsco_status": "metadata_only",
@@ -122,9 +123,18 @@
           "/images/edits",
           "/images/variations"
         ],
+        "models": [
+          "gpt-image-2",
+          "gpt-image-1.5",
+          "gpt-image-1",
+          "gpt-image-1-mini",
+          "dall-e-3",
+          "dall-e-2"
+        ],
+        "default_model": "gpt-image-2",
         "name": "images",
-        "notes": "Image generation/edit/variation surfaces require modality-specific price accounting.",
-        "status": "covered_metadata"
+        "notes": "Image generation/edit/variation surfaces require modality-specific price accounting. GPT Image models return b64_json by default; current direct Image API default is gpt-image-2.",
+        "status": "covered_partial"
       },
       {
         "cost_hooks": [
@@ -362,9 +372,22 @@
         ],
         "name": "computer_use",
         "status": "tracked_behavior"
+      },
+      {
+        "cost_hooks": [
+          "model_tokens",
+          "image_input_tokens",
+          "image_output_tokens",
+          "image_output_price"
+        ],
+        "name": "image_generation",
+        "status": "tracked_cost",
+        "supported_mainline_models": [
+          "gpt-5+"
+        ]
       }
     ],
-    "review_scope": "OpenAI public API reference endpoint groups and current API guides reviewed 2026-07-02"
+    "review_scope": "OpenAI public API reference endpoint groups and current API guides reviewed 2026-07-08"
   },
   "client_side_mechanics": {
     "codex_config": {},
@@ -517,6 +540,12 @@
       "url": "https://developers.openai.com/api/docs/guides/batch"
     },
     {
+      "confidence": 0.94,
+      "retrieved": "2026-07-08",
+      "title": "Image generation",
+      "url": "https://developers.openai.com/api/docs/guides/image-generation"
+    },
+    {
       "confidence": 0.92,
       "retrieved": "2026-07-02",
       "title": "Cost optimization",
@@ -551,6 +580,7 @@
     "implemented_features": [
       "openai_api_coverage_map",
       "openai_cost_management_map",
+      "openai_image_generation_tool",
       "automatic_prompt_cache",
       "prompt_cache_key",
       "prompt_cache_retention",
@@ -561,6 +591,8 @@
       "Batch API JSONL planner and result ingester",
       "Responses input-token preflight estimator",
       "OpenAI built-in tool/session/storage cost ledger",
+      "OpenAI image edits and variations native tools",
+      "Responses image_generation hosted tool wiring",
       "Realtime response.done usage import",
       "OpenAI admin usage reconciliation"
     ],
@@ -569,10 +601,11 @@
     "tests": [
       "test_prompt_cache_openai_request_shape",
       "test_prompt_cache_provider_policy_matrix",
+      "test_openai_image_generate_tool_registered_and_gated",
       "test_openai_metadata_covers_current_api_and_cost_controls"
     ]
   },
-  "last_reviewed": "2026-07-02",
+  "last_reviewed": "2026-07-08",
   "prompt_caching": {
     "invalidates_on": [
       "prefix_change",
@@ -690,6 +723,9 @@
       "container_gb_minutes",
       "vector_store_gb_days",
       "video_seconds",
+      "image_input_tokens",
+      "image_output_tokens",
+      "image_output_units",
       "audio_minutes",
       "batch_request_count"
     ],
@@ -723,6 +759,30 @@
         "strict_schema": true,
         "supported": true
       }
+    },
+    {
+      "base_url": "https://api.openai.com/v1",
+      "endpoint": "/images/generations",
+      "modalities": {
+        "input": [
+          "text"
+        ],
+        "output": [
+          "image"
+        ]
+      },
+      "name": "image_generations",
+      "status": "supported",
+      "streaming": {
+        "format": "none",
+        "supported": false
+      },
+      "tools": {
+        "parallel_tool_calls": false,
+        "strict_schema": false,
+        "supported": false
+      },
+      "default_model": "gpt-image-2"
     },
     {
       "base_url": "https://api.openai.com/v1",
