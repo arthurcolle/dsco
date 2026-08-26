@@ -78,21 +78,22 @@ COSMO_TARGET ?= dsco.distributed.systems
 COSMO_LEGACY_TARGET ?= dsco.com
 COSMOCC_VERSION ?= 4.0.2
 
-SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swarm.c tui.c native_ui.c native_ui_json.c pixel_tui.c pixel_fx.c ui_motion.c kitty_graphics.c rich_text.c font_compat.c kitty_tools.c kitty_agent_windows.c env_config.c \
-	md.c baseline.c chronicle.c agent_event.c callbacks.c setup.c crypto.c eval.c pipeline.c plugin.c kitty_banner.c \
+SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swarm.c swarm_daemon.c tui.c native_ui.c native_ui_json.c pixel_tui.c pixel_tui_perf.c pixel_fx.c ui_motion.c kitty_graphics.c rich_text.c font_compat.c kitty_tools.c kitty_agent_windows.c env_config.c \
+	px_backend.c px_theme.c native_composer.c native_masthead.c compositor_parity.c compositor_stream_bench.c \
+	md.c rtf.c baseline.c chronicle.c agent_event.c callbacks.c setup.c crypto.c eval.c pipeline.c plugin.c kitty_banner.c \
 			semantic.c hlc.c ipc.c mcp.c mcp_server.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c instrumenter.c structured_process.c task_profile.c \
 	output_guard.c topology.c workspace.c plan.c stateful_atoms.c recovery.c router.c \
 		durable_agents.c bus_cli.c skills_cli.c skill_index.c \
 	capability.c \
-	pheromone.c ooda.c killswitch.c governance.c gov_experiment.c memory_tier.c talons.c avian.c \
+	pheromone.c ooda.c overmind.c killswitch.c governance.c gov_experiment.c memory_tier.c talons.c avian.c \
 	arena_alloc.c event_loop.c vm.c scheduler.c waiter.c vfs.c trading.c legion.c \
 	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c harden.c embedded_data.c cstring_unlock.c \
 	se_store.c watchdog.c audit_log.c heartbeat.c env_guard.c peer_bootstrap.c presence.c \
 	project.c project_mux.c project_grid.c \
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
 	fingerprint.c trust.c toolmgmt.c connector.c integration_fabric.c codex_app_directory.c openrouter_cache.c codex_cache.c codex_usage.c dcr.c \
-	openai_oauth.c local_llm.c \
-	startup.c plot.c anim.c fractal.c shadeexpr.c face_sdf.c avatar.c self_improve.c bg_learn.c autoresearch.c rsi_curriculum.c pets.c img_util.c supervisor.c \
+	openai_oauth.c kimi_oauth.c local_llm.c model_pricing.c subscription_gate.c subscription_bench.c \
+	startup.c plot.c anim.c fractal.c shadeexpr.c face_sdf.c avatar.c self_improve.c bg_learn.c autoresearch.c rsi_curriculum.c pets.c img_util.c supervisor.c ring_buffer.c \
 	graphsub_client.c graphsub_tools.c \
 	openai_images.c \
 	webhook_security.c \
@@ -116,6 +117,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	remote_cli.c \
 	cluster.c \
 	activation_lease.c \
+	cloud_runtime.c context_fabric.c acp_server.c \
 	json_fast.c \
 	construct.c prompt_pool.c rl_hooks.c \
 	$(OPTIONAL_SRCS)
@@ -525,11 +527,11 @@ dsc: dsc.c
 
 # Standalone animated Distributed Systems wordmark (Kitty graphics protocol).
 dsco-banner: $(SRC_DIR)/kitty_banner_main.c $(SRC_DIR)/kitty_banner.c \
-		$(SRC_DIR)/kitty_graphics.c $(INC_DIR)/kitty_banner.h \
-		$(INC_DIR)/kitty_banner_mask.h $(INC_DIR)/kitty_graphics.h
+		$(SRC_DIR)/kitty_graphics.c $(SRC_DIR)/px_theme.c $(INC_DIR)/kitty_banner.h \
+		$(INC_DIR)/kitty_banner_mask.h $(INC_DIR)/kitty_graphics.h $(INC_DIR)/px_theme.h
 	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -I$(INC_DIR) \
 		-o $@ $(SRC_DIR)/kitty_banner_main.c $(SRC_DIR)/kitty_banner.c \
-		$(SRC_DIR)/kitty_graphics.c -lz -lm
+		$(SRC_DIR)/kitty_graphics.c $(SRC_DIR)/px_theme.c -lz -lm
 
 # Native semantic surface gallery. Use `--ppm /tmp/dsco-lab.ppm` headlessly,
 # or run `./dsco-kitty-lab --animate` inside Kitty/Ghostty/WezTerm.
@@ -801,12 +803,39 @@ $(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_
 test: $(TARGET) test_runner
 	./test_runner
 
+# End-to-end behavioral verification of documented gate claims against the
+# LIVE binary (drives `dsco mcp serve` over JSON-RPC; no LLM, deterministic).
+# NOTE: this verifies the gate itself — it runs with DSCO_GOV_BYPASS unset so
+# a shell-level DSCO_GOV_BYPASS=1 / DSCO_GOV_MODEL=none cannot silently make
+# these checks pass against an ungoverned process.
+test-gate-claims: $(TARGET)
+	env -u DSCO_GOV_BYPASS -u DSCO_GOV_MODEL \
+		-u DSCO_ALLOW_READ -u DSCO_ALLOW_WRITE -u DSCO_ALLOW_NET \
+		-u DSCO_ALLOW_RUN -u DSCO_ALLOW_SECRETS -u DSCO_ALLOW_CONTROL \
+		-u DSCO_ALLOW_EXFIL \
+		bash tests/verify_gate_claims.sh ./dsco
+
 test-fast: $(TARGET) test_runner test_command_plane
 	./test_command_plane
 	DSCO_TEST_QUICK=1 ./test_runner
 
 test-cli-flags: $(TARGET)
 	bash tests/test_cli_global_flags.sh ./$(TARGET)
+
+# Deterministic capability-gate hardening test (G04 .git control-writes,
+# G05 symlink-scope escape). Links only the gate + json objects plus a tiny
+# stub for the registry read-only predicate. No network, no LLM.
+test-cap-hardening: $(TARGET)
+	printf '#include <stdbool.h>\nbool tools_meta_is_read_only(const char *n){(void)n;return false;}\n' > build/obj/_cap_test_stub.c
+	$(CC) $(CFLAGS) -o test_cap_hardening tests/test_capability_hardening.c \
+		build/obj/capability.o build/obj/json_util.o build/obj/json_fast.o \
+		build/obj/_cap_test_stub.c
+	./test_cap_hardening
+
+# Deterministic cognitive-orchestration kernel test. No network or LLM.
+test-overmind:
+	$(CC) $(TEST_CFLAGS) -o test_overmind tests/test_overmind.c src/overmind.c
+	./test_overmind
 
 test_runner: $(TEST_OBJS) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)

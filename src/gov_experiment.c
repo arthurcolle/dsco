@@ -48,9 +48,13 @@ static gov_model_t parse_model(const char *v) {
     return GOV_MODEL_STANDARD;
 }
 
+/* File-scope (moved 2026-08-25) so gov_experiment_set_model() can invalidate
+ * it: mcp_server_run pins the posture after saved-env loading may already
+ * have resolved the lazy cache with a stale env snapshot. -1 = unresolved. */
+static _Atomic int g_model_cache = -1;
+
 gov_model_t gov_experiment_model(void) {
-    static _Atomic int cached = -1;
-    int c = atomic_load_explicit(&cached, memory_order_relaxed);
+    int c = atomic_load_explicit(&g_model_cache, memory_order_relaxed);
     if (c >= 0)
         return (gov_model_t)c;
     /* DSCO_GOV_BYPASS=1 is the legacy hard override → NONE. */
@@ -60,13 +64,18 @@ gov_model_t gov_experiment_model(void) {
         m = GOV_MODEL_NONE;
     else
         m = parse_model(getenv("DSCO_GOV_MODEL"));
-    atomic_store_explicit(&cached, (int)m, memory_order_relaxed);
+    atomic_store_explicit(&g_model_cache, (int)m, memory_order_relaxed);
     return m;
+}
+
+void gov_experiment_reset_cache(void) {
+    atomic_store_explicit(&g_model_cache, -1, memory_order_relaxed);
 }
 
 bool gov_experiment_bypass_all(void) {
     return gov_experiment_model() == GOV_MODEL_NONE;
 }
+
 
 /* ── Policy matrix ────────────────────────────────────────────────────────
    Which stages run, and whether a deny there enforces (blocks) or is merely

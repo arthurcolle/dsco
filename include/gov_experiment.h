@@ -53,6 +53,7 @@ const char *gov_stage_name(gov_stage_t s);
 
 /* True iff the whole gate should be skipped (model == NONE). */
 bool gov_experiment_bypass_all(void);
+void gov_experiment_reset_cache(void);
 
 /* True iff this stage should be EXECUTED for the active model. In AUDIT_ONLY
    every stage executes (for measurement). In MINIMAL only immune stages run. */
