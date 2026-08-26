@@ -63,6 +63,8 @@ LDLIBS ?= -lcurl -lsqlite3 -ldl -lm
 
 TARGET = dsco
 LITE_TARGET = dsco-lite
+SPINE_TARGET = spine-dsco-slim
+LOCAL_SMART_ROUTER_TARGET = local-smart-router
 WASM_TARGET = web/static/dsco_wasm.js
 WASM_EXPORTS = '["_dsco_wasm_version","_dsco_wasm_exports_json","_dsco_wasm_models_json","_dsco_wasm_tools_json","_dsco_wasm_route_explain","_dsco_wasm_tool_exec","_dsco_wasm_session_reset","_dsco_wasm_session_add","_dsco_wasm_session_state"]'
 WASM_CACHE_DIR ?= $(BUILD_DIR)/emscripten-cache
@@ -85,14 +87,15 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	capability.c \
 	pheromone.c ooda.c killswitch.c governance.c gov_experiment.c memory_tier.c talons.c avian.c \
 	arena_alloc.c event_loop.c vm.c scheduler.c waiter.c vfs.c trading.c legion.c \
-	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c \
+	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c harden.c embedded_data.c \
 	se_store.c watchdog.c audit_log.c heartbeat.c env_guard.c peer_bootstrap.c presence.c \
 	project.c project_mux.c project_grid.c \
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
 	fingerprint.c trust.c toolmgmt.c connector.c integration_fabric.c codex_app_directory.c openrouter_cache.c codex_cache.c dcr.c \
-	openai_oauth.c local_llm.c \
+	openai_oauth.c local_llm.c matrix_inference.c tool_call_normalizer.c \
 	startup.c plot.c anim.c fractal.c shadeexpr.c face_sdf.c avatar.c self_improve.c bg_learn.c rsi_curriculum.c pets.c img_util.c supervisor.c \
 	graphsub_client.c graphsub_tools.c \
+	openai_images.c \
 	webhook_security.c \
 	extension/backend.c extension/numerical_gsl.c extension/skill_requirements.c \
 	extension/eigen_backend.c extension/fftw_backend.c extension/backend_selftest.c \
@@ -105,6 +108,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	command_plane.c \
 	session_memory.c \
 	provider_pool.c \
+	route_catalog.c \
 	dsco_swim.c sequence_state.c \
 	math_fastpath.c \
 	http_pool.c \
@@ -113,7 +117,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	cluster.c \
 	activation_lease.c \
 	json_fast.c \
-	construct.c prompt_pool.c \
+	construct.c prompt_pool.c rl_hooks.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
 
@@ -334,9 +338,51 @@ endif
 # end of the link line so clang does not emit duplicate-library notices.
 LDLIBS := $(filter-out -lm,$(LDLIBS)) -lm
 
-all: $(TARGET) dsc dsco-new $(LITE_TARGET)
+# ── Hardened release switch (HARDEN=1) ──────────────────────────────────────
+# Compile the anti-RE bodies in (-DDSCO_HARDENED), drop debug info (-g) and the
+# compiler ident string, and strip local/debug symbols at link. The `harden`
+# target below drives this into an isolated build dir, then strips + hardened-
+# signs the result. Placed after all platform BASE_CFLAGS mutations so the
+# filter-out sees the final flag set.
+ifeq ($(HARDEN),1)
+BASE_CFLAGS := $(filter-out -g,$(BASE_CFLAGS)) -DDSCO_HARDENED -DDSCO_USE_OBF_SECRETS -fno-ident
+ifeq ($(UNAME_S),Darwin)
+RELEASE_LDFLAGS += -Wl,-x -Wl,-S
+else
+RELEASE_LDFLAGS += -Wl,-x -Wl,-s -Wl,--build-id=none -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
+endif
+endif
+
+all: $(TARGET) $(LITE_TARGET) $(SPINE_TARGET)
 debug: $(DEBUG_TARGET)
 dev: $(DEBUG_TARGET)
+
+# ── Hardened, ship-ready binary ─────────────────────────────────────────────
+# Builds the anti-RE profile into an isolated obj dir (keeps dev objects warm),
+# strips all local/debug symbols, and applies a hardened-runtime code signature
+# (blocks debugger attach + dyld injection for non-root). No .dbg is emitted.
+# Override the signing identity: `make harden DSCO_CODESIGN_ID="Developer ID..."`.
+DSCO_CODESIGN_ID ?= -
+.PHONY: harden harden-verify
+harden:
+	@echo "── building hardened dsco (anti-RE) ──"
+	$(MAKE) HARDEN=1 BUILD_DIR=build-harden $(TARGET)
+	strip -x $(TARGET) 2>/dev/null || strip $(TARGET)
+ifeq ($(UNAME_S),Darwin)
+	@codesign --remove-signature $(TARGET) 2>/dev/null || true
+	codesign --force --options runtime --entitlements scripts/harden.entitlements --sign "$(DSCO_CODESIGN_ID)" $(TARGET)
+endif
+	@$(MAKE) --no-print-directory harden-verify
+
+harden-verify:
+	@echo "── hardened build report ──"
+	@ls -la $(TARGET)
+	@printf 'symbols:      '; nm $(TARGET) 2>/dev/null | wc -l | tr -d ' '
+	@printf 'local syms:   '; nm $(TARGET) 2>/dev/null | grep -cE ' [tdb] ' || echo 0
+ifeq ($(UNAME_S),Darwin)
+	@printf 'codesign:     '; codesign -dv $(TARGET) 2>&1 | grep -iE 'flags' || echo '(unsigned)'
+endif
+	@printf 'string leak:  '; strings $(TARGET) 2>/dev/null | grep -cE '"env":|"comment":|api\.anthropic|oauth' | sed 's/$$/ sensitive strings (lower is better)/'
 
 profile-instrumented:
 	$(MAKE) BUILD_DIR=build/instrumented TARGET=$(PROFILE_TARGET) PROFILE_BUILD=1 $(PROFILE_TARGET)
@@ -447,9 +493,6 @@ $(COSMO_TARGET): $(OBJS) $(GSL_OBJS)
 endif
 endif
 
-dsc: dsc.c
-	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -o $@ $< -lcurl -lreadline
-
 $(DEBUG_TARGET): $(DEBUG_OBJS) $(GSL_DEBUG_OBJS)
 	$(CC) $(DEBUG_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
@@ -463,6 +506,22 @@ dsco-new: $(TARGET)
 $(LITE_TARGET): $(SRC_DIR)/lite_main.c $(INC_DIR)/config.h
 	$(CC) $(LITE_CFLAGS) -o $@ $<
 	-strip -x $@ 2>/dev/null || true
+
+$(SPINE_TARGET): $(SRC_DIR)/spine_dsco_slim.c $(LIB_OBJS) $(GSL_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(RELEASE_LDFLAGS) $(LDLIBS)
+
+$(LOCAL_SMART_ROUTER_TARGET): $(SRC_DIR)/local_smart_router.c $(SRC_DIR)/json_fast.c \
+		$(INC_DIR)/local_smart_router.h vendor/yyjson.h vendor/yyjson.c
+	$(CC) $(filter-out -MMD -MP,$(CFLAGS)) -Ivendor -o $@ \
+		$(SRC_DIR)/local_smart_router.c $(SRC_DIR)/json_fast.c -lcurl -lpthread
+
+.PHONY: test-local-smart-router
+test-local-smart-router: $(LOCAL_SMART_ROUTER_TARGET)
+	./$(LOCAL_SMART_ROUTER_TARGET) --self-test
+
+.PHONY: test-spine-dsco-slim
+test-spine-dsco-slim: $(SPINE_TARGET)
+	sh $(TEST_DIR)/test_spine_dsco_slim.sh ./$(SPINE_TARGET)
 
 # Source compilation rules
 # ── Pizza box: bake data/ blobs before generated .o files are compiled ──
@@ -510,6 +569,11 @@ $(ASAN_UBSAN_TEST_OBJ_DIR)/generated_%.o: src/generated/%.c | bake_data $(ASAN_U
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
+
+# embedded_data.c pulls in the generated key header + registry; bake first.
+$(OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h | bake_data
+$(DEBUG_OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h | bake_data
+$(TEST_OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h | bake_data
 
 ifeq ($(PROFILE_BUILD),1)
 $(OBJ_DIR)/instrumenter.o: CFLAGS := $(filter-out $(PROFILE_COVERAGE_FLAGS),$(CFLAGS)) -fsanitize-coverage=0
@@ -942,14 +1006,11 @@ docs-check:
 	python3 scripts/gen_external_tool_catalog.py --root . --check
 	python3 scripts/gen_repo_coverage.py --root . --check
 
-bench-startup: $(TARGET) dsc
+bench-startup: $(TARGET)
 	@echo "== dsco metadata startup =="
 	@/usr/bin/time -p sh -c './$(TARGET) --version >/dev/null 2>&1'
 	@/usr/bin/time -p sh -c './$(TARGET) --help >/dev/null 2>&1'
 	@/usr/bin/time -p sh -c './$(TARGET) --models-json >/dev/null 2>&1'
-	@echo "== dsc metadata startup =="
-	@/usr/bin/time -p sh -c './dsc --help >/dev/null 2>&1'
-
 bench-tool: $(TARGET)
 	@echo "== dsco direct local tool execution =="
 	@/usr/bin/time -p sh -c './$(TARGET) --tool-exec cwd "{}" >/dev/null 2>&1'
@@ -989,20 +1050,18 @@ release-hardened-native: $(TARGET)
 lint: format-check docs-check check-version
 
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET) $(LITE_TARGET) $(DEBUG_TARGET) $(PROFILE_TARGET) dsc test_runner coverage_runner $(TARGET)-asan $(TARGET)-ubsan asan-test_runner ubsan-test_runner
+	rm -rf $(BUILD_DIR) $(TARGET) $(LITE_TARGET) $(LOCAL_SMART_ROUTER_TARGET) $(DEBUG_TARGET) $(PROFILE_TARGET) test_runner coverage_runner $(TARGET)-asan $(TARGET)-ubsan asan-test_runner ubsan-test_runner
 
-install: $(TARGET) dsco-new $(LITE_TARGET) dsc
+install: $(TARGET) $(LITE_TARGET)
 	install -d $(PREFIX)/bin
 	install -d $(DSCO_SHARE_DIR)
 	install -m 755 $(TARGET) $(PREFIX)/bin/
 	install -m 755 $(LITE_TARGET) $(PREFIX)/bin/
-	install -m 755 dsc $(PREFIX)/bin/
 	install -m 755 scripts/live_face_avatar.sh $(PREFIX)/bin/dsco-live-face-avatar
-	install -m 755 dsco-new $(PREFIX)/bin/
 	install -m 644 $(INC_DIR)/tool_embeddings.bin $(DSCO_SHARE_DIR)/
 	install -m 755 face_capture.py $(DSCO_SHARE_DIR)/
 	install -d $(DSCO_DIR)/sessions $(DSCO_DIR)/plugins $(DSCO_DIR)/debug
-	@echo "installed dsco, dsco-lite, dsc, dsco-new to $(PREFIX)/bin/"
+	@echo "installed dsco, dsco-lite to $(PREFIX)/bin/"
 	@echo "installed tool_embeddings.bin to $(DSCO_SHARE_DIR)/"
 	@echo "installed dsco-live-face-avatar and face_capture.py"
 	@echo "created $(DSCO_DIR)/{sessions,plugins,debug}"
@@ -1027,7 +1086,7 @@ ui: $(TARGET) ui-deps
 .PHONY: all debug dev clean install uninstall test coverage docs docs-check \
 	profile profile-instrumented \
 	asan ubsan asan-test ubsan-test test_runner_tsan test_plan_cache_tsan test_runner_asan format format-check \
-	test-cli-flags \
+	test-cli-flags test-local-smart-router \
 	model-resolution-sim \
 	fast fast-build fast-test fast-quick fast-syntax fast-changed fast-bench fast-doctor \
 	changed-tests compile-commands build-report build-cache-doctor fast-objects time-trace ninja-file ninja-build \

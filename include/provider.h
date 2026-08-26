@@ -38,6 +38,7 @@ struct provider {
                                const char *request_json,
                                stream_text_cb text_cb,
                                stream_tool_start_cb tool_cb,
+                               stream_tool_arg_delta_cb tool_delta_cb,
                                stream_thinking_cb thinking_cb,
                                void *cb_ctx);
 
@@ -62,6 +63,7 @@ stream_result_t provider_stream_reuse(provider_t *p, const char *api_key,
                                       const char *request_json,
                                       stream_text_cb text_cb,
                                       stream_tool_start_cb tool_cb,
+                                      stream_tool_arg_delta_cb tool_delta_cb,
                                       stream_thinking_cb thinking_cb,
                                       void *cb_ctx);
 
@@ -160,8 +162,9 @@ bool provider_model_is_routable(const char *model,
                                 const char *provider_override,
                                 const char **out_provider_name);
 
-/* Build a default cross-lab fallback chain for a primary model. Returns the
- * number of models written into out_models. */
+/* Build a default cross-lab fallback chain for a primary model. When
+ * DSCO_LOCAL_FALLBACK_MODEL names a local provider, reserve the final slot for
+ * that always-available lane. Returns the number of models written. */
 int provider_build_default_fallback_models(const char *model,
                                            char out_models[][128],
                                            int max_models);
@@ -186,5 +189,26 @@ const char *provider_publish_api_key_env(const char *api_key);
  * which credentials are actually available. Returns NULL if the family has no
  * usable route. */
 const char *provider_primary_model_for(const char *family, bool prefer_code);
+
+#ifdef DSCO_INTERNAL_TESTS
+typedef struct {
+    parsed_response_t parsed;
+    char *reasoning_stream;
+    char *tool_arg_delta_stream;
+    bool done;
+    bool terminal_success;
+} provider_test_openai_sse_result_t;
+
+/* Feed raw OpenAI-compatible SSE bytes through the production line parser.
+ * Every allocation in the result is released by
+ * provider_test_free_openai_sse_result(). */
+bool provider_test_parse_openai_sse(const char *bytes, size_t len,
+                                    provider_test_openai_sse_result_t *out);
+bool provider_test_parse_openai_sse_for_model(const char *bytes, size_t len,
+                                              const char *source_provider,
+                                              const char *request_model,
+                                              provider_test_openai_sse_result_t *out);
+void provider_test_free_openai_sse_result(provider_test_openai_sse_result_t *result);
+#endif
 
 #endif

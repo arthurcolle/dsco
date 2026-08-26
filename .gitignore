@@ -139,3 +139,31 @@ mcp_smoke
 data/consumer_profile_ontology/*.csv
 data/consumer_profile_ontology/*.jsonl
 dsco-instrumented
+
+# hardening: never commit the embedded-blob key material
+include/embedded_key.gen.h
+build/.embed_key
+
+# hardening: generated encrypted blobs + registry are build artifacts (key-specific)
+src/generated/embedded_*.c
+include/embedded_data_registry.h
+
+# runtime + local artifacts: regenerate locally, never commit/merge
+.swarm/
+build-harden/
+bench/scale_map_test.out/
+ic-procurement-reading-list/
+data/consumer_profile_ontology/facet_index/
+reports/dspy_session_distill_*.json*
+PAT_BOLAND_THE_MEMORY_REPRICING.html
+/generated/
+/spine-dsco-slim
+/spine-dsco-slim.d
+/soap1.png
+/soap2.png
+
+# local side of the embedded-blob pipeline: per-machine, never commit
+/data/dsco_secrets.txt
+
+# scratch outputs
+quine_out.txt
