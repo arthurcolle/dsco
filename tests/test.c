@@ -8,6 +8,7 @@
 #include "config.h"
 #include "crypto.h"
 #include "eval.h"
+#include "rl_hooks.h"
 #include "tools.h"
 #include "mcp.h"
 #include "mcp_names.h"
@@ -15,6 +16,8 @@
 #include "provider.h"
 #include "provider_pool.h"
 #include "provider_profiles.h"
+#include "matrix_inference.h"
+#include "tool_call_normalizer.h"
 #include "openai_oauth.h"
 #include "plan.h"
 #include <curl/curl.h>
@@ -45,6 +48,7 @@
 #include "vfs.h"
 #include "memory_tier.h"
 #include "capability.h"
+#include "workspace.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1624,7 +1628,7 @@ static void test_build_request_ex_for_credential_includes_billing_header(void) {
     conv_init(&conv);
     conv_add_user_text(&conv, "hey");
     const char *prompt_prefix =
-        "You are dsco, an agentic CLI built on the Overmind Soul architecture.";
+        "You are dsco, Distributed Systems, Inc.'s local-first autonomous agent runtime.";
 
     char saved_ver[64];
     bool had_ver = false;
@@ -2369,7 +2373,7 @@ static void test_claude_code_response_dispatch_matrix(void) {
 
 static void test_claude_code_billing_header_contract_matrix(void) {
     const char *prompt_prefix =
-        "You are dsco, an agentic CLI built on the Overmind Soul architecture.";
+        "You are dsco, Distributed Systems, Inc.'s local-first autonomous agent runtime.";
     char saved_ver[64];
     char saved_entry[64];
     char saved_force[64];
@@ -2458,14 +2462,16 @@ static void test_claude_code_billing_header_contract_matrix(void) {
 }
 
 static void test_system_prompts_mention_bash_parallel_workers(void) {
-    TEST("system prompts mention bash dsco parallelism");
-    ASSERT(strstr(SYSTEM_PROMPT, "use bash to launch local dsc or dsco worker processes") != NULL,
-           "full system prompt should mention bash-launched dsc/dsco workers");
-    ASSERT(strstr(SYSTEM_PROMPT_CHEAP, "bash may launch local dsc or dsco workers") != NULL,
-           "cheap system prompt should mention bash-launched dsc/dsco workers");
+    TEST("system prompts require autonomous parallel execution");
+    ASSERT(strstr(SYSTEM_PROMPT, "Launch every ready, independent") != NULL,
+           "full system prompt should default independent work to parallel execution");
+    ASSERT(strstr(SYSTEM_PROMPT, "never let workers race on the same mutable artifact") != NULL,
+           "full system prompt should constrain parallel writes");
+    ASSERT(strstr(SYSTEM_PROMPT_CHEAP, "concurrently issue all ready independent tool calls") != NULL,
+           "cheap system prompt should preserve the parallel execution posture");
     ASSERT(strstr(SYSTEM_PROMPT, "Durable artifacts require proof") != NULL,
            "full system prompt should require artifact proof");
-    ASSERT(strstr(SYSTEM_PROMPT_CHEAP, "Durable artifacts require proof") != NULL,
+    ASSERT(strstr(SYSTEM_PROMPT_CHEAP, "verify their paths") != NULL,
            "cheap system prompt should require artifact proof");
     PASS();
 }
@@ -2614,9 +2620,26 @@ static void test_provider_request_model_prefix_routing(void) {
     conv_init(&conv);
     conv_add_user_text(&conv, "hello");
     char saved_openai_params[2048];
+    char saved_lmstudio_draft[256];
     bool had_openai_params = false;
+    bool had_lmstudio_draft = false;
     test_capture_env("DSCO_OPENAI_PARAMS", saved_openai_params, sizeof(saved_openai_params),
                      &had_openai_params);
+    test_capture_env("LMSTUDIO_DRAFT_MODEL", saved_lmstudio_draft,
+                     sizeof(saved_lmstudio_draft), &had_lmstudio_draft);
+
+    setenv("LMSTUDIO_DRAFT_MODEL", "qwen/qwen3.5-2b", 1);
+    session_state_t lmstudio_session;
+    session_state_init(&lmstudio_session, "lmstudio:qwythos-heretic-q8");
+    provider_t *lmstudio = provider_create("lmstudio");
+    ASSERT(lmstudio != NULL, "LM Studio provider should be created");
+    char *lmstudio_req =
+        lmstudio->build_request(lmstudio, &conv, &lmstudio_session, 1024, NULL);
+    ASSERT(lmstudio_req != NULL, "LM Studio request should not be NULL");
+    ASSERT(strstr(lmstudio_req, "\"draft_model\":\"qwen/qwen3.5-2b\"") != NULL,
+           "LM Studio should receive its configured speculative draft model");
+    free(lmstudio_req);
+    provider_free(lmstudio);
 
     session_state_t moonshot_session;
     session_state_init(&moonshot_session, "moonshotai/kimi-k2.7-code");
@@ -2653,6 +2676,7 @@ static void test_provider_request_model_prefix_routing(void) {
     free(fugu_req);
     provider_free(fugu);
     test_restore_env("DSCO_OPENAI_PARAMS", saved_openai_params, had_openai_params);
+    test_restore_env("LMSTUDIO_DRAFT_MODEL", saved_lmstudio_draft, had_lmstudio_draft);
 
     session_state_t openrouter_session;
     session_state_init(&openrouter_session, "openrouter/moonshotai/kimi-k2.7-code");
@@ -2751,6 +2775,18 @@ static void test_openai_request_defaults_auto_tool_choice(void) {
            "native OpenAI requests should not inject Kimi thinking controls");
 
     free(req);
+    session_state_init(&session, "gpt-5.6-sol");
+    snprintf(session.effort, sizeof(session.effort), "%s", "high");
+    req = p->build_request(p, &conv, &session, 1024, NULL);
+    ASSERT(req != NULL, "request should not be NULL for GPT-5.6 tool compatibility");
+    ASSERT(strstr(req, "\"max_completion_tokens\":1024") != NULL,
+           "GPT-5.6 tool requests should use max_completion_tokens");
+    ASSERT(strstr(req, "\"reasoning_effort\":\"none\"") != NULL,
+           "GPT-5.6 Chat Completions tool requests should force reasoning_effort none");
+    ASSERT(strstr(req, "\"reasoning_effort\":\"high\"") == NULL,
+           "GPT-5.6 Chat Completions tool requests should not send rejected effort");
+
+    free(req);
     provider_free(p);
     conv_free(&conv);
     test_restore_env("DSCO_OPENAI_PARAMS", saved_params, had_params);
@@ -2779,6 +2815,10 @@ static void test_openai_request_normalizes_max_effort(void) {
 
     char *req = p->build_request(p, &conv, &session, 1024, NULL);
     ASSERT(req != NULL, "request should not be NULL");
+    ASSERT(strstr(req, "\"max_completion_tokens\":1024") != NULL,
+           "OpenAI GPT-5-class requests should use max_completion_tokens");
+    ASSERT(strstr(req, "\"max_tokens\":1024") == NULL,
+           "OpenAI GPT-5-class requests should not use rejected max_tokens");
     ASSERT(strstr(req, "\"reasoning_effort\":\"xhigh\"") != NULL,
            "OpenAI-compatible request should normalize max to xhigh");
     ASSERT(strstr(req, "\"reasoning_effort\":\"max\"") == NULL,
@@ -2792,9 +2832,748 @@ static void test_openai_request_normalizes_max_effort(void) {
            "OpenAI-compatible request should serialize explicit high effort");
 
     free(req);
+    setenv("DSCO_OPENAI_PARAMS", "{\"max_tokens\":77}", 1);
+    session_state_init(&session, "gpt-5.6-sol");
+    req = p->build_request(p, &conv, &session, 1024, NULL);
+    ASSERT(req != NULL, "request should not be NULL for gpt-5.6-sol");
+    ASSERT(strstr(req, "\"max_completion_tokens\":77") != NULL,
+           "OpenAI GPT-5-class extra max_tokens should remap to max_completion_tokens");
+    ASSERT(strstr(req, "\"max_tokens\":77") == NULL,
+           "OpenAI GPT-5-class extra max_tokens should not leak rejected field");
+
+    free(req);
+    unsetenv("DSCO_OPENAI_PARAMS");
+    session_state_init(&session, "gpt-4o");
+    req = p->build_request(p, &conv, &session, 1024, NULL);
+    ASSERT(req != NULL, "request should not be NULL for gpt-4o");
+    ASSERT(strstr(req, "\"max_tokens\":1024") != NULL,
+           "non-GPT-5 OpenAI chat requests should keep max_tokens");
+
+    free(req);
     provider_free(p);
     conv_free(&conv);
     test_restore_env("DSCO_OPENAI_PARAMS", saved_params, had_params);
+    PASS();
+}
+
+static void test_openrouter_gpt56_tools_chat_completions_compat(void) {
+    TEST("OpenRouter GPT-5.6 request controls and extra params");
+    tools_init();
+    tools_reset_external();
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "count these items");
+
+    char saved_params[2048];
+    bool had_params = false;
+    test_capture_env("DSCO_OPENAI_PARAMS", saved_params, sizeof(saved_params), &had_params);
+    unsetenv("DSCO_OPENAI_PARAMS");
+    tools_register_external("test_gpt56_count", "Count items",
+                            "{\"type\":\"object\",\"properties\":{\"count\":{\"type\":\"integer\"}}}",
+                            test_external_tool_stub, NULL);
+
+    session_state_t session;
+    session_state_init(&session, "openrouter/openai/gpt-5.6-sol");
+    snprintf(session.effort, sizeof(session.effort), "%s", "max");
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "OpenRouter provider should be created");
+
+    char *max_req = p->build_request(p, &conv, &session, 777, NULL);
+    ASSERT(max_req != NULL, "OpenRouter GPT-5.6 max-effort request should be built");
+    bool correct_model = strstr(max_req, "\"model\":\"openai/gpt-5.6-sol\"") != NULL;
+    bool includes_tool = strstr(max_req, "\"name\":\"test_gpt56_count\"") != NULL;
+    bool completion_limit = strstr(max_req, "\"max_completion_tokens\":777") != NULL;
+    bool rejected_limit_absent = strstr(max_req, "\"max_tokens\":777") == NULL;
+    bool nested_max = strstr(max_req, "\"reasoning\":{\"effort\":\"max\"}") != NULL;
+    bool top_level_effort_absent = strstr(max_req, "\"reasoning_effort\"") == NULL;
+    free(max_req);
+
+
+    snprintf(session.prompt_cache_key, sizeof(session.prompt_cache_key), "%s",
+             "session-cache-key");
+    snprintf(session.prompt_cache_retention, sizeof(session.prompt_cache_retention), "%s",
+             "session-retention");
+    setenv("DSCO_OPENAI_PARAMS",
+           "{\"prompt_cache_options\":{\"retention\":\"24h\"},"
+           "\"safety_identifier\":\"user_42\",\"moderation\":true,"
+           "\"prompt_cache_key\":\"explicit-cache-key\"}",
+           1);
+    char *extra_req = p->build_request(p, &conv, &session, 777, NULL);
+    ASSERT(extra_req != NULL, "OpenRouter GPT-5.6 extra-parameter request should be built");
+    bool valid_extra_json = json_is_valid_container(extra_req);
+    bool cache_options =
+        strstr(extra_req, "\"prompt_cache_options\":{\"retention\":\"24h\"}") != NULL;
+    bool safety_identifier =
+        strstr(extra_req, "\"safety_identifier\":\"user_42\"") != NULL;
+    bool moderation = strstr(extra_req, "\"moderation\":true") != NULL;
+    bool explicit_cache_key =
+        strstr(extra_req, "\"prompt_cache_key\":\"explicit-cache-key\"") != NULL;
+    bool one_cache_key = test_count_substr(extra_req, "\"prompt_cache_key\"") == 1;
+    bool session_cache_key_absent = strstr(extra_req, "session-cache-key") == NULL;
+    bool legacy_retention_absent = strstr(extra_req, "\"prompt_cache_retention\"") == NULL;
+    free(extra_req);
+
+    provider_free(p);
+    conv_free(&conv);
+    tools_reset_external();
+    test_restore_env("DSCO_OPENAI_PARAMS", saved_params, had_params);
+
+    ASSERT(correct_model, "request should preserve the OpenRouter OpenAI model slug");
+    ASSERT(includes_tool, "request should contain the tool under test");
+    ASSERT(completion_limit, "GPT-5.6 request should use max_completion_tokens");
+    ASSERT(rejected_limit_absent, "GPT-5.6 request should not send max_tokens");
+    ASSERT(nested_max, "OpenRouter GPT-5.6 should nest max effort under reasoning");
+    ASSERT(top_level_effort_absent,
+           "OpenRouter GPT-5.6 should not emit top-level reasoning_effort");
+    ASSERT(valid_extra_json, "extra request parameters should preserve valid request JSON");
+    ASSERT(cache_options, "request should pass through prompt_cache_options");
+    ASSERT(safety_identifier, "request should pass through safety_identifier");
+    ASSERT(moderation, "request should pass through moderation");
+    ASSERT(explicit_cache_key, "explicit prompt_cache_key should win over session policy");
+    ASSERT(one_cache_key, "request should emit prompt_cache_key exactly once");
+    ASSERT(session_cache_key_absent, "overridden session prompt_cache_key should not leak");
+    ASSERT(legacy_retention_absent,
+           "prompt_cache_options should suppress incompatible prompt_cache_retention");
+    PASS();
+}
+
+static void test_openai_sse_data_without_space_streams_reasoning_details(void) {
+    TEST("OpenAI SSE data without space streams reasoning_details");
+    const char *sse =
+        "data:{\"id\":\"gen_details\",\"choices\":[{\"delta\":{\"reasoning_details\":["
+        "{\"type\":\"reasoning.summary\",\"summary\":\"Plan \"},"
+        "{\"type\":\"reasoning.text\",\"text\":\"then act.\"}]}}]}\n"
+        "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n"
+        "data:[DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse, strlen(sse), &result);
+    bool done = parsed && result.done;
+    bool streamed = parsed && result.reasoning_stream &&
+                    strcmp(result.reasoning_stream, "Plan then act.") == 0;
+    int preserved_reasoning = 0;
+    if (parsed) {
+        for (int i = 0; i < result.parsed.count; i++) {
+            if (result.parsed.blocks[i].text &&
+                strcmp(result.parsed.blocks[i].text, "Plan then act.") == 0)
+                preserved_reasoning++;
+        }
+    }
+    provider_test_free_openai_sse_result(&result);
+
+    ASSERT(parsed, "offline SSE parse should succeed");
+    ASSERT(done, "data:[DONE] without a space should terminate the stream");
+    ASSERT(streamed, "summary and text reasoning details should reach the thinking stream");
+    ASSERT(preserved_reasoning == 1,
+           "reasoning-only details should be preserved exactly once in the parsed response");
+    PASS();
+}
+
+static void test_openai_sse_legacy_reasoning_takes_precedence_over_details(void) {
+    TEST("OpenAI SSE legacy reasoning is not duplicated by details");
+    const char *sse =
+        "data: {\"choices\":[{\"delta\":{\"reasoning\":\"One thought.\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.summary\","
+        "\"summary\":\"One thought.\"}]}}]}\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n"
+        "data: [DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse, strlen(sse), &result);
+    bool exactly_once = parsed && result.reasoning_stream &&
+                        strcmp(result.reasoning_stream, "One thought.") == 0;
+    int accumulated_once = 0;
+    if (parsed) {
+        for (int i = 0; i < result.parsed.count; i++) {
+            if (result.parsed.blocks[i].text &&
+                strcmp(result.parsed.blocks[i].text, "One thought.") == 0)
+                accumulated_once++;
+        }
+    }
+    provider_test_free_openai_sse_result(&result);
+
+    ASSERT(parsed, "offline SSE parse should succeed");
+    ASSERT(exactly_once, "legacy reasoning should suppress duplicate reasoning_details output");
+    ASSERT(accumulated_once == 1, "parsed reasoning should contain one copy of the delta");
+    PASS();
+}
+
+static void test_openai_sse_tool_call_after_reasoning_accumulates_exactly(void) {
+    TEST("OpenAI SSE tool call after reasoning accumulates exactly");
+    const char *sse =
+        "data:{\"choices\":[{\"delta\":{\"reasoning_details\":[{"
+        "\"type\":\"reasoning.text\",\"text\":\"Need a count.\"}]}}]}\n"
+        "data:{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_count_42\",\"type\":\"function\",\"function\":{"
+        "\"name\":\"count_items\",\"arguments\":\"{\\\"count\\\":\"}}]}}]}\n"
+        "data:{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"function\":{\"arguments\":\"2}\"}}]}}]}\n"
+        "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n"
+        "data:[DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse, strlen(sse), &result);
+    int tool_blocks = 0;
+    content_block_t *tool = NULL;
+    if (parsed) {
+        for (int i = 0; i < result.parsed.count; i++) {
+            if (result.parsed.blocks[i].type &&
+                strcmp(result.parsed.blocks[i].type, "tool_use") == 0) {
+                tool_blocks++;
+                tool = &result.parsed.blocks[i];
+            }
+        }
+    }
+    bool reasoning_first = parsed && result.reasoning_stream &&
+                           strcmp(result.reasoning_stream, "Need a count.") == 0;
+    bool exact_tool = tool_blocks == 1 && tool && tool->tool_name && tool->tool_id &&
+                      tool->tool_input && strcmp(tool->tool_name, "count_items") == 0 &&
+                      strcmp(tool->tool_id, "call_count_42") == 0 &&
+                      strcmp(tool->tool_input, "{\"count\":2}") == 0;
+    bool exact_arg_delta_stream = parsed && result.tool_arg_delta_stream &&
+                                  strcmp(result.tool_arg_delta_stream, "{\"count\":2}") == 0;
+    bool tool_stop = parsed && result.parsed.stop_reason &&
+                     strcmp(result.parsed.stop_reason, "tool_use") == 0;
+    bool done = parsed && result.done;
+    provider_test_free_openai_sse_result(&result);
+
+    ASSERT(parsed, "offline SSE parse should succeed");
+    ASSERT(reasoning_first, "reasoning preceding a tool call should still be streamed");
+    ASSERT(exact_arg_delta_stream, "tool argument deltas should stream through native callback");
+    ASSERT(exact_tool, "streamed tool deltas should preserve exact name, id, and JSON arguments");
+    ASSERT(tool_stop, "tool_calls finish_reason should map to tool_use");
+    ASSERT(done, "terminal data:[DONE] should be observed after the tool call");
+    PASS();
+}
+
+static void test_lmstudio_reasoning_xml_promotes_to_tool_call(void) {
+    TEST("LM Studio reasoning XML promotes to governed tool call");
+    const char *sse =
+        "data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"Need the shell.\\n\"}}]}\n"
+        "data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"<tool_call>\\n"
+        "<function=Bash>\\n<parameter=command>\\nprintf BASH_TOOL_OK\\n\"}}]}\n"
+        "data:{\"choices\":[{\"delta\":{\"reasoning_content\":\"</parameter>\\n"
+        "</function>\\n</tool_call>\\n\"},\"finish_reason\":\"stop\"}]}\n"
+        "data:[DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse_for_model(
+        sse, strlen(sse), "lmstudio", "qwen35-27b-dense", &result);
+    content_block_t *tool = NULL;
+    content_block_t *thinking = NULL;
+    for (int i = 0; parsed && i < result.parsed.count; i++) {
+        if (result.parsed.blocks[i].type &&
+            strcmp(result.parsed.blocks[i].type, "tool_use") == 0)
+            tool = &result.parsed.blocks[i];
+        if (result.parsed.blocks[i].type &&
+            (strcmp(result.parsed.blocks[i].type, "thinking") == 0 ||
+             strcmp(result.parsed.blocks[i].type, "text") == 0) &&
+            result.parsed.blocks[i].text)
+            thinking = &result.parsed.blocks[i];
+    }
+    bool exact_tool = tool && tool->tool_name && tool->tool_input &&
+                      strcmp(tool->tool_name, "Bash") == 0 &&
+                      strcmp(tool->tool_input, "{\"command\":\"printf BASH_TOOL_OK\"}") == 0;
+    bool reasoning_kept = thinking && strcmp(thinking->text, "Need the shell.") == 0;
+    bool tool_stop = result.parsed.stop_reason &&
+                     strcmp(result.parsed.stop_reason, "tool_use") == 0;
+    bool terminal_success = result.terminal_success;
+    provider_test_free_openai_sse_result(&result);
+
+    ASSERT(parsed, "LM Studio SSE parse should succeed");
+    ASSERT(exact_tool, "reasoning XML should become an exact tool_use block");
+    ASSERT(reasoning_kept, "reasoning before the XML tool call should be preserved");
+    ASSERT(tool_stop, "promoted XML should override stop with tool_use");
+    ASSERT(terminal_success, "promoted tool call should validate as terminal success");
+    PASS();
+}
+
+static void test_matrix_canary_accepts_structured_and_reasoning_tool_calls(void) {
+    TEST("Matrix canary accepts both LM Studio tool encodings");
+    const char *structured =
+        "{\"choices\":[{\"message\":{\"tool_calls\":[{\"function\":{"
+        "\"name\":\"health_probe\",\"arguments\":\"{}\"}}]}}]}";
+    const char *reasoning =
+        "{\"choices\":[{\"message\":{\"reasoning_content\":\""
+        "<tool_call><function=health_probe></function></tool_call>\"}}]}";
+    const char *prose =
+        "{\"choices\":[{\"message\":{\"content\":\"health_probe is healthy\"}}]}";
+    ASSERT(matrix_inference_canary_response_ok(structured),
+           "structured tool_calls response should pass");
+    ASSERT(matrix_inference_canary_response_ok(reasoning),
+           "LM Studio reasoning XML response should pass");
+    ASSERT(!matrix_inference_canary_response_ok(prose),
+           "mere prose mentioning the tool must not pass");
+    PASS();
+}
+
+static void test_lmstudio_parallel_local_tool_calls_promote(void) {
+    TEST("LM Studio parallel local tool calls promote");
+    const char *sse =
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"<tools>\\n"
+        "{\\\"name\\\":\\\"read_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"a.c\\\"}}\\n"
+        "{\\\"name\\\":\\\"read_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"b.c\\\"}}\\n"
+        "</tools>\"}}]}\n"
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n"
+        "data: [DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    ASSERT(provider_test_parse_openai_sse_for_model(sse, strlen(sse), "lmstudio", NULL, &result),
+           "LM Studio local parallel response should parse");
+    int tools = 0;
+    bool a = false, b = false;
+    for (int i = 0; i < result.parsed.count; i++) {
+        content_block_t *blk = &result.parsed.blocks[i];
+        if (!blk->type || strcmp(blk->type, "tool_use") != 0) continue;
+        tools++;
+        if (blk->tool_input && strstr(blk->tool_input, "a.c")) a = true;
+        if (blk->tool_input && strstr(blk->tool_input, "b.c")) b = true;
+    }
+    ASSERT(tools == 2 && a && b, "both normalized calls should become tool_use blocks");
+    ASSERT(result.parsed.stop_reason && !strcmp(result.parsed.stop_reason, "tool_use"),
+           "normalized local calls should force tool_use stop reason");
+    provider_test_free_openai_sse_result(&result);
+    PASS();
+}
+
+static void test_local_tool_call_normalizer_formats_and_bounds(void) {
+    TEST("local tool-call normalizer formats and bounds");
+    const char *cases[] = {
+        "<tools>\n{\"name\":\"add_numbers\",\"arguments\":{\"a\":1,\"b\":2}}\n"
+        "{\"name\":\"lookup_weather\",\"arguments\":{\"city\":\"Uruk\"}}\n</tools>",
+        "```json\n[{\"name\":\"add_numbers\",\"arguments\":{\"a\":1,\"b\":2}},"
+        "{\"name\":\"lookup_weather\",\"arguments\":{\"city\":\"Uruk\"}}]\n```",
+        "<lookup_inventory sku=\"DSCO-B9\"/>",
+        "{\"choices\":[{\"message\":{\"tool_calls\":["
+        "{\"function\":{\"name\":\"health_probe\",\"arguments\":\"{}\"}},"
+        "{\"function\":{\"name\":\"add_numbers\",\"arguments\":\"{\\\"a\\\":1,\\\"b\\\":2}\"}}]}}]}",
+    };
+    size_t expected[] = {2, 2, 1, 2};
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        normalized_tool_calls_t calls;
+        ASSERT(tool_calls_normalize(cases[i], &calls), "supported encoding should normalize");
+        ASSERT(calls.count == expected[i], "parallel call count should be preserved");
+        for (size_t j = 0; j < calls.count; j++)
+            ASSERT(json_is_valid_container(calls.calls[j].arguments),
+                   "normalized arguments should be valid JSON");
+        tool_calls_normalized_free(&calls);
+    }
+
+    normalized_tool_calls_t calls;
+    ASSERT(!tool_calls_normalize("health_probe is healthy", &calls),
+           "prose must not become a tool call");
+    tool_calls_normalized_free(&calls);
+    ASSERT(!tool_calls_normalize("<tools>{\"name\":\"x\",\"arguments\":[]}</tools>", &calls),
+           "arguments must be an object");
+    tool_calls_normalized_free(&calls);
+    ASSERT(!tool_calls_normalize("<tools>{\"name\":\"bad name\",\"arguments\":{}}</tools>", &calls),
+           "unsafe tool names must be rejected");
+    tool_calls_normalized_free(&calls);
+    PASS();
+}
+
+static void test_openai_sse_legacy_function_call_streams_args(void) {
+    TEST("OpenAI SSE legacy function_call streams arguments");
+    const char *sse =
+        "data:{\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"lookup_weather\","
+        "\"arguments\":\"{\\\"city\\\":\"}}}]}\n"
+        "data:{\"choices\":[{\"delta\":{\"function_call\":{"
+        "\"arguments\":\"\\\"DC\\\"}\"}}}]}\n"
+        "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"function_call\"}]}\n"
+        "data:[DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse, strlen(sse), &result);
+    content_block_t *tool = NULL;
+    int tool_blocks = 0;
+    if (parsed) {
+        for (int i = 0; i < result.parsed.count; i++) {
+            if (result.parsed.blocks[i].type &&
+                strcmp(result.parsed.blocks[i].type, "tool_use") == 0) {
+                tool = &result.parsed.blocks[i];
+                tool_blocks++;
+            }
+        }
+    }
+    bool exact_tool = tool_blocks == 1 && tool && tool->tool_name && tool->tool_id &&
+                      tool->tool_input && strcmp(tool->tool_name, "lookup_weather") == 0 &&
+                      strcmp(tool->tool_id, "call_0") == 0 &&
+                      strcmp(tool->tool_input, "{\"city\":\"DC\"}") == 0;
+    bool exact_arg_delta_stream = parsed && result.tool_arg_delta_stream &&
+                                  strcmp(result.tool_arg_delta_stream,
+                                         "{\"city\":\"DC\"}") == 0;
+    bool terminal_success = parsed && result.terminal_success;
+    bool tool_stop = parsed && result.parsed.stop_reason &&
+                     strcmp(result.parsed.stop_reason, "tool_use") == 0;
+    provider_test_free_openai_sse_result(&result);
+
+    ASSERT(parsed, "offline SSE parse should succeed");
+    ASSERT(exact_arg_delta_stream, "legacy function_call args should stream as native deltas");
+    ASSERT(exact_tool, "legacy function_call should finalize as one tool_use block");
+    ASSERT(tool_stop, "legacy function_call finish_reason should map to tool_use");
+    ASSERT(terminal_success, "legacy function_call stream should validate as terminal success");
+    PASS();
+}
+
+static void test_openai_sse_refusal_delta_streams_as_text(void) {
+    TEST("OpenAI SSE refusal delta streams as text");
+    const char *sse =
+        "data:{\"choices\":[{\"delta\":{\"refusal\":\"I can't help with that.\"}}]}\n"
+        "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n"
+        "data:[DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse, strlen(sse), &result);
+    content_block_t *text = NULL;
+    int text_blocks = 0;
+    if (parsed) {
+        for (int i = 0; i < result.parsed.count; i++) {
+            if (result.parsed.blocks[i].type &&
+                strcmp(result.parsed.blocks[i].type, "text") == 0) {
+                text = &result.parsed.blocks[i];
+                text_blocks++;
+            }
+        }
+    }
+    bool exact_text = text_blocks == 1 && text && text->text &&
+                      strcmp(text->text, "I can't help with that.") == 0;
+    bool terminal_success = parsed && result.terminal_success;
+    bool end_turn = parsed && result.parsed.stop_reason &&
+                    strcmp(result.parsed.stop_reason, "end_turn") == 0;
+    provider_test_free_openai_sse_result(&result);
+
+    ASSERT(parsed, "offline SSE parse should succeed");
+    ASSERT(exact_text, "refusal deltas should be preserved as text output");
+    ASSERT(end_turn, "stop finish_reason should map to end_turn");
+    ASSERT(terminal_success, "refusal-only stream should validate as terminal success");
+    PASS();
+}
+
+static void test_openrouter_sse_opaque_reasoning_replays_only_for_same_model(void) {
+    TEST("OpenRouter opaque reasoning replays only for same model");
+    static const char wire_model[] = "openai/gpt-5.6-sol";
+    static const char opaque_details[] =
+        "[{\"type\":\"reasoning.encrypted\",\"id\":\"rs_1\","
+        "\"format\":\"openai-responses-v1\",\"index\":0,"
+        "\"data\":\"opaque-ciphertext-fragment+/=\","
+        "\"vendor\":{\"nonce\":\"n-1\",\"version\":7},"
+        "\"unknown\":[true,null,{\"k\":\"v\"}]}]";
+
+    jbuf_t sse;
+    jbuf_init(&sse, 1024);
+    jbuf_append(&sse,
+                "data:{\"id\":\"gen-opaque-56\",\"model\":\"openai/gpt-5.6-sol\","
+                "\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":"
+                "\"Need a count.\",\"reasoning_details\":");
+    jbuf_append(&sse, opaque_details);
+    jbuf_append(&sse,
+                "},\"finish_reason\":null}]}\n"
+                "data:{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+                "\"id\":\"call_count_56\",\"type\":\"function\",\"function\":{"
+                "\"name\":\"count_items\",\"arguments\":\"{\\\"count\\\":\"}}]}}]}\n"
+                "data:{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+                "\"function\":{\"arguments\":\"2}\"}}]}}]}\n"
+                "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n"
+                "data:[DONE]\n");
+
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse_for_model(
+        sse.data, sse.len, "openrouter", wire_model, &result);
+    int visible_reasoning_blocks = 0;
+    int opaque_blocks = 0;
+    int tool_blocks = 0;
+    bool opaque_exact = false;
+    bool exact_tool = false;
+    if (parsed) {
+        for (int i = 0; i < result.parsed.count; i++) {
+            content_block_t *block = &result.parsed.blocks[i];
+            if (block->text && strcmp(block->text, "Need a count.") == 0)
+                visible_reasoning_blocks++;
+            if (block->type &&
+                strcmp(block->type,
+                       "openrouter_reasoning_details:openai/gpt-5.6-sol") == 0) {
+                opaque_blocks++;
+                opaque_exact = block->text && strcmp(block->text, opaque_details) == 0;
+            }
+            if (block->type && strcmp(block->type, "tool_use") == 0) {
+                tool_blocks++;
+                exact_tool = block->tool_name && block->tool_id && block->tool_input &&
+                             strcmp(block->tool_name, "count_items") == 0 &&
+                             strcmp(block->tool_id, "call_count_56") == 0 &&
+                             strcmp(block->tool_input, "{\"count\":2}") == 0;
+            }
+        }
+    }
+    bool visible_once = parsed && result.reasoning_stream &&
+                        strcmp(result.reasoning_stream, "Need a count.") == 0 &&
+                        visible_reasoning_blocks == 1;
+    bool terminal_tool_call = parsed && result.done && result.terminal_success &&
+                              result.parsed.stop_reason &&
+                              strcmp(result.parsed.stop_reason, "tool_use") == 0;
+
+    char saved_params[2048];
+    bool had_params = false;
+    test_capture_env("DSCO_OPENAI_PARAMS", saved_params, sizeof(saved_params), &had_params);
+    unsetenv("DSCO_OPENAI_PARAMS");
+
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "count these items");
+    if (parsed)
+        conv_add_assistant_raw(&conv, &result.parsed);
+    conv_add_tool_result_named(&conv, "call_count_56", "count_items", "2", false);
+
+    provider_t *openrouter = provider_create("openrouter");
+    session_state_t same_session;
+    session_state_init(&same_session, "openrouter/openai/gpt-5.6-sol");
+    char *same_request = openrouter
+                             ? openrouter->build_request(openrouter, &conv, &same_session, 777, NULL)
+                             : NULL;
+
+    jbuf_t exact_field;
+    jbuf_init(&exact_field, strlen(opaque_details) + 32);
+    jbuf_append(&exact_field, "\"reasoning_details\":");
+    jbuf_append(&exact_field, opaque_details);
+    const char *assistant = same_request
+                                ? strstr(same_request, "{\"role\":\"assistant\"")
+                                : NULL;
+    const char *details_pos = assistant ? strstr(assistant, exact_field.data) : NULL;
+    const char *tool_pos = assistant ? strstr(assistant, "\"id\":\"call_count_56\"") : NULL;
+    const char *tool_result_pos = assistant
+                                      ? strstr(assistant, "{\"role\":\"tool\"")
+                                      : NULL;
+    bool replayed_exactly_once = same_request &&
+                                 test_count_substr(same_request, exact_field.data) == 1;
+    bool replayed_alongside_tool = details_pos && tool_pos && details_pos < tool_pos &&
+                                   (!tool_result_pos || tool_pos < tool_result_pos);
+
+    session_state_t changed_model_session;
+    session_state_init(&changed_model_session, "openrouter/openai/gpt-5.6");
+    char *changed_model_request =
+        openrouter ? openrouter->build_request(openrouter, &conv, &changed_model_session, 777, NULL)
+                   : NULL;
+    bool changed_model_omits_detail =
+        changed_model_request && strstr(changed_model_request, "opaque-ciphertext-fragment") == NULL &&
+        strstr(changed_model_request, "\"reasoning_details\"") == NULL &&
+        strstr(changed_model_request, "\"id\":\"call_count_56\"") != NULL;
+
+    provider_t *openai = provider_create("openai");
+    session_state_t changed_provider_session;
+    session_state_init(&changed_provider_session, "openai/gpt-5.6-sol");
+    char *changed_provider_request =
+        openai ? openai->build_request(openai, &conv, &changed_provider_session, 777, NULL) : NULL;
+    bool changed_provider_omits_detail =
+        changed_provider_request &&
+        strstr(changed_provider_request, "opaque-ciphertext-fragment") == NULL &&
+        strstr(changed_provider_request, "\"reasoning_details\"") == NULL &&
+        strstr(changed_provider_request, "\"id\":\"call_count_56\"") != NULL;
+
+    free(same_request);
+    free(changed_model_request);
+    free(changed_provider_request);
+    provider_free(openrouter);
+    provider_free(openai);
+    conv_free(&conv);
+    provider_test_free_openai_sse_result(&result);
+    jbuf_free(&exact_field);
+    jbuf_free(&sse);
+    test_restore_env("DSCO_OPENAI_PARAMS", saved_params, had_params);
+
+    ASSERT(parsed, "offline OpenRouter SSE parse should succeed");
+    ASSERT(visible_once, "scalar reasoning should be streamed and retained exactly once");
+    ASSERT(opaque_blocks == 1 && opaque_exact,
+           "opaque reasoning detail and unknown nested fields should be retained byte-for-byte");
+    ASSERT(tool_blocks == 1 && exact_tool,
+           "tool continuation should retain the exact call id, name, and arguments");
+    ASSERT(terminal_tool_call, "tool_calls finish_reason should be terminal success");
+    ASSERT(replayed_exactly_once,
+           "same OpenRouter model should replay the exact reasoning_details array once");
+    ASSERT(replayed_alongside_tool,
+           "replayed reasoning_details should remain on the assistant message with its tool call");
+    ASSERT(changed_model_omits_detail,
+           "changing the requested model should omit stale opaque detail but keep the tool call");
+    ASSERT(changed_provider_omits_detail,
+           "changing provider should omit OpenRouter opaque detail but keep the tool call");
+    PASS();
+}
+
+static void test_openai_sse_done_without_finish_reason_is_not_terminal_success(void) {
+    TEST("OpenAI SSE [DONE] without finish_reason is incomplete");
+    const char *sse =
+        "data:{\"choices\":[{\"delta\":{\"content\":\"partial\"},"
+        "\"finish_reason\":null}]}\n"
+        "data:[DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse, strlen(sse), &result);
+    bool saw_done_sentinel = parsed && result.done;
+    bool terminal_success = parsed && result.terminal_success;
+    bool incomplete_reason = parsed && result.parsed.stop_reason &&
+                             strcmp(result.parsed.stop_reason, "incomplete_stream") == 0;
+    provider_test_free_openai_sse_result(&result);
+
+    ASSERT(parsed, "offline SSE hook should parse the incomplete stream bytes");
+    ASSERT(saw_done_sentinel, "fixture should exercise a received [DONE] sentinel");
+    ASSERT(!terminal_success,
+           "[DONE] without a non-null finish_reason must not mark the stream successful");
+    ASSERT(incomplete_reason,
+           "terminal validation should map the protocol error to incomplete_stream");
+    PASS();
+}
+
+static void test_openai_sse_tool_call_without_id_is_not_terminal_success(void) {
+    TEST("OpenAI SSE tool call without provider id is rejected");
+    const char *sse =
+        "data:{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"type\":\"function\",\"function\":{\"name\":\"count_items\","
+        "\"arguments\":\"{}\"}}]}}]}\n"
+        "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n"
+        "data:[DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse, strlen(sse), &result);
+    bool saw_done_sentinel = parsed && result.done;
+    bool terminal_success = parsed && result.terminal_success;
+    provider_test_free_openai_sse_result(&result);
+
+    ASSERT(parsed, "offline SSE hook should parse the missing-id stream bytes");
+    ASSERT(saw_done_sentinel, "fixture should contain a complete SSE terminator");
+    ASSERT(!terminal_success,
+           "a completed tool call without its provider-issued id must fail terminal validation");
+    PASS();
+}
+
+static void test_openai_sse_content_block_overflow_is_not_terminal_success(void) {
+    TEST("OpenAI SSE content block overflow is rejected");
+    jbuf_t sse;
+    jbuf_init(&sse, 32768);
+    for (int i = 0; i < MAX_CONTENT_BLOCKS; i++) {
+        jbuf_appendf(&sse,
+                     "data:{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":%d,"
+                     "\"id\":\"call_%d\",\"type\":\"function\",\"function\":{"
+                     "\"name\":\"count_items\",\"arguments\":\"{}\"}}]}}]}\n",
+                     i, i);
+    }
+    jbuf_append(&sse,
+                "data:{\"choices\":[{\"delta\":{\"content\":\"overflow sentinel\"}}]}\n"
+                "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n"
+                "data:[DONE]\n");
+
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse.data, sse.len, &result);
+    bool saw_done_sentinel = parsed && result.done;
+    bool terminal_success = parsed && result.terminal_success;
+    provider_test_free_openai_sse_result(&result);
+    jbuf_free(&sse);
+
+    ASSERT(parsed, "offline SSE hook should parse the over-capacity stream bytes");
+    ASSERT(saw_done_sentinel, "overflow fixture should contain a complete SSE terminator");
+    ASSERT(!terminal_success,
+           "a turn requiring more than MAX_CONTENT_BLOCKS must be rejected, not truncated");
+    PASS();
+}
+
+static void test_openrouter_sse_reasoning_details_deduplicate_exact_objects_only(void) {
+    TEST("OpenRouter SSE reasoning details deduplicate exact objects only");
+    static const char first_detail[] =
+        "{\"type\":\"reasoning.summary\",\"index\":0,\"summary\":\"First \"}";
+    static const char second_detail[] =
+        "{\"type\":\"reasoning.summary\",\"index\":0,\"summary\":\"second.\"}";
+    static const char expected_details[] =
+        "[{\"type\":\"reasoning.summary\",\"index\":0,\"summary\":\"First \"},"
+        "{\"type\":\"reasoning.summary\",\"index\":0,\"summary\":\"second.\"}]";
+
+    jbuf_t sse;
+    jbuf_init(&sse, 1024);
+    jbuf_append(&sse, "data:{\"choices\":[{\"delta\":{\"reasoning_details\":[");
+    jbuf_append(&sse, first_detail);
+    jbuf_append(&sse, "]}}]}\n");
+    jbuf_append(&sse, "data:{\"choices\":[{\"delta\":{\"reasoning_details\":[");
+    jbuf_append(&sse, first_detail);
+    jbuf_append(&sse, "]}}]}\n");
+    jbuf_append(&sse, "data:{\"choices\":[{\"delta\":{\"reasoning_details\":[");
+    jbuf_append(&sse, second_detail);
+    jbuf_append(&sse,
+                "]}}]}\n"
+                "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n"
+                "data:[DONE]\n");
+
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse_for_model(
+        sse.data, sse.len, "openrouter", "openai/gpt-5.6-sol", &result);
+    int replay_blocks = 0;
+    bool replay_exact = false;
+    if (parsed) {
+        for (int i = 0; i < result.parsed.count; i++) {
+            content_block_t *block = &result.parsed.blocks[i];
+            if (block->type &&
+                strcmp(block->type,
+                       "openrouter_reasoning_details:openai/gpt-5.6-sol") == 0) {
+                replay_blocks++;
+                replay_exact = block->text && strcmp(block->text, expected_details) == 0;
+            }
+        }
+    }
+    bool displayed_once = parsed && result.reasoning_stream &&
+                          strcmp(result.reasoning_stream, "First second.") == 0;
+    bool terminal_success = parsed && result.done && result.terminal_success;
+    provider_test_free_openai_sse_result(&result);
+    jbuf_free(&sse);
+
+    ASSERT(parsed, "offline OpenRouter SSE parse should succeed");
+    ASSERT(terminal_success, "valid distinct reasoning summaries should complete normally");
+    ASSERT(displayed_once,
+           "an exact repeated detail should display once while distinct summaries retain order");
+    ASSERT(replay_blocks == 1 && replay_exact,
+           "replay should retain one exact copy and both distinct same-index summary fragments");
+    PASS();
+}
+
+static void test_openai_sse_reasoning_replay_requires_openrouter_source(void) {
+    TEST("OpenAI SSE reasoning replay requires OpenRouter source");
+    static const char opaque_details[] =
+        "[{\"type\":\"reasoning.encrypted\",\"index\":0,"
+        "\"data\":\"provider-owned-ciphertext\"}]";
+    const char *sse =
+        "data:{\"model\":\"openai/gpt-5.6-sol\",\"choices\":[{\"delta\":{"
+        "\"content\":\"answer\",\"reasoning_details\":[{"
+        "\"type\":\"reasoning.encrypted\",\"index\":0,"
+        "\"data\":\"provider-owned-ciphertext\"}]}}]}\n"
+        "data:{\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n"
+        "data:[DONE]\n";
+
+    provider_test_openai_sse_result_t openai_result = {0};
+    provider_test_openai_sse_result_t openrouter_result = {0};
+    bool parsed_openai = provider_test_parse_openai_sse_for_model(
+        sse, strlen(sse), "openai", "gpt-5.6-sol", &openai_result);
+    bool parsed_openrouter = provider_test_parse_openai_sse_for_model(
+        sse, strlen(sse), "openrouter", "openai/gpt-5.6-sol", &openrouter_result);
+    int openai_replay_blocks = 0;
+    int openrouter_replay_blocks = 0;
+    bool openrouter_replay_exact = false;
+    if (parsed_openai) {
+        for (int i = 0; i < openai_result.parsed.count; i++) {
+            const char *type = openai_result.parsed.blocks[i].type;
+            if (type && strncmp(type, "openrouter_reasoning_details",
+                                strlen("openrouter_reasoning_details")) == 0)
+                openai_replay_blocks++;
+        }
+    }
+    if (parsed_openrouter) {
+        for (int i = 0; i < openrouter_result.parsed.count; i++) {
+            content_block_t *block = &openrouter_result.parsed.blocks[i];
+            if (block->type &&
+                strcmp(block->type,
+                       "openrouter_reasoning_details:openai/gpt-5.6-sol") == 0) {
+                openrouter_replay_blocks++;
+                openrouter_replay_exact =
+                    block->text && strcmp(block->text, opaque_details) == 0;
+            }
+        }
+    }
+    bool both_terminal = parsed_openai && parsed_openrouter && openai_result.done &&
+                         openrouter_result.done && openai_result.terminal_success &&
+                         openrouter_result.terminal_success;
+    provider_test_free_openai_sse_result(&openai_result);
+    provider_test_free_openai_sse_result(&openrouter_result);
+
+    ASSERT(parsed_openai && parsed_openrouter, "both source-provider parses should succeed");
+    ASSERT(both_terminal, "source provenance should not change valid stream completion");
+    ASSERT(openai_replay_blocks == 0,
+           "direct OpenAI reasoning_details must not become an OpenRouter replay block");
+    ASSERT(openrouter_replay_blocks == 1 && openrouter_replay_exact,
+           "OpenRouter reasoning_details should create one exact provider-scoped replay block");
     PASS();
 }
 
@@ -3623,6 +4402,16 @@ static void test_realtime_voice_tool_selection_routes_domain_tools(void) {
 
 static void test_session_state_init_populates_fallbacks_without_changing_model(void) {
     TEST("session_state_init fallbacks preserve canonical model");
+    char saved_payg_x[256], saved_sakana_payg_x[256], saved_fish_payg_x[256], saved_local_x[256];
+    bool had_payg_x=false, had_sakana_payg_x=false, had_fish_payg_x=false, had_local_x=false;
+    test_capture_env("FUGU_PAYG_API_KEY", saved_payg_x, sizeof(saved_payg_x), &had_payg_x);
+    test_capture_env("SAKANA_PAYG_API_KEY", saved_sakana_payg_x, sizeof(saved_sakana_payg_x), &had_sakana_payg_x);
+    test_capture_env("FISH_PAYG_API_KEY", saved_fish_payg_x, sizeof(saved_fish_payg_x), &had_fish_payg_x);
+    test_capture_env("DSCO_LOCAL_FALLBACK_MODEL", saved_local_x, sizeof(saved_local_x), &had_local_x);
+    unsetenv("FUGU_PAYG_API_KEY");
+    unsetenv("SAKANA_PAYG_API_KEY");
+    unsetenv("FISH_PAYG_API_KEY");
+    unsetenv("DSCO_LOCAL_FALLBACK_MODEL");
     char saved_disable_fallbacks[64], saved_disable_codex[64], saved_or[256], saved_anth[256];
     char saved_openai[256], saved_xai[256], saved_grok[256], saved_x_ai[256];
     char saved_fugu[256], saved_sakana[256], saved_fish[256], saved_sakana_token[256];
@@ -3684,6 +4473,10 @@ static void test_session_state_init_populates_fallbacks_without_changing_model(v
     test_restore_env("SAKANA_API_KEY", saved_sakana, had_sakana);
     test_restore_env("FISH_API_KEY", saved_fish, had_fish);
     test_restore_env("SAKANA_TOKEN", saved_sakana_token, had_sakana_token);
+        test_restore_env("FUGU_PAYG_API_KEY", saved_payg_x, had_payg_x);
+    test_restore_env("SAKANA_PAYG_API_KEY", saved_sakana_payg_x, had_sakana_payg_x);
+    test_restore_env("FISH_PAYG_API_KEY", saved_fish_payg_x, had_fish_payg_x);
+    test_restore_env("DSCO_LOCAL_FALLBACK_MODEL", saved_local_x, had_local_x);
     PASS();
 }
 
@@ -3751,7 +4544,61 @@ static void test_tool_execute_unknown(void) {
 static void test_tool_registry_expanded_builtin_count(void) {
     TEST("tool registry expanded built-in count");
     tools_init();
-    ASSERT(tools_builtin_count() >= 172, "built-in tool registry should expose expanded tools");
+    ASSERT(tools_builtin_count() >= 173, "built-in tool registry should expose expanded tools");
+    PASS();
+}
+
+static void test_openai_image_generate_tool_registered_and_gated(void) {
+    TEST("openai_image_generate tool registered and gated");
+    tools_init();
+
+    int count = 0;
+    const tool_def_t *all = tools_get_all(&count);
+    const tool_def_t *tool = NULL;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(all[i].name, "openai_image_generate") == 0) {
+            tool = &all[i];
+            break;
+        }
+    }
+    ASSERT(tool != NULL, "openai_image_generate should be registered");
+    ASSERT(tool->input_schema_json && strstr(tool->input_schema_json, "gpt-image-2") != NULL,
+           "schema should document gpt-image-2 as default");
+
+    const char *input = "{\"prompt\":\"draw a circuit\",\"output_path\":\"/tmp/dsco_oai.png\"}";
+    unsigned caps = dsco_caps_for_tool("openai_image_generate", input);
+    ASSERT((caps & CAP_NET) != 0, "OpenAI image generation should require net");
+    ASSERT((caps & CAP_FS_WRITE) != 0, "OpenAI image generation should require fs_write");
+    ASSERT((caps & CAP_SECRETS) != 0, "OpenAI image generation should require secrets");
+    ASSERT((caps & CAP_UNTRUSTED_IN) != 0, "OpenAI image generation ingests remote content");
+
+    char saved_net[256], saved_write[256], saved_secrets[256];
+    bool had_net = false, had_write = false, had_secrets = false;
+    test_capture_env("DSCO_ALLOW_NET", saved_net, sizeof(saved_net), &had_net);
+    test_capture_env("DSCO_ALLOW_WRITE", saved_write, sizeof(saved_write), &had_write);
+    test_capture_env("DSCO_ALLOW_SECRETS", saved_secrets, sizeof(saved_secrets), &had_secrets);
+
+    setenv("DSCO_ALLOW_NET", "example.com", 1);
+    setenv("DSCO_ALLOW_WRITE", "/tmp", 1);
+    setenv("DSCO_ALLOW_SECRETS", "1", 1);
+    char reason[256] = "";
+    dsco_cap_decision_t d =
+        dsco_capability_gate("openai_image_generate", input, "trusted", reason, sizeof(reason));
+    ASSERT(d == CAP_DECISION_DENY, "scoped net grant should reject non-OpenAI host");
+    ASSERT(strstr(reason, "host outside DSCO_ALLOW_NET scope") != NULL,
+           "denial should explain host scope");
+
+    setenv("DSCO_ALLOW_NET", "api.openai.com", 1);
+    setenv("DSCO_ALLOW_WRITE", "/var/empty", 1);
+    reason[0] = '\0';
+    d = dsco_capability_gate("openai_image_generate", input, "trusted", reason, sizeof(reason));
+    ASSERT(d == CAP_DECISION_DENY, "scoped write grant should reject output_path");
+    ASSERT(strstr(reason, "write path outside DSCO_ALLOW_WRITE scope") != NULL,
+           "denial should explain write scope");
+
+    test_restore_env("DSCO_ALLOW_NET", saved_net, had_net);
+    test_restore_env("DSCO_ALLOW_WRITE", saved_write, had_write);
+    test_restore_env("DSCO_ALLOW_SECRETS", saved_secrets, had_secrets);
     PASS();
 }
 
@@ -4829,6 +5676,22 @@ static void test_untrusted_python_routes_to_sandbox(void) {
     PASS();
 }
 
+static void test_python_tool_ignores_empty_file_when_code_present(void) {
+    TEST("python tool ignores empty file when code present");
+    tools_init();
+
+    char result[4096];
+    result[0] = '\0';
+    bool ok = tools_execute("python",
+                            "{\"code\":\"print(\\\"PY_EMPTY_FILE_OK\\\")\","
+                            "\"file\":\"\",\"args\":\"\"}",
+                            result, sizeof(result));
+
+    ASSERT(ok, "python code execution should ignore empty file field");
+    ASSERT(strstr(result, "PY_EMPTY_FILE_OK") != NULL, "python code output should be present");
+    PASS();
+}
+
 static void test_untrusted_node_requires_code_or_file(void) {
     TEST("tools_execute_for_tier untrusted node validation");
     tools_init();
@@ -5069,6 +5932,88 @@ static bool test_write_text_file(const char *path, const char *body) {
         return false;
     }
     return fclose(f) == 0;
+}
+
+static void test_workspace_agents_md_hierarchical_prompt(void) {
+    TEST("workspace prompt loads hierarchical AGENTS.md");
+
+    char saved_home[512];
+    bool had_home = false;
+    test_capture_env("HOME", saved_home, sizeof(saved_home), &had_home);
+
+    char old_cwd[1024];
+    bool have_old_cwd = getcwd(old_cwd, sizeof(old_cwd)) != NULL;
+
+    char root[512];
+    snprintf(root, sizeof(root), "/tmp/dsco_agentsmd_%d_%ld", (int)getpid(), (long)time(NULL));
+    char outside_agents[640], repo[640], git_dir[700], pkg[700], nested[760];
+    snprintf(outside_agents, sizeof(outside_agents), "%s/AGENTS.md", root);
+    snprintf(repo, sizeof(repo), "%s/repo", root);
+    snprintf(git_dir, sizeof(git_dir), "%s/.git", repo);
+    snprintf(pkg, sizeof(pkg), "%s/pkg", repo);
+    snprintf(nested, sizeof(nested), "%s/tool", pkg);
+
+    bool setup_ok = false;
+    int agents_files = -1;
+    bool summary_count_ok = false;
+    bool has_root = false;
+    bool has_pkg = false;
+    bool has_outside = false;
+    bool order_ok = false;
+
+    if (!have_old_cwd)
+        goto cleanup;
+    if (mkdir(root, 0700) != 0)
+        goto cleanup;
+    if (mkdir(repo, 0700) != 0 || mkdir(git_dir, 0700) != 0 ||
+        mkdir(pkg, 0700) != 0 || mkdir(nested, 0700) != 0) {
+        goto cleanup;
+    }
+
+    char repo_agents[760], pkg_agents[820];
+    snprintf(repo_agents, sizeof(repo_agents), "%s/AGENTS.md", repo);
+    snprintf(pkg_agents, sizeof(pkg_agents), "%s/AGENTS.md", pkg);
+    if (!test_write_text_file(outside_agents, "OUTSIDE_AGENT\n") ||
+        !test_write_text_file(repo_agents, "ROOT_AGENT\n") ||
+        !test_write_text_file(pkg_agents, "PKG_AGENT\n")) {
+        goto cleanup;
+    }
+
+    setenv("HOME", root, 1);
+    if (chdir(nested) != 0)
+        goto cleanup;
+    dsco_workspace_prompt_invalidate();
+
+    dsco_workspace_status_t st;
+    char summary[768];
+    dsco_workspace_status(&st, summary, sizeof(summary));
+    const char *prompt = dsco_workspace_prompt();
+    const char *root_pos = prompt ? strstr(prompt, "ROOT_AGENT") : NULL;
+    const char *pkg_pos = prompt ? strstr(prompt, "PKG_AGENT") : NULL;
+
+    agents_files = st.agents_files;
+    summary_count_ok = strstr(summary, "agents_md=2") != NULL;
+    has_root = root_pos != NULL;
+    has_pkg = pkg_pos != NULL;
+    has_outside = prompt && strstr(prompt, "OUTSIDE_AGENT") != NULL;
+    order_ok = root_pos && pkg_pos && root_pos < pkg_pos;
+    setup_ok = true;
+
+cleanup:
+    if (have_old_cwd)
+        chdir(old_cwd);
+    test_restore_env("HOME", saved_home, had_home);
+    dsco_workspace_prompt_invalidate();
+    test_rm_rf(root);
+
+    ASSERT(setup_ok, "temporary AGENTS.md workspace setup should succeed");
+    ASSERT(agents_files == 2, "status should count root and nested AGENTS.md files");
+    ASSERT(summary_count_ok, "workspace status summary should include agents_md count");
+    ASSERT(has_root, "prompt should include repository-root AGENTS.md");
+    ASSERT(has_pkg, "prompt should include nested AGENTS.md");
+    ASSERT(!has_outside, "prompt should stop at repo root and skip parent AGENTS.md");
+    ASSERT(order_ok, "prompt should merge AGENTS.md from root to leaf");
+    PASS();
 }
 
 static void test_temp_plugin_paths(const char *tag, char *dir, size_t dir_len, char *manifest_path,
@@ -8372,6 +9317,25 @@ static void test_tools_external_output_schema_contracts(void) {
     PASS();
 }
 
+static void test_tools_discovery_ranks_multi_tool_coding_intent(void) {
+    TEST("discover_tools ranks multi-tool coding intent");
+    tools_init();
+
+    char result[65536];
+    bool ok = tools_execute(
+        "discover_tools",
+        "{\"query\":\"edit source code apply patch run tests compile format git diff symbols\",\"limit\":40}",
+        result, sizeof(result));
+    ASSERT(ok, "discover_tools coding query succeeds");
+    ASSERT(strstr(result, "\"name\":\"apply_patch\"") != NULL,
+           "coding discovery finds apply_patch despite unrelated query terms");
+    ASSERT(strstr(result, "\"name\":\"test_run\"") != NULL,
+           "coding discovery finds test_run despite unrelated query terms");
+    ASSERT(strstr(result, "\"name\":\"edit_file\"") != NULL,
+           "coding discovery finds edit_file");
+    PASS();
+}
+
 static void test_tools_builtin_output_schema_discovery(void) {
     TEST("builtin discovery exposes output schemas");
     tools_init();
@@ -9311,6 +10275,34 @@ static void test_tool_allowlist_filters_visible_tools(void) {
     free((void *)filtered);
 
     test_restore_env("DSCO_TOOL_ALLOWLIST", saved, had);
+    tools_init();
+    PASS();
+}
+
+static void test_restricted_tool_profile(void) {
+    TEST("restricted tool profile exposes only Bash, curl_raw, and ssh_command");
+    tools_init_profile(TOOLS_RESTRICTED);
+
+    int count = 0;
+    const tool_def_t *defs = tools_get_all(&count);
+    int allowed = 0;
+    for (int i = 0; i < count; i++) {
+        if (!tools_profile_allows_index(i))
+            continue;
+        allowed++;
+        ASSERT(defs[i].name != NULL, "restricted profile entry should have a name");
+        ASSERT(strcmp(defs[i].name, "Bash") == 0 || strcmp(defs[i].name, "curl_raw") == 0 ||
+                   strcmp(defs[i].name, "ssh_command") == 0,
+               "restricted profile must not expose another builtin tool");
+    }
+    ASSERT(allowed == 3, "restricted profile should expose exactly three tools");
+    ASSERT(tools_lookup_index("Bash") >= 0, "restricted profile should expose Bash");
+    ASSERT(tools_lookup_index("curl_raw") >= 0, "restricted profile should expose curl_raw");
+    ASSERT(tools_lookup_index("ssh_command") >= 0,
+           "restricted profile should expose ssh_command");
+    ASSERT(tools_lookup_index("grep_files") < 0,
+           "restricted profile should hide non-allowlisted tools");
+
     tools_init();
     PASS();
 }
@@ -10469,6 +11461,12 @@ static void test_codex_cache_first_run_defaults(void) {
            "Codex default effort should be medium before cache refresh");
     ASSERT(codex_cache_model_supported("openai/gpt-5.5"),
            "Codex should support gpt-5.5 before cache refresh");
+    ASSERT(codex_cache_model_supported("openai/gpt-5.6-sol"),
+           "Codex should support gpt-5.6-sol before cache refresh");
+    ASSERT(codex_cache_model_supported("openai/gpt-5.6-terra"),
+           "Codex should support gpt-5.6-terra before cache refresh");
+    ASSERT(codex_cache_model_supported("openai/gpt-5.6-luna"),
+           "Codex should support gpt-5.6-luna before cache refresh");
     ASSERT(!codex_cache_model_supported("openai/gpt-4.1"),
            "Codex should not treat gpt-4.1 as supported");
     PASS();
@@ -10830,7 +11828,7 @@ static void test_provider_create_known_unsupported_does_not_fallback_openai(void
            "unsupported build_request should explain missing transport");
     free(req);
 
-    stream_result_t sr = bedrock->stream(bedrock, NULL, "{}", NULL, NULL, NULL, NULL);
+    stream_result_t sr = bedrock->stream(bedrock, NULL, "{}", NULL, NULL, NULL, NULL, NULL);
     ASSERT(!sr.ok, "unsupported stream should fail clearly");
     ASSERT(sr.http_status == 501, "unsupported stream should report 501");
     ASSERT(sr.parsed.stop_reason && strcmp(sr.parsed.stop_reason, "unsupported_provider") == 0,
@@ -10901,7 +11899,7 @@ static void test_provider_configurable_base_requires_explicit_base(void) {
            "azure alias should canonicalize to azure-foundry");
     ASSERT(missing->api_url && missing->api_url[0] == '\0',
            "azure without base should not inherit the OpenAI base URL");
-    stream_result_t sr = missing->stream(missing, "azure-key", "{}", NULL, NULL, NULL, NULL);
+    stream_result_t sr = missing->stream(missing, "azure-key", "{}", NULL, NULL, NULL, NULL, NULL);
     ASSERT(!sr.ok, "missing Azure base should fail locally");
     ASSERT(sr.parsed.stop_reason && strcmp(sr.parsed.stop_reason, "missing_api_base") == 0,
            "missing Azure base should report missing_api_base");
@@ -11279,6 +12277,16 @@ static void test_provider_select_default_primary_model_prefers_zai_coding_plan(v
 
 static void test_provider_build_default_fallback_models_cross_lab(void) {
     TEST("provider_build_default_fallback_models cross-lab");
+    char saved_payg_x[256], saved_sakana_payg_x[256], saved_fish_payg_x[256], saved_local_x[256];
+    bool had_payg_x=false, had_sakana_payg_x=false, had_fish_payg_x=false, had_local_x=false;
+    test_capture_env("FUGU_PAYG_API_KEY", saved_payg_x, sizeof(saved_payg_x), &had_payg_x);
+    test_capture_env("SAKANA_PAYG_API_KEY", saved_sakana_payg_x, sizeof(saved_sakana_payg_x), &had_sakana_payg_x);
+    test_capture_env("FISH_PAYG_API_KEY", saved_fish_payg_x, sizeof(saved_fish_payg_x), &had_fish_payg_x);
+    test_capture_env("DSCO_LOCAL_FALLBACK_MODEL", saved_local_x, sizeof(saved_local_x), &had_local_x);
+    unsetenv("FUGU_PAYG_API_KEY");
+    unsetenv("SAKANA_PAYG_API_KEY");
+    unsetenv("FISH_PAYG_API_KEY");
+    unsetenv("DSCO_LOCAL_FALLBACK_MODEL");
     char saved_xai[256], saved_or[256], saved_anth[256], saved_openai[256],
         saved_disable_codex[256];
     char saved_fugu[256], saved_sakana[256], saved_fish[256], saved_sakana_token[256];
@@ -11327,11 +12335,25 @@ static void test_provider_build_default_fallback_models_cross_lab(void) {
     test_restore_env("SAKANA_API_KEY", saved_sakana, had_sakana);
     test_restore_env("FISH_API_KEY", saved_fish, had_fish);
     test_restore_env("SAKANA_TOKEN", saved_sakana_token, had_sakana_token);
+        test_restore_env("FUGU_PAYG_API_KEY", saved_payg_x, had_payg_x);
+    test_restore_env("SAKANA_PAYG_API_KEY", saved_sakana_payg_x, had_sakana_payg_x);
+    test_restore_env("FISH_PAYG_API_KEY", saved_fish_payg_x, had_fish_payg_x);
+    test_restore_env("DSCO_LOCAL_FALLBACK_MODEL", saved_local_x, had_local_x);
     PASS();
 }
 
 static void test_provider_build_default_fallback_models_prefers_codex_subscription(void) {
     TEST("provider fallback prefers Codex subscription");
+    char saved_payg_x[256], saved_sakana_payg_x[256], saved_fish_payg_x[256], saved_local_x[256];
+    bool had_payg_x=false, had_sakana_payg_x=false, had_fish_payg_x=false, had_local_x=false;
+    test_capture_env("FUGU_PAYG_API_KEY", saved_payg_x, sizeof(saved_payg_x), &had_payg_x);
+    test_capture_env("SAKANA_PAYG_API_KEY", saved_sakana_payg_x, sizeof(saved_sakana_payg_x), &had_sakana_payg_x);
+    test_capture_env("FISH_PAYG_API_KEY", saved_fish_payg_x, sizeof(saved_fish_payg_x), &had_fish_payg_x);
+    test_capture_env("DSCO_LOCAL_FALLBACK_MODEL", saved_local_x, sizeof(saved_local_x), &had_local_x);
+    unsetenv("FUGU_PAYG_API_KEY");
+    unsetenv("SAKANA_PAYG_API_KEY");
+    unsetenv("FISH_PAYG_API_KEY");
+    unsetenv("DSCO_LOCAL_FALLBACK_MODEL");
     char saved_dsco_oauth[256], saved_oauth[256], saved_or[256], saved_anth[256];
     char saved_openai[256], saved_xai[256], saved_grok[256], saved_disable_codex[64];
     bool had_dsco_oauth = false, had_oauth = false, had_or = false, had_anth = false;
@@ -11377,6 +12399,10 @@ static void test_provider_build_default_fallback_models_prefers_codex_subscripti
     test_restore_env("XAI_API_KEY", saved_xai, had_xai);
     test_restore_env("GROK_API_KEY", saved_grok, had_grok);
     test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex, had_disable_codex);
+        test_restore_env("FUGU_PAYG_API_KEY", saved_payg_x, had_payg_x);
+    test_restore_env("SAKANA_PAYG_API_KEY", saved_sakana_payg_x, had_sakana_payg_x);
+    test_restore_env("FISH_PAYG_API_KEY", saved_fish_payg_x, had_fish_payg_x);
+    test_restore_env("DSCO_LOCAL_FALLBACK_MODEL", saved_local_x, had_local_x);
     PASS();
 }
 
@@ -11468,6 +12494,16 @@ static void test_provider_build_default_fallback_models_respects_capacity(void) 
 
 static void test_provider_build_default_fallback_models_empty_without_credentials(void) {
     TEST("provider fallback chain empty without credentials");
+    char saved_payg_x[256], saved_sakana_payg_x[256], saved_fish_payg_x[256], saved_local_x[256];
+    bool had_payg_x=false, had_sakana_payg_x=false, had_fish_payg_x=false, had_local_x=false;
+    test_capture_env("FUGU_PAYG_API_KEY", saved_payg_x, sizeof(saved_payg_x), &had_payg_x);
+    test_capture_env("SAKANA_PAYG_API_KEY", saved_sakana_payg_x, sizeof(saved_sakana_payg_x), &had_sakana_payg_x);
+    test_capture_env("FISH_PAYG_API_KEY", saved_fish_payg_x, sizeof(saved_fish_payg_x), &had_fish_payg_x);
+    test_capture_env("DSCO_LOCAL_FALLBACK_MODEL", saved_local_x, sizeof(saved_local_x), &had_local_x);
+    unsetenv("FUGU_PAYG_API_KEY");
+    unsetenv("SAKANA_PAYG_API_KEY");
+    unsetenv("FISH_PAYG_API_KEY");
+    unsetenv("DSCO_LOCAL_FALLBACK_MODEL");
     char saved_or[256], saved_anth[256], saved_openai[256], saved_xai[256], saved_grok[256];
     char saved_google[256], saved_deepseek[256], saved_mistral[256], saved_kimi[256];
     char saved_moonshot[256], saved_fugu[256], saved_sakana[256], saved_fish[256];
@@ -11537,6 +12573,10 @@ static void test_provider_build_default_fallback_models_empty_without_credential
     test_restore_env("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", saved_disable_claude,
                      had_disable_claude);
     test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex, had_disable_codex);
+        test_restore_env("FUGU_PAYG_API_KEY", saved_payg_x, had_payg_x);
+    test_restore_env("SAKANA_PAYG_API_KEY", saved_sakana_payg_x, had_sakana_payg_x);
+    test_restore_env("FISH_PAYG_API_KEY", saved_fish_payg_x, had_fish_payg_x);
+    test_restore_env("DSCO_LOCAL_FALLBACK_MODEL", saved_local_x, had_local_x);
     PASS();
 }
 
@@ -11676,6 +12716,26 @@ static void test_provider_build_default_fallback_models_empty_for_local_endpoint
     test_restore_env("ANTHROPIC_API_KEY", saved_anth, had_anth);
     test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
     test_restore_env("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY", saved_disable_codex, had_disable_codex);
+    PASS();
+}
+
+static void test_provider_build_default_fallback_models_appends_configured_local(void) {
+    TEST("provider fallback chain appends configured local last resort");
+    char saved_local[256];
+    bool had_local = false;
+    test_capture_env("DSCO_LOCAL_FALLBACK_MODEL", saved_local, sizeof(saved_local), &had_local);
+    setenv("DSCO_LOCAL_FALLBACK_MODEL", "ollama:qwen3.6:27b-mlx", 1);
+
+    char models[4][128];
+    int count = provider_build_default_fallback_models("claude-sonnet-4-6", models, 4);
+    ASSERT(count > 0, "configured local fallback should produce a fallback lane");
+    ASSERT(strcmp(models[count - 1], "ollama:qwen3.6:27b-mlx") == 0,
+           "configured local fallback should reserve the final slot");
+
+    count = provider_build_default_fallback_models("ollama:qwen3.6:27b-mlx", models, 4);
+    ASSERT(count == 0, "local primary should not fall back to itself or remote providers");
+
+    test_restore_env("DSCO_LOCAL_FALLBACK_MODEL", saved_local, had_local);
     PASS();
 }
 
@@ -12559,6 +13619,9 @@ static void test_provider_route_prefers_codex_subscription_for_openai_models(voi
     unsetenv("ANTHROPIC_API_KEY");
 
     const char *routed = provider_route_for_model("openai/gpt-5.5", NULL, NULL);
+    const char *terra_route = provider_route_for_model("openai/gpt-5.6-terra", NULL, NULL);
+    const char *terra_openai_override_route =
+        provider_route_for_model("openai/gpt-5.6-terra", NULL, "openai");
     const char *req_key = provider_resolve_request_api_key(routed, NULL);
     const char *openai_default = provider_primary_model_for("openai", true);
     const char *legacy_route = provider_route_for_model("openai/gpt-4.1", NULL, NULL);
@@ -12575,9 +13638,19 @@ static void test_provider_route_prefers_codex_subscription_for_openai_models(voi
                                      : NULL;
     char *codex_req_model = codex_req ? json_get_str(codex_req, "model") : NULL;
     char *codex_req_instructions = codex_req ? json_get_str(codex_req, "instructions") : NULL;
+    session_state_t terra_session;
+    session_state_init(&terra_session, "openai/gpt-5.6-terra");
+    char *terra_req = codex_provider ? codex_provider->build_request(codex_provider, &codex_conv,
+                                                                     &terra_session, 1024, req_key)
+                                     : NULL;
+    char *terra_req_model = terra_req ? json_get_str(terra_req, "model") : NULL;
 
     ASSERT(strcmp(routed, "openai-codex") == 0,
            "OpenAI model should use ChatGPT Codex subscription before API keys");
+    ASSERT(strcmp(terra_route, "openai-codex") == 0,
+           "GPT-5.6 OpenAI model should use ChatGPT Codex subscription before API keys");
+    ASSERT(strcmp(terra_openai_override_route, "openai-codex") == 0,
+           "OpenAI family override should retain the Codex subscription lane");
     ASSERT(req_key && strcmp(req_key, "chatgpt-oauth-route") == 0,
            "Native Codex subscription route should expose the ChatGPT OAuth token");
     ASSERT(openai_default && strcmp(openai_default, "gpt-5.5") == 0,
@@ -12593,8 +13666,12 @@ static void test_provider_route_prefers_codex_subscription_for_openai_models(voi
            "openai-codex should prefer native ChatGPT streaming when OAuth is available");
     ASSERT(codex_req_model && strcmp(codex_req_model, "gpt-5.5") == 0,
            "Native Codex request should resolve alias to bare Codex model");
+    ASSERT(terra_req_model && strcmp(terra_req_model, "gpt-5.6-terra") == 0,
+           "Native Codex request should preserve bare GPT-5.6 model ids");
     ASSERT(codex_req_instructions && strstr(codex_req, "\"input\"") != NULL,
            "Native Codex request should use Responses instructions/input shape");
+    free(terra_req_model);
+    free(terra_req);
     free(codex_req_instructions);
     free(codex_req_model);
     free(codex_req);
@@ -14107,6 +15184,34 @@ static void test_prompt_cache_provider_policy_matrix(void) {
     }
 }
 
+static void test_prompt_cache_gpt56_explicit_request_shape(void) {
+    TEST("GPT-5.6 prompt cache uses an explicit breakpoint and supported TTL");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "hello");
+    session_state_t session;
+    session_state_init(&session, "gpt-5.6-terra");
+    snprintf(session.prompt_cache_key, sizeof(session.prompt_cache_key), "%s", "dsco-test-cache");
+    /* Verify legacy/default 24h cannot generate an invalid GPT-5.6 request. */
+    snprintf(session.prompt_cache_retention, sizeof(session.prompt_cache_retention), "%s", "24h");
+    provider_t *p = provider_create("openai");
+    ASSERT(p != NULL, "openai provider should be creatable");
+    char *req = p->build_request(p, &conv, &session, 1024, NULL);
+    ASSERT(req != NULL, "GPT-5.6 request should build");
+    ASSERT(strstr(req, "\"prompt_cache_key\":\"dsco-test-cache\"") != NULL,
+           "GPT-5.6 request should include stable cache routing key");
+    ASSERT(strstr(req, "\"prompt_cache_options\":{\"mode\":\"explicit\",\"ttl\":\"30m\"}") != NULL,
+           "GPT-5.6 request should use its only supported explicit-cache TTL");
+    ASSERT(strstr(req, "\"prompt_cache_breakpoint\":{\"mode\":\"explicit\"}") != NULL,
+           "GPT-5.6 request should mark the stable system prefix explicitly");
+    ASSERT(strstr(req, "\"prompt_cache_retention\"") == NULL,
+           "GPT-5.6 request must not send deprecated cache retention");
+    free(req);
+    conv_free(&conv);
+    provider_free(p);
+    PASS();
+}
+
 static void test_prompt_cache_openai_request_shape(void) {
     TEST("prompt cache OpenAI request shape includes key and retention");
     conversation_t conv;
@@ -14205,6 +15310,8 @@ static void test_openai_metadata_covers_current_api_and_cost_controls(void) {
         "\"batch\"",
         "\"audio\"",
         "\"images\"",
+        "\"gpt-image-2\"",
+        "\"image_generation\"",
         "\"videos\"",
         "\"embeddings\"",
         "\"moderations\"",
@@ -20298,14 +21405,18 @@ static void test_capability_gate(void) {
                   CAP_DECISION_ALLOW,
               "lifting the net lockdown should ALLOW web_search again");
 
-    /* Taint the session, then an egress call closes the lethal triad -> DENY. */
+    /* Taint the session, then an egress call closes the lethal triad.
+     * Default posture (warn-and-allow vs fail-closed) is pending principal
+     * ratification; assert the invariant hard-lockdown path explicitly. */
     dsco_flow_note(CAP_SECRETS);
     dsco_flow_note(CAP_UNTRUSTED_IN);
     reason[0] = '\0';
+    setenv("DSCO_ALLOW_EXFIL", "0", 1);
     GATECHECK(dsco_capability_gate("send_email", NULL, "trusted", reason, sizeof(reason)) ==
                   CAP_DECISION_DENY,
-              "tainted send_email should DENY on trifecta");
+              "tainted send_email should DENY on trifecta under DSCO_ALLOW_EXFIL=0");
     GATECHECK(reason[0] != '\0', "trifecta DENY should populate a reason");
+    unsetenv("DSCO_ALLOW_EXFIL");
 
     /* Operator override acknowledges the exfil risk for the run. */
     setenv("DSCO_ALLOW_EXFIL", "1", 1);
@@ -20568,9 +21679,60 @@ static void test_tool_bash_background_lifecycle(void) {
 int main(void) {
     fprintf(stderr, "\n\033[1m\033[36mdsco test suite — MAGNUM COQ EDITION\033[0m\n\n");
     setenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", "1", 1);
+    /* Hermetic governance posture: the operator shell may export
+     * DSCO_GOV_BYPASS=1 / DSCO_GOV_MODEL=none, which resolves the gate to
+     * NONE mode and silently neuters every governance/self-preservation
+     * assertion. gov_experiment_model() caches on first read, so sanitize
+     * before any gate call. */
+    unsetenv("DSCO_GOV_BYPASS");
+    unsetenv("DSCO_GOV_MODEL");
+
+    /* Hermetic operator posture: a systems-agent shell exports posture vars
+     * (DSCO_SYSTEMS_AGENT, supervise/net/fleet toggles) that change tool
+     * exposure and child-spawn behavior. Left set, they flip the realtime
+     * voice selector into operator mode (leaking python/bash into a plain
+     * calculator context) and destabilize durable cross-provider spawns.
+     * Sanitize so the suite is deterministic regardless of the caller's env. */
+    unsetenv("DSCO_SYSTEMS_AGENT");
+    unsetenv("DSCO_REALTIME_SYSTEM_TOOLS");
+    unsetenv("DSCO_REALTIME_OPERATOR_TOOLS");
+    unsetenv("DSCO_SUPERVISED");
+    unsetenv("DSCO_SUPERVISE_RESTART");
+    unsetenv("DSCO_NO_SUPERVISE");
+    unsetenv("DSCO_NET_FORCE");
+    unsetenv("DSCO_FLEET_CONCURRENCY");
+    unsetenv("DSCO_DHT_SWARM");
 
     /* Initialize VOS arena subsystem — required by pipeline and other modules */
     arena_subsystem_init();
+
+    const char *test_only = getenv("DSCO_TEST_ONLY");
+    if (test_only && strcmp(test_only, "provider-stream") == 0) {
+        test_openai_request_defaults_auto_tool_choice();
+        test_openrouter_gpt56_tools_chat_completions_compat();
+        test_openai_sse_data_without_space_streams_reasoning_details();
+        test_openai_sse_legacy_reasoning_takes_precedence_over_details();
+        test_openai_sse_tool_call_after_reasoning_accumulates_exactly();
+        test_lmstudio_reasoning_xml_promotes_to_tool_call();
+        test_matrix_canary_accepts_structured_and_reasoning_tool_calls();
+        test_local_tool_call_normalizer_formats_and_bounds();
+        test_lmstudio_parallel_local_tool_calls_promote();
+        test_openai_sse_legacy_function_call_streams_args();
+        test_openai_sse_refusal_delta_streams_as_text();
+        test_openrouter_sse_opaque_reasoning_replays_only_for_same_model();
+        test_openai_sse_done_without_finish_reason_is_not_terminal_success();
+        test_openai_sse_tool_call_without_id_is_not_terminal_success();
+        test_openai_sse_content_block_overflow_is_not_terminal_success();
+        test_openrouter_sse_reasoning_details_deduplicate_exact_objects_only();
+        test_openai_sse_reasoning_replay_requires_openrouter_source();
+
+        fprintf(stderr, "\n\033[1m  %d tests: \033[32m%d passed\033[0m", tests_run,
+                tests_passed);
+        if (tests_failed > 0)
+            fprintf(stderr, ", \033[31m%d failed\033[0m", tests_failed);
+        fprintf(stderr, "\033[0m\n\n");
+        return tests_failed > 0 ? 1 : 0;
+    }
 
     /* JSON */
     test_json_get_str();
@@ -20661,6 +21823,22 @@ int main(void) {
     test_provider_request_model_prefix_routing();
     test_openai_request_defaults_auto_tool_choice();
     test_openai_request_normalizes_max_effort();
+    test_openrouter_gpt56_tools_chat_completions_compat();
+    test_openai_sse_data_without_space_streams_reasoning_details();
+    test_openai_sse_legacy_reasoning_takes_precedence_over_details();
+    test_openai_sse_tool_call_after_reasoning_accumulates_exactly();
+    test_lmstudio_reasoning_xml_promotes_to_tool_call();
+    test_matrix_canary_accepts_structured_and_reasoning_tool_calls();
+    test_local_tool_call_normalizer_formats_and_bounds();
+    test_lmstudio_parallel_local_tool_calls_promote();
+    test_openai_sse_legacy_function_call_streams_args();
+    test_openai_sse_refusal_delta_streams_as_text();
+    test_openrouter_sse_opaque_reasoning_replays_only_for_same_model();
+    test_openai_sse_done_without_finish_reason_is_not_terminal_success();
+    test_openai_sse_tool_call_without_id_is_not_terminal_success();
+    test_openai_sse_content_block_overflow_is_not_terminal_success();
+    test_openrouter_sse_reasoning_details_deduplicate_exact_objects_only();
+    test_openai_sse_reasoning_replay_requires_openrouter_source();
     test_openai_request_accepts_extra_params_env();
     test_openai_request_structured_output_schema();
     test_openrouter_request_tool_choice_none();
@@ -20700,6 +21878,7 @@ int main(void) {
     test_tool_execute_eval();
     test_tool_execute_unknown();
     test_tool_registry_expanded_builtin_count();
+    test_openai_image_generate_tool_registered_and_gated();
     test_expanded_text_tools_json_serializers();
     test_discover_tools_grouped_json_has_no_leading_commas();
     test_tool_execute_self_exiting_alias();
@@ -20732,6 +21911,7 @@ int main(void) {
     test_sandbox_run_trusted_defaults_fallback();
     test_sandbox_run_rejects_invalid_filesystem();
     test_untrusted_python_routes_to_sandbox();
+    test_python_tool_ignores_empty_file_when_code_present();
     test_untrusted_node_requires_code_or_file();
     test_public_tools_execute_uses_governance_approval_gate();
     test_governance_gate_removed_immune_self_surgery_veto();
@@ -20911,6 +22091,7 @@ int main(void) {
 
     /* Prompt injection */
     test_detect_prompt_injection();
+    test_workspace_agents_md_hierarchical_prompt();
 
     /* Conversation extended */
     test_conv_add_tool_use_and_result();
@@ -20953,6 +22134,7 @@ int main(void) {
     test_tools_normalize_schema_scalars();
     test_tools_normalize_schema_containers();
     test_tools_external_output_schema_contracts();
+    test_tools_discovery_ranks_multi_tool_coding_intent();
     test_tools_builtin_output_schema_discovery();
     test_tools_normalize_legacy_tool_inputs();
     test_tools_validate_repaired_inputs();
@@ -20979,6 +22161,7 @@ int main(void) {
     test_agent_and_swarm_tool_schemas_expose_spawn_fields();
     test_swarm_group_status_json_includes_executor_metadata();
     test_tool_allowlist_filters_visible_tools();
+    test_restricted_tool_profile();
     test_worker_core_tools_survive_restrictive_agent_profile();
     test_worker_tool_profile_allows_full_builtin_catalog();
     test_tools_get_paged_budget_floor();
@@ -21087,6 +22270,7 @@ int main(void) {
     test_provider_build_default_fallback_models_native_primary_duplicate();
     test_provider_build_default_fallback_models_for_fugu_cross_provider();
     test_provider_build_default_fallback_models_empty_for_local_endpoint();
+    test_provider_build_default_fallback_models_appends_configured_local();
     test_provider_route_explicit_openrouter_overrides_native_namespace();
     test_provider_route_native_namespace_does_not_silently_fallback_to_openrouter();
     test_provider_model_is_routable_respects_native_namespace_without_key();
@@ -21128,6 +22312,7 @@ int main(void) {
     test_swarm_provider_fabric_uses_configured_local_lane();
     test_cross_provider_durable_agent_matrix_generated();
     test_prompt_cache_provider_policy_matrix();
+    test_prompt_cache_gpt56_explicit_request_shape();
     test_prompt_cache_openai_request_shape();
     test_prompt_cache_xai_header_shape();
     test_provider_metadata_catalog_validates();

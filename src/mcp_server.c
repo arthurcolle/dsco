@@ -226,6 +226,11 @@ static void handle_tools_call(const char *id_raw, const char *params) {
         send_error(id_raw, -32000, reason[0] ? reason : "governance_block");
         return;
     }
+    size_t arglen = strnlen(args, sizeof(args));
+    if (arglen >= sizeof(args) - 1) {
+        send_error(id_raw, -32602, "arguments too large");
+        return;
+    }
     static char result[MCP_RESULT_MAX];
     result[0] = '\0';
     bool ok = tools_execute_for_tier(name, args, g_tier, result, sizeof(result));

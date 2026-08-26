@@ -45,7 +45,7 @@ static const char *const k_read_tools[] = {
 /* Local file mutation. Implies read too. */
 static const char *const k_write_tools[] = {
     "write_file", "edit_file", "apply_patch", "ast_edit", "create_file", "delete_file",
-    "move_file", "rename_file", "patch",
+    "move_file", "rename_file", "patch", "openai_image_generate",
     /* Claude-compatible surfaces */
     "Write", "Edit", NULL};
 
@@ -59,7 +59,7 @@ static const char *const k_exec_tools[] = {
 /* External-content ingress with network egress (both untrusted-in and net). */
 static const char *const k_net_tools[] = {
     "web_search", "read_url", "fetch", "fetch_url", "http", "http_request", "browser",
-    "web_fetch", "curl", "download",
+    "web_fetch", "curl", "download", "openai_image_generate",
     /* Claude-compatible surfaces */
     "WebFetch", "WebSearch", NULL};
 
@@ -70,6 +70,11 @@ static const char *const k_egress_tools[] = {"ssh_command", "scp", "rsync", "sen
 /* Control-plane / self-modification: gating the gate. */
 static const char *const k_control_tools[] = {
     "governance", "killswitch", "self_exit", "gate_status", "gov_experiment", "tamper",
+    NULL};
+
+/* Tools that consume credentials even when the input JSON does not name them. */
+static const char *const k_secret_tools[] = {
+    "openai_image_generate",
     NULL};
 
 /* Tools whose input can name credentials/secret material. */
@@ -118,6 +123,8 @@ unsigned dsco_caps_for_tool(const char *name, const char *input_json) {
         caps |= CAP_FS_READ | CAP_FS_WRITE;
     if (name_in(name, k_control_tools))
         caps |= CAP_CONTROL;
+    if (name_in(name, k_secret_tools))
+        caps |= CAP_SECRETS;
 
     if (name_in(name, k_net_tools))
         caps |= CAP_NET | CAP_UNTRUSTED_IN; /* remote content is untrusted */
@@ -380,16 +387,37 @@ dsco_cap_decision_t dsco_capability_gate(const char *name, const char *input_jso
     }
 
     /* 2. Lethal trifecta: this call egresses and the session has already
-     *    ingested untrusted content AND accessed private data. Fail closed —
-     *    this is the exfiltration edge. The operator can acknowledge the risk
-     *    for a run with DSCO_ALLOW_EXFIL=1. */
+     *    ingested untrusted content AND accessed private data.
+     *
+     *    Policy (owner-directed default): warn-and-allow. A local sovereign
+     *    runtime must be able to exercise its own egress paths (gateway/gateway
+     *    self-tests, worker swarms over MCP) without a hard stop. So the default
+     *    is to ALLOW the call but emit a loud RED advisory on stderr — the
+     *    operator sees every trifecta edge without being blocked by it.
+     *
+     *    Explicit hardening for CI/prod restores fail-closed:
+     *      DSCO_ALLOW_EXFIL=0  -> hard DENY every trifecta egress.
+     *      DSCO_ALLOW_EXFIL=1  -> ALLOW silently (no advisory).
+     *      (unset)             -> ALLOW with a RED advisory. */
     if (dsco_flow_would_exfiltrate(caps)) {
-        if (env_tristate("DSCO_ALLOW_EXFIL") == 1)
-            return CAP_DECISION_ALLOW;
-        CAP_REASON("lethal-trifecta block: '%s' would egress after untrusted-content "
-                   "ingestion + private-data access; set DSCO_ALLOW_EXFIL=1 to override",
-                   name);
-        return CAP_DECISION_DENY;
+        int exfil = env_tristate("DSCO_ALLOW_EXFIL");
+        if (exfil == 0) {
+            CAP_REASON("lethal-trifecta block: '%s' would egress after untrusted-content "
+                       "ingestion + private-data access; DSCO_ALLOW_EXFIL=0 hard lockdown",
+                       name);
+            return CAP_DECISION_DENY;
+        }
+        if (exfil != 1) {
+            /* unset: default permissive, but flag it in RED. */
+            bool tty = isatty(2);
+            fprintf(stderr,
+                    "%s⚠ LETHAL-TRIFECTA BYPASS%s '%s' egresses after untrusted-in + "
+                    "private-data access (allowed by default; set DSCO_ALLOW_EXFIL=0 to "
+                    "enforce)%s\n",
+                    tty ? "\x1b[1;97;41m" : "", tty ? "\x1b[0;91m" : "", name,
+                    tty ? "\x1b[0m" : "");
+        }
+        return CAP_DECISION_ALLOW;
     }
 
     /* 3. Deno-style explicit hardening. Tier-based allow/deny for these
@@ -426,8 +454,18 @@ dsco_cap_decision_t dsco_capability_gate(const char *name, const char *input_jso
             char *pth = json_get_str(input_json, "file_path");
             if (!pth)
                 pth = json_get_str(input_json, "path");
+            if (!pth)
+                pth = json_get_str(input_json, "output_path");
+            if (!pth)
+                pth = json_get_str(input_json, "output");
             if (pth && pth[0] && !cap_path_in_scope(pth, ws)) {
                 CAP_REASON("write path outside DSCO_ALLOW_WRITE scope: %.80s", pth);
+                free(pth);
+                return CAP_DECISION_DENY;
+            }
+            if ((!pth || !pth[0]) && (caps & CAP_EXEC)) {
+                CAP_REASON("scoped write grant requires explicit structured path for exec-capable tool '%s'",
+                           name);
                 free(pth);
                 return CAP_DECISION_DENY;
             }
@@ -441,6 +479,12 @@ dsco_cap_decision_t dsco_capability_gate(const char *name, const char *input_jso
                 free(pth);
                 return CAP_DECISION_DENY;
             }
+            if ((!pth || !pth[0]) && (caps & CAP_EXEC)) {
+                CAP_REASON("scoped read grant requires explicit structured path for exec-capable tool '%s'",
+                           name);
+                free(pth);
+                return CAP_DECISION_DENY;
+            }
             free(pth);
         }
         if ((caps & CAP_NET) && ns && ns[0] && !cap_env_is_boolean(ns)) {
@@ -449,9 +493,17 @@ dsco_cap_decision_t dsco_capability_gate(const char *name, const char *input_jso
                 hv = json_get_str(input_json, "host");
             if (!hv)
                 hv = json_get_str(input_json, "hostname");
+            if (!hv && strcmp(name, "openai_image_generate") == 0)
+                hv = safe_strdup("api.openai.com");
             char host[256];
             if (hv && cap_host_of(hv, host, sizeof(host)) && !cap_host_in_scope(host, ns)) {
                 CAP_REASON("host outside DSCO_ALLOW_NET scope: %.80s", host);
+                free(hv);
+                return CAP_DECISION_DENY;
+            }
+            if ((!hv || !hv[0]) && (caps & CAP_EXEC)) {
+                CAP_REASON("scoped net grant requires explicit structured host/url for exec-capable tool '%s'",
+                           name);
                 free(hv);
                 return CAP_DECISION_DENY;
             }

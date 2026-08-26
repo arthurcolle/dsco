@@ -104,9 +104,9 @@ and no mandatory hosted control plane.
 |---|---:|
 | Version | `1.0.2` |
 | Runtime | Native C, default build standard `c2y` |
-| Source size | ~353K LOC across `src/` + `include/` |
-| Source files | 118 `.c` / 119 `.h` |
-| Built-in tools | 172 generated from `src/tools.c` |
+| Source size | ~199K LOC across top-level `src/*.c` + `include/*.h` |
+| Source files | 136 `.c` / 138 `.h` top-level |
+| Built-in tools | 275 generated from `src/tools.c` |
 | Integration universe | 1,887 Codex app catalog entries when the current directory cache is present |
 | Integration statuses | cached, installed, connected, live, inaccessible, stale, OAuth-gated, mutating, sync-capable |
 | Generated docs | API reference, built-in tool catalog, external integration catalog, constants/env index, repo coverage manifest |
@@ -124,9 +124,9 @@ tracked repo layout, run `make docs` and commit the generated docs.
 | Surface | Scale | Why it matters |
 |---|---:|---|
 | Codex app catalog | 1,887 apps | DSCO can reason over an integration universe before an MCP server is installed or authenticated. |
-| Built-in tools | 172 | Local work can proceed without waiting for external connectors. |
-| Source files | 237 C/header files | The runtime is inspectable and patchable as a concrete systems codebase. |
-| Source size | ~353K LOC | DSCO is a runtime with subsystems, not a prompt wrapper. |
+| Built-in tools | 275 | Local work can proceed without waiting for external connectors. |
+| Source files | 274 top-level C/header files | The runtime is inspectable and patchable as a concrete systems codebase. |
+| Source size | ~199K top-level C/header LOC | DSCO is a runtime with subsystems, not a prompt wrapper. |
 | Generated references | 6 artifacts | API, built-in tools, external integrations, constants/env, repo coverage, and machine-readable indexes keep docs tied to code. |
 | Integration profiles | 5 default bundles | engineering, GTM, finance, enterprise knowledge, governed agent runtime. |
 | Action-risk flags | 8 classes | read, write, send, delete, admin, untrusted content, confirmation-required, interactive. |
@@ -147,7 +147,7 @@ new operator should know first.
 | MCP servers | 64 | Upper bound for configured MCP server processes. |
 | MCP tools | 2,048 | Upper bound for MCP-discovered tools before profile/dynamic loading. |
 | MCP line size | 256 KiB | JSON-RPC stdio line bound for MCP transport. |
-| Default model alias | `zai/glm-5.2` | Native Z.AI GLM Coding Plan default in `include/config.h`; can be overridden with `-m` or `DSCO_MODEL`. |
+| Default model alias | `openai/gpt-5.5` | ChatGPT subscription-routed default in `include/config.h`; can be overridden with `-m` or `DSCO_MODEL`. |
 | Max output reserve | 16,384 tokens | Default output token reserve; `DSCO_MAX_TOKENS` can override. |
 | Agent checkpoint cadence | 40 turns | `MAX_AGENT_TURNS` is a progress checkpoint cadence, not the primary stop wall. |
 | Hard turn ceiling | 100,000 | Emergency runaway backstop; normal stops are budget/context/interrupt/no-progress. |
@@ -302,6 +302,7 @@ Important environment variables:
 |---|---|
 | `DSCO_EXEC` | Default executor/provider (`claude`, `codex`, `auto`, `fugu`, `sakana`, etc.). |
 | `DSCO_MODEL` | Default model override. |
+| `DSCO_LOCAL_FALLBACK_MODEL` | Final local lane used after configured cloud/provider fallbacks fail. |
 | `DSCO_PROFILE` | Startup profile: `full`, `lite`, or `worker`. |
 | `DSCO_ENV_FILE` | Override saved setup env-file path. |
 | `DSCO_BUDGET` / `DSCO_DAILY_BUDGET` | Session/daily cost budget controls. |
@@ -952,8 +953,8 @@ declarations, constants, environment variable usage, or tracked repo layout, run
 
 ```text
 dsco-cli/
-├── src/                  # C runtime implementation (118 .c)
-├── include/              # Public/internal headers (119 .h)
+├── src/                  # C runtime implementation (136 top-level .c)
+├── include/              # Public/internal headers (138 top-level .h)
 ├── tests/                # Runtime, unit, smoke, and regression tests
 ├── scripts/              # Build, packaging, docs, bootstrap, smoke helpers
 ├── docs/                 # Documentation set and generated references
