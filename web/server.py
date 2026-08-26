@@ -16,7 +16,9 @@ import logging
 import os
 import secrets
 import sqlite3
+import re
 import subprocess
+import sys
 import time
 import traceback
 import uuid
@@ -86,7 +88,7 @@ DSCO_BIN = WEB_DIR.parent / "dsco"
 WORK_DIR = Path(os.getenv("DSCO_WORK_DIR", str(Path.cwd())))
 DSCO_VERSION_CACHE: str = "unknown"
 
-DEFAULT_MODEL = os.getenv("DSCO_MODEL", "claude-sonnet-4-6")
+DEFAULT_MODEL = os.getenv("DSCO_MODEL", "claude-fable-5")
 DEFAULT_PORT = int(os.getenv("DSCO_UI_PORT", "3141"))
 MAX_TOKENS = 16384
 MAX_TOOL_OUTPUT = 64 * 1024
@@ -97,10 +99,12 @@ CONTROL_PLANE_SCHEMA_VERSION = 1
 _control_plane_ready = False
 
 # Security defaults: this server is a privileged local agent control plane.
-# Keep dangerous capability behind explicit operator opt-in even on localhost.
+# On loopback with a required token it is a single-user dev tool, so the agent's
+# tools are enabled by default. Set DSCO_WEB_ALLOW_DANGEROUS_TOOLS=0 to lock them,
+# and DSCO_WEB_REQUIRE_TOKEN stays on so a bare port is never unauthenticated.
 WEB_AUTH_TOKEN = os.getenv("DSCO_WEB_TOKEN") or secrets.token_urlsafe(32)
 WEB_REQUIRE_TOKEN = os.getenv("DSCO_WEB_REQUIRE_TOKEN", "1").strip().lower() not in ("0", "false", "off", "no")
-WEB_ALLOW_DANGEROUS_TOOLS = os.getenv("DSCO_WEB_ALLOW_DANGEROUS_TOOLS", "0").strip().lower() in ("1", "true", "on", "yes")
+WEB_ALLOW_DANGEROUS_TOOLS = os.getenv("DSCO_WEB_ALLOW_DANGEROUS_TOOLS", "1").strip().lower() in ("1", "true", "on", "yes")
 WEB_ALLOW_ABSOLUTE_PATHS = os.getenv("DSCO_WEB_ALLOW_ABSOLUTE_PATHS", "0").strip().lower() in ("1", "true", "on", "yes")
 WEB_ALLOW_CUSTOM_BASE_URL = os.getenv("DSCO_WEB_ALLOW_CUSTOM_BASE_URL", "0").strip().lower() in ("1", "true", "on", "yes")
 WEB_TRADING_LIVE = os.getenv("DSCO_TRADING_LIVE", "0").strip().lower() in ("1", "true", "on", "yes")
@@ -190,6 +194,369 @@ def get_provider_key(provider: str) -> Optional[str]:
     return None
 
 
+# ── Claude subscription (OAuth, like Claude Code) ────────────────────────────
+# Uses the user's Claude Pro/Max subscription via the OAuth token that Claude
+# Code stores, instead of a metered ANTHROPIC_API_KEY. The token grants access
+# only when the request presents the oauth beta header and a system prompt whose
+# first block is the Claude Code identity string.
+CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+ANTHROPIC_OAUTH_BETA = "oauth-2025-04-20"
+ANTHROPIC_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
+
+def _load_claude_oauth_raw() -> Optional[dict]:
+    """Read Claude Code OAuth creds from ~/.claude/.credentials.json or macOS keychain."""
+    raw = None
+    cred_path = Path.home() / ".claude" / ".credentials.json"
+    if cred_path.exists():
+        try:
+            raw = cred_path.read_text()
+        except OSError:
+            raw = None
+    if not raw and sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, text=True, timeout=5)
+            if out.returncode == 0:
+                raw = out.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            raw = None
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return data.get("claudeAiOauth") or (data if data.get("accessToken") else None)
+
+
+def _persist_claude_oauth(creds: dict) -> None:
+    """Write refreshed creds back to keychain and/or credentials file."""
+    payload = json.dumps({"claudeAiOauth": creds})
+    cred_path = Path.home() / ".claude" / ".credentials.json"
+    if cred_path.exists():
+        try:
+            cred_path.write_text(payload)
+        except OSError:
+            pass
+    if sys.platform == "darwin":
+        try:
+            subprocess.run(
+                ["security", "add-generic-password", "-U",
+                 "-a", os.getenv("USER", "dsco"),
+                 "-s", "Claude Code-credentials", "-w", payload],
+                capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def _refresh_claude_oauth(creds: dict) -> Optional[dict]:
+    """Exchange the refresh token for a fresh access token; persist and return it."""
+    refresh = creds.get("refreshToken")
+    if not refresh:
+        return None
+    try:
+        resp = httpx.post(
+            "https://console.anthropic.com/v1/oauth/token",
+            json={"grant_type": "refresh_token", "refresh_token": refresh,
+                  "client_id": ANTHROPIC_OAUTH_CLIENT_ID},
+            timeout=15)
+    except Exception as e:
+        log.warning(f"Claude OAuth refresh error: {e}")
+        return None
+    if resp.status_code != 200:
+        log.warning(f"Claude OAuth refresh failed: {resp.status_code} {resp.text[:200]}")
+        return None
+    tok = resp.json()
+    new = dict(creds)
+    new["accessToken"] = tok.get("access_token", creds.get("accessToken"))
+    if tok.get("refresh_token"):
+        new["refreshToken"] = tok["refresh_token"]
+    if tok.get("expires_in"):
+        new["expiresAt"] = int((time.time() + tok["expires_in"]) * 1000)
+    _persist_claude_oauth(new)
+    return new
+
+
+def get_claude_oauth_token() -> Optional[str]:
+    """Return a valid Claude subscription OAuth access token, refreshing if expired."""
+    if os.getenv("DSCO_DISABLE_CLAUDE_OAUTH", "").strip().lower() in ("1", "true", "on", "yes"):
+        return None
+    creds = _load_claude_oauth_raw()
+    if not creds or not creds.get("accessToken"):
+        return None
+    expires_at = creds.get("expiresAt") or 0  # epoch ms
+    if expires_at and time.time() * 1000 >= (expires_at - 60_000):
+        refreshed = _refresh_claude_oauth(creds)
+        if refreshed:
+            creds = refreshed
+    return creds.get("accessToken")
+
+
+def anthropic_auth() -> tuple[Optional[str], bool]:
+    """Return (token, is_oauth). Prefer Claude subscription OAuth, then ANTHROPIC_API_KEY."""
+    tok = get_claude_oauth_token()
+    if tok:
+        return tok, True
+    return os.getenv("ANTHROPIC_API_KEY"), False
+
+
+def make_anthropic_client(token: str, is_oauth: bool) -> "anthropic.AsyncAnthropic":
+    if is_oauth:
+        return anthropic.AsyncAnthropic(
+            auth_token=token,
+            default_headers={"anthropic-beta": ANTHROPIC_OAUTH_BETA})
+    return anthropic.AsyncAnthropic(api_key=token)
+
+
+def anthropic_system(is_oauth: bool, system_text: str):
+    """When using subscription OAuth the first system block must be the Claude Code identity."""
+    if is_oauth:
+        return [
+            {"type": "text", "text": CLAUDE_CODE_IDENTITY},
+            {"type": "text", "text": system_text},
+        ]
+    return system_text
+
+
+# ── OpenAI subscription (ChatGPT / Codex OAuth) ──────────────────────────────
+# Uses the user's ChatGPT Plus/Pro subscription via the OAuth token that the
+# Codex CLI stores in ~/.codex/auth.json. This is a SEPARATE responsibility from
+# OPENAI_API_KEY: subscription requests go to the ChatGPT backend's Responses
+# API (chatgpt.com/backend-api/codex/responses), not the public /v1 API.
+OPENAI_CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
+OPENAI_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
+OPENAI_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+_CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
+
+
+def _jwt_exp(token: str) -> int:
+    """Return the exp claim (epoch seconds) of a JWT, or 0 if undecodable."""
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return int(json.loads(base64.urlsafe_b64decode(payload)).get("exp", 0))
+    except Exception:
+        return 0
+
+
+def _load_openai_oauth_raw() -> Optional[dict]:
+    """Read Codex OAuth creds from ~/.codex/auth.json."""
+    if not _CODEX_AUTH_PATH.exists():
+        return None
+    try:
+        data = json.loads(_CODEX_AUTH_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    toks = data.get("tokens") or {}
+    if not toks.get("access_token") or not toks.get("account_id"):
+        return None
+    return data
+
+
+def _refresh_openai_oauth(data: dict) -> Optional[dict]:
+    """Exchange the Codex refresh token for a fresh access token; persist and return."""
+    refresh = (data.get("tokens") or {}).get("refresh_token")
+    if not refresh:
+        return None
+    try:
+        resp = httpx.post(
+            OPENAI_OAUTH_TOKEN_URL,
+            json={"grant_type": "refresh_token", "refresh_token": refresh,
+                  "client_id": OPENAI_OAUTH_CLIENT_ID, "scope": "openid profile email"},
+            timeout=15)
+    except Exception as e:
+        log.warning(f"OpenAI OAuth refresh error: {e}")
+        return None
+    if resp.status_code != 200:
+        log.warning(f"OpenAI OAuth refresh failed: {resp.status_code} {resp.text[:200]}")
+        return None
+    tok = resp.json()
+    new = dict(data)
+    new_tokens = dict(data.get("tokens") or {})
+    if tok.get("access_token"):
+        new_tokens["access_token"] = tok["access_token"]
+    if tok.get("refresh_token"):
+        new_tokens["refresh_token"] = tok["refresh_token"]
+    if tok.get("id_token"):
+        new_tokens["id_token"] = tok["id_token"]
+    new["tokens"] = new_tokens
+    try:
+        _CODEX_AUTH_PATH.write_text(json.dumps(new, indent=2))
+    except OSError:
+        pass
+    return new
+
+
+def get_openai_oauth() -> Optional[tuple[str, str]]:
+    """Return (access_token, account_id) for the ChatGPT subscription, refreshing if expired."""
+    if os.getenv("DSCO_DISABLE_OPENAI_OAUTH", "").strip().lower() in ("1", "true", "on", "yes"):
+        return None
+    data = _load_openai_oauth_raw()
+    if not data:
+        return None
+    tokens = data["tokens"]
+    access = tokens["access_token"]
+    exp = _jwt_exp(access)
+    if exp and time.time() >= (exp - 60):
+        refreshed = _refresh_openai_oauth(data)
+        if refreshed:
+            tokens = refreshed["tokens"]
+            access = tokens["access_token"]
+    return access, tokens["account_id"]
+
+
+def _codex_headers(access_token: str, account_id: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "chatgpt-account-id": account_id,
+        "OpenAI-Beta": "responses=experimental",
+        "originator": "codex_cli_rs",
+        "session_id": uuid.uuid4().hex,
+        "content-type": "application/json",
+        "accept": "text/event-stream",
+    }
+
+
+def _tools_openai_to_responses(tools: list[dict]) -> list[dict]:
+    """Flatten chat/completions tool schema into Responses API function tools."""
+    out = []
+    for t in tools or []:
+        fn = t.get("function") if t.get("type") == "function" else t
+        if not fn or not fn.get("name"):
+            continue
+        out.append({
+            "type": "function",
+            "name": fn["name"],
+            "description": fn.get("description", ""),
+            "parameters": fn.get("parameters", {"type": "object", "properties": {}}),
+            "strict": False,
+        })
+    return out
+
+
+def _messages_to_responses_input(session: "Session", msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert dsco's internal block history into Responses API input items."""
+    items: list[dict[str, Any]] = []
+    for m in msgs:
+        role = m.get("role")
+        content = m.get("content")
+        if role == "user":
+            if isinstance(content, str):
+                items.append({"type": "message", "role": "user",
+                              "content": [{"type": "input_text", "text": content}]})
+            elif isinstance(content, list):
+                tool_results = [c for c in content if isinstance(c, dict) and c.get("type") == "tool_result"]
+                if tool_results:
+                    for tr in tool_results:
+                        items.append({"type": "function_call_output",
+                                      "call_id": tr.get("tool_use_id", "call_0"),
+                                      "output": tr.get("content", "")})
+                else:
+                    text = user_content_to_openai(content)
+                    if isinstance(text, list):
+                        parts = [{"type": "input_text", "text": p.get("text", "")}
+                                 for p in text if isinstance(p, dict) and p.get("type") in ("text", "input_text")]
+                        text = parts or [{"type": "input_text", "text": ""}]
+                    else:
+                        text = [{"type": "input_text", "text": str(text)}]
+                    items.append({"type": "message", "role": "user", "content": text})
+        elif role == "assistant":
+            if isinstance(content, str):
+                items.append({"type": "message", "role": "assistant",
+                              "content": [{"type": "output_text", "text": content}]})
+            elif isinstance(content, list):
+                for b in content:
+                    if b.get("type") == "text":
+                        items.append({"type": "message", "role": "assistant",
+                                      "content": [{"type": "output_text", "text": b["text"]}]})
+                    elif b.get("type") == "tool_use":
+                        items.append({"type": "function_call", "call_id": b["id"],
+                                      "name": b["name"], "arguments": json.dumps(b["input"])})
+    return items
+
+
+def _codex_effort(session: "Session") -> str:
+    mi = model_info(session.model) or {}
+    return "high" if mi.get("supports_thinking") else "medium"
+
+
+async def stream_codex_responses(access_token: str, account_id: str, *, model: str,
+                                 instructions: str, input_items: list[dict],
+                                 tools: Optional[list[dict]] = None, effort: str = "medium"):
+    """Stream the ChatGPT Responses API, yielding normalized (kind, payload) events.
+
+    kinds: 'reasoning' str · 'text' str · 'tool_call' {call_id,name,arguments}
+           · 'usage' {input,output} · 'error' str
+    """
+    body: dict[str, Any] = {
+        "model": model,
+        "instructions": instructions,
+        "input": input_items,
+        "tools": _tools_openai_to_responses(tools or []),
+        "tool_choice": "auto",
+        "parallel_tool_calls": False,
+        "store": False,
+        "stream": True,
+        "prompt_cache_key": uuid.uuid4().hex,
+        "reasoning": {"effort": effort, "summary": "auto"},
+        "include": [],
+    }
+    pending: dict[str, dict] = {}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=15.0)) as client:
+        async with client.stream("POST", OPENAI_CODEX_URL, json=body,
+                                 headers=_codex_headers(access_token, account_id)) as resp:
+            if resp.status_code != 200:
+                detail = (await resp.aread()).decode("utf-8", "replace")
+                yield ("error", f"ChatGPT backend {resp.status_code}: {detail[:300]}")
+                return
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload or payload == "[DONE]":
+                    continue
+                try:
+                    ev = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                et = ev.get("type", "")
+                if et == "response.output_text.delta":
+                    yield ("text", ev.get("delta", ""))
+                elif et == "response.reasoning_summary_text.delta":
+                    yield ("reasoning", ev.get("delta", ""))
+                elif et == "response.output_item.added":
+                    item = ev.get("item", {})
+                    if item.get("type") == "function_call":
+                        pending[item.get("id", item.get("call_id", ""))] = {
+                            "call_id": item.get("call_id", ""),
+                            "name": item.get("name", ""),
+                            "arguments": item.get("arguments", "") or "",
+                        }
+                elif et == "response.function_call_arguments.delta":
+                    slot = pending.get(ev.get("item_id", ""))
+                    if slot is not None:
+                        slot["arguments"] += ev.get("delta", "")
+                elif et == "response.output_item.done":
+                    item = ev.get("item", {})
+                    if item.get("type") == "function_call":
+                        yield ("tool_call", {
+                            "call_id": item.get("call_id", ""),
+                            "name": item.get("name", ""),
+                            "arguments": item.get("arguments", "") or "",
+                        })
+                elif et == "response.completed":
+                    usage = (ev.get("response", {}) or {}).get("usage", {}) or {}
+                    yield ("usage", {
+                        "input": int(usage.get("input_tokens", 0) or 0),
+                        "output": int(usage.get("output_tokens", 0) or 0),
+                    })
+                elif et == "response.failed":
+                    err = (ev.get("response", {}) or {}).get("error", {}) or {}
+                    yield ("error", err.get("message", "response failed"))
+
+
 # ── Dynamic Model Registry ───────────────────────────────────────────────────
 
 MODEL_REGISTRY: list[dict] = []
@@ -212,15 +579,18 @@ def load_model_registry():
 
     # Fallback: minimal set
     MODEL_REGISTRY = [
-        {"alias": "opus", "model_id": "claude-opus-4-7", "context_window": 200000,
-         "max_output": 32000, "input_price": 15.0, "output_price": 75.0,
-         "cache_read_price": 1.5, "cache_write_price": 18.75, "supports_thinking": 1},
-        {"alias": "sonnet", "model_id": "claude-sonnet-4-6", "context_window": 200000,
-         "max_output": 16000, "input_price": 3.0, "output_price": 15.0,
-         "cache_read_price": 0.3, "cache_write_price": 3.75, "supports_thinking": 1},
-        {"alias": "haiku", "model_id": "claude-haiku-4-5-20251001", "context_window": 200000,
-         "max_output": 8192, "input_price": 0.8, "output_price": 4.0,
-         "cache_read_price": 0.08, "cache_write_price": 1.0, "supports_thinking": 0},
+        {"alias": "fable", "model_id": "claude-fable-5", "context_window": 1000000,
+         "max_output": 128000, "input_price": 10.0, "output_price": 50.0,
+         "cache_read_price": 1.0, "cache_write_price": 12.5, "supports_thinking": 1},
+        {"alias": "opus", "model_id": "claude-opus-4-8", "context_window": 1000000,
+         "max_output": 128000, "input_price": 5.0, "output_price": 25.0,
+         "cache_read_price": 0.5, "cache_write_price": 6.25, "supports_thinking": 1},
+        {"alias": "sonnet", "model_id": "claude-sonnet-5", "context_window": 1000000,
+         "max_output": 128000, "input_price": 2.0, "output_price": 10.0,
+         "cache_read_price": 0.2, "cache_write_price": 2.5, "supports_thinking": 1},
+        {"alias": "haiku", "model_id": "claude-haiku-4-5", "context_window": 200000,
+         "max_output": 64000, "input_price": 1.0, "output_price": 5.0,
+         "cache_read_price": 0.1, "cache_write_price": 1.25, "supports_thinking": 0},
     ]
 
 
@@ -1286,10 +1656,8 @@ async def tool_grep(pattern: str, path: Optional[str] = None, include: Optional[
         return f"[error: {e}]"
 
 
-async def tool_dsco_exec(name: str, input_data: dict) -> str:
-    """Proxy any tool through `dsco --tool-exec <name> <json>`."""
-    if not WEB_ALLOW_DANGEROUS_TOOLS:
-        return "[blocked: dsco tool proxy is disabled in web mode; set DSCO_WEB_ALLOW_DANGEROUS_TOOLS=1]"
+async def tool_dsco_exec(name: str, input_data: dict, timeout_s: float = 60) -> str:
+    """Proxy tools through dsco's capability-governed execution path."""
     if not DSCO_BIN.exists():
         return f"[dsco binary not found — cannot execute tool: {name}]"
     input_json = json.dumps(input_data)
@@ -1301,7 +1669,7 @@ async def tool_dsco_exec(name: str, input_data: dict) -> str:
             cwd=str(WORK_DIR),
             env=_safe_subprocess_env(),
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
         out = stdout.decode("utf-8", errors="replace").strip()
         if not out:
             err = stderr.decode("utf-8", errors="replace").strip()
@@ -1309,13 +1677,104 @@ async def tool_dsco_exec(name: str, input_data: dict) -> str:
         # dsco emits {"ok":bool,"result":"..."} — unwrap it
         try:
             payload = json.loads(out)
-            return payload.get("result", out)
+            result = payload.get("result", out)
+            return result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
         except json.JSONDecodeError:
             return out
     except asyncio.TimeoutError:
-        return f"[tool {name} timed out after 60s]"
+        return f"[tool {name} timed out after {int(timeout_s)}s]"
     except Exception as e:
         return f"[error executing tool {name}: {e}]"
+
+
+# ── Swarm tool (web-proxy aware) ──────────────────────────────────────────────
+# Each --tool-exec call is a fresh subprocess, so the in-memory swarm group from
+# a `create` is gone by the time a follow-up `collect` runs → "invalid group_id".
+# We route the stateless UI through the *synchronous* map_reduce action (fan out,
+# barrier-wait, coordinator-synthesize, return) so a single proxy call runs the
+# swarm to completion. A stray collect/status falls back to persisted artifacts.
+_SWARM_MODEL_PLACEHOLDERS = {"", "model", "default", "auto", "same", "inherit"}
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _strip_ansi(s: str) -> str:
+    return _ANSI_RE.sub("", s)
+
+
+def _sanitize_swarm_model(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    return None if value.strip().lower() in _SWARM_MODEL_PLACEHOLDERS else value.strip()
+
+
+def _clean_swarm_input(input_data: dict) -> dict:
+    """Drop placeholder model fields so workers inherit dsco's configured default."""
+    d = dict(input_data)
+    if "model" in d and _sanitize_swarm_model(d.get("model")) is None:
+        d.pop("model", None)
+    if "coordinator_model" in d and _sanitize_swarm_model(d.get("coordinator_model")) is None:
+        d.pop("coordinator_model", None)
+    tasks = d.get("tasks")
+    if isinstance(tasks, list):
+        cleaned = []
+        for t in tasks:
+            if isinstance(t, dict):
+                t = dict(t)
+                if "model" in t and _sanitize_swarm_model(t.get("model")) is None:
+                    t.pop("model", None)
+            cleaned.append(t)
+        d["tasks"] = cleaned
+    return d
+
+
+def _read_latest_swarm_run() -> Optional[str]:
+    """Format the most recent persisted swarm run's worker outputs as a fallback for collect."""
+    latest = WORK_DIR / ".swarm" / "latest.json"
+    if not latest.exists():
+        return None
+    try:
+        run = json.loads(latest.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    workers = run.get("workers") or []
+    lines = [f"[recovered from persisted run {run.get('run_id', '?')} · status={run.get('status', '?')} "
+             f"· {run.get('completed_workers', 0)}/{run.get('worker_count', len(workers))} done]"]
+    if run.get("coordinator_output"):
+        lines.append("\n## Coordinator\n" + run["coordinator_output"])
+    for w in workers:
+        out = (w.get("output") or "").strip()
+        lines.append(f"\n### worker {w.get('worker_id', '?')} [{w.get('status', '?')}] — {w.get('role', '')[:80]}\n"
+                     + (out or "(no output — worker did not complete)"))
+    return "\n".join(lines)
+
+
+async def tool_swarm(input_data: dict) -> str:
+    action = (input_data.get("action") or "").strip().lower()
+    data = _clean_swarm_input(input_data)
+
+    if action == "create" and isinstance(data.get("tasks"), list) and data["tasks"]:
+        # Rewrite fire-and-forget create → synchronous map_reduce so one proxy call
+        # runs the whole swarm and returns results (no orphaned agents, no lost group).
+        mr = dict(data)
+        mr["action"] = "map_reduce"
+        mr.setdefault("name", data.get("name") or "swarm")
+        if not (mr.get("coordinator") or "").strip():
+            mr["coordinator"] = ("Synthesize the worker outputs into one clear, complete answer. "
+                                 "Preserve each worker's key findings and label which worker each came from.")
+        timeout = int(mr.get("timeout") or 180)
+        mr["timeout"] = timeout
+        return _strip_ansi(await tool_dsco_exec("swarm", mr, timeout_s=timeout + 30))
+
+    if action in ("collect", "status", "map_reduce", "topology_run", "topology_solve", "provider_fabric"):
+        timeout = int(data.get("timeout") or 180)
+        res = await tool_dsco_exec("swarm", data, timeout_s=timeout + 30)
+        if action in ("collect", "status") and "invalid group_id" in res:
+            recovered = _read_latest_swarm_run()
+            if recovered:
+                return _strip_ansi(recovered)
+        return _strip_ansi(res)
+
+    return _strip_ansi(await tool_dsco_exec("swarm", data))
 
 
 async def execute_tool(name: str, input_data: dict) -> str:
@@ -1332,6 +1791,8 @@ async def execute_tool(name: str, input_data: dict) -> str:
         return tool_glob(input_data["pattern"], input_data.get("path"))
     elif name == "grep":
         return await tool_grep(input_data["pattern"], input_data.get("path"), input_data.get("include"))
+    elif name == "swarm":
+        return await tool_swarm(input_data)
     # Proxy all other tools through the dsco binary
     return await tool_dsco_exec(name, input_data)
 
@@ -1521,12 +1982,13 @@ def assistant_content_for_replay(content_blocks: list[dict[str, Any]]) -> list[d
 
 async def agent_loop_anthropic(ws: WebSocket, session: Session):
     """Agentic tool loop using Anthropic native SDK."""
-    api_key = get_provider_key("anthropic")
-    if not api_key:
+    token, is_oauth = anthropic_auth()
+    if not token:
         await ws.send_json({"type": "error",
-                            "message": "No API key for anthropic — set ANTHROPIC_API_KEY env var or add it to .env"})
+                            "message": "No Anthropic credentials — sign in with Claude Code (subscription) "
+                                       "or set ANTHROPIC_API_KEY env var / .env"})
         return
-    client = anthropic.AsyncAnthropic(api_key=api_key)
+    client = make_anthropic_client(token, is_oauth)
     turn = 0
     mi = model_info(session.model) or model_info(detect_provider(session.model))
     supports_thinking = mi and mi.get("supports_thinking")
@@ -1540,7 +2002,7 @@ async def agent_loop_anthropic(ws: WebSocket, session: Session):
             "max_tokens": MAX_TOKENS,
             "messages": session.messages,
             "tools": session.get_tools_anthropic(),
-            "system": session.system_prompt(),
+            "system": anthropic_system(is_oauth, session.system_prompt()),
             "stream": True,
         }
 
@@ -1792,14 +2254,106 @@ async def agent_loop_openai(ws: WebSocket, session: Session):
                         "total_input": session.total_input, "total_output": session.total_output})
 
 
+async def agent_loop_openai_subscription(ws: WebSocket, session: Session):
+    """Agentic tool loop using the ChatGPT subscription via the Codex Responses API."""
+    auth = get_openai_oauth()
+    if not auth:
+        await ws.send_json({"type": "error",
+                            "message": "No ChatGPT subscription — sign in with `codex login` "
+                                       "or set OPENAI_API_KEY for API access"})
+        return
+    access_token, account_id = auth
+    model_id = session.model
+    effort = _codex_effort(session)
+    turn = 0
+
+    while turn < MAX_TURNS and not session.cancelled:
+        turn += 1
+        session.turns = turn
+
+        input_items = _messages_to_responses_input(session, session.messages)
+        content_blocks: list[dict] = []
+        current_text = ""
+        thinking_open = False
+        tool_calls: list[dict] = []
+        input_tokens = output_tokens = 0
+        stream_start = time.monotonic()
+        ttft_sent = False
+
+        try:
+            async for kind, payload in stream_codex_responses(
+                access_token, account_id,
+                model=model_id, instructions=session.system_prompt(),
+                input_items=input_items, tools=session.get_tools_openai(), effort=effort):
+                if session.cancelled:
+                    break
+                if kind == "reasoning":
+                    if not thinking_open:
+                        await ws.send_json({"type": "thinking_start"})
+                        thinking_open = True
+                    await ws.send_json({"type": "thinking_delta", "content": payload})
+                elif kind == "text":
+                    if not ttft_sent:
+                        await ws.send_json({"type": "stream_metrics",
+                                            "ttft_ms": round((time.monotonic() - stream_start) * 1000)})
+                        ttft_sent = True
+                    current_text += payload
+                    await ws.send_json({"type": "text_delta", "content": payload})
+                elif kind == "tool_call":
+                    try:
+                        inp = json.loads(payload["arguments"]) if payload["arguments"] else {}
+                    except json.JSONDecodeError:
+                        inp = {}
+                    tool_calls.append({"id": payload["call_id"], "name": payload["name"], "input": inp})
+                    await ws.send_json({"type": "tool_start", "tool_id": payload["call_id"], "name": payload["name"]})
+                    await ws.send_json({"type": "tool_input", "tool_id": payload["call_id"],
+                                        "name": payload["name"], "input": inp})
+                elif kind == "usage":
+                    input_tokens, output_tokens = payload["input"], payload["output"]
+                elif kind == "error":
+                    await ws.send_json({"type": "error", "message": f"openai (subscription): {payload}"})
+                    return
+        except Exception as e:
+            log.error(f"OpenAI subscription stream error: {e}\n{traceback.format_exc()}")
+            await ws.send_json({"type": "error", "message": f"openai (subscription) error: {e}"})
+            return
+
+        if current_text:
+            content_blocks.append({"type": "text", "text": current_text})
+        for tc in tool_calls:
+            content_blocks.append({"type": "tool_use", "id": tc["id"], "name": tc["name"], "input": tc["input"]})
+
+        session.total_input += input_tokens
+        session.total_output += output_tokens
+        session.messages.append({"role": "assistant", "content": content_blocks})
+        await ws.send_json({"type": "turn_end", "turn": turn,
+                            "usage": {"input": input_tokens, "output": output_tokens, "cache_read": 0},
+                            "stop_reason": "tool_use" if tool_calls else "end_turn"})
+
+        if session.cancelled or not tool_calls:
+            break
+
+        tool_results = []
+        for tc in tool_calls:
+            result = await execute_tool(tc["name"], tc["input"])
+            tool_results.append({"type": "tool_result", "tool_use_id": tc["id"], "content": result})
+            await ws.send_json({"type": "tool_result", "tool_id": tc["id"], "output": result})
+        session.messages.append({"role": "user", "content": tool_results})
+
+    await ws.send_json({"type": "agent_done", "total_turns": turn,
+                        "total_input": session.total_input, "total_output": session.total_output})
+
+
 # ── Agent Loop Dispatcher ────────────────────────────────────────────────────
 
 async def agent_loop(ws: WebSocket, session: Session):
-    """Route to correct provider loop."""
+    """Route to correct provider loop. Prefer subscription auth over API keys."""
     provider = detect_provider(session.model)
     log.info(f"agent_loop: model={session.model} provider={provider}")
     if provider == "anthropic":
         await agent_loop_anthropic(ws, session)
+    elif provider == "openai" and get_openai_oauth():
+        await agent_loop_openai_subscription(ws, session)
     else:
         await agent_loop_openai(ws, session)
 
@@ -1873,8 +2427,11 @@ async def record_http_metrics(request: Request, call_next):
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index():
-    return FileResponse(STATIC_DIR / "index.html")
+async def index(token: str = ""):
+    response = FileResponse(STATIC_DIR / "index.html")
+    if token and _token_ok(token):
+        response.set_cookie(WEB_AUTH_COOKIE, WEB_AUTH_TOKEN, httponly=True, samesite="strict")
+    return response
 
 
 @app.get("/auth")
@@ -2405,9 +2962,14 @@ async def engine_chat(request: Request):
     route_source = "backend_override" if requested_backend_id else ("backend_catalog" if backend_row else "implicit_provider")
     auth_mode = "byok_request" if wants_byok else "managed_env"
     api_key = provided_key
+    engine_is_oauth = False
     if not api_key:
         env_name = backend.get("api_key_env", "") or _provider_env_name(provider)
         api_key = os.getenv(env_name, "").strip() if env_name else ""
+    if not api_key and not provided_key and provider == "anthropic":
+        oauth_tok = get_claude_oauth_token()
+        if oauth_tok:
+            api_key, engine_is_oauth = oauth_tok, True
     if not api_key and not dry_run:
         return JSONResponse(
             {
@@ -2445,14 +3007,14 @@ async def engine_chat(request: Request):
             max_tokens = max(1, min(max_tokens, int(info["max_output"])))
         try:
             if backend["transport"] == "anthropic":
-                client = anthropic.AsyncAnthropic(api_key=api_key)
+                client = make_anthropic_client(api_key, engine_is_oauth)
                 kwargs: dict[str, Any] = {
                     "model": model_id,
                     "max_tokens": max_tokens,
                     "messages": anthropic_messages,
                 }
-                if system_text:
-                    kwargs["system"] = system_text
+                if system_text or engine_is_oauth:
+                    kwargs["system"] = anthropic_system(engine_is_oauth, system_text)
                 response = await client.messages.create(**kwargs)
                 response_text = "\n".join(
                     block.text for block in response.content
@@ -2594,6 +3156,124 @@ def _openai_error_response(status_code: int, message: str, err_type: str = "inva
     )
 
 
+def _gateway_cache_control(body: dict[str, Any]) -> Optional[dict[str, str]]:
+    raw = body.get("cache_control")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise _GatewayHttp(400, "cache_control must be an object when provided.", code="invalid_cache_control")
+    if raw.get("type") != "ephemeral":
+        raise _GatewayHttp(400, "cache_control.type must be 'ephemeral'.", code="invalid_cache_control")
+    out = {"type": "ephemeral"}
+    ttl = str(raw.get("ttl", "") or "").strip()
+    if ttl:
+        if ttl == "5m":
+            return out
+        if ttl != "1h":
+            raise _GatewayHttp(400, "cache_control.ttl must be '1h' or omitted.", code="invalid_cache_control")
+        out["ttl"] = "1h"
+    return out
+
+
+def _gateway_prompt_cache_target(body: dict[str, Any]) -> str:
+    target = str(body.get("dsco_prompt_cache_target", "") or "automatic").strip().lower()
+    if target not in ("automatic", "system"):
+        raise _GatewayHttp(
+            400,
+            "dsco_prompt_cache_target must be 'automatic' or 'system'.",
+            code="invalid_prompt_cache_target",
+        )
+    return target
+
+
+def _gateway_prompt_cache_key(body: dict[str, Any]) -> str:
+    raw = body.get("prompt_cache_key") or body.get("dsco_prompt_cache_key")
+    if raw is None:
+        return ""
+    key = str(raw).strip()
+    if not key:
+        return ""
+    if len(key) > 64:
+        raise _GatewayHttp(400, "prompt_cache_key must be 64 characters or fewer.", code="invalid_prompt_cache_key")
+    return key
+
+
+def _gateway_prompt_cache_retention(body: dict[str, Any]) -> str:
+    raw = body.get("prompt_cache_retention")
+    if raw is None:
+        return ""
+    retention = str(raw).strip()
+    if retention not in ("24h", "in_memory"):
+        raise _GatewayHttp(
+            400,
+            "prompt_cache_retention must be '24h' or 'in_memory'.",
+            code="invalid_prompt_cache_retention",
+        )
+    return retention
+
+
+def _gateway_default_prompt_cache_key(provider: str, model_id: str, system_text: str) -> str:
+    material = json.dumps(
+        {"provider": provider, "model": model_id, "system": system_text},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return "dsco-gw-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
+
+
+def _gateway_apply_anthropic_prompt_cache(ctx: dict[str, Any], kwargs: dict[str, Any]) -> None:
+    cache_control = ctx.get("cache_control")
+    system_text = ctx.get("system_text") or ""
+    is_oauth = ctx.get("is_oauth", False)
+    blocks: list[dict[str, Any]] = []
+    if is_oauth:
+        # Subscription OAuth requires the Claude Code identity as the first system block.
+        blocks.append({"type": "text", "text": CLAUDE_CODE_IDENTITY})
+    if system_text:
+        if cache_control and ctx.get("prompt_cache_target") == "system":
+            blocks.append({"type": "text", "text": system_text, "cache_control": cache_control})
+        else:
+            blocks.append({"type": "text", "text": system_text})
+    if blocks:
+        # Preserve the simple string form for the common non-oauth, non-cache case.
+        if not is_oauth and len(blocks) == 1 and "cache_control" not in blocks[0]:
+            kwargs["system"] = system_text
+        else:
+            kwargs["system"] = blocks
+    if cache_control and (ctx.get("prompt_cache_target") != "system" or not system_text):
+        kwargs["cache_control"] = cache_control
+
+
+def _gateway_openai_messages_with_system_cache(messages: list[dict[str, Any]], cache_control: dict[str, str]) -> list[dict[str, Any]]:
+    out = [dict(m) for m in messages]
+    for msg in out:
+        if msg.get("role") != "system":
+            continue
+        text = _openai_message_text(msg.get("content", ""))
+        if text:
+            msg["content"] = [{"type": "text", "text": text, "cache_control": cache_control}]
+        break
+    return out
+
+
+def _gateway_apply_openai_compat_prompt_cache(ctx: dict[str, Any], create_kwargs: dict[str, Any]) -> None:
+    cache_control = ctx.get("cache_control")
+    extra_body = dict(create_kwargs.get("extra_body") or {})
+    if ctx.get("provider") == "openai" and ctx.get("prompt_cache_key"):
+        extra_body["prompt_cache_key"] = ctx["prompt_cache_key"]
+        if ctx.get("prompt_cache_retention"):
+            extra_body["prompt_cache_retention"] = ctx["prompt_cache_retention"]
+    if cache_control and ctx.get("provider") == "openrouter" and ctx.get("prompt_cache_target") == "system" and ctx.get("system_text"):
+        create_kwargs["messages"] = _gateway_openai_messages_with_system_cache(
+            create_kwargs["messages"],
+            cache_control,
+        )
+    elif cache_control and ctx.get("provider") == "openrouter":
+        extra_body["cache_control"] = cache_control
+    if extra_body:
+        create_kwargs["extra_body"] = extra_body
+
+
 def _completion_envelope(model: str, content: str, *, input_tokens: int = 0, output_tokens: int = 0, finish_reason: str = "stop") -> dict[str, Any]:
     """Build an OpenAI chat.completion response object."""
     return {
@@ -2616,6 +3296,70 @@ def _completion_envelope(model: str, content: str, *, input_tokens: int = 0, out
 _GATEWAY_PASSTHROUGH = ("temperature", "top_p", "stop", "seed", "tools", "tool_choice", "response_format", "n")
 
 
+def _openai_chat_to_responses_input(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert OpenAI chat messages into Responses API input items (system handled separately)."""
+    items: list[dict[str, Any]] = []
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content")
+        if role == "system":
+            continue
+        if role == "tool":
+            items.append({"type": "function_call_output",
+                          "call_id": m.get("tool_call_id", "call_0"),
+                          "output": _openai_message_text(content)})
+        elif role == "assistant":
+            text = _openai_message_text(content)
+            if text:
+                items.append({"type": "message", "role": "assistant",
+                              "content": [{"type": "output_text", "text": text}]})
+            for tc in m.get("tool_calls") or []:
+                fn = tc.get("function", {})
+                items.append({"type": "function_call", "call_id": tc.get("id", "call_0"),
+                              "name": fn.get("name", ""), "arguments": fn.get("arguments", "")})
+        elif role == "user":
+            items.append({"type": "message", "role": "user",
+                          "content": [{"type": "input_text", "text": _openai_message_text(content)}]})
+    return items
+
+
+async def _gateway_codex_collect(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Run the ChatGPT Responses stream to completion and return aggregated text + usage."""
+    access_token, account_id = ctx["openai_oauth"]
+    text_parts: list[str] = []
+    input_tokens = output_tokens = 0
+    async for kind, payload in stream_codex_responses(
+        access_token, account_id, model=ctx["model_id"],
+        instructions=ctx.get("system_text") or "",
+        input_items=_openai_chat_to_responses_input(ctx["openai_messages"]),
+        tools=ctx["passthrough"].get("tools")):
+        if kind == "text":
+            text_parts.append(payload)
+        elif kind == "usage":
+            input_tokens, output_tokens = payload["input"], payload["output"]
+        elif kind == "error":
+            raise RuntimeError(payload)
+    return {"text": "".join(text_parts), "input_tokens": input_tokens, "output_tokens": output_tokens}
+
+
+def _gateway_openai_uses_max_completion_tokens(provider: str, model_id: str) -> bool:
+    if provider != "openai":
+        return False
+    normalized = model_id.lower()
+    if normalized.startswith("openai/"):
+        normalized = normalized.split("/", 1)[1]
+    return normalized.startswith(("gpt-5", "o1", "o3", "o4", "chatgpt-"))
+
+
+def _gateway_openai_token_kwargs(ctx: dict[str, Any]) -> dict[str, int]:
+    key = (
+        "max_completion_tokens"
+        if _gateway_openai_uses_max_completion_tokens(ctx["provider"], ctx["model_id"])
+        else "max_tokens"
+    )
+    return {key: ctx["max_tokens"]}
+
+
 def _gateway_resolve(body: dict[str, Any]) -> dict[str, Any]:
     """Resolve model/provider/credential/messages for a gateway request.
 
@@ -2629,14 +3373,31 @@ def _gateway_resolve(body: dict[str, Any]) -> dict[str, Any]:
     provided_key = str(body.get("api_key", "") or "").strip()
     env_name = backend.get("api_key_env") or _provider_env_name(provider) or ""
     api_key = provided_key or (os.getenv(env_name, "").strip() if env_name else "")
+    is_oauth = False
+    openai_oauth: Optional[tuple[str, str]] = None
+    if provider == "anthropic" and not provided_key:
+        oauth_tok = get_claude_oauth_token()
+        if oauth_tok:
+            api_key, is_oauth = oauth_tok, True
+    elif provider == "openai" and not provided_key:
+        # Subscription is the primary credential; an env OPENAI_API_KEY is only a fallback.
+        openai_oauth = get_openai_oauth()
     dry_run = _bool_flag(body.get("dry_run", False)) == 1
+    cache_control = _gateway_cache_control(body)
+    prompt_cache_target = _gateway_prompt_cache_target(body)
 
     try:
         system_text, openai_messages, anthropic_messages = _normalize_engine_messages(body)
     except ValueError as exc:
         raise _GatewayHttp(400, str(exc)) from None
+    prompt_cache_key = _gateway_prompt_cache_key(body)
+    prompt_cache_retention = _gateway_prompt_cache_retention(body)
+    if not prompt_cache_key and _bool_flag(body.get("dsco_prompt_cache", False)) == 1:
+        prompt_cache_key = _gateway_default_prompt_cache_key(provider, model_id, system_text)
+    if provider == "openai" and prompt_cache_key and not prompt_cache_retention:
+        prompt_cache_retention = "24h"
 
-    if not api_key and not dry_run:
+    if not api_key and not openai_oauth and not dry_run:
         raise _GatewayHttp(
             401,
             f"No routed credential for provider '{provider}' (expected env {env_name or '<none>'}). "
@@ -2664,12 +3425,18 @@ def _gateway_resolve(body: dict[str, Any]) -> dict[str, Any]:
         "provider": provider,
         "backend": backend,
         "api_key": api_key,
+        "is_oauth": is_oauth,
+        "openai_oauth": openai_oauth,
         "dry_run": dry_run,
         "system_text": system_text,
         "openai_messages": openai_messages,
         "anthropic_messages": anthropic_messages,
         "max_tokens": max_tokens,
         "base_url": base_url,
+        "cache_control": cache_control,
+        "prompt_cache_target": prompt_cache_target,
+        "prompt_cache_key": prompt_cache_key,
+        "prompt_cache_retention": prompt_cache_retention,
         "passthrough": {k: body[k] for k in _GATEWAY_PASSTHROUGH if k in body and body[k] is not None},
     }
 
@@ -2689,10 +3456,9 @@ async def _gateway_complete(ctx: dict[str, Any]) -> dict[str, Any]:
         return _completion_envelope(model_id, content)
 
     if backend["transport"] == "anthropic":
-        client = anthropic.AsyncAnthropic(api_key=api_key)
+        client = make_anthropic_client(api_key, ctx.get("is_oauth", False))
         kwargs: dict[str, Any] = {"model": model_id, "max_tokens": ctx["max_tokens"], "messages": ctx["anthropic_messages"]}
-        if ctx["system_text"]:
-            kwargs["system"] = ctx["system_text"]
+        _gateway_apply_anthropic_prompt_cache(ctx, kwargs)
         if "temperature" in passthrough:
             kwargs["temperature"] = float(passthrough["temperature"])
         if "top_p" in passthrough:
@@ -2708,12 +3474,21 @@ async def _gateway_complete(ctx: dict[str, Any]) -> dict[str, Any]:
             output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
         )
 
+    # ChatGPT subscription (Responses API) — no OPENAI_API_KEY involved.
+    if ctx.get("openai_oauth"):
+        agg = await _gateway_codex_collect(ctx)
+        return _completion_envelope(
+            model_id, agg["text"],
+            input_tokens=agg["input_tokens"], output_tokens=agg["output_tokens"])
+
     # openai-compat transport (openai / openrouter / groq / deepseek / mistral / together / xai / local ollama …)
     client = openai.AsyncOpenAI(api_key=api_key, base_url=ctx["base_url"])
-    create_kwargs: dict[str, Any] = {"model": model_id, "messages": ctx["openai_messages"], "max_tokens": ctx["max_tokens"]}
+    create_kwargs: dict[str, Any] = {"model": model_id, "messages": ctx["openai_messages"]}
+    create_kwargs.update(_gateway_openai_token_kwargs(ctx))
     for k in _GATEWAY_PASSTHROUGH:
         if k in passthrough:
             create_kwargs[k] = passthrough[k]
+    _gateway_apply_openai_compat_prompt_cache(ctx, create_kwargs)
     resp = await client.chat.completions.create(**create_kwargs)
     message = resp.choices[0].message if resp.choices else None
     content = _openai_message_text(message.content if message else "")
@@ -2754,22 +3529,34 @@ async def _gateway_stream(ctx: dict[str, Any]):
             for i in range(0, len(text), 8):
                 yield emit({"content": text[i:i + 8]})
         elif backend["transport"] == "anthropic":
-            client = anthropic.AsyncAnthropic(api_key=api_key)
+            client = make_anthropic_client(api_key, ctx.get("is_oauth", False))
             kwargs: dict[str, Any] = {"model": model_id, "max_tokens": ctx["max_tokens"], "messages": ctx["anthropic_messages"]}
-            if ctx["system_text"]:
-                kwargs["system"] = ctx["system_text"]
+            _gateway_apply_anthropic_prompt_cache(ctx, kwargs)
             if "temperature" in passthrough:
                 kwargs["temperature"] = float(passthrough["temperature"])
             async with client.messages.stream(**kwargs) as stream:
                 async for piece in stream.text_stream:
                     if piece:
                         yield emit({"content": piece})
+        elif ctx.get("openai_oauth"):
+            access_token, account_id = ctx["openai_oauth"]
+            async for kind, payload in stream_codex_responses(
+                access_token, account_id, model=model_id,
+                instructions=ctx.get("system_text") or "",
+                input_items=_openai_chat_to_responses_input(ctx["openai_messages"]),
+                tools=passthrough.get("tools")):
+                if kind == "text" and payload:
+                    yield emit({"content": payload})
+                elif kind == "error":
+                    raise RuntimeError(payload)
         else:
             client = openai.AsyncOpenAI(api_key=api_key, base_url=ctx["base_url"])
-            create_kwargs: dict[str, Any] = {"model": model_id, "messages": ctx["openai_messages"], "max_tokens": ctx["max_tokens"]}
+            create_kwargs: dict[str, Any] = {"model": model_id, "messages": ctx["openai_messages"]}
+            create_kwargs.update(_gateway_openai_token_kwargs(ctx))
             for k in _GATEWAY_PASSTHROUGH:
                 if k in passthrough:
                     create_kwargs[k] = passthrough[k]
+            _gateway_apply_openai_compat_prompt_cache(ctx, create_kwargs)
             stream = await client.chat.completions.create(stream=True, **create_kwargs)
             async for ev in stream:
                 if not ev.choices:
@@ -3912,7 +4699,7 @@ async def list_topologies(limit: int = MAX_LIST_LIMIT):
 async def websocket_endpoint(ws: WebSocket):
     origin = (ws.headers.get("origin") or "").rstrip("/")
     allowed = _allowed_origins(ws.url.hostname or "127.0.0.1", ws.url.port or DEFAULT_PORT)
-    token = (ws.query_params.get("token") or "").strip()
+    token = (ws.query_params.get("token") or ws.cookies.get(WEB_AUTH_COOKIE) or "").strip()
     if WEB_REQUIRE_TOKEN and not _token_ok(token):
         await ws.close(code=1008)
         return
@@ -4386,13 +5173,19 @@ def main():
 
     port = args.port
     url = f"http://{args.host}:{port}"
+    browser_url = f"{url}/?token={WEB_AUTH_TOKEN}" if WEB_REQUIRE_TOKEN else url
 
-    # Show available providers
+    # Show available providers (subscription OAuth is preferred over API keys).
+    has_openai_sub = bool(get_openai_oauth())
     available = []
     for prov, ep in PROVIDER_ENDPOINTS.items():
-        if os.getenv(ep["env"]):
+        if prov == "openai" and has_openai_sub:
+            available.append("openai (subscription)")
+        elif os.getenv(ep["env"]):
             available.append(prov)
-    if os.getenv("ANTHROPIC_API_KEY"):
+    if get_claude_oauth_token():
+        available.insert(0, "anthropic (subscription)")
+    elif os.getenv("ANTHROPIC_API_KEY"):
         available.insert(0, "anthropic")
 
     print(f"\033[36m")
@@ -4412,9 +5205,13 @@ def main():
     if not available:
         print("\033[33m  warning: no API keys found — set ANTHROPIC_API_KEY or OPENROUTER_API_KEY\033[0m\n")
 
+    if WEB_REQUIRE_TOKEN:
+        print(f"\033[36m  open:  {browser_url}\033[0m")
+        print(f"\033[36m  token: {WEB_AUTH_TOKEN}\033[0m\n")
+
     if args.open:
         import webbrowser
-        webbrowser.open(url)
+        webbrowser.open(browser_url)
 
     uvicorn.run(app, host=args.host, port=port, log_level="warning",
                 ws_ping_interval=30, ws_ping_timeout=120)

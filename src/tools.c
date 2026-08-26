@@ -33,6 +33,7 @@
 #include "plugin.h"
 #include "trace.h"
 #include "provider.h"
+#include "provider_profiles.h"
 #include "topology.h"
 #include "task_profile.h"
 #include "plan_optimizer.h"
@@ -50,6 +51,7 @@
 #include "learned_cost.h"
 #include "session_memory.h"
 #include "toolmgmt.h"
+#include "openai_images.h"
 #include "local_llm.h"
 #include "vm.h"
 #include "codex_app_directory.h"
@@ -58,6 +60,7 @@
 #include "control_flow.h"
 #include "recovery.h"
 #include "env_config.h"
+#include "semantic.h"
 
 extern external_tool_t g_external_tools[MAX_EXTERNAL_TOOLS];
 extern int g_external_tool_count;
@@ -8016,6 +8019,10 @@ static __attribute__((unused)) bool tool_psql(const char *input, char *result, s
 static bool tool_python(const char *input, char *result, size_t rlen) {
     char *code = json_get_str(input, "code");
     char *file = path_normalize(json_get_str(input, "file"));
+    if (file && file[0] == '\0') {
+        free(file);
+        file = NULL;
+    }
     if (!code && !file) {
         snprintf(result, rlen, "error: code or file required");
         return false;
@@ -9310,6 +9317,107 @@ failure:
     return false;
 }
 
+typedef struct {
+    topology_node_binding_t bindings[TOPO_MAX_BINDINGS];
+    int count;
+    bool malformed;
+} topology_binding_parse_ctx_t;
+
+static void topology_parse_node_binding(const char *element_start, void *ctx) {
+    topology_binding_parse_ctx_t *pctx = (topology_binding_parse_ctx_t *)ctx;
+    if (!pctx || !element_start || pctx->malformed || pctx->count >= TOPO_MAX_BINDINGS)
+        return;
+    while (*element_start && isspace((unsigned char)*element_start))
+        element_start++;
+    if (*element_start != '{') {
+        pctx->malformed = true;
+        return;
+    }
+
+    topology_node_binding_t *binding = &pctx->bindings[pctx->count];
+    memset(binding, 0, sizeof(*binding));
+    binding->node_id = json_get_int(element_start, "node_id", -1);
+    binding->temperature = json_get_double(element_start, "temperature", -1);
+    binding->top_p = json_get_double(element_start, "top_p", -1);
+    binding->top_k = json_get_int(element_start, "top_k", -1);
+    binding->thinking_budget = json_get_int(element_start, "thinking_budget", -1);
+
+    char *node_tag = json_get_str(element_start, "node_tag");
+    char *provider = json_get_str(element_start, "provider");
+    char *model = json_get_str(element_start, "model");
+    char *effort = json_get_str(element_start, "effort");
+    char *tool_choice = json_get_str(element_start, "tool_choice");
+    char *system_prompt = json_get_str(element_start, "system_prompt");
+    if ((!node_tag || !node_tag[0]) && binding->node_id < 0) {
+        pctx->malformed = true;
+    } else {
+        if (node_tag)
+            snprintf(binding->node_tag, sizeof(binding->node_tag), "%s", node_tag);
+        if (provider)
+            snprintf(binding->provider, sizeof(binding->provider), "%s", provider);
+        if (model)
+            snprintf(binding->model, sizeof(binding->model), "%s", model);
+        if (effort)
+            snprintf(binding->effort, sizeof(binding->effort), "%s", effort);
+        if (tool_choice)
+            snprintf(binding->tool_choice, sizeof(binding->tool_choice), "%s", tool_choice);
+        if (system_prompt)
+            snprintf(binding->system_prompt, sizeof(binding->system_prompt), "%s", system_prompt);
+        pctx->count++;
+    }
+    free(node_tag);
+    free(provider);
+    free(model);
+    free(effort);
+    free(tool_choice);
+    free(system_prompt);
+}
+
+static bool topology_validate_node_bindings(const topology_t *topology,
+                                            const topology_binding_parse_ctx_t *pctx,
+                                            char *error, size_t error_len) {
+    if (!topology || !pctx)
+        return false;
+    for (int i = 0; i < pctx->count; i++) {
+        const topology_node_binding_t *binding = &pctx->bindings[i];
+        const topo_node_t *node = NULL;
+        if (binding->node_tag[0]) {
+            for (int n = 0; n < topology->node_count; n++) {
+                if (strcmp(topology->nodes[n].tag, binding->node_tag) == 0) {
+                    node = &topology->nodes[n];
+                    break;
+                }
+            }
+        } else if (binding->node_id >= 0 && binding->node_id < topology->node_count) {
+            node = &topology->nodes[binding->node_id];
+        }
+        if (!node) {
+            snprintf(error, error_len, "node binding %d does not select a node in topology '%s'", i,
+                     topology->name);
+            return false;
+        }
+        if (binding->provider[0] && !provider_profile_find(binding->provider)) {
+            snprintf(error, error_len, "node binding '%s' names unknown provider '%s'", node->tag,
+                     binding->provider);
+            return false;
+        }
+        if (binding->provider[0] && !provider_has_usable_key(binding->provider,
+                                                              tools_runtime_api_key())) {
+            snprintf(error, error_len, "node binding '%s' provider '%s' has no usable credential",
+                     node->tag, binding->provider);
+            return false;
+        }
+        if (binding->model[0] && !provider_model_is_routable(
+                                     binding->model, tools_runtime_api_key(),
+                                     binding->provider[0] ? binding->provider : NULL, NULL)) {
+            snprintf(error, error_len, "node binding '%s' model '%s' is not routable", node->tag,
+                     binding->model);
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool tool_topology_run(const char *input, char *result, size_t rlen) {
     char *task = json_get_str(input, "task");
     int topology_id = json_get_int(input, "topology_id", 0);
@@ -9318,6 +9426,7 @@ static bool tool_topology_run(const char *input, char *result, size_t rlen) {
     bool auto_mode = json_get_bool(input, "auto", !(topology && topology[0]) && topology_id <= 0);
     bool explicit_name = topology && topology[0];
     bool explicit_id = topology_id > 0;
+    char *node_bindings_raw = json_get_raw(input, "node_bindings");
 
     if (!task || !task[0]) {
         snprintf(result, rlen, "error: task required");
@@ -9329,6 +9438,7 @@ static bool tool_topology_run(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: provide either topology name or topology_id, not both");
         free(task);
         free(topology);
+        free(node_bindings_raw);
         return false;
     }
 
@@ -9362,6 +9472,33 @@ static bool tool_topology_run(const char *input, char *result, size_t rlen) {
         return false;
     }
 
+    topology_binding_parse_ctx_t binding_ctx;
+    memset(&binding_ctx, 0, sizeof(binding_ctx));
+    if (node_bindings_raw) {
+        if (node_bindings_raw[0] != '[' ||
+            json_array_foreach(input, "node_bindings", topology_parse_node_binding, &binding_ctx) < 0 ||
+            binding_ctx.malformed) {
+            snprintf(result, rlen, "error: node_bindings must be an array of objects with node_tag or node_id");
+            free(task);
+            free(topology);
+            free(node_bindings_raw);
+            return false;
+        }
+        char binding_error[256];
+        if (!topology_validate_node_bindings(&plan.topology, &binding_ctx, binding_error,
+                                             sizeof(binding_error))) {
+            snprintf(result, rlen, "error: %s", binding_error);
+            free(task);
+            free(topology);
+            free(node_bindings_raw);
+            return false;
+        }
+    }
+    topology_run_options_t run_options = {
+        .bindings = binding_ctx.count > 0 ? binding_ctx.bindings : NULL,
+        .binding_count = binding_ctx.count,
+    };
+
     jbuf_t b;
     jbuf_init(&b, MAX_TOOL_RESULT + 4096);
     jbuf_append(&b, "{\"ok\":");
@@ -9372,6 +9509,8 @@ static bool tool_topology_run(const char *input, char *result, size_t rlen) {
         append_topology_json(&b, &plan.topology, true);
         jbuf_append(&b, ",\"dynamic\":");
         jbuf_append(&b, plan.is_dynamic ? "true" : "false");
+        jbuf_append(&b, ",\"node_binding_count\":");
+        jbuf_append_int(&b, binding_ctx.count);
         jbuf_append(&b, ",\"rationale\":");
         jbuf_append_json_str(&b, plan.rationale);
         jbuf_append(&b, ",\"profile\":{\"kind\":");
@@ -9390,6 +9529,7 @@ static bool tool_topology_run(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "%s", b.data ? b.data : "{}");
         free(task);
         free(topology);
+        free(node_bindings_raw);
         jbuf_free(&b);
         return true;
     }
@@ -9399,6 +9539,7 @@ static bool tool_topology_run(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "error: no runtime API key configured for topology execution");
         free(task);
         free(topology);
+        free(node_bindings_raw);
         jbuf_free(&b);
         return false;
     }
@@ -9507,8 +9648,25 @@ static bool tool_topology_run(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen, "{\"ok\":false,\"cancelled\":true,\"reason\":\"user cancelled\"}");
         free(task);
         free(topology);
+        free(node_bindings_raw);
         jbuf_free(&b);
         return false;
+    }
+
+    /* A cache hit or the operator's dialog choice may have replaced the plan
+     * after the first validation pass. Revalidate bindings against the final
+     * topology before spawning any worker. */
+    if (binding_ctx.count > 0) {
+        char binding_error[256];
+        if (!topology_validate_node_bindings(&plan.topology, &binding_ctx, binding_error,
+                                             sizeof(binding_error))) {
+            snprintf(result, rlen, "error: %s", binding_error);
+            free(task);
+            free(topology);
+            free(node_bindings_raw);
+            jbuf_free(&b);
+            return false;
+        }
     }
 
     /* ── Execute ──────────────────────────────────────────────────────── */
@@ -9517,8 +9675,8 @@ static bool tool_topology_run(const char *input, char *result, size_t rlen) {
     topology_run_stats_t stats;
     struct timespec t_start, t_end;
     clock_gettime(CLOCK_MONOTONIC, &t_start);
-    bool ok = topology_plan_run(&plan, api_key, tools_runtime_model(), task, topo_result,
-                                MAX_TOOL_RESULT, &stats);
+    bool ok = topology_plan_run_with_options(&plan, api_key, tools_runtime_model(), task,
+                                             &run_options, topo_result, MAX_TOOL_RESULT, &stats);
     clock_gettime(CLOCK_MONOTONIC, &t_end);
     double wall_s = (t_end.tv_sec - t_start.tv_sec) + (t_end.tv_nsec - t_start.tv_nsec) / 1e9;
 
@@ -9538,6 +9696,8 @@ static bool tool_topology_run(const char *input, char *result, size_t rlen) {
     append_topology_json(&b, &plan.topology, true);
     jbuf_append(&b, ",\"dynamic\":");
     jbuf_append(&b, plan.is_dynamic ? "true" : "false");
+    jbuf_append(&b, ",\"node_binding_count\":");
+    jbuf_append_int(&b, binding_ctx.count);
     jbuf_append(&b, ",\"rationale\":");
     jbuf_append_json_str(&b, plan.rationale);
     jbuf_append(&b, ",\"stats\":{\"agents_spawned\":");
@@ -9572,6 +9732,7 @@ static bool tool_topology_run(const char *input, char *result, size_t rlen) {
     free(topo_result);
     free(task);
     free(topology);
+    free(node_bindings_raw);
     jbuf_free(&b);
     return ok;
 }
@@ -22900,6 +23061,114 @@ void tools_playbook_advance_turn(void) {
     g_playbook.current_turn++;
 }
 
+/* ── conversation_context: agent-visible live transcript mutation ────────
+ *
+ * The agent loop owns g_active_conv and sets it before tool execution.  This
+ * deliberately keeps transcript construction in the same governed tool plane
+ * as every other agent effect rather than hiding it behind a slash command.
+ * Tool-use protocol messages are immutable here: removing or replacing one
+ * would leave unmatched tool calls/results and corrupt the next provider turn.
+ */
+static bool conversation_text_message(const message_t *m) {
+    return m && m->content_count == 1 && m->content && m->content[0].type &&
+           strcmp(m->content[0].type, "text") == 0;
+}
+
+static bool tool_conversation_context(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    char *role = json_get_str(input, "role");
+    char *content = json_get_str(input, "content");
+    bool ok = false;
+
+    if (!g_active_conv) {
+        snprintf(result, rlen,
+                 "{\"error\":\"no active conversation — conversation_context only works during agent loop\"}");
+        goto done;
+    }
+    if (!action || !action[0]) {
+        snprintf(result, rlen, "{\"error\":\"missing action: inspect|append|replace_last|remove_last\"}");
+        goto done;
+    }
+
+    if (strcmp(action, "inspect") == 0) {
+        jbuf_t out;
+        jbuf_init(&out, 256);
+        jbuf_appendf(&out, "{\"messages\":%d", g_active_conv->count);
+        if (g_active_conv->count > 0) {
+            const message_t *last = &g_active_conv->msgs[g_active_conv->count - 1];
+            jbuf_append(&out, ",\"last_role\":");
+            jbuf_append_json_str(&out, last->role == ROLE_USER ? "user" : "assistant");
+            jbuf_appendf(&out, ",\"last_is_plain_text\":%s",
+                         conversation_text_message(last) ? "true" : "false");
+            if (conversation_text_message(last)) {
+                jbuf_append(&out, ",\"last_content\":");
+                jbuf_append_json_str(&out, last->content[0].text ? last->content[0].text : "");
+            }
+        }
+        jbuf_append(&out, "}");
+        snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+        jbuf_free(&out);
+        ok = true;
+    } else if (strcmp(action, "append") == 0) {
+        if (!content) {
+            snprintf(result, rlen, "{\"error\":\"append requires content\"}");
+            goto done;
+        }
+        if (role && strcmp(role, "assistant") == 0)
+            conv_add_assistant_text(g_active_conv, content);
+        else if (!role || strcmp(role, "user") == 0)
+            conv_add_user_text(g_active_conv, content);
+        else {
+            snprintf(result, rlen, "{\"error\":\"role must be user or assistant\"}");
+            goto done;
+        }
+        snprintf(result, rlen, "{\"status\":\"appended\",\"role\":\"%s\",\"messages\":%d}",
+                 role && strcmp(role, "assistant") == 0 ? "assistant" : "user", g_active_conv->count);
+        ok = true;
+    } else if (strcmp(action, "replace_last") == 0) {
+        if (!content) {
+            snprintf(result, rlen, "{\"error\":\"replace_last requires content\"}");
+            goto done;
+        }
+        if (g_active_conv->count == 0 ||
+            !conversation_text_message(&g_active_conv->msgs[g_active_conv->count - 1])) {
+            snprintf(result, rlen,
+                     "{\"error\":\"last message is not replaceable plain text\"}");
+            goto done;
+        }
+        msg_role_t prior_role = g_active_conv->msgs[g_active_conv->count - 1].role;
+        if (role && strcmp(role, "assistant") != 0 && strcmp(role, "user") != 0) {
+            snprintf(result, rlen, "{\"error\":\"role must be user or assistant\"}");
+            goto done;
+        }
+        conv_pop_last(g_active_conv);
+        if ((role && strcmp(role, "assistant") == 0) || (!role && prior_role == ROLE_ASSISTANT))
+            conv_add_assistant_text(g_active_conv, content);
+        else
+            conv_add_user_text(g_active_conv, content);
+        snprintf(result, rlen, "{\"status\":\"replaced\",\"messages\":%d}", g_active_conv->count);
+        ok = true;
+    } else if (strcmp(action, "remove_last") == 0) {
+        if (g_active_conv->count == 0 ||
+            !conversation_text_message(&g_active_conv->msgs[g_active_conv->count - 1])) {
+            snprintf(result, rlen,
+                     "{\"error\":\"last message is not removable plain text\"}");
+            goto done;
+        }
+        conv_pop_last(g_active_conv);
+        snprintf(result, rlen, "{\"status\":\"removed\",\"messages\":%d}", g_active_conv->count);
+        ok = true;
+    } else {
+        snprintf(result, rlen, "{\"error\":\"unknown action '%s'\"}", action);
+    }
+
+done:
+    free(action);
+    free(role);
+    free(content);
+    return ok;
+}
+
 /* ── plot: render data as Unicode charts (inline / tool result / artifact) ── */
 #include "plot.h"
 static bool tool_plot(const char *input, char *result, size_t rlen) {
@@ -27404,11 +27673,147 @@ static double tool_contract_query_score(const char *name, const char *desc, cons
     return score;
 }
 
-static bool tool_matches_query_local(const char *name, const char *desc, const char *input_schema,
-                                     const char *output_schema, const char *metadata,
-                                     const char *query) {
-    return tool_contract_query_score(name, desc, input_schema, output_schema, metadata, query,
-                                     true) > 0.0;
+typedef struct {
+    int index;
+    double score;
+} capability_rank_t;
+
+static int capability_rank_cmp(const void *a, const void *b) {
+    const capability_rank_t *ra = (const capability_rank_t *)a;
+    const capability_rank_t *rb = (const capability_rank_t *)b;
+    if (rb->score > ra->score)
+        return 1;
+    if (rb->score < ra->score)
+        return -1;
+    return ra->index - rb->index;
+}
+
+typedef struct {
+    const tool_retrieval_hit_t *candidates;
+    tool_retrieval_hit_t *ordered;
+    int cap;
+    int n;
+} capability_rerank_ctx_t;
+
+static void capability_rerank_cb(const char *element_start, void *ud) {
+    capability_rerank_ctx_t *ctx = (capability_rerank_ctx_t *)ud;
+    int index = json_get_int(element_start, "index", -1);
+    if (!ctx || index < 0 || index >= ctx->cap || ctx->n >= ctx->cap)
+        return;
+    tool_retrieval_hit_t hit = ctx->candidates[index];
+    hit.rerank_score = json_get_double(element_start, "relevance_score", 0.0);
+    ctx->ordered[ctx->n++] = hit;
+}
+
+int tools_retrieve_capabilities(const char *query, int candidate_limit,
+                                tool_retrieval_hit_t *out_hits, int max_hits,
+                                bool *out_reranked) {
+    if (out_reranked)
+        *out_reranked = false;
+    if (!query || !query[0] || !out_hits || max_hits <= 0)
+        return 0;
+    if (candidate_limit < 1)
+        candidate_limit = 1;
+    if (candidate_limit > 128)
+        candidate_limit = 128;
+
+    int builtin_total;
+    const tool_def_t *builtins = tools_get_all(&builtin_total);
+    external_tool_snapshot_t external = tools_external_snapshot();
+    int total = builtin_total + external.count;
+    if (total <= 0) {
+        tools_external_snapshot_free(&external);
+        return 0;
+    }
+
+    char **docs = safe_malloc((size_t)total * sizeof(*docs));
+    capability_rank_t *ranked = safe_malloc((size_t)total * sizeof(*ranked));
+    /* tfidf_index_t is ~16MB; it must not live on the tool-call stack. */
+    tfidf_index_t *index = safe_malloc(sizeof(*index));
+    sem_tfidf_init(index);
+    int n = 0;
+    for (int i = 0; i < builtin_total; i++) {
+        docs[n] = tool_contract_doc_alloc(builtins[i].name, builtins[i].description,
+                                          builtins[i].input_schema_json,
+                                          tools_output_schema_for_def(&builtins[i]), NULL);
+        sem_tfidf_add_doc(index, docs[n++]);
+    }
+    for (int i = 0; i < external.count; i++) {
+        jbuf_t meta;
+        jbuf_init(&meta, 256);
+        append_external_contract_metadata(&meta, &external.items[i]);
+        docs[n] = tool_contract_doc_alloc(external.items[i].name, external.items[i].description,
+                                          external.items[i].input_schema_json,
+                                          tools_output_schema_for_external(&external.items[i]), meta.data);
+        jbuf_free(&meta);
+        sem_tfidf_add_doc(index, docs[n++]);
+    }
+    sem_tfidf_finalize(index);
+    tool_score_t *scores = safe_malloc((size_t)total * sizeof(*scores));
+    int scored = sem_tools_rank(index, query, scores, total, total);
+    for (int i = 0; i < scored; i++)
+        ranked[i] = (capability_rank_t){.index = scores[i].tool_index, .score = scores[i].score};
+    qsort(ranked, (size_t)scored, sizeof(*ranked), capability_rank_cmp);
+
+    int candidates = scored < candidate_limit ? scored : candidate_limit;
+    for (int i = 0; i < candidates; i++) {
+        int ci = ranked[i].index;
+        tool_retrieval_hit_t *hit = &out_hits[i];
+        memset(hit, 0, sizeof(*hit));
+        hit->index = ci < builtin_total ? ci : ci - builtin_total;
+        hit->recall_score = ranked[i].score;
+        hit->rerank_score = ranked[i].score;
+        if (ci < builtin_total) {
+            snprintf(hit->name, sizeof(hit->name), "%s", builtins[ci].name);
+            snprintf(hit->source, sizeof(hit->source), "builtin");
+        } else {
+            const external_tool_t *t = &external.items[ci - builtin_total];
+            snprintf(hit->name, sizeof(hit->name), "%s", t->name);
+            snprintf(hit->source, sizeof(hit->source), "mcp");
+            hit->loaded = t->loaded;
+        }
+    }
+
+    bool reranked = false;
+    if (candidates > 1 && getenv("JINA_API_KEY") && getenv("JINA_API_KEY")[0]) {
+        jbuf_t request;
+        jbuf_init(&request, 8192);
+        jbuf_append(&request, "{\"query\":");
+        jbuf_append_json_str(&request, query);
+        jbuf_append(&request, ",\"model\":\"jina-reranker-v3\",\"top_n\":");
+        jbuf_append_int(&request, candidates);
+        jbuf_append(&request, ",\"documents\":[");
+        for (int i = 0; i < candidates; i++) {
+            if (i)
+                jbuf_append(&request, ",");
+            jbuf_append_json_str(&request, docs[ranked[i].index]);
+        }
+        jbuf_append(&request, "]}");
+        char response[65536] = {0};
+        if (tool_jina_ai_rerank(request.data, response, sizeof(response))) {
+            tool_retrieval_hit_t ordered[128];
+            capability_rerank_ctx_t ctx = {.candidates = out_hits, .ordered = ordered,
+                                           .cap = candidates, .n = 0};
+            json_array_foreach(response, "results", capability_rerank_cb, &ctx);
+            if (ctx.n > 0) {
+                memcpy(out_hits, ordered, (size_t)ctx.n * sizeof(*out_hits));
+                candidates = ctx.n;
+                reranked = true;
+            }
+        }
+        jbuf_free(&request);
+    }
+
+    for (int i = 0; i < total; i++)
+        free(docs[i]);
+    free(scores);
+    free(ranked);
+    free(docs);
+    free(index);
+    tools_external_snapshot_free(&external);
+    if (out_reranked)
+        *out_reranked = reranked;
+    return candidates < max_hits ? candidates : max_hits;
 }
 
 static void integration_action_flags_json(jbuf_t *b, unsigned actions) {
@@ -27514,81 +27919,35 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
         jbuf_appendf(&b, ",\"total_tools\":%d,\"matches\":[", grand_total);
 
         int emitted = 0;
-        int skipped = 0;
-        int matched = 0;
         bool first = true;
-
-        /* MCP tools first: integration queries usually need exact external schemas. */
-        for (int pass = 0; pass < 2; pass++) {
-            for (int i = 0; i < g_external_tool_count; i++) {
-                external_tool_t *t = &g_external_tools[i];
-                bool exact = strcasecmp(t->name, query) == 0;
-                if ((pass == 0) != exact)
-                    continue;
-                jbuf_t meta;
-                jbuf_init(&meta, 256);
-                append_external_contract_metadata(&meta, t);
-                const char *out_schema = tools_output_schema_for_external(t);
-                bool match = tool_matches_query_local(t->name, t->description, t->input_schema_json,
-                                                      out_schema, meta.data, query);
-                if (!exact && !match) {
-                    jbuf_free(&meta);
-                    continue;
-                }
-                matched++;
-                if (skipped < offset) {
-                    skipped++;
-                    jbuf_free(&meta);
-                    continue;
-                }
-                if (emitted >= limit) {
-                    jbuf_free(&meta);
-                    continue;
-                }
-                if (!first)
-                    jbuf_append(&b, ",");
-                first = false;
+        tool_retrieval_hit_t hits[128];
+        bool reranked = false;
+        int matched = tools_retrieve_capabilities(query, 128, hits, 128, &reranked);
+        for (int i = offset; i < matched && emitted < limit; i++) {
+            if (!first)
+                jbuf_append(&b, ",");
+            first = false;
+            int idx = hits[i].index;
+            if (strcmp(hits[i].source, "mcp") == 0 && idx >= 0 && idx < g_external_tool_count) {
+                external_tool_t *t = &g_external_tools[idx];
                 discover_append_tool_detail(&b, t->name, t->description, t->input_schema_json,
-                                            out_schema, "mcp");
-                jbuf_free(&meta);
-                emitted++;
+                                            tools_output_schema_for_external(t), "mcp");
+            } else if (strcmp(hits[i].source, "builtin") == 0 && idx >= 0 && idx < total) {
+                const tool_def_t *t = &tools[idx];
+                discover_append_tool_detail(&b, t->name, t->description, t->input_schema_json,
+                                            tools_output_schema_for_def(t), "builtin");
             }
-        }
-
-        for (int pass = 0; pass < 2; pass++) {
-            for (int i = 0; i < total; i++) {
-                bool exact = strcasecmp(tools[i].name, query) == 0;
-                if ((pass == 0) != exact)
-                    continue;
-                const char *out_schema = tools_output_schema_for_def(&tools[i]);
-                if (!exact && !tool_matches_query_local(tools[i].name, tools[i].description,
-                                                        tools[i].input_schema_json, out_schema, NULL,
-                                                        query)) {
-                    continue;
-                }
-                matched++;
-                if (skipped < offset) {
-                    skipped++;
-                    continue;
-                }
-                if (emitted >= limit)
-                    continue;
-                if (!first)
-                    jbuf_append(&b, ",");
-                first = false;
-                discover_append_tool_detail(&b, tools[i].name, tools[i].description,
-                                            tools[i].input_schema_json, out_schema, "builtin");
-                emitted++;
-            }
+            emitted++;
         }
 
         jbuf_appendf(&b,
-                     "],\"matched\":%d,\"offset\":%d,\"limit\":%d,\"showing\":%d,"
+                     "],\"matched\":%d,\"offset\":%d,\"limit\":%d,\"showing\":%d,\"reranked\":%s,"
                      "\"has_more\":%s,\"truncated\":%s,"
                      "\"note\":\"Full input_schema and output_schema returned for matches. Use "
                      "load_tools with exact "
                      "names to pin MCP tools into the active tool set.\"}",
-                     matched, offset, limit, emitted, matched > offset + emitted ? "true" : "false",
+                     matched, offset, limit, emitted, reranked ? "true" : "false",
+                     matched > offset + emitted ? "true" : "false",
                      matched > offset + emitted ? "true" : "false");
         snprintf(result, rlen, "%s", b.data ? b.data : "{}");
         jbuf_free(&b);
@@ -32337,6 +32696,17 @@ static const tool_def_t s_tools[] = {
          "{\"type\":\"object\",\"properties\":{\"aggressive\":{\"type\":\"boolean\"}}}",
      .execute = tool_context_compact,
      .core = true},
+    {.name = "conversation_context",
+     .description = "Inspect or make bounded live-transcript edits during an agent turn. "
+                    "action=inspect|append|replace_last|remove_last. append/replace require content; "
+                    "role=user|assistant. Tool-use protocol messages cannot be altered.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\","
+         "\"enum\":[\"inspect\",\"append\",\"replace_last\",\"remove_last\"]},"
+         "\"role\":{\"type\":\"string\",\"enum\":[\"user\",\"assistant\"]},"
+         "\"content\":{\"type\":\"string\"}},\"required\":[\"action\"]}",
+     .execute = tool_conversation_context,
+     .core = true},
     {.name = "plot",
      .description = "Render data as a Unicode chart (returns ANSI/Unicode art). Types: line, bar, "
                     "column, area, scatter, hist, heatmap, box, candlestick, gauge, sparkline, "
@@ -34035,7 +34405,10 @@ static const tool_def_t s_tools[] = {
          "\"include_metered\":{\"type\":\"boolean\",\"description\":\"provider_fabric may include "
          "metered/API-key overflow lanes when true; false keeps subscription lanes only\"},"
          "\"topology\":{\"type\":\"string\",\"description\":\"Topology "
-         "name for topology_run\"}},\"required\":[\"action\"]}",
+         "name for topology_run\"},\"node_bindings\":{\"type\":\"array\",\"description\":"
+         "\"topology_run: optional per-node provider/model-instance bindings; each item selects node_tag "
+         "or zero-based node_id and may set provider, model, effort, temperature, top_p, top_k, "
+         "thinking_budget, tool_choice, system_prompt\"}},\"required\":[\"action\"]}",
      .execute = tool_swarm_dispatch,
      .core = true},
 
@@ -34729,6 +35102,17 @@ static const tool_def_t s_tools[] = {
      .execute = tool_plugin_validate,
      .is_read_only = true,
      .is_concurrent = true},
+    {.name = "openai_image_generate",
+     .description = "Generate one image with the OpenAI Image API and save it to a local file.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"prompt\":{\"type\":\"string\"},\"output_path\":{"
+         "\"type\":\"string\"},\"model\":{\"type\":\"string\",\"default\":\"gpt-image-2\"},"
+         "\"size\":{\"type\":\"string\",\"default\":\"auto\"},\"quality\":{\"type\":\"string\","
+         "\"default\":\"auto\"},\"output_format\":{\"type\":\"string\",\"enum\":[\"png\","
+         "\"webp\",\"jpeg\"],\"default\":\"png\"},\"background\":{\"type\":\"string\"},"
+         "\"moderation\":{\"type\":\"string\"},\"output_compression\":{\"type\":\"integer\"}},"
+         "\"required\":[\"prompt\"]}",
+     .execute = tool_openai_image_generate},
     {.name = "view_image",
      .description = "Prepare a local image file for model-side vision analysis.",
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},"
@@ -34922,7 +35306,7 @@ bool tools_invoke_by_name(const char *name, const char *input, char *result, siz
     result[0] = '\0';
     /* O(1) hash-map lookup (falls back to MCP alias resolution). */
     int idx = tools_lookup_index(name);
-    if (idx >= 0 && idx < s_tool_count && s_tools[idx].execute) {
+    if (idx >= 0 && idx < s_tool_count && tools_profile_allows_index(idx) && s_tools[idx].execute) {
         return s_tools[idx].execute(input ? input : "{}", result, rlen);
     }
     snprintf(result, rlen, "{\"error\":\"unknown tool: %s\"}", name);
@@ -34965,21 +35349,26 @@ bool tools_is_parent_specified_core_tool(const char *tool_name) {
     return false;
 }
 
+static bool tools_restricted_profile_requested(void) {
+    const char *profile = getenv("DSCO_TOOL_PROFILE");
+    return profile && strcmp(profile, "restricted") == 0;
+}
+
 void tools_init_local_only(void) {
     /* Fast path for local metadata/direct-tool commands. Keep this free of
      * subsystem startup: no plugins, browser profiles, IPC, MCP, or VFS. */
-    g_tools_init_profile = TOOLS_AGENT;
+    g_tools_init_profile = tools_restricted_profile_requested() ? TOOLS_RESTRICTED : TOOLS_AGENT;
     tool_map_rebuild();
 }
 
 void tools_init(void) {
-    tools_init_profile(TOOLS_FULL);
+    tools_init_profile(tools_restricted_profile_requested() ? TOOLS_RESTRICTED : TOOLS_FULL);
 }
 
 void tools_init_profile(tools_init_profile_t profile) {
     dsco_flow_reset(); /* session start: clear lethal-trifecta taint accumulation */
     g_tools_init_profile = profile;
-    if (profile == TOOLS_CORE || profile == TOOLS_AGENT) {
+    if (profile != TOOLS_FULL) {
         tool_map_rebuild();
         return;
     }
@@ -35029,6 +35418,11 @@ bool tools_profile_allows_index(int index) {
             }
         }
         return false;
+    }
+    if (g_tools_init_profile == TOOLS_RESTRICTED) {
+        const char *name = s_tools[index].name;
+        return name && (strcmp(name, "Bash") == 0 || strcmp(name, "curl_raw") == 0 ||
+                        strcmp(name, "ssh_command") == 0);
     }
     if (g_tools_init_profile == TOOLS_FULL || g_tools_init_profile == TOOLS_AGENT)
         return true;
@@ -36838,8 +37232,9 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools, float bud
                     int ti = grp->tool_indices[j];
                     if (ti < 0 || ti >= total || ti >= g_emb_count)
                         continue;
-                    if (!tools[ti].core)
-                        continue; /* only core tools for embedding paging */
+                    /* Relevance paging must admit loadable builtins too. Otherwise
+                     * code-repair tools such as apply_patch, test_run, and diagnostics
+                     * can never be surfaced by a coding intent. */
                     float sim = cosine_sim_f(qvec, &g_emb_vectors[ti * g_emb_dim], g_emb_dim);
                     if (sim > 0.12f) {
                         tool_signals[ti]++;
@@ -36869,7 +37264,7 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools, float bud
             int ranked_count = sem_tools_rank(&g_tool_index, context, ranked, capped, capped);
             for (int i = 0; i < ranked_count; i++) {
                 int idx = ranked[i].tool_index;
-                if (idx >= 0 && idx < total && ranked[i].score > 0.05 && tools[idx].core) {
+                if (idx >= 0 && idx < total && ranked[i].score > 0.05) {
                     tool_signals[idx]++;
                     if (!included[idx] && wn < working_budget) {
                         widx[wn++] = idx;
@@ -36943,8 +37338,7 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools, float bud
         int ranked_count = sem_tools_rank(&g_tool_index, context, ranked, capped, capped);
         for (int i = 0; i < ranked_count && dn < discovery_budget; i++) {
             int idx = ranked[i].tool_index;
-            if (idx >= 0 && idx < total && !included[idx] && ranked[i].score > 0.05 &&
-                tools[idx].core) {
+            if (idx >= 0 && idx < total && !included[idx] && ranked[i].score > 0.05) {
                 didx[dn++] = idx;
                 included[idx] = true;
             }
@@ -37508,6 +37902,10 @@ void tools_register_external_with_output(const char *name, const char *descripti
                                          void *ctx) {
     if (!name || !name[0])
         return;
+    /* Restricted mode admits only its fixed builtin set. In particular, do not
+     * permit a dynamic/MCP registration to add or shadow a permitted name. */
+    if (g_tools_init_profile == TOOLS_RESTRICTED)
+        return;
     char *new_schema = safe_strdup(
         input_schema_json && input_schema_json[0] ? input_schema_json : k_default_input_schema_json);
     char *new_output_schema =
@@ -37956,6 +38354,17 @@ static bool tools_execute_internal(const char *name, const char *input_json, cha
 
     if (!name) {
         snprintf(result, result_len, "error: null tool name");
+        return false;
+    }
+    /* Keep the execution surface identical to the disclosed surface. This must
+     * precede VM, plugin, and cache paths, each of which can bypass lookup. */
+    int profile_index = tools_lookup_index(name);
+    /* Builtins use non-negative indexes and are subject to the active profile.
+     * Plugin/MCP tools use negative registry indexes; they are only inserted in
+     * the full profile, while restricted mode rejects dynamic registration. */
+    if (profile_index < 0 ? g_tools_init_profile != TOOLS_FULL
+                          : !tools_profile_allows_index(profile_index)) {
+        snprintf(result, result_len, "unknown tool: %s", name);
         return false;
     }
 
@@ -39025,6 +39434,9 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             dsco_cap_decision_t cap_dec =
                 dsco_capability_gate(name, input_json, tier, cap_reason, sizeof(cap_reason));
             if (cap_dec == CAP_DECISION_DENY) {
+                /* Capability denials are the non-negotiable floor: audit mode
+                 * may remove approval and budget friction, not enable control
+                 * tools or the lethal exfiltration combination. */
                 pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region,
                                   "immune", "{\"reason\":\"capability_denied\"}");
                 tool_gov_deny(result, result_len, name, "capability",
@@ -39034,8 +39446,12 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             }
         }
 
-        /* ── Human approval for risky/blocked tools ──────────────────────── */
-        if (!tool_request_approval(name, input_json, cls, tier, result, result_len)) {
+        /* ── Human approval for risky/blocked tools ────────────────────────
+         * Audit mode retains a record of the assessment but does not turn a
+         * headless development run into an approval dead-end. Immune vetoes
+         * above (killswitch, breakers, self-preservation) stay enforced. */
+        if (gov_stage_enforces(_gov_model, GOV_STAGE_APPROVAL) &&
+            !tool_request_approval(name, input_json, cls, tier, result, result_len)) {
             pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region, "immune",
                               "{\"reason\":\"approval_denied\"}");
             self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);

@@ -22,7 +22,11 @@
 
 #define CLAUDE_CODE_BILLING_SALT "59cf53e54c78"
 #define CLAUDE_CODE_VERSION_FALLBACK "2.1.37"
+#ifdef DSCO_USE_OBF_SECRETS
+#define CLAUDE_CODE_OAUTH_BETA dsco_secret("CLAUDE_CODE_OAUTH_BETA")
+#else
 #define CLAUDE_CODE_OAUTH_BETA "oauth-2025-04-20"
+#endif
 
 /* Global interrupt flag — set by SIGINT handler in agent.c.
    Declared extern here so the streaming code can check it. */
@@ -3957,6 +3961,7 @@ typedef struct {
     /* Callbacks */
     stream_text_cb text_cb;
     stream_tool_start_cb tool_cb;
+    stream_tool_arg_delta_cb tool_delta_cb;
     stream_thinking_cb thinking_cb;
     void *cb_ctx;
 
@@ -4673,6 +4678,9 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
                 char *partial = json_get_str(delta_raw, "partial_json");
                 if (partial) {
                     jbuf_append(&s->input_buf, partial);
+                    if (partial[0] && s->tool_delta_cb) {
+                        s->tool_delta_cb(s->cur_tool_name, s->cur_tool_id, partial, s->cb_ctx);
+                    }
                     free(partial);
                 }
             } else if (delta_type && strcmp(delta_type, "content_delta") == 0) {
@@ -4896,7 +4904,9 @@ static void sse_state_reset_for_retry(sse_state_t *s) {
 }
 
 stream_result_t llm_stream(const char *api_key, const char *request_json, stream_text_cb text_cb,
-                           stream_tool_start_cb tool_cb, stream_thinking_cb thinking_cb,
+                           stream_tool_start_cb tool_cb,
+                           stream_tool_arg_delta_cb tool_delta_cb,
+                           stream_thinking_cb thinking_cb,
                            void *cb_ctx) {
     stream_result_t result = {0};
 
@@ -4905,6 +4915,7 @@ stream_result_t llm_stream(const char *api_key, const char *request_json, stream
     state.current_index = -1;
     state.text_cb = text_cb;
     state.tool_cb = tool_cb;
+    state.tool_delta_cb = tool_delta_cb;
     state.thinking_cb = thinking_cb;
     state.cb_ctx = cb_ctx;
     jbuf_init(&state.text_buf, 4096);

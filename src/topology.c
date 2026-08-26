@@ -79,6 +79,8 @@ static double tier_unit_cost(model_tier_t tier) {
             return 0.0180;
         case TIER_OPUS:
             return 0.0900;
+        case TIER_FABLE:
+            return 0.1800;
     }
     return 0.0180;
 }
@@ -102,7 +104,13 @@ static void topo_finalize(topology_t *t) {
 #define TE(idx, from, to, type) topo_add_edge(&g_topologies[(idx) - 1], from, to, type)
 #define TF(idx) topo_finalize(&g_topologies[(idx) - 1])
 
-static void init_topology_registry_linear(void) {
+#if defined(__GNUC__) || defined(__clang__)
+#define TOPOLOGY_NOINLINE __attribute__((noinline))
+#else
+#define TOPOLOGY_NOINLINE
+#endif
+
+static TOPOLOGY_NOINLINE void init_topology_registry_linear(void) {
     TI(1, "sentinel", "Escalation chain: triage, analyze, decide", CAT_CHAIN, EXEC_LINEAR, 1, 3.0);
     TN(1, TIER_HAIKU, ROLE_CLASSIFIER, "triage", 1);
     TN(1, TIER_SONNET, ROLE_WORKER, "analyze", 1);
@@ -183,7 +191,7 @@ static void init_topology_registry_linear(void) {
     TF(8);
 }
 
-static void init_topology_registry_fanout(void) {
+static TOPOLOGY_NOINLINE void init_topology_registry_fanout(void) {
     TI(9, "starburst", "Opus coordinator fans out to Sonnet workers and merges", CAT_FANOUT,
        EXEC_PARALLEL_STAGES, 1, 3.0);
     TN(9, TIER_OPUS, ROLE_COORDINATOR, "coord", 1);
@@ -372,7 +380,7 @@ static void init_topology_registry_fanout(void) {
     TF(18);
 }
 
-static void init_topology_registry_hierarchy(void) {
+static TOPOLOGY_NOINLINE void init_topology_registry_hierarchy(void) {
     TI(19, "military", "General to captains to soldiers", CAT_HIERARCHY, EXEC_PARALLEL_STAGES, 1,
        3.0);
     TN(19, TIER_OPUS, ROLE_COORDINATOR, "general", 1);
@@ -581,7 +589,7 @@ static void init_topology_registry_hierarchy(void) {
     TF(26);
 }
 
-static void init_topology_registry_mesh(void) {
+static TOPOLOGY_NOINLINE void init_topology_registry_mesh(void) {
     TI(27, "tribunal", "Three judges deliberate and Opus synthesizes", CAT_MESH, EXEC_CONSENSUS, 1,
        5.0);
     TN(27, TIER_SONNET, ROLE_SPECIALIST, "judge1", 1);
@@ -664,7 +672,7 @@ static void init_topology_registry_mesh(void) {
     TF(32);
 }
 
-static void init_topology_registry_specialist(void) {
+static TOPOLOGY_NOINLINE void init_topology_registry_specialist(void) {
     TI(33, "switchboard", "Haiku router chooses one or two specialists then Opus integrates",
        CAT_SPECIALIST, EXEC_PARALLEL_STAGES, 1, 3.0);
     TN(33, TIER_HAIKU, ROLE_CLASSIFIER, "router", 1);
@@ -777,7 +785,7 @@ static void init_topology_registry_specialist(void) {
     TF(40);
 }
 
-static void init_topology_registry_feedback(void) {
+static TOPOLOGY_NOINLINE void init_topology_registry_feedback(void) {
     TI(41, "critic_loop", "Generate, critique, refine with up to three rounds", CAT_FEEDBACK,
        EXEC_ITERATIVE, 3, 6.0);
     TN(41, TIER_SONNET, ROLE_GENERATOR, "generate", 1);
@@ -887,7 +895,7 @@ static void init_topology_registry_feedback(void) {
     TF(48);
 }
 
-static void init_topology_registry_competitive(void) {
+static TOPOLOGY_NOINLINE void init_topology_registry_competitive(void) {
     TI(49, "tournament", "Multiple contestants, one judge", CAT_COMPETITIVE, EXEC_TOURNAMENT, 1,
        2.0);
     for (int i = 0; i < 4; i++)
@@ -984,7 +992,7 @@ static void init_topology_registry_competitive(void) {
     TF(54);
 }
 
-static void init_topology_registry_domain(void) {
+static TOPOLOGY_NOINLINE void init_topology_registry_domain(void) {
     TI(55, "code_review", "Lint, logic review, security review, verdict", CAT_DOMAIN, EXEC_LINEAR,
        1, 4.0);
     TN(55, TIER_HAIKU, ROLE_VALIDATOR, "lint", 1);
@@ -1078,6 +1086,8 @@ static void init_topology_registry_domain(void) {
     TE(60, 8, 9, EDGE_SEQUENCE);
     TF(60);
 }
+
+#undef TOPOLOGY_NOINLINE
 
 void topology_registry_init(void) {
     if (g_topologies_inited)
@@ -1389,12 +1399,21 @@ double topology_estimate_cost(const topology_t *t, int input_tokens, int output_
     return t->est_cost_1k * units;
 }
 
+bool topology_plan_run_with_options(const topology_plan_t *plan, const char *api_key,
+                                    const char *coordinator_model, const char *task,
+                                    const topology_run_options_t *options, char *result, size_t rlen,
+                                    topology_run_stats_t *stats) {
+    if (!plan)
+        return false;
+    return topology_run_with_options(&plan->topology, api_key, coordinator_model, task, options,
+                                     result, rlen, stats);
+}
+
 bool topology_plan_run(const topology_plan_t *plan, const char *api_key,
                        const char *coordinator_model, const char *task, char *result, size_t rlen,
                        topology_run_stats_t *stats) {
-    if (!plan)
-        return false;
-    return topology_run(&plan->topology, api_key, coordinator_model, task, result, rlen, stats);
+    return topology_plan_run_with_options(plan, api_key, coordinator_model, task, NULL, result, rlen,
+                                          stats);
 }
 
 /* OpenRouter swarm tier defaults. The tier enum names are legacy, but the
@@ -1420,6 +1439,10 @@ static const char *or_tier_model(model_tier_t tier) {
         }
         case TIER_OPUS: {
             const char *e = getenv("DSCO_SWARM_OPUS");
+            return (e && e[0]) ? e : "openrouter/z-ai/glm-5.2";
+        }
+        case TIER_FABLE: {
+            const char *e = getenv("DSCO_SWARM_FABLE");
             return (e && e[0]) ? e : "openrouter/z-ai/glm-5.2";
         }
     }
@@ -1457,6 +1480,10 @@ static const char *hetero_tier_model(model_tier_t tier) {
         }
         case TIER_OPUS: {
             const char *e = getenv("DSCO_SWARM_OPUS");
+            return (e && e[0]) ? e : "openrouter/z-ai/glm-5.2";
+        }
+        case TIER_FABLE: {
+            const char *e = getenv("DSCO_SWARM_FABLE");
             return (e && e[0]) ? e : "openrouter/z-ai/glm-5.2";
         }
     }
@@ -1504,11 +1531,14 @@ const char *topology_resolve_model_for_tier(const char *coordinator_model, const
     } else if (strcmp(provider, "openrouter") == 0) {
         return topology_resolve_openrouter_model(or_tier_model(tier), buf, buflen);
     } else if (strcmp(provider, "openai") == 0) {
-        resolved = (tier == TIER_OPUS) ? "o1" : (tier == TIER_SONNET ? "gpt-4o" : "gpt-4o-mini");
+        resolved = (tier == TIER_OPUS || tier == TIER_FABLE)
+                       ? "o1"
+                       : (tier == TIER_SONNET ? "gpt-4o" : "gpt-4o-mini");
     } else if (strcmp(provider, "groq") == 0) {
         resolved = (tier == TIER_HAIKU) ? "llama-3.1-8b-instant" : "llama-3.3-70b-versatile";
     } else if (strcmp(provider, "deepseek") == 0) {
-        resolved = (tier == TIER_OPUS) ? "deepseek-reasoner" : "deepseek-chat";
+        resolved = (tier == TIER_OPUS || tier == TIER_FABLE) ? "deepseek-reasoner"
+                                                               : "deepseek-chat";
     } else if (strcmp(provider, "mistral") == 0) {
         resolved = (tier == TIER_HAIKU)
                        ? "mistral-small-latest"
@@ -1594,29 +1624,32 @@ static const char *topology_native_lane_model(const provider_profile_t *profile,
     const char *p = profile->name;
 
     if (strcmp(p, "sakana") == 0)
-        return tier == TIER_OPUS ? "fugu-ultra" : "fugu";
+        return (tier == TIER_OPUS || tier == TIER_FABLE) ? "fugu-ultra" : "fugu";
     if (strcmp(p, "anthropic") == 0)
-        return tier == TIER_HAIKU  ? "claude-haiku-4-5-20251001"
-               : tier == TIER_OPUS ? "claude-opus-4-8"
-                                   : "claude-sonnet-4-6";
+        return tier == TIER_HAIKU   ? "claude-haiku-4-5"
+               : tier == TIER_OPUS  ? "claude-opus-4-8"
+               : tier == TIER_FABLE ? "claude-fable-5"
+                                    : "claude-sonnet-5";
     if (strcmp(p, "openai-codex") == 0)
         return "gpt-5.5";
     if (strcmp(p, "openai") == 0)
-        return tier == TIER_HAIKU ? "gpt-4.1-mini" : tier == TIER_OPUS ? "gpt-5.4" : "gpt-4.1";
+        return tier == TIER_HAIKU ? "gpt-4.1-mini"
+               : (tier == TIER_OPUS || tier == TIER_FABLE) ? "gpt-5.4"
+                                                              : "gpt-4.1";
     if (strcmp(p, "xai") == 0)
-        return tier == TIER_OPUS ? "grok-4" : "grok-4-fast";
+        return (tier == TIER_OPUS || tier == TIER_FABLE) ? "grok-4" : "grok-4-fast";
     if (strcmp(p, "moonshot") == 0)
         return "kimi-k2.7-code-highspeed";
     if (strcmp(p, "google") == 0)
-        return tier == TIER_OPUS ? "gemini-2.5-pro" : "gemini-2.5-flash";
+        return (tier == TIER_OPUS || tier == TIER_FABLE) ? "gemini-2.5-pro" : "gemini-2.5-flash";
     if (strcmp(p, "groq") == 0)
         return tier == TIER_HAIKU ? "llama-3.1-8b-instant" : "llama-3.3-70b-versatile";
     if (strcmp(p, "deepseek") == 0)
-        return tier == TIER_OPUS ? "deepseek-reasoner" : "deepseek-chat";
+        return (tier == TIER_OPUS || tier == TIER_FABLE) ? "deepseek-reasoner" : "deepseek-chat";
     if (strcmp(p, "mistral") == 0)
-        return tier == TIER_HAIKU  ? "mistral-small-latest"
-               : tier == TIER_OPUS ? "mistral-large-latest"
-                                   : "codestral-latest";
+        return tier == TIER_HAIKU ? "mistral-small-latest"
+               : (tier == TIER_OPUS || tier == TIER_FABLE) ? "mistral-large-latest"
+                                                              : "codestral-latest";
     if (strcmp(p, "perplexity") == 0)
         return tier == TIER_HAIKU ? "sonar" : "sonar-pro";
     if (strcmp(p, "cerebras") == 0)
@@ -1656,7 +1689,7 @@ static const char *topology_openrouter_lane_model(model_tier_t tier, int slot) {
     if (tier == TIER_HAIKU) {
         models = haiku;
         count = (int)(sizeof(haiku) / sizeof(haiku[0]));
-    } else if (tier == TIER_OPUS) {
+    } else if (tier == TIER_OPUS || tier == TIER_FABLE) {
         models = opus;
         count = (int)(sizeof(opus) / sizeof(opus[0]));
     }
@@ -2376,10 +2409,54 @@ typedef struct {
     int child_id;
 } stage_child_map_t;
 
+static const topology_node_binding_t *topology_find_binding(
+    const topology_run_options_t *options, const topo_node_t *node) {
+    if (!options || !options->bindings || options->binding_count <= 0 || !node)
+        return NULL;
+    int count = options->binding_count;
+    if (count > TOPO_MAX_BINDINGS)
+        count = TOPO_MAX_BINDINGS;
+    for (int i = 0; i < count; i++) {
+        const topology_node_binding_t *binding = &options->bindings[i];
+        if (binding->node_tag[0] && strcmp(binding->node_tag, node->tag) == 0)
+            return binding;
+    }
+    for (int i = 0; i < count; i++) {
+        const topology_node_binding_t *binding = &options->bindings[i];
+        if (!binding->node_tag[0] && binding->node_id == node->id)
+            return binding;
+    }
+    return NULL;
+}
+
+static bool topology_binding_is_routable(const topology_node_binding_t *binding,
+                                         const char *api_key, const char **out_provider) {
+    if (out_provider)
+        *out_provider = NULL;
+    if (!binding || !binding->model[0])
+        return true;
+    return provider_model_is_routable(binding->model, api_key,
+                                      binding->provider[0] ? binding->provider : NULL, out_provider);
+}
+
+static void topology_apply_instance_binding(const topology_node_binding_t *binding) {
+    if (!binding)
+        return;
+    if (binding->effort[0] || binding->temperature >= 0 || binding->top_p >= 0 ||
+        binding->top_k > 0 || binding->thinking_budget > 0 || binding->tool_choice[0] ||
+        binding->system_prompt[0]) {
+        swarm_set_next_instance(binding->effort[0] ? binding->effort : NULL,
+                                binding->temperature, binding->top_p, binding->top_k,
+                                binding->thinking_budget,
+                                binding->tool_choice[0] ? binding->tool_choice : NULL,
+                                binding->system_prompt[0] ? binding->system_prompt : NULL);
+    }
+}
+
 static bool run_stage(const topology_t *t, const int ready_nodes[], int ready_count,
                       const char *api_key, const char *coordinator_model, const char *task,
-                      char *current_outputs[], char *prev_outputs[], int iteration,
-                      topology_run_stats_t *stats) {
+                      const topology_run_options_t *options, char *current_outputs[],
+                      char *prev_outputs[], int iteration, topology_run_stats_t *stats) {
     swarm_t sw;
     swarm_init(&sw, api_key, coordinator_model);
 
@@ -2389,9 +2466,30 @@ static bool run_stage(const topology_t *t, const int ready_nodes[], int ready_co
 
     for (int i = 0; i < ready_count; i++) {
         const topo_node_t *node = &t->nodes[ready_nodes[i]];
+        const topology_node_binding_t *binding = topology_find_binding(options, node);
+        const char *binding_provider = NULL;
+        if (!topology_binding_is_routable(binding, api_key, &binding_provider)) {
+            fprintf(stderr, "  topology: binding for node '%s' is not routable\n", node->tag);
+            swarm_destroy(&sw);
+            return false;
+        }
         char model_buf[128];
-        const char *default_node_model = topology_resolve_model_for_tier(
-            coordinator_model, api_key, node->tier, model_buf, sizeof(model_buf));
+        const char *default_node_model = NULL;
+        if (binding && binding->model[0]) {
+            default_node_model = binding->model;
+        } else if (binding && binding->provider[0]) {
+            const provider_profile_t *profile = provider_profile_find(binding->provider);
+            default_node_model = topology_native_lane_model(profile, node->tier);
+            if (!default_node_model || !default_node_model[0]) {
+                fprintf(stderr, "  topology: no default model for provider '%s' node '%s'\n",
+                        binding->provider, node->tag);
+                swarm_destroy(&sw);
+                return false;
+            }
+        } else {
+            default_node_model = topology_resolve_model_for_tier(
+                coordinator_model, api_key, node->tier, model_buf, sizeof(model_buf));
+        }
         for (int rep = 0; rep < node->replicas; rep++) {
             char *prompt =
                 build_node_prompt(t, node, task, current_outputs, prev_outputs, iteration);
@@ -2416,6 +2514,18 @@ static bool run_stage(const topology_t *t, const int ready_nodes[], int ready_co
                                        sizeof(lane_provider), lane_model, sizeof(lane_model))) {
                 node_provider = lane_provider;
                 node_model = lane_model;
+            }
+
+            /* An explicit node binding wins over throughput striping.  It is
+             * intentionally applied per replica so instance parameters remain
+             * isolated and cannot bleed to an unrelated worker. */
+            if (binding) {
+                if (binding->provider[0])
+                    node_provider = binding->provider;
+                else if (binding_provider && binding_provider[0])
+                    node_provider = binding_provider;
+                node_model = default_node_model;
+                topology_apply_instance_binding(binding);
             }
 
             int child_id = node_provider
@@ -2475,8 +2585,10 @@ static bool run_stage(const topology_t *t, const int ready_nodes[], int ready_co
     return true;
 }
 
-bool topology_run(const topology_t *t, const char *api_key, const char *coordinator_model,
-                  const char *task, char *result, size_t rlen, topology_run_stats_t *stats) {
+bool topology_run_with_options(const topology_t *t, const char *api_key,
+                               const char *coordinator_model, const char *task,
+                               const topology_run_options_t *options, char *result, size_t rlen,
+                               topology_run_stats_t *stats) {
     if (!result || rlen == 0)
         return false;
     result[0] = '\0';
@@ -2539,8 +2651,8 @@ bool topology_run(const topology_t *t, const char *api_key, const char *coordina
             }
             fprintf(stderr, "\n");
 
-            ok = run_stage(t, ready, ready_count, api_key, coordinator_model, task, current_outputs,
-                           prev_outputs, iteration, stats);
+            ok = run_stage(t, ready, ready_count, api_key, coordinator_model, task, options,
+                           current_outputs, prev_outputs, iteration, stats);
             if (!ok)
                 break;
 
@@ -2629,6 +2741,11 @@ bool topology_run(const topology_t *t, const char *api_key, const char *coordina
     return ok;
 }
 
+bool topology_run(const topology_t *t, const char *api_key, const char *coordinator_model,
+                  const char *task, char *result, size_t rlen, topology_run_stats_t *stats) {
+    return topology_run_with_options(t, api_key, coordinator_model, task, NULL, result, rlen, stats);
+}
+
 /* ── Scheduler-integrated topology execution ────────────────────────── */
 
 typedef struct {
@@ -2657,8 +2774,8 @@ static int topo_node_task(void *ctx) {
     const topology_t *t = &tc->plan->topology;
     int ready[1] = {tc->node_idx};
 
-    tc->success = run_stage(t, ready, 1, tc->api_key, tc->model, tc->task, tc->current_outputs,
-                            tc->prev_outputs, tc->iteration, tc->stats);
+    tc->success = run_stage(t, ready, 1, tc->api_key, tc->model, tc->task, NULL,
+                            tc->current_outputs, tc->prev_outputs, tc->iteration, tc->stats);
 
     /* Capture the output for the caller */
     if (tc->success && tc->current_outputs[tc->node_idx]) {
@@ -2686,7 +2803,7 @@ static bool run_stage_scheduled(const topology_t *t, const int ready_nodes[], in
                                 int iteration, topology_run_stats_t *stats, topology_plan_t *plan) {
     /* If only one ready node or no scheduler, use the original path */
     if (!g_topo_sched || ready_count <= 1) {
-        return run_stage(t, ready_nodes, ready_count, api_key, coordinator_model, task,
+        return run_stage(t, ready_nodes, ready_count, api_key, coordinator_model, task, NULL,
                          current_outputs, prev_outputs, iteration, stats);
     }
 
@@ -2718,7 +2835,7 @@ static bool run_stage_scheduled(const topology_t *t, const int ready_nodes[], in
             /* Could not spawn — cancel previously spawned and fall back */
             for (int j = 0; j < i; j++)
                 sched_cancel(g_topo_sched, ids[j]);
-            return run_stage(t, ready_nodes, ready_count, api_key, coordinator_model, task,
+            return run_stage(t, ready_nodes, ready_count, api_key, coordinator_model, task, NULL,
                              current_outputs, prev_outputs, iteration, stats);
         }
     }
