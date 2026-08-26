@@ -4,6 +4,7 @@
 
 #include "crypto.h"
 #include "json_util.h"
+#include "cloud_runtime.h"
 
 #include <arpa/inet.h>
 #include <curl/curl.h>
@@ -338,6 +339,13 @@ bool openai_oauth_load(openai_oauth_bundle_t *out) {
         return false;
     if (oai_load_from_env(out))
         return true;
+    /* Cloud BYOK may only use an explicitly injected token.  Never borrow a
+     * shared user's dsco/Codex HOME credentials. */
+    if (dsco_cloud_runtime_active() || getenv("DSCO_DISABLE_SHARED_HOME_OAUTH")) {
+        memset(out, 0, sizeof(*out));
+        out->source = OPENAI_OAUTH_SOURCE_MISSING;
+        return false;
+    }
     if (oai_load_from_dsco_cache(out))
         return true;
     if (oai_load_from_codex(out))

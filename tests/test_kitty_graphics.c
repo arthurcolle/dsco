@@ -85,6 +85,65 @@ static void test_empty_payload(void) {
     CHECK("empty payload APC", n > 12 && strstr(output, "\033_Ga=t,t=d,f=24,i=9,m=0;") != NULL);
 }
 
+static void test_send_stats(void) {
+    static const unsigned char payload[] = {0, 1, 2, 3, 4, 5};
+    kitty_graphics_send_options_t options;
+    kitty_graphics_send_options_default(&options);
+    options.compress = false;
+    options.chunk_size = 4;
+
+    FILE *stream = tmpfile();
+    CHECK("stats tmpfile", stream != NULL);
+    if (!stream) return;
+    kitty_graphics_send_stats_t stats;
+    bool ok = kitty_graphics_send_pixels_ex(
+        stream, "a=t,t=d,f=24,i=17", payload, sizeof(payload), &options, &stats);
+    fflush(stream);
+    long wire_size = ftell(stream);
+    fclose(stream);
+
+    CHECK("instrumented send succeeds", ok);
+    CHECK("stats preserve input bytes", stats.input_bytes == sizeof(payload));
+    CHECK("stats preserve uncompressed bytes", stats.packed_bytes == sizeof(payload));
+    CHECK("stats report base64 bytes", stats.encoded_bytes == 8);
+    CHECK("stats report chunks", stats.chunks == 2);
+    CHECK("stats report exact wire bytes",
+          wire_size > 0 && stats.wire_bytes == (uint64_t)wire_size);
+    CHECK("stats report working allocation", stats.peak_heap_bytes >= 9);
+    CHECK("stats timings are nonnegative",
+          stats.base64_ms >= 0.0 && stats.write_ms >= 0.0 &&
+          stats.total_ms >= stats.base64_ms);
+}
+
+static void test_rgb_patch_contract(void) {
+    static const unsigned char pixels[] = {1, 2, 3, 4, 5, 6};
+    FILE *stream = tmpfile();
+    CHECK("patch tmpfile", stream != NULL);
+    if (!stream) return;
+    bool ok = kitty_graphics_send_rgb_patch(
+        stream, 77, 1, 3, 4, 2, 1, pixels, sizeof(pixels), NULL);
+    ok = ok && kitty_graphics_select_frame(stream, 77, 1, NULL);
+    char output[512];
+    size_t n = read_stream(stream, output, sizeof(output));
+    fclose(stream);
+
+    CHECK("RGB patch sends", ok && n > 0);
+    CHECK("RGB patch declares exact Kitty format",
+          strstr(output,
+                 "\033_Ga=f,t=d,f=24,i=77,r=1,x=3,y=4,s=2,v=1,X=1,q=2,o=z,m=0;") != NULL);
+    CHECK("RGB patch re-selects edited frame",
+          strstr(output, "\033_Ga=a,i=77,c=1,q=2,m=0;\033\\") != NULL);
+    FILE *invalid = tmpfile();
+    CHECK("patch validation tmpfile", invalid != NULL);
+    if (invalid) {
+        CHECK("RGB patch rejects mismatched payload",
+              !kitty_graphics_send_rgb_patch(invalid, 77, 1,
+                                             0, 0, 2, 1,
+                                             pixels, sizeof(pixels) - 1, NULL));
+        fclose(invalid);
+    }
+}
+
 static void test_environment_hint(void) {
     const char *old_graphics = getenv("DSCO_KITTY_GRAPHICS");
     const char *old_pixel = getenv("DSCO_PIXEL_TUI");
@@ -110,6 +169,9 @@ static void test_environment_hint(void) {
     CHECK("ordinary terminal hint off", !kitty_graphics_environment_hint());
     setenv("TERM_PROGRAM", "Ghostty", 1);
     CHECK("known terminal hint on", kitty_graphics_environment_hint());
+    setenv("DSCO_PIXEL_TUI", "0", 1);
+    CHECK("pixel TUI opt-out wins", !kitty_graphics_environment_hint());
+    unsetenv("DSCO_PIXEL_TUI");
     setenv("DSCO_KITTY_GRAPHICS", "off", 1);
     CHECK("explicit off wins", !kitty_graphics_environment_hint());
     setenv("TERM_PROGRAM", "Apple_Terminal", 1);
@@ -133,6 +195,8 @@ int main(void) {
     test_chunk_framing();
     test_query();
     test_empty_payload();
+    test_send_stats();
+    test_rgb_patch_contract();
     test_environment_hint();
     printf("kitty graphics: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

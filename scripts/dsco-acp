@@ -1,0 +1,32 @@
+#!/bin/sh
+# DSCO ACP launch wrapper for Buzz or any ACP harness.
+#
+# Keeps routing and governance defaults at the DSCO boundary rather than in
+# the harness. Operators may override any of these environment values.
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+if [ -n "${DSCO_BIN:-}" ]; then
+    DSCO_EXEC=$DSCO_BIN
+elif [ -x "$SCRIPT_DIR/dsco" ]; then
+    DSCO_EXEC=$SCRIPT_DIR/dsco
+elif [ -x "$ROOT/dsco" ]; then
+    DSCO_EXEC=$ROOT/dsco
+else
+    DSCO_EXEC=$(command -v dsco 2>/dev/null || true)
+fi
+if [ -z "$DSCO_EXEC" ]; then
+    echo "dsco-acp: cannot find dsco (set DSCO_BIN or add dsco to PATH)" >&2
+    exit 127
+fi
+
+: "${DSCO_ROUTER_POLICY:=adaptive}"
+: "${DSCO_ROUTER_MAX_ESCALATIONS:=2}"
+: "${DSCO_ACP_TRUST_TIER:=trusted}"
+: "${DSCO_ACP_APPROVAL_MODE:=never}"
+: "${DSCO_ACP_EFFORT:=high}"
+
+export DSCO_ROUTER_POLICY DSCO_ROUTER_MAX_ESCALATIONS
+export DSCO_ACP_TRUST_TIER DSCO_ACP_APPROVAL_MODE DSCO_ACP_EFFORT
+exec "$DSCO_EXEC" acp serve "$@"

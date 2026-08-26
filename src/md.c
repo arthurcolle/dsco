@@ -550,6 +550,20 @@ static void latex_replace_symbols(char *buf, int bufsize) {
     }
 }
 
+/* Public, copy-out wrapper so non-terminal renderers (rtf.c) can reuse the
+ * exact same LaTeX→Unicode conversion as the terminal pipeline. */
+char *md_latex_to_unicode(const char *tex, size_t len) {
+    if (!tex)
+        return NULL;
+    if (len >= MD_LINE_MAX)
+        len = MD_LINE_MAX - 1;
+    char buf[MD_LINE_MAX];
+    memcpy(buf, tex, len);
+    buf[len] = ' ';
+    latex_replace_symbols(buf, sizeof buf);
+    return strdup(buf);
+}
+
 /* ── Inline Markdown Rendering ────────────────────────────────────────── */
 
 /* Render inline markdown formatting to ANSI.
@@ -1920,18 +1934,42 @@ const char *md_lang_from_path(const char *path) {
     const struct {
         const char *ext;
         const char *lang;
-    } exts[] = {{".tsx", "tsx"},      {".jsx", "jsx"},     {".cpp", "cpp"},
-                {".cc", "cpp"},       {".cxx", "cpp"},     {".hpp", "cpp"},
-                {".hh", "cpp"},       {".hxx", "cpp"},     {".py", "python"},
-                {".js", "javascript"}, {".ts", "typescript"}, {".mjs", "javascript"},
-                {".cjs", "javascript"}, {".rs", "rust"},   {".go", "go"},
-                {".java", "java"},    {".kt", "kotlin"},   {".kts", "kotlin"},
-                {".rb", "ruby"},      {".sql", "sql"},     {".html", "html"},
-                {".htm", "html"},     {".xml", "xml"},     {".css", "css"},
-                {".scss", "scss"},    {".json", "json"},   {".jsonl", "json"},
-                {".yaml", "yaml"},    {".yml", "yaml"},    {".md", "markdown"},
-                {".markdown", "markdown"}, {".sh", "bash"}, {".bash", "bash"},
-                {".zsh", "zsh"},      {".c", "c"},         {".h", "c"},
+    } exts[] = {{".tsx", "tsx"},
+                {".jsx", "jsx"},
+                {".cpp", "cpp"},
+                {".cc", "cpp"},
+                {".cxx", "cpp"},
+                {".hpp", "cpp"},
+                {".hh", "cpp"},
+                {".hxx", "cpp"},
+                {".py", "python"},
+                {".js", "javascript"},
+                {".ts", "typescript"},
+                {".mjs", "javascript"},
+                {".cjs", "javascript"},
+                {".rs", "rust"},
+                {".go", "go"},
+                {".java", "java"},
+                {".kt", "kotlin"},
+                {".kts", "kotlin"},
+                {".rb", "ruby"},
+                {".sql", "sql"},
+                {".html", "html"},
+                {".htm", "html"},
+                {".xml", "xml"},
+                {".css", "css"},
+                {".scss", "scss"},
+                {".json", "json"},
+                {".jsonl", "json"},
+                {".yaml", "yaml"},
+                {".yml", "yaml"},
+                {".md", "markdown"},
+                {".markdown", "markdown"},
+                {".sh", "bash"},
+                {".bash", "bash"},
+                {".zsh", "zsh"},
+                {".c", "c"},
+                {".h", "c"},
                 {NULL, NULL}};
 
     for (int i = 0; exts[i].ext; i++) {

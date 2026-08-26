@@ -1,0 +1,59 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -Eeuo pipefail
+
+# Pixel Fold field entrypoint for an on-device DSCO checkout.
+# Defaults are intentionally local-first and capability-minimal.
+
+DSCO_ROOT="${DSCO_ROOT:-$HOME/dsco/dsco-cli}"
+DSCO_BIN="${DSCO_BIN:-$DSCO_ROOT/dsco}"
+DSCO_DEVICE_STATE="${DSCO_DEVICE_STATE:-$HOME/.dsco/device/pixel-fold.env}"
+
+fail() { printf 'dsco-device: %s\n' "$*" >&2; exit 1; }
+
+[ -x "$DSCO_BIN" ] || fail "missing executable $DSCO_BIN (run scripts/pixel-fold/install-termux)"
+mkdir -p "$(dirname "$DSCO_DEVICE_STATE")" "$HOME/.dsco/sessions" "$HOME/.dsco/debug"
+
+# Android can recreate an Activity at any size. Never cache columns/rows; the
+# terminal is the authoritative viewport and SIGWINCH remains available to DSCO.
+cols="$(tput cols 2>/dev/null || printf 80)"
+rows="$(tput lines 2>/dev/null || printf 24)"
+case "$cols" in ''|*[!0-9]*) cols=80 ;; esac
+case "$rows" in ''|*[!0-9]*) rows=24 ;; esac
+
+if [ "$cols" -ge 120 ]; then
+  layout=expanded
+elif [ "$cols" -ge 80 ]; then
+  layout=medium
+else
+  layout=compact
+fi
+
+umask 077
+tmp="${DSCO_DEVICE_STATE}.tmp.$$"
+{
+  printf 'DSCO_DEVICE=pixel-fold\n'
+  printf 'DSCO_DEVICE_LAYOUT=%s\n' "$layout"
+  printf 'DSCO_DEVICE_COLS=%s\n' "$cols"
+  printf 'DSCO_DEVICE_ROWS=%s\n' "$rows"
+  printf 'DSCO_DEVICE_UPDATED=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} >"$tmp"
+mv -f "$tmp" "$DSCO_DEVICE_STATE"
+
+export DSCO_DEVICE=pixel-fold
+export DSCO_DEVICE_LAYOUT="$layout"
+export DSCO_PROFILE="${DSCO_PROFILE:-lite}"
+export DSCO_EXEC="${DSCO_EXEC:-auto}"
+export DSCO_APPROVAL_MODE="${DSCO_APPROVAL_MODE:-ask}"
+export DSCO_ALLOW_READ="${DSCO_ALLOW_READ:-1}"
+export DSCO_ALLOW_WRITE="${DSCO_ALLOW_WRITE:-1}"
+export DSCO_ALLOW_NET="${DSCO_ALLOW_NET:-0}"
+export DSCO_ALLOW_RUN="${DSCO_ALLOW_RUN:-0}"
+export DSCO_ALLOW_SECRETS="${DSCO_ALLOW_SECRETS:-0}"
+# Field posture is non-escalatable by ambient parent-shell state.
+export DSCO_ALLOW_CONTROL=0
+
+cd "$DSCO_ROOT"
+if [ "$#" -eq 0 ]; then
+  exec "$DSCO_BIN" -i
+fi
+exec "$DSCO_BIN" "$@"

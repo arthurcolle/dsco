@@ -36,7 +36,9 @@
  */
 
 #define MCP_MAX_SERVERS    64
-#define MCP_MAX_TOOLS      2048
+/* Large registry gateways currently advertise 2,500+ tools. Keep enough room
+ * for that catalog plus additional concurrently configured MCP servers. */
+#define MCP_MAX_TOOLS      4096
 #define MCP_MAX_LINE       (256 * 1024)
 #define MCP_MAX_ARGS       32
 #define MCP_MAX_ENV        32
@@ -60,8 +62,13 @@ typedef struct {
     char  name[128];
     char  command[512];
     char  url[1024];
+    char  fallback_url[1024]; /* optional local mirror, tried when url fails */
     char  cwd[512];
     char  source[256];
+    /* Operator-facing configuration text.  Propagated to the external-tool
+     * registry so discovery can resolve a service by its configured identity
+     * (for example, "Cloudmail MCP"), not only by a short server key. */
+    char  description[1024];
     char  args[MCP_MAX_ARGS][256];
     int   argc;
     char  env_keys[MCP_MAX_ENV][128];

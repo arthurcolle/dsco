@@ -21,6 +21,7 @@
 #define DSCO_ACTIVATION_ISSUER_MAX 128
 #define DSCO_ACTIVATION_SCOPE_MAX 512
 #define DSCO_ACTIVATION_SIG_MAX 256
+#define DSCO_RUNTIME_SPEC_SHA256_MAX 65
 #define DSCO_ACTIVATION_PATH_MAX 1024
 
 #define DSCO_ACTIVATION_LEASE_SCHEMA_ID \
@@ -35,7 +36,8 @@ typedef struct {
     char scopes[DSCO_ACTIVATION_SCOPE_MAX]; /* comma-separated local capability scopes */
     int64_t issued_at;                      /* unix seconds */
     int64_t expires_at;                     /* unix seconds; 0 = non-expiring local/dev lease */
-    char signature[DSCO_ACTIVATION_SIG_MAX]; /* detached signature placeholder */
+    char runtime_spec_sha256[DSCO_RUNTIME_SPEC_SHA256_MAX]; /* optional immutable cloud RuntimeSpec binding */
+    char signature[DSCO_ACTIVATION_SIG_MAX]; /* base64url DER P-256 ECDSA signature */
 } activation_lease_t;
 
 typedef enum {
@@ -45,6 +47,7 @@ typedef enum {
     ACTIVATION_LEASE_ERR_PARSE = -3,
     ACTIVATION_LEASE_ERR_EXPIRED = -4,
     ACTIVATION_LEASE_ERR_TRUNCATED = -5,
+    ACTIVATION_LEASE_ERR_SIGNATURE = -6,
 } activation_lease_status_t;
 
 /* Return the default on-disk lease path. Honors DSCO_ACTIVATION_LEASE_PATH when
@@ -74,6 +77,15 @@ activation_lease_status_t activation_lease_save_file(const char *path,
 activation_lease_status_t activation_lease_load_file(const char *path,
                                                      activation_lease_t *out,
                                                      char *err, size_t err_len);
+/* Verify the detached signature against the issuer P-256 public key compiled
+ * into the binary with -DDSCO_ACTIVATION_ISSUER_P256_B64='"..."'.  Cloud
+ * startup uses this entry point; structural load intentionally remains useful
+ * for local lease administration. */
+activation_lease_status_t activation_lease_verify_signature(const activation_lease_t *lease,
+                                                            char *err, size_t err_len);
+activation_lease_status_t activation_lease_load_file_verified(const char *path,
+                                                              activation_lease_t *out,
+                                                              char *err, size_t err_len);
 activation_lease_status_t activation_lease_remove_file(const char *path);
 
 /* Basic local lease operations. acquire refuses to overwrite an active lease;

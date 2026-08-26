@@ -1,20 +1,37 @@
 # TUI / Native Compositor — Improvement Plan v1
 
-## EXECUTION STATUS — 2026-07-14 session 2
+## EXECUTION STATUS — 2026-08-11 attachment / MCP / latency repair
 
-| Item | State |
+| Item | Verified state |
 |---|---|
-| DPR fix | **Landed & refactored**: logical/physical split now lives in `native_ui_terminal_viewport()` (native_ui.c); `pixel_tui.c` consumes it via `render_device_scale()`/`session_render_geometry()`. Thresholds: 2x at cell ≥14w/24h, 3x at ≥27w/38h, env override `DSCO_PIXEL_TUI_DPR` 1–4. |
-| P1.1 tests | **Written**: `tests/test_pixel_geometry.c` (~40 assertions: boundary cells 13/14/26/27w + 23/24/37/38h, override 0/-2/5, logical division, density breakpoints, shell-layout invariants, pinned incident geometry 75×29@2325×1682→3x). Makefile target `test_pixel_geometry` wired. **Not yet compiled/run** — exec lane blocked. |
-| P0 commits | **Blocked on exec** (immune: lethal-trifecta, gsu=0). Gated script prepared: `scripts/execute_tui_plan_p0_p1.sh` — builds, runs all three test suites, then commits 1–3. Supersedes `commit_compositor_wip.sh` commit 1 (which omitted native_ui/rich_text/compositor doc). |
-| P1.2–P1.4, P2+ | Not started; P1.2 partially covered — a dpr flip alone changes logical w/h, which defeats `session_refresh_geometry_locked`'s early-out (verified by reading; needs the P1.2 injection-seam test to prove). |
-| Threshold retune question | Incident cell 31×58 was physically 2x + large font but classifies 3x. Behavior pinned in test with comment; retune is a conscious future decision. Visual result is still correct-size (placement stretches), so not urgent. |
+| Primary MCP | **Fixed and live-verified**: `localhost:2016` refusal now falls back to `https://tools.distributed.systems/mcp`; slow cold-start discovery gets a 30s budget + one bounded retry; MCP `nextCursor` pagination is followed (64-page guard). Rebuilt binary discovered and registered **2,698 tools**. `DSCO_MCP_DEBUG` is no longer suppressed by the background loader. |
+| Clipboard / screencap attach | **Fixed**: clipboard captures no longer reuse `/tmp/dsco_clip_<pid>.png` (which let a second paste clobber the first before submit). Each paste receives a distinct `~/.dsco/attachments/clip_<pid>_<time>_<seq>.png`; rapid two-grab verification produced two surviving files. |
+| Composer latency | **First hotspot fixed**: the `@` image picker no longer runs `opendir/readdir` on every repaint/keystroke; directory scans are cached by `(directory,prefix)` token. |
+| Verification | `make` links, ad-hoc codesigns, and verifies the binary. MCP live fallback/discovery passed. Full suite: **5,217/5,222 passed**; the same five environment-sensitive provider OAuth/routing/fabric failures reproduce with the MCP patch temporarily reverted, so they are not regressions from this repair. |
 
-**To resume:** run `sh scripts/execute_tui_plan_p0_p1.sh` from a session with exec authority (or manually). It is gated — nothing commits unless build + 24/24 + 70/70 + geometry suite all pass.
+**Remaining TUI performance work:** add frame-time telemetry and coalesced dirty-region
+repaint for the immediate-mode composer/transcript path; cache slash-menu matching where
+measurement shows value; preserve retained-compositor ownership boundaries.
 
 ---
 
-**Date:** 2026-07-14 · **Branch:** `emergency/wip-snapshot-20260707` @ `b0b0284`
+## EXECUTION STATUS — 2026-07-15 session 3
+
+| Item | State |
+|---|---|
+| DPR fix | **Landed & refactored**: logical/physical split lives in `native_ui_terminal_viewport()`; `pixel_tui.c` now rasterizes every logical shape and glyph onto the exact terminal backing dimensions before Kitty placement. Auto-detection conservatively selects 2x at cell ≥14w/24h; `DSCO_PIXEL_TUI_DPR=1..4` remains the explicit override. |
+| P1.1 tests | **Passing**: `tests/test_pixel_geometry.c` now covers boundary cells, override handling, logical division, density breakpoints, shell-layout invariants, the pinned incident geometry, and multiline UTF-8 composer wrapping/viewport behavior. Makefile target `test_pixel_geometry` wired; **84/84 assertions pass** (2026-07-15). |
+| P0 commits | **Not run**: the current branch contains unrelated local work, so compositor changes remain uncommitted until an explicit commit/publish request. The gated validation script is historical context, not the current execution path. |
+| P1.2–P1.4, P2+ | P1.2 partially covered — a dpr flip alone changes logical w/h, which defeats `session_refresh_geometry_locked`'s early-out (verified by reading; needs the P1.2 injection-seam test to prove). P2 now has a `test_pixel` aggregate plus retained-region/backend/full-session artifact coverage (**52/52 assertions**). P3.1 landed as `px_backend`; P3.2 landed for the live masthead and composer with stable keyed scenes and semantic damage. P5.3 parity work landed early: multiline composer layout, command/image popovers, status/notices, permissions, questions, and menus now project into native retained state; pager/lock/raw TTY surfaces use explicit handoff. |
+| Threshold retune question | **Resolved**: incident cell 31×58 stays at conservative 2x, and the observed odd `2325×1682` backing is uploaded exactly. Kitty no longer stretches a logical half-resolution frame. |
+
+**To resume:** migrate one owner region at a time through `native_ui` +
+`px_backend`; transcript is next. Keep `make test_pixel`, ANSI snapshots, and a
+live PTY smoke green at every boundary.
+
+---
+
+**Date:** 2026-07-15 · **Branch:** `agent/governed-runtime-product-readiness`
 **Owner:** Arthur Colle · **Executor:** DSCO Runtime
 **Companion docs:** `docs/NATIVE_AGENT_COMPOSITOR.md`, `docs/TUI_DESIGN_LANGUAGE.md`,
 `.workspace/design/COMPOSITOR_DESIGN_LANGUAGE.md`
@@ -26,11 +43,11 @@
 | Clean `-Wall -Wextra` build; `dsco` + `spine-dsco-slim` link | make -j8, 2026-07-14 |
 | `test_tui_snapshot` 24/24 · `test_tui_theme_snapshot` 70/70 | run 2026-07-14 |
 | DPR/Retina fix landed in `pixel_tui.c` (3 sites, `render_device_scale()`) | this session |
-| Compositor sources (~7.5K LOC) **untracked** — zero git protection | `git status` |
-| `pixel_tui.c` uses `native_ui` for shell layout ONLY — scene/diff/render/focus/hit-test unused | grep: 1 call site |
-| No dedicated tests for pixel_tui, native_ui, kitty_tools, kitty_agent_windows | `ls tests/` |
-| Existing snapshot tests cover the ANSI/cell TUI, not the pixel path | grep in tests |
-| Every repaint re-encodes + re-uploads the FULL framebuffer (no damage-driven partial upload) | `session_repaint` |
+| Compositor work remains in an intentionally dirty mixed tree; unrelated files must stay out of future commits | `git status --short` |
+| Live masthead and composer now use retained `native_ui` scene/diff/render through `px_backend`; transcript, inspector, and live overlays remain immediate-mode | `native_masthead.c`, `native_composer.c`, `px_backend.c`, `draw_session_masthead()`, `draw_session_composer()` |
+| Dedicated compositor tests cover geometry, transport, retained masthead/backend damage, session PPMs, and plan artifacts | `make test_pixel` |
+| ANSI snapshots remain independent; native session artifacts cover compact/dense/expanded geometry plus all four lifecycle states | `tests/test_native_compositor.c` |
+| Framebuffer tile diff + Kitty frame edits avoid full uploads for bounded damage; semantic damage now exists for masthead and composer | `session_collect_damage()`, `native_ui_diff()` |
 
 ## Phase 0 — Durability (BLOCKING, ~10 min)
 
@@ -64,50 +81,64 @@ Nothing else is safe until the subsystem is committed.
 
 ## Phase 2 — Test infrastructure for the pixel path
 
-The subsystem is ~7.5K LOC with zero direct tests. The design docs already
-ratify acceptance criteria (§6 of COMPOSITOR_DESIGN_LANGUAGE.md); implement them.
+The subsystem now has direct geometry, retained-scene, transport, plan, and
+session-artifact tests. Checked-in visual goldens and resize fault injection
+remain from the design-language acceptance criteria (§6).
 
-- **2.1 Canvas snapshot harness.** `DSCO_PIXEL_TUI_SESSION_SNAPSHOT` /
+- **2.1 Canvas snapshot harness (headless seam landed; checked-in goldens remain).** `DSCO_PIXEL_TUI_SESSION_SNAPSHOT` /
   `pixel_tui_write_plan_ppm` already emit PPMs. Add
   `tests/test_pixel_snapshot.c`: render session frames at
   compact (640×360), dense (1162×841), expanded (1600×900) for each of the
   4 states; hash-compare against checked-in golden PPMs; env knob to
   regenerate goldens.
-- **2.2 Kitty transport unit tests.** Capture escape output into a memstream;
+- **2.2 Kitty transport unit tests (landed).** Capture escape output into a memstream;
   assert control-string grammar (`a=t/T/p/f/d`, `f=24`, `o=z`, chunking
   `m=` continuation at 4096, image-id lifecycle: upload → place → delete old).
   No real terminal required.
-- **2.3 native_ui contract tests.** Scene diff damage bounds, focus order,
+- **2.3 native_ui contract tests (landed).** Scene diff damage bounds, focus order,
   hit routing, density breakpoints — per the doc's own testing contract.
-- **Accept:** `make test_pixel` target; all green in CI-style run; goldens committed.
+- **Accept:** `make test_pixel` is green in a CI-style run. Checked-in PPM
+  goldens remain a follow-up; current artifacts are structural/hash smoke tests.
 
 ## Phase 3 — Architecture convergence: retained scene → pixel backend
 
-`native_ui.c` (retained scene, keyed diff, damage regions) and `pixel_tui.c`
-(immediate-mode frame painter) are parallel systems joined only at
-`native_ui_agent_shell_layout()`. The compositor doc's whole thesis —
-semantic scene → diff → backend ops — is not yet what the pixel path does.
+`native_ui.c` now drives the live masthead, live composer, and generative
+overlays through the shared pixel adapter. Transcript, inspector, and live
+overlays still use the immediate painter and should migrate incrementally.
 
-- **3.1** Implement `native_ui_backend_t` for px_canvas (fill/stroke rect,
-  text via font_compat, icon, clip push/pop). Small file, `src/px_backend.c`.
-- **3.2** Migrate ONE region (status header) from direct painting to
-  scene-driven rendering. Prove identical golden output. Minimal diff;
-  do not rewrite `pixel_tui.c` wholesale.
-- **3.3** Damage-driven partial repaint: use `native_ui_diff` damage rects to
-  re-encode only dirty regions. Kitty supports placement-relative updates;
+- **3.1 Landed.** `px_backend` maps semantic tokens and retained primitives to
+  transport-owned raster operations. Kitty, headless PPM, and a future native
+  window can share it without exposing `pixel_tui.c` internals.
+- **3.2 Landed for masthead and composer.** The live status header and command
+  deck are built by `native_masthead_build()` and `native_composer_build()`
+  with stable keys, accessibility labels, and fixed scene pairs for
+  allocation-free previous/current diffing. The shared cell editor remains
+  authoritative, and the established TUI remains untouched.
+- **3.3 Partial.** Framebuffer tile patching is already live; the retained
+  masthead and composer now also emit semantic damage. Next, use
+  `native_ui_diff` regions to
+  restrict repaint/encode work instead of scanning a newly painted full canvas.
+  Kitty supports placement-relative updates;
   fall back to full frame when fragmentation exceeds threshold (native_ui
   already implements that fallback policy).
 - **3.4** Migrate remaining regions incrementally (transcript, tool activity,
-  composer, meters) — one region per commit, goldens updated per step.
+  inspector meters, overlays) — one region per commit, goldens updated per step.
+  **Tool-history direction landed:** every governed call now owns one durable
+  operation row that updates in place with a bounded result; the native default
+  is `results`, with explicit `calls` and `full` density modes. A dedicated
+  `native_transcript` module remains the next architectural extraction.
 - **Accept:** golden parity at each step; steady-state upload bytes/frame for
   a single meter update drops materially vs full-frame (measure via memstream
   byte counts; record before/after in this doc).
 
 ## Phase 4 — Performance & telemetry
 
-- **4.1** Frame-cost instrumentation: encode µs, zlib bytes, upload bytes,
-  paints/s — into Chronicle/observability (Wave B #12 synergy) behind an env
-  flag; zero cost when off.
+- **4.1 Partially landed.** Frame-cost instrumentation covers encode, transport,
+  frame tails, scheduler wake lateness, deadline misses, and long rendered-frame
+  gaps behind `DSCO_PIXEL_TUI_PERF`; zero cost remains the disabled target.
+  Chronicle rollups and a live HUD remain. See
+  `docs/NATIVE_COMPOSITOR_WORKSPACE_ROADMAP.md` for the multi-session controller
+  and complete observability sequence.
 - **4.2** Repaint coalescing audit: 0.125s min-interval + telemetry wake path
   under swarm-storm load (many `session_swarm_update` per tick); prove no
   unbounded queue and no starvation of the final state.
@@ -119,10 +150,13 @@ semantic scene → diff → backend ops — is not yet what the pixel path does.
 
 - **5.1** `kitty_agent_windows` lifecycle tests + reconnect behavior when a
   companion window is closed by the user mid-swarm.
-- **5.2** Scroll-region transcript with placement re-anchor already exists;
-  add scrollback for the pixel transcript (currently render-window only).
-- **5.3** Overlay stack: command palette + permission surface as `native_ui`
-  overlay roles rendered through the px backend (depends on Phase 3).
+- **5.2 Landed.** Scroll-region transcript, placement re-anchor, bounded
+  retained history, PageUp/PageDown, and SGR wheel scrollback are live.
+- **5.3** Overlay stack and compatibility boundary (**landed early**): command
+  and image-picker popovers, permission/confirmation/question/menu modals,
+  transient notices, and full status projection render through the pixel
+  backend. Pager, secure lock, and raw-stdin surfaces explicitly suspend and
+  resume the compositor. The established TUI remains selectable with `--tui`.
 - **5.4** Fractional DPR (from 1.3) if integer proves insufficient in practice.
 - **5.5** Second backend spike (Metal or plain-ANSI) to prove the backend
   contract is real — smallest possible, one region.

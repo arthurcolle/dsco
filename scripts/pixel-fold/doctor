@@ -1,0 +1,47 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -u
+
+DSCO_ROOT="${DSCO_ROOT:-$HOME/dsco/dsco-cli}"
+DSCO_BIN="${DSCO_BIN:-$DSCO_ROOT/dsco}"
+failures=0
+
+check() {
+  label="$1"; shift
+  if "$@" >/dev/null 2>&1; then
+    printf 'ok    %s\n' "$label"
+  else
+    printf 'FAIL  %s\n' "$label"
+    failures=$((failures + 1))
+  fi
+}
+
+printf 'DSCO Pixel Fold doctor\n'
+printf 'root=%s\n' "$DSCO_ROOT"
+printf 'binary=%s\n' "$DSCO_BIN"
+printf 'android=%s sdk=%s abi=%s\n' \
+  "$(getprop ro.product.model 2>/dev/null || printf unknown)" \
+  "$(getprop ro.build.version.sdk 2>/dev/null || printf unknown)" \
+  "$(getprop ro.product.cpu.abi 2>/dev/null || uname -m)"
+printf 'viewport=%sx%s\n' "$(tput cols 2>/dev/null || printf '?')" "$(tput lines 2>/dev/null || printf '?')"
+
+is_aarch64() { [ "$(uname -m)" = aarch64 ]; }
+private_state() {
+  mkdir -p "$HOME/.dsco/device"
+  mode="$(stat -c %a "$HOME/.dsco" 2>/dev/null || printf 700)"
+  [ "$mode" -le 700 ]
+}
+
+check 'Termux environment' test -n "${PREFIX:-}"
+check 'aarch64 userspace' is_aarch64
+check 'DSCO checkout' test -d "$DSCO_ROOT/.git"
+check 'DSCO executable' test -x "$DSCO_BIN"
+check 'DSCO version' "$DSCO_BIN" --version
+check 'governed cwd tool' env DSCO_ALLOW_NET=0 DSCO_ALLOW_RUN=0 DSCO_ALLOW_SECRETS=0 DSCO_ALLOW_CONTROL=0 \
+  "$DSCO_BIN" --tool-exec cwd '{}'
+check 'private DSCO state' private_state
+
+if [ "$failures" -ne 0 ]; then
+  printf '\n%d check(s) failed.\n' "$failures" >&2
+  exit 1
+fi
+printf '\nField entrypoint healthy.\n'

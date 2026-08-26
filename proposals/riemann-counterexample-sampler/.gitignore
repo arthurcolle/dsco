@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+runs/
+lean/.lake/
+lean/lake-manifest.json

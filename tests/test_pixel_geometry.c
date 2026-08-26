@@ -160,11 +160,45 @@ static void test_shell_layout_invariants(void) {
         if (l.shows_inspector)
             CHECK(l.inspector.width >= 190 && l.inspector.width <= 215,
                   "inspector width band, got %d", l.inspector.width);
+        if (sizes[i].w >= 640) {
+            CHECK(l.header.x == l.outer_margin && l.header.y == 4,
+                  "persistent masthead anchored upper-left at %dx%d",
+                  sizes[i].w, sizes[i].h);
+            CHECK(l.header.width <= sizes[i].w / 2 && l.header.height == 44,
+                  "persistent masthead stays half-width and compact at %dx%d, got %dx%d",
+                  sizes[i].w, sizes[i].h, l.header.width, l.header.height);
+        }
         /* Composer anchored at the bottom, transcript above it. */
         if (sizes[i].h >= 320)
             CHECK(l.transcript.y + l.transcript.height <= l.composer.y,
                   "transcript above composer at %dx%d", sizes[i].w, sizes[i].h);
     }
+}
+
+static void test_composer_layout(void) {
+    native_ui_composer_layout_t l =
+        native_ui_composer_layout("alpha\nbeta\ngamma", 8, 80, 8);
+    CHECK(l.total_rows == 3 && l.row_count == 3,
+          "explicit newlines retained, got %d/%d", l.total_rows, l.row_count);
+    CHECK(l.cursor_row == 1 && l.cursor_column == 2,
+          "cursor maps into second row, got %d:%d", l.cursor_row, l.cursor_column);
+    CHECK(l.rows[1].byte_start == 6 && l.rows[1].byte_end == 10,
+          "second row byte span retained");
+
+    l = native_ui_composer_layout("abcdefghij", 7, 4, 8);
+    CHECK(l.total_rows == 3, "soft wrap produces 3 rows, got %d", l.total_rows);
+    CHECK(l.cursor_row == 1 && l.cursor_column == 3,
+          "wrapped cursor maps to 1:3, got %d:%d", l.cursor_row, l.cursor_column);
+
+    l = native_ui_composer_layout("0\n1\n2\n3\n4\n5\n6\n7\n8\n9", 19, 20, 8);
+    CHECK(l.total_rows == 10 && l.row_count == 8 && l.first_row == 2,
+          "eight-row viewport follows cursor, got total=%d visible=%d first=%d",
+          l.total_rows, l.row_count, l.first_row);
+
+    l = native_ui_composer_layout("A\xE7\x95\x8C" "B", 4, 3, 8);
+    CHECK(l.total_rows == 2 && l.cursor_row == 0 && l.cursor_column == 3,
+          "wide UTF-8 glyph consumes two cells, got rows=%d cursor=%d:%d",
+          l.total_rows, l.cursor_row, l.cursor_column);
 }
 
 int main(void) {
@@ -175,6 +209,7 @@ int main(void) {
     test_observed_regression_case();
     test_density_breakpoints();
     test_shell_layout_invariants();
+    test_composer_layout();
     printf("pixel geometry: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

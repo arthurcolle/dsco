@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from web import server
+from web import billing
 
 
 def ns(**kwargs):
@@ -404,6 +405,215 @@ class WebServerTests(unittest.IsolatedAsyncioTestCase):
         data = resp.json()
         self.assertIn("/health", data["endpoints"])
         self.assertGreaterEqual(data["endpoints"]["/health"]["calls"], 1)
+
+
+class BillingTests(unittest.TestCase):
+    def _fresh_control_plane(self, tmpdir: str):
+        server.CONTROL_PLANE_DB = Path(tmpdir) / "control_plane.db"
+        server._control_plane_ready = False
+        with server._control_plane_conn() as conn:
+            person = conn.execute(
+                "SELECT id, email FROM people WHERE plan_id = 'team-managed' ORDER BY id LIMIT 1"
+            ).fetchone()
+        return person
+
+    def test_provider_identity_billability_matrix(self):
+        byok = billing.resolve_provider_identity(provider="openai", auth_mode="byok_request", backend_id="")
+        self.assertFalse(byok.billable)
+        generic = billing.resolve_provider_identity(provider="openai", auth_mode="unknown", backend_id="")
+        self.assertFalse(generic.billable)
+        managed = billing.resolve_provider_identity(provider="openai", auth_mode="managed_env", backend_id="managed-openai")
+        self.assertTrue(managed.billable)
+        codex = billing.resolve_provider_identity(
+            provider="openai", auth_mode="openai_codex_oauth", backend_id="",
+            metadata={"provider_account_id": "acct_123"})
+        self.assertTrue(codex.billable)
+        self.assertEqual(codex.adapter, "openai_codex_oauth")
+
+    def test_close_period_dry_run_reconcile_and_download(self):
+        original_db = server.CONTROL_PLANE_DB
+        original_ready = server._control_plane_ready
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                person = self._fresh_control_plane(tmpdir)
+                client = TestClient(server.app, headers={"Authorization": f"Bearer {server.WEB_AUTH_TOKEN}"})
+
+                acct = client.post("/api/billing/accounts",
+                                   json={"person_id": person["id"], "billing_mode": "postpaid"})
+                self.assertEqual(acct.status_code, 200)
+
+                # Seed billable + unbillable usage last month.
+                start, end = billing.period_bounds()
+                # Backdate the commercial effective date for this historical-close fixture;
+                # enrollment itself correctly starts a current trial by default.
+                with server._control_plane_conn() as conn:
+                    conn.execute("UPDATE people SET created_at=? WHERE id=?",
+                                 ((start - timedelta(days=30)).isoformat(timespec="seconds"), person["id"]))
+                    conn.execute("UPDATE billing_accounts SET trial_ends_at=NULL,created_at=? WHERE person_id=?",
+                                 (start.isoformat(timespec="seconds"), person["id"]))
+                    conn.commit()
+                period = start.strftime("%Y-%m")
+                ts = (start + timedelta(days=2)).isoformat(timespec="seconds")
+                with server._control_plane_conn() as conn:
+                    for i in range(4):
+                        server._record_request_log(conn, {
+                            "id": f"mgd-{i}", "person_id": person["id"], "person_email": person["email"],
+                            "plan_id": "team-managed", "model": "gpt-4o", "provider": "openai",
+                            "backend_id": "managed-openai", "auth_mode": "managed_env",
+                            "route_source": "backend_catalog", "status": "ok",
+                            "input_tokens": 2_000_000, "output_tokens": 800_000, "cache_read_tokens": 0,
+                            "latency_ms": 1.0, "estimated_cost_usd": 1.0, "metadata": {}, "created_at": ts})
+                    for i in range(3):
+                        server._record_request_log(conn, {
+                            "id": f"byok-{i}", "person_id": person["id"], "person_email": person["email"],
+                            "plan_id": "team-managed", "model": "gpt-4o", "provider": "openai",
+                            "backend_id": "", "auth_mode": "byok_request",
+                            "route_source": "implicit_provider", "status": "ok",
+                            "input_tokens": 5_000_000, "output_tokens": 5_000_000, "cache_read_tokens": 0,
+                            "latency_ms": 1.0, "estimated_cost_usd": 0.0, "metadata": {}, "created_at": ts})
+                    conn.commit()
+
+                dry = client.post("/api/billing/close", json={"period": period})
+                self.assertEqual(dry.status_code, 200)
+                self.assertTrue(dry.json()["dry_run"])
+                self.assertEqual(dry.json()["invoice_count"], 1)
+                inv = dry.json()["invoices"][0]
+                self.assertEqual(inv["unbillable_request_count"], 3)  # BYOK excluded
+                self.assertGreater(inv["total_cents"], 0)
+                # Dry-run persists nothing.
+                empty = client.get("/api/billing/invoices")
+                self.assertEqual(empty.json()["invoices"], [])
+
+                applied = client.post("/api/billing/close", json={"period": period, "apply": True})
+                self.assertEqual(applied.status_code, 200)
+                self.assertFalse(applied.json()["dry_run"])
+                # Idempotent: second apply keeps a single invoice + run.
+                client.post("/api/billing/close", json={"period": period, "apply": True})
+
+                listed = client.get("/api/billing/invoices").json()["invoices"]
+                self.assertEqual(len(listed), 1)
+                invoice_id = listed[0]["id"]
+
+                detail = client.get(f"/api/billing/invoices/{invoice_id}").json()
+                self.assertEqual(detail["total_cents"], inv["total_cents"])
+                self.assertTrue(any(it["kind"] == "plan_base" for it in detail["items"]))
+
+                # Reconciliation: local totals must match summed items.
+                rec = client.post("/api/billing/reconcile", json={"invoice_id": invoice_id})
+                self.assertTrue(rec.json()["ok"])
+
+                # Signed customer download works; tampered signature is rejected.
+                good = client.get(listed[0]["download_url"])
+                self.assertEqual(good.status_code, 200)
+                self.assertIn("Total", good.text)
+                bad = client.get(f"/billing/invoice/{invoice_id}?sig=deadbeef")
+                self.assertEqual(bad.status_code, 403)
+            finally:
+                server.CONTROL_PLANE_DB = original_db
+                server._control_plane_ready = original_ready
+
+    def test_dunning_blocks_access_after_grace(self):
+        original_db = server.CONTROL_PLANE_DB
+        original_ready = server._control_plane_ready
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                person = self._fresh_control_plane(tmpdir)
+                now = server._now_iso()
+                past_due = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat(timespec="seconds")
+                with server._control_plane_conn() as conn:
+                    conn.execute(
+                        """INSERT INTO billing_accounts(person_id,billing_email,billing_mode,status,
+                           access_state,created_at,updated_at) VALUES(?,?,?,?,?,?,?)""",
+                        (person["id"], person["email"], "postpaid", "active", "allowed", now, now))
+                    conn.execute(
+                        """INSERT INTO billing_invoices(id,person_id,plan_id,period_start,period_end,status,
+                           subtotal_cents,total_cents,due_at,created_at,updated_at)
+                           VALUES('past-inv',?,'team-managed',?,?,'open',5000,5000,?,?,?)""",
+                        (person["id"], past_due, past_due, past_due, now, now))
+                    conn.commit()
+                    # Grace already elapsed -> access must be blocked.
+                    result = billing.run_dunning(conn, dry_run=False)
+                    conn.commit()
+                self.assertGreaterEqual(result["action_count"], 1)
+                with server._control_plane_conn() as conn:
+                    err = billing.access_error(conn, person["id"])
+                    notices = conn.execute("SELECT COUNT(*) FROM billing_notices").fetchone()[0]
+                self.assertIsNotNone(err)
+                self.assertEqual(err["code"], "billing_suspended")
+                self.assertGreaterEqual(notices, 1)
+            finally:
+                server.CONTROL_PLANE_DB = original_db
+                server._control_plane_ready = original_ready
+
+    def test_plan_ratify_publishes_terms(self):
+        original_db = server.CONTROL_PLANE_DB
+        original_ready = server._control_plane_ready
+        with tempfile.TemporaryDirectory() as tmpdir:
+            try:
+                server.CONTROL_PLANE_DB = Path(tmpdir) / "control_plane.db"
+                server._control_plane_ready = False
+                with server._control_plane_conn() as conn:  # warm up + init schema
+                    conn.execute("SELECT 1")
+                client = TestClient(server.app, headers={"Authorization": f"Bearer {server.WEB_AUTH_TOKEN}"})
+                created = client.post("/api/control/plans", json={"name": "Enterprise Lane", "price_monthly": 999})
+                self.assertEqual(created.status_code, 200)
+                plan_id = created.json()["id"]
+                # New operator plans start as draft.
+                plans = {p["id"]: p for p in client.get("/api/control/plans").json()["plans"]}
+                self.assertEqual(plans[plan_id]["terms_status"], "draft")
+                # Invalid proration is rejected.
+                bad = client.post(f"/api/control/plans/{plan_id}/ratify", json={"proration_policy": "weekly"})
+                self.assertEqual(bad.status_code, 400)
+                # Ratify with explicit trial/proration/retry terms.
+                ok = client.post(f"/api/control/plans/{plan_id}/ratify",
+                                 json={"billing_mode": "postpaid", "trial_days": 30,
+                                       "proration_policy": "daily", "retry_schedule": [1, 5, 10]})
+                self.assertEqual(ok.status_code, 200)
+                self.assertEqual(ok.json()["terms_status"], "ratified")
+                plans = {p["id"]: p for p in client.get("/api/control/plans").json()["plans"]}
+                self.assertEqual(plans[plan_id]["terms_status"], "ratified")
+                self.assertEqual(plans[plan_id]["trial_days"], 30)
+                self.assertEqual(plans[plan_id]["proration_policy"], "daily")
+            finally:
+                server.CONTROL_PLANE_DB = original_db
+                server._control_plane_ready = original_ready
+
+    def test_stripe_finalize_is_idempotent(self):
+        import httpx
+
+        seen = []
+
+        def handler(request: "httpx.Request") -> "httpx.Response":
+            seen.append((request.method, request.url.path, request.headers.get("Idempotency-Key")))
+            path = request.url.path
+            if path == "/v1/customers":
+                return httpx.Response(200, json={"id": "cus_x"})
+            if path == "/v1/invoices" and request.method == "POST":
+                return httpx.Response(200, json={"id": "in_x"})
+            if path == "/v1/invoiceitems":
+                return httpx.Response(200, json={"id": f"ii_{len(seen)}"})
+            if path.endswith("/finalize"):
+                return httpx.Response(200, json={"id": "in_x", "status": "open",
+                    "due_date": 1739923200, "hosted_invoice_url": "https://pay/x", "invoice_pdf": "https://pay/x.pdf"})
+            if path.startswith("/v1/invoices/in_x"):
+                return httpx.Response(200, json={"id": "in_x", "status": "paid", "total": 4900})
+            return httpx.Response(404, json={"error": {"message": "unmocked " + path}})
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        stripe = billing.StripeREST(api_key="sk_test_x", client=client)
+        self.assertTrue(stripe.configured)
+        cust = stripe.create_customer(email="a@x.io", name="A", person_id="p1")
+        inv = stripe.create_invoice(customer=cust["id"], invoice_id="loc1", period="2026-02", days_until_due=7)
+        item = stripe.create_item(customer=cust["id"], stripe_invoice=inv["id"], invoice_id="loc1",
+                                  item={"amount_cents": 4900, "description": "base", "item_key": "plan-base"})
+        fin = stripe.finalize_invoice(inv["id"], "loc1")
+        remote = stripe.get_invoice(inv["id"])
+        self.assertEqual(fin["status"], "open")
+        self.assertEqual(remote["status"], "paid")
+        # Every mutating POST must carry a deterministic idempotency key.
+        posts = [(m, p, k) for (m, p, k) in seen if m == "POST"]
+        self.assertTrue(all(k for _, _, k in posts))
+        self.assertIn("dsco-finalize-loc1", [k for _, _, k in posts])
 
 
 if __name__ == "__main__":

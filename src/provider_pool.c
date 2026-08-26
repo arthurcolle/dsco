@@ -63,8 +63,10 @@ provider_slot_t *provider_pool_slot(const char *name) {
 static provider_slot_t *pool_register(const char *name, bool is_subscription) {
     provider_slot_t *existing = provider_pool_slot_unlocked(name);
     if (existing) {
-        if (is_subscription)
-            existing->is_subscription = true;
+        /* Auth can change during a process (OAuth removed, PAYG selected,
+         * setup reloaded). Re-initialization must not preserve a stale
+         * zero-marginal label from the previous credential class. */
+        existing->is_subscription = is_subscription;
         return existing;
     }
     if (g_pool.count >= PROVIDER_POOL_MAX)
@@ -183,7 +185,8 @@ static void pool_limits_save_snapshot(const pool_limits_snapshot_t *snapshot) {
     rename(tmp, path);
 }
 
-/* Build + warm the transport for a slot. Safe to call repeatedly. */
+/* Build the reusable transport container for a slot. The first real request
+ * establishes the connection; later turns can reuse it. Safe to call repeatedly. */
 static void pool_warm(provider_slot_t *s) {
     if (!s)
         return;
@@ -192,7 +195,7 @@ static void pool_warm(provider_slot_t *s) {
     if (!s->provider) {
         s->provider = provider_create(s->name);
         if (s->provider)
-            provider_prepare(s->provider); /* warm DNS/TCP/TLS; no-op if unsupported */
+            provider_prepare(s->provider); /* allocate reusable handle; no-op if unsupported */
     }
     if (!s->provider) {
         s->state = POOL_SLOT_NOKEY; /* uncreatable — treat as unusable */
@@ -249,17 +252,21 @@ void provider_pool_init(const char *session_key) {
     if (session_key && session_key[0])
         snprintf(g_pool.session_key, sizeof(g_pool.session_key), "%s", session_key);
 
-    /* The flat-rate/core subscription lanes are always registered so they show
-     * up in /providers even before first use; they are warmed when a credential
-     * is available. openai-codex covers the ChatGPT subscription path. */
+    /* Register subscription-class transports separately from metered API-key
+     * fallbacks. In particular, direct OpenAI API usage is not a ChatGPT
+     * subscription lane; openai-codex owns that allocation. */
+    const char *anthropic_key = provider_resolve_request_api_key("anthropic", session_key);
+    const char *zai_key = provider_resolve_request_api_key("zai", session_key);
     struct {
         const char *name;
         bool        is_sub;
     } core[] = {
-        {"sakana", provider_sakana_current_key_is_subscription()},
-        {"anthropic", true}, {"openai", true},
+        {"sakana", provider_sakana_subscription_request_key() != NULL},
+        {"anthropic", provider_usage_is_included("anthropic", anthropic_key)},
+        {"openai", false},
         {"openai-codex", true},
-        {"zai", true},
+        {"kimi-code", true},
+        {"zai", provider_usage_is_included("zai", zai_key)},
         /* Common metered fallbacks — registered lazily-warm only if keyed. */
         {"openrouter", false}, {"xai", false},      {"moonshot", false},
         {"google", false},
@@ -307,7 +314,9 @@ provider_t *provider_pool_acquire(const char *name) {
     if (!s->provider)
         pool_warm(s);
     s->last_used = now;
-    provider_t *provider = s->provider;
+    /* An open breaker is a routing decision, not merely display state. Never
+     * hand the failed transport back to a caller until its deadline resets. */
+    provider_t *provider = s->state == POOL_SLOT_TRIPPED ? NULL : s->provider;
     pthread_mutex_unlock(&g_pool_mu);
     if (save_limits)
         pool_limits_save_snapshot(&limits_snapshot);

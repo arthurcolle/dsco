@@ -1,9 +1,9 @@
-/* jina-embeddings-v4, dim=1024, 364 tools */
+/* jina-embeddings-v3, dim=1024, 372 tools */
 #ifndef DSCO_TOOL_EMBEDDINGS_H
 #define DSCO_TOOL_EMBEDDINGS_H
 
 #define TOOL_EMB_DIM 1024
-#define TOOL_EMB_COUNT 364
+#define TOOL_EMB_COUNT 372
 
 static const char *TOOL_EMB_NAMES[] = {
     "write_file",

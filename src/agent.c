@@ -16,6 +16,7 @@
 #include "strategy.h"
 #include "json_util.h"
 #include "ipc.h"
+#include "kitty_banner.h"
 #include "tui.h"
 #include "pixel_tui.h"
 #include "plan.h"
@@ -36,6 +37,7 @@
 #include "codex_usage.h"
 #include "provider_pool.h"
 #include "openai_oauth.h"
+#include "kimi_oauth.h"
 #include "local_llm.h"
 #include "topology.h"
 #include "router.h"
@@ -551,6 +553,18 @@ static void mcp_register_discovered_tools(mcp_registry_t *reg) {
         tools_register_external_with_output(mcp_tools[i].name, mcp_tools[i].description,
                                             mcp_tools[i].input_schema,
                                             mcp_tools[i].output_schema, mcp_tool_execute_cb, reg);
+        if (mcp_tools[i].server_idx >= 0 && mcp_tools[i].server_idx < reg->server_count) {
+            const mcp_server_t *server = &reg->servers[mcp_tools[i].server_idx];
+            /* Keep the configured service identity in discovery metadata. MCP
+             * tools use short stable names such as mcp__email__inbox, while
+             * operators naturally ask for the configured service name such as
+             * "Cloudmail MCP". Without this bridge, the resolver cannot pick
+             * an otherwise connected endpoint. */
+            tools_register_external_metadata(
+                mcp_tools[i].name, server->name,
+                server->description[0] ? server->description : server->name, "mcp", "MCP",
+                server->description, "external_mcp", 0, "live");
+        }
     }
     /* The bg loader (see mcp_bg_init_thread) sets g_mcp_bg_active so the
      * notification routes through tui_panel_notify instead of fprintf,
@@ -570,7 +584,9 @@ static tui_status_bar_t *g_mcp_bg_sb = NULL;
 
 static void *mcp_bg_init_thread(void *arg) {
     tui_status_bar_t *sb = (tui_status_bar_t *)arg;
-    mcp_set_silent(true);
+    /* Honor an explicit debug request even though we normally run silent — the
+     * whole point of DSCO_MCP_DEBUG is to surface why a server won't connect. */
+    mcp_set_silent(getenv("DSCO_MCP_DEBUG") == NULL);
     int n = mcp_init(&g_mcp);
     if (n > 0)
         mcp_register_discovered_tools(&g_mcp);
@@ -1218,6 +1234,7 @@ static bool provider_failover_available(const char *provider, const char *api_ke
 }
 
 #define DSCO_UNKNOWN_SUBSCRIPTION_RESET_SECS 300
+#define DSCO_BILLING_CYCLE_RESET_RETRY_SECS 3600
 
 static time_t subscription_exhausted_until_for_retry(const char *provider,
                                                      const stream_result_t *sr) {
@@ -1227,6 +1244,24 @@ static time_t subscription_exhausted_until_for_retry(const char *provider,
     time_t existing = provider_pool_subscription_exhausted_until(provider);
     if (existing > now)
         return existing;
+    /* Kimi Code quota errors carry no reset timestamp, but the official
+     * client's usages endpoint does. Ask it which window is exhausted and
+     * when it reopens. */
+    if (provider && strcmp(provider, "kimi-code") == 0) {
+        time_t reset = kimi_code_quota_reset_at();
+        /* Sanity-cap at 35 days so shape drift can't park the lane forever. */
+        if (reset > now && reset <= now + 35 * 24 * 3600)
+            return reset;
+    }
+    /* Kimi Code distinguishes a rolling 5-hour window ("usage limit for this
+     * period") from weekly/monthly allocation ("... for this billing cycle")
+     * without a reset timestamp. A cycle-level exhaustion won't clear for
+     * days, so probe hourly instead of every few minutes. */
+    for (int i = 0; sr && i < sr->parsed.count; i++) {
+        const char *txt = sr->parsed.blocks[i].text;
+        if (txt && str_contains_ci_local(txt, "billing cycle"))
+            return now + DSCO_BILLING_CYCLE_RESET_RETRY_SECS;
+    }
     return now + DSCO_UNKNOWN_SUBSCRIPTION_RESET_SECS;
 }
 
@@ -1363,7 +1398,7 @@ static bool ensure_provider_with_override(session_state_t *session, const char *
     if (!pname || !pname[0])
         return false;
     if (g_provider && strcmp(g_provider->name, pname) == 0)
-        return true;
+        return provider_pool_healthy(pname);
     /* Acquire from the durable pool: the previous provider stays warm (its
      * transport is kept alive) instead of being torn down, and switching back
      * is instant. The pool owns every instance — never provider_free() here. */
@@ -2154,6 +2189,10 @@ static void handle_pending_winch(void) {
     if (!g_winch_pending)
         return;
     g_winch_pending = 0;
+    /* A resize can accompany a font-size / display-DPI change, which alters the
+     * device pixels-per-cell the banner canvas is sized against. Drop the
+     * cached cell metrics so the next banner render re-queries the terminal. */
+    kitty_banner_invalidate_geometry();
     /* The Kitty framebuffer is independent of the legacy status pane. Refresh
      * it even before the first composer paint (or when that pane is disabled),
      * otherwise an early OS-window resize leaves a stale image floating in a
@@ -4287,7 +4326,9 @@ static void fsm_thinking_enter(void *ctx) {
         tui_term_unlock();
         return;
     }
+    tui_transcript_stream_set_live(true);
     if (!g_features.collapsible_thinking) {
+        tui_transcript_ensure_region();
         fprintf(stderr, "  \033[2m\033[3m[thinking]\n");
         fflush(stderr);
     }
@@ -4326,6 +4367,7 @@ static void fsm_text_enter(void *ctx) {
         return;
     }
     tui_prepare_external_output_locked();
+    tui_transcript_stream_set_live(true);
     print_role_header("assistant", true, NULL);
     fputs("  ", stderr);
     fflush(stderr);
@@ -4343,11 +4385,13 @@ static void fsm_text_exit(void *ctx) {
     }
     fflush(stderr);
     tui_term_unlock();
+    tui_transcript_stream_set_live(false);
     tui_word_counter_end(&s_word_counter);
 }
 
 static void fsm_tool_pending_enter(void *ctx) {
     (void)ctx;
+    tui_transcript_stream_set_live(false);
     tui_term_lock();
     pixel_tui_session_set_state(stderr, PIXEL_TUI_EXECUTING);
     tui_term_unlock();
@@ -4415,11 +4459,11 @@ static void on_stream_text(const char *text, void *ctx) {
     chronicle_llm_delta(g_chronicle_active_trace_id, g_chronicle_active_llm_span_id, "text", text);
     tui_stream_heartbeat_poke(&s_heartbeat, NULL);
 
-    /* A live follow-up composer owns the terminal cursor between keystrokes.
-     * Streaming partial Markdown into that same cursor region makes its repaint
-     * split or erase the answer.  Keep consuming the provider stream, but render
-     * the completed text atomically once the response is available. */
-    if (tui_composer_is_reading() && !pixel_tui_session_active()) {
+    /* The follow-up composer owns the live input deck.  Its repaint cadence
+     * must never compete with Markdown's cursor-relative partial-line echo;
+     * collect the response and commit it as one transcript block at STREAM_END.
+     * Native mode has a retained compositor and remains safe to stream. */
+    if (!pixel_tui_session_active() && tui_composer_is_reading()) {
         s_turn_deferred_text = true;
         return;
     }
@@ -4436,6 +4480,7 @@ static void on_stream_text(const char *text, void *ctx) {
 
     /* F2: Typing cadence — buffer and flush at steady rate */
     tui_term_lock();
+    tui_transcript_ensure_region();
     if (pixel_tui_session_active()) {
         pixel_tui_session_append_text(stderr, text);
     } else if (g_features.typing_cadence) {
@@ -4466,6 +4511,7 @@ static void on_stream_thinking(const char *text, void *ctx) {
 
     /* F4: Collapsible thinking — count silently instead of printing */
     tui_term_lock();
+    tui_transcript_ensure_region();
     if (pixel_tui_session_active()) {
         pixel_tui_session_note_thinking(stderr, text);
     } else if (g_features.collapsible_thinking) {
@@ -4642,10 +4688,20 @@ static void print_role_header(const char *role, bool ok, const char *trail) {
         }
     }
 
+    int row = tui_composer_transcript_row();
     if (rgb) {
-        fprintf(stderr, "\n  \033[38;2;%d;%d;%dm▌\033[0m \033[1m%s\033[0m", br, bg, bb, role);
+        if (row > 0)
+            fprintf(stderr,
+                    "\033[1;%dr\033[%d;1H\033[2K  \033[38;2;%d;%d;%dm▌\033[0m \033[1m%s\033[0m",
+                    row, row, br, bg, bb, role);
+        else
+            fprintf(stderr, "\n  \033[38;2;%d;%d;%dm▌\033[0m \033[1m%s\033[0m", br, bg, bb, role);
     } else {
-        fprintf(stderr, "\n  %s▌%s %s%s%s", fb, TUI_RESET, TUI_BOLD, role, TUI_RESET);
+        if (row > 0)
+            fprintf(stderr, "\033[1;%dr\033[%d;1H\033[2K  %s▌%s %s%s%s", row, row, fb, TUI_RESET,
+                    TUI_BOLD, role, TUI_RESET);
+        else
+            fprintf(stderr, "\n  %s▌%s %s%s%s", fb, TUI_RESET, TUI_BOLD, role, TUI_RESET);
     }
     if (trail && trail[0])
         fprintf(stderr, "%s %s%s", TUI_DIM, trail, TUI_RESET);
@@ -4664,9 +4720,11 @@ static void print_user_text_block(const char *text) {
         return;
     }
 
-    /* Commit submitted input as a real transcript message. The composer only
-     * edits bytes; rendering the user turn here, after terminal controls have
-     * been stripped, keeps role ordering intact and avoids an unsafe raw echo. */
+    /* Commit submitted input as a real transcript message above the live
+     * composer. Park on the last transcript row (not a leading newline): a
+     * newline at the pane boundary used to land the USER block inside the
+     * input footprint, which the next composer remount then erased. */
+    fflush(stderr);
     tui_prepare_external_output_locked();
     print_role_header("user", true, NULL);
     fputs("  ", stderr);
@@ -4710,27 +4768,43 @@ static void print_assistant_text_block(const char *text) {
     tui_term_unlock();
 }
 
+static void native_tool_operation_complete(const char *name,
+                                           const char *input_json,
+                                           bool ok, double elapsed_ms,
+                                           const char *result) {
+    if (!pixel_tui_session_active()) return;
+    uint64_t operation_id =
+        pixel_tui_session_tool_begin(stderr, name, input_json);
+    pixel_tui_session_tool_end(stderr, operation_id, name, ok,
+                               elapsed_ms, result);
+}
+
 /* Print `▌ tool_call  name(args)` block. */
 static void print_tool_start_line(const char *name, const char *input_json) {
     char preview[200];
     extract_tool_preview(name, input_json, preview, sizeof(preview));
 
+    /* The native compositor receives the governed call at the execution gate,
+     * where it can retain one row from start through result. Avoid a second
+     * model-output row here. ANSI still prints the established call block. */
+    if (pixel_tui_session_active())
+        return;
     char trail[256];
     if (preview[0])
         snprintf(trail, sizeof(trail), "%s(%s)", name, preview);
     else
         snprintf(trail, sizeof(trail), "%s", name);
-    if (pixel_tui_session_active()) {
-        tui_term_lock();
-        print_role_header("tool_call", true, trail);
-        pixel_tui_session_end_message(stderr);
-        tui_term_unlock();
-    } else {
-        print_role_header("tool_call", true, trail);
-    }
+    print_role_header("tool_call", true, trail);
 }
 
 static void print_tool_result_ex(const char *name, bool ok, const char *result, double elapsed_ms) {
+    if (pixel_tui_session_active()) {
+        /* tools_execute_for_tier() completed the native operation row with the
+         * bounded result preview. Do not duplicate the full result as another
+         * transcript message; durable logs and model context keep full text. */
+        baseline_log(ok ? "tool_result" : "tool_error", name, result, NULL);
+        return;
+    }
     char elapsed_str[32] = "";
     if (elapsed_ms > 0) {
         if (elapsed_ms < 1000.0)
@@ -4750,16 +4824,6 @@ static void print_tool_result_ex(const char *name, bool ok, const char *result, 
         tpos += snprintf(trail + tpos, sizeof(trail) - tpos, " · %s", elapsed_str);
     if (size_str[0] && tpos < (int)sizeof(trail))
         tpos += snprintf(trail + tpos, sizeof(trail) - tpos, " · %s", size_str);
-    if (pixel_tui_session_active()) {
-        tui_term_lock();
-        print_role_header("tool_response", ok, trail);
-        if (result && result[0])
-            pixel_tui_session_append_text(stderr, result);
-        pixel_tui_session_end_message(stderr);
-        tui_term_unlock();
-        baseline_log(ok ? "tool_result" : "tool_error", name, result, NULL);
-        return;
-    }
     print_role_header("tool_response", ok, trail);
 
     /* Display-art tools (plot) render in full color; otherwise a dim preview
@@ -4970,9 +5034,10 @@ static void print_usage_ex(usage_t *u, const char *model, session_state_t *sessi
 /* ── Read input line (readline or fgets) ───────────────────────────────── */
 
 static void park_transcript_cursor_after_pane(void) {
-    /* Ephemeral panel: nothing to do. tui_composer_read already cleared
-     * the panel rows and echoed the input into scrollback. The cursor
-     * sits where the next streamed text should begin. */
+    /* Persistent pane: tui_composer_read leaves the command deck mounted and
+     * parks the cursor in the transcript scroll region above it. The labeled
+     * USER message is committed by print_user_text_block. */
+    tui_prepare_external_output();
 }
 
 static bool interactive_composer_enabled(void) {
@@ -5014,11 +5079,8 @@ static char *read_input_line_prompt(char *buf, size_t buf_sz, const char *prompt
                 add_history(buf);
         }
 #endif
-        /* Panel is ephemeral — composer_read already cleared the 3 panel
-         * rows and parked the cursor where streamed text should begin.
-         * Re-rendering the panel here would put it back under the cursor,
-         * so streaming would overwrite it and scroll the chrome up into
-         * the response. The next composer_read call repaints the panel. */
+        /* The command deck stays mounted across submit. The labeled USER
+         * message is committed below into the transcript scroll region. */
         park_transcript_cursor_after_pane();
         return buf;
     }
@@ -5337,7 +5399,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 TUI_BYELLOW, TUI_RESET, TOOL_REG_ALWAYS, tool_count);
     }
 
-    /* Enhanced startup info */
+    /* Enhanced startup info — a framed "session card" with clear hierarchy,
+     * a feature meter, and semantic colors instead of a wall of dim text. */
     {
         /* Active feature count */
         int active_features = 0;
@@ -5346,33 +5409,96 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             if (flags[fi])
                 active_features++;
 
-        fprintf(stderr, "  %s%d/%d features active%s · %strust: %s%s", TUI_DIM, active_features,
-                TUI_FEATURE_COUNT, TUI_RESET, TUI_DIM,
-                session_trust_tier_to_string(session.trust_tier), TUI_RESET);
-
-        /* Git branch on startup (F19) */
+        /* Current git branch (F19) */
+        char branch[128] = "";
         if (g_features.branch_indicator) {
             FILE *gf = popen("git rev-parse --abbrev-ref HEAD 2>/dev/null", "r");
             if (gf) {
-                char branch[128] = "";
                 if (fgets(branch, sizeof(branch), gf)) {
                     size_t bl = strlen(branch);
                     if (bl > 0 && branch[bl - 1] == '\n')
                         branch[bl - 1] = '\0';
-                    if (branch[0])
-                        fprintf(stderr, " · %s%s %s%s", TUI_BMAGENTA,
-                                tui_glyph()->icon_git ? tui_glyph()->icon_git : "", branch,
-                                TUI_RESET);
                 }
                 pclose(gf);
             }
         }
+
+        const tui_glyphs_t *gl = tui_glyph();
+        const char *ACCENT = "\033[38;5;140m"; /* soft violet — matches the banner gradient */
+        const char *KEY = "\033[38;5;244m";    /* muted key labels */
+        const char *bfull = (gl->block_full && gl->block_full[0]) ? gl->block_full : "#";
+        const char *blight = (gl->block_light && gl->block_light[0]) ? gl->block_light : "-";
+        const char *vbar = "\342\224\202"; /* │ */
+        int rule_w = tui_term_width() - 4;
+        if (rule_w > 62)
+            rule_w = 62;
+        if (rule_w < 26)
+            rule_w = 26;
+
+        /* Top rule: ╭─ session ─────… */
+        fprintf(stderr, "\n  %s\342\225\255\342\224\200%s %ssession%s %s", ACCENT, TUI_RESET,
+                TUI_BOLD, TUI_RESET, ACCENT);
+        for (int i = 0; i < rule_w - 11; i++)
+            fputs("\342\224\200", stderr);
+        fprintf(stderr, "%s\n", TUI_RESET);
+
+        /* Feature meter row */
+        int meter = 14;
+        int fill = TUI_FEATURE_COUNT
+                       ? (active_features * meter + TUI_FEATURE_COUNT / 2) / TUI_FEATURE_COUNT
+                       : 0;
+        if (fill > meter)
+            fill = meter;
+        fprintf(stderr, "  %s%s%s  %sfeatures%s  %s", ACCENT, vbar, TUI_RESET, KEY, TUI_RESET,
+                TUI_BGREEN);
+        for (int i = 0; i < fill; i++)
+            fputs(bfull, stderr);
+        fprintf(stderr, "%s", TUI_DIM);
+        for (int i = fill; i < meter; i++)
+            fputs(blight, stderr);
+        fprintf(stderr, "%s  %s%d%s%s/%d%s\n", TUI_RESET, TUI_BOLD, active_features, TUI_RESET,
+                TUI_DIM, TUI_FEATURE_COUNT, TUI_RESET);
+
+        /* Trust + branch row */
+        const char *trust = session_trust_tier_to_string(session.trust_tier);
+        const char *tcolor = TUI_BGREEN;
+        if (trust && (strstr(trust, "untrust") || strstr(trust, "ungovern") ||
+                      strstr(trust, "disabled")))
+            tcolor = TUI_BYELLOW;
+        fprintf(stderr, "  %s%s%s  %strust%s     %s%s%s", ACCENT, vbar, TUI_RESET, KEY, TUI_RESET,
+                tcolor, trust ? trust : "unknown", TUI_RESET);
+        if (branch[0])
+            fprintf(stderr, "   %s%s%s %s%s%s", KEY, gl->icon_git ? gl->icon_git : "\342\216\207",
+                    TUI_RESET, TUI_BMAGENTA, branch, TUI_RESET);
         fprintf(stderr, "\n");
-        if (session.active_topology[0]) {
-            fprintf(stderr, "  %stopology:%s %s\n", TUI_DIM, TUI_RESET, session.active_topology);
-        } else if (session.topology_auto) {
-            fprintf(stderr, "  %stopology:%s auto\n", TUI_DIM, TUI_RESET);
-        }
+
+        /* Topology row (only when configured) */
+        if (session.active_topology[0])
+            fprintf(stderr, "  %s%s%s  %stopology%s  %s%s%s\n", ACCENT, vbar, TUI_RESET, KEY,
+                    TUI_RESET, TUI_BCYAN, session.active_topology, TUI_RESET);
+        else if (session.topology_auto)
+            fprintf(stderr, "  %s%s%s  %stopology%s  %sauto%s\n", ACCENT, vbar, TUI_RESET, KEY,
+                    TUI_RESET, TUI_DIM, TUI_RESET);
+
+        /* Budget row — today's spend and any caps, colored by headroom */
+        double daily = baseline_daily_cost();
+        const char *mcol = (g_cost_budget > 0 && daily >= g_cost_budget * 0.8) ? TUI_BYELLOW
+                                                                               : TUI_BGREEN;
+        fprintf(stderr, "  %s%s%s  %sbudget%s    %s$%.2f%s %stoday%s", ACCENT, vbar, TUI_RESET, KEY,
+                TUI_RESET, mcol, daily, TUI_RESET, TUI_DIM, TUI_RESET);
+        if (g_cost_budget > 0)
+            fprintf(stderr, "  %s\302\267%s  $%.2f %ssession%s", TUI_DIM, TUI_RESET, g_cost_budget,
+                    TUI_DIM, TUI_RESET);
+        if (g_daily_budget > 0)
+            fprintf(stderr, "  %s\302\267%s  $%.2f %sdaily%s", TUI_DIM, TUI_RESET, g_daily_budget,
+                    TUI_DIM, TUI_RESET);
+        fprintf(stderr, "\n");
+
+        /* Bottom rule */
+        fprintf(stderr, "  %s\342\225\260", ACCENT);
+        for (int i = 0; i < rule_w - 1; i++)
+            fputs("\342\224\200", stderr);
+        fprintf(stderr, "%s\n", TUI_RESET);
     }
 
     /* Initialize status bar */
@@ -5398,27 +5524,34 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     followup_queue_t followup_queue;
     followup_queue_init(&followup_queue);
 
-    /* SIGWINCH handler for terminal resize */
+    /* SIGWINCH handler for terminal resize. Deliberately NOT SA_RESTART: on
+     * macOS/BSD, SA_RESTART causes an interrupted select(2) to be silently
+     * re-armed with a fresh timeout instead of returning EINTR. A live OS
+     * window resize (dragging, or the green-button zoom animation) delivers
+     * a burst of SIGWINCH signals every animation frame; with SA_RESTART set,
+     * each one re-armed the composer's 200ms select() before it could expire,
+     * starving the resize-detection check at the top of the read loop
+     * (tui.c tui_composer_read) for as long as the resize kept animating —
+     * during which the newly exposed window area stayed on Kitty's raw,
+     * uncomposited backing store (visible as bleed-through / a flat fill)
+     * instead of the compositor's opaque frame. Without SA_RESTART, select()
+     * returns EINTR on every SIGWINCH, so the loop re-checks geometry and
+     * calls pixel_tui_session_refresh() immediately on each resize step. */
     g_winch_sb = &status_bar;
     struct sigaction sa_winch;
     memset(&sa_winch, 0, sizeof(sa_winch));
     sa_winch.sa_handler = sigwinch_handler;
     sigemptyset(&sa_winch.sa_mask);
-    sa_winch.sa_flags = SA_RESTART;
+    sa_winch.sa_flags = 0;
     sigaction(SIGWINCH, &sa_winch, NULL);
 
-    /* Always show today's spend — awareness, not enforcement */
-    {
-        double daily = baseline_daily_cost();
-        fprintf(stderr, "  %stoday:%s $%.2f", TUI_DIM, TUI_RESET, daily);
-        if (g_cost_budget > 0)
-            fprintf(stderr, " · session cap $%.2f", g_cost_budget);
-        if (g_daily_budget > 0)
-            fprintf(stderr, " · daily cap $%.2f", g_daily_budget);
-    fprintf(stderr, "\n");
-}
+    /* Budget summary is now shown inline in the session card above. */
 
-    fprintf(stderr, "  %stype a message, /help for commands, quit to exit%s\n", TUI_DIM, TUI_RESET);
+    fprintf(stderr,
+            "  %stype a message%s  %s\302\267%s  %s/help%s%s for commands%s  %s\302\267%s  "
+            "%squit%s%s to exit%s\n",
+            TUI_RESET, TUI_RESET, TUI_DIM, TUI_RESET, TUI_BCYAN, TUI_RESET, TUI_DIM, TUI_RESET,
+            TUI_DIM, TUI_RESET, TUI_BCYAN, TUI_RESET, TUI_DIM, TUI_RESET);
 
     /* Kick off MCP server discovery in the background. The input panel is now
      * up; mcp_init's HTTP roundtrips run on a worker so the user can start
@@ -5444,6 +5577,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     }
 
     bool startup_consumed = false;
+    bool banner_settled = false;
     bool goal_autorun_pending =
         goal_is_active(&session) && !env_truthy(getenv("DSCO_GOAL_NO_AUTORUN"));
     while (1) {
@@ -5581,6 +5715,13 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         len = strlen(input_buf);
         if (len == 0)
             continue;
+        if (!banner_settled) {
+            /* First real chat input: freeze the welcome banner on its clean
+             * root frame. Keep the placement in the transcript so Kitty
+             * scrolls it out of the viewport naturally as the chat grows. */
+            kitty_banner_settle(stderr);
+            banner_settled = true;
+        }
         if (pixel_session)
             pixel_tui_session_set_turn(stderr, session.turn_count + 1);
         print_user_text_block(input_buf);
@@ -9142,6 +9283,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
         tools_context_turn_begin();
         tools_loop_control_reset();
         tools_set_active_conversation(&conv);
+        tools_set_active_session(&session);
         tools_playbook_advance_turn();
         arena_scratch_reset(); /* §2: reset per-turn scratch arena */
 
@@ -9472,8 +9614,13 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 break;
             }
 
-            /* Build request via provider */
-            ensure_provider(&session, api_key);
+            /* Build request via provider. Do not bypass an open circuit just
+             * because the previously selected provider pointer is still warm. */
+            if (!ensure_provider(&session, api_key)) {
+                tui_error("provider unavailable (circuit breaker open or credential missing)");
+                baseline_log("error", "provider_unavailable", NULL, NULL);
+                break;
+            }
             const char *cur_key = resolve_provider_key(api_key);
             provider_debug_log_request(g_provider ? g_provider->name : "anthropic", session.model,
                                        cur_key);
@@ -10058,8 +10205,12 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             /* Drain any bytes still held by the typing-cadence buffer
                before STREAM_END fires md_flush — otherwise the tail of
                the response would be discarded. */
-            if (g_features.typing_cadence)
+            if (g_features.typing_cadence) {
+                tui_term_lock();
+                tui_transcript_ensure_region();
                 tui_cadence_drain(&s_cadence);
+                tui_term_unlock();
+            }
 
             /* FSM-driven cleanup — STREAM_END triggers text_exit
                (md_flush + newline) or thinking_exit as needed, then
@@ -10069,6 +10220,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                 if (st != TUI_STREAM_ST_IDLE && st != TUI_STREAM_ST_DONE)
                     tui_fsm_send(&s_streaming_fsm, TUI_FSM_EVT_STREAM_END);
             }
+            tui_transcript_stream_set_live(false);
 
             if (s_turn_deferred_text && chron_output_text[0]) {
                 print_assistant_text_block(chron_output_text);
@@ -10622,6 +10774,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                             if (!maybe_escalate_tool_permission(blk->tool_name, tier, trust_reason,
                                                                 &exec_tier, deny_reason,
                                                                 sizeof(deny_reason))) {
+                                native_tool_operation_complete(blk->tool_name, blk->tool_input,
+                                                               false, 0.0, deny_reason);
                                 print_tool_result(blk->tool_name, false, deny_reason);
                                 baseline_log("security", "tool_blocked", deny_reason, NULL);
                                 conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
@@ -10649,6 +10803,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                                            "repeated. Do not retry this tool call; choose a "
                                            "different approach or ask the user for help.]"
                                          : "");
+                            native_tool_operation_complete(blk->tool_name, blk->tool_input,
+                                                           false, 0.0, validation_result);
                             conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
                                                        validation_result, true);
                             journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input);
@@ -10790,6 +10946,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                                              sr.usage.output_tokens, tc);
                                 }
                             }
+                            native_tool_operation_complete(blk->tool_name, blk->tool_input,
+                                                           ok, 0.0, tool_result);
                             print_role_header("tool_response", ok, trail);
                             /* Indented preview body — first line, up to 80 cols. */
                             if (tool_result[0]) {
@@ -11052,6 +11210,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     if (batch_policy_blocked[bi]) {
                         tui_batch_spinner_complete(&batch_spinner, bi, false,
                                                    batch_policy_reason[bi], 0.0);
+                        native_tool_operation_complete(blk->tool_name, blk->tool_input,
+                                                       false, 0.0,
+                                                       batch_policy_reason[bi]);
                         baseline_log("security", "tool_blocked", batch_policy_reason[bi], NULL);
                         conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
                                                    batch_policy_reason[bi], true);
@@ -11074,6 +11235,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                                        "approach or ask the user for help.]"
                                      : "");
                         tui_batch_spinner_complete(&batch_spinner, bi, false, val_err, 0.0);
+                        native_tool_operation_complete(blk->tool_name, blk->tool_input,
+                                                       false, 0.0, validation_result);
                         conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
                                                    validation_result, true);
                         if (repeated_validation) {
@@ -11137,6 +11300,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                             consecutive_cached_fails = 0;
                         }
                         tui_batch_spinner_complete(&batch_spinner, bi, cached_ok, "cached", 0.0);
+                        native_tool_operation_complete(blk->tool_name, blk->tool_input,
+                                                       cached_ok, 0.0, cached_result);
                         conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
                                                    cached_result, !cached_ok);
                         free(cached_result);
@@ -11177,6 +11342,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     int bi = serial_indices_arr[si];
                     content_block_t *blk = &sr.parsed.blocks[batch_indices[bi]];
                     if (g_interrupted) {
+                        native_tool_operation_complete(
+                            blk->tool_name, blk->tool_input, false, 0.0,
+                            "tool execution interrupted by user");
                         conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
                                                    "tool execution interrupted by user", true);
                         tui_batch_spinner_complete(&batch_spinner, bi, false, "interrupted", 0.0);
@@ -11399,7 +11567,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         usleep(10000);
                 }
 
-                if (conc_count > 0) {
+                if (conc_count > 0 && !pixel_tui_session_active()) {
                     fprintf(stderr, "  %s\xe2\x9a\xa1 %d tools ran concurrently (read-only)%s\n",
                             TUI_DIM, conc_count, TUI_RESET);
                 }

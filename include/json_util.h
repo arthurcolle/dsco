@@ -128,4 +128,10 @@ bool json_is_valid_container(const char *json);
 typedef void (*json_array_cb)(const char *element_start, void *ctx);
 int json_array_foreach(const char *json, const char *key, json_array_cb cb, void *ctx);
 
+/* Kimi/Moonshot rejects tool parameter schemas whose property schemas omit
+ * "type" (enum-only MCP properties etc.). Returns a malloc'd patched copy
+ * with inferred types filled in, or NULL when nothing needed patching (or
+ * the input wasn't parseable) — callers keep the original in that case. */
+char *json_schema_ensure_property_types(const char *schema_json);
+
 #endif

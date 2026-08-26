@@ -36,6 +36,11 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 
+try:
+    from web import billing
+except ImportError:  # running `python web/server.py`
+    import billing  # type: ignore
+
 # Optional WebRTC
 try:
     from aiortc import RTCPeerConnection, RTCSessionDescription
@@ -436,6 +441,17 @@ def _tools_openai_to_responses(tools: list[dict]) -> list[dict]:
     return out
 
 
+def _tool_output_str(value: Any) -> str:
+    """Tool output must be a string on the wire; older session histories may
+    hold structured results (dicts/lists), which the backends 400 on."""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def _messages_to_responses_input(session: "Session", msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert dsco's internal block history into Responses API input items."""
     items: list[dict[str, Any]] = []
@@ -452,7 +468,7 @@ def _messages_to_responses_input(session: "Session", msgs: list[dict[str, Any]])
                     for tr in tool_results:
                         items.append({"type": "function_call_output",
                                       "call_id": tr.get("tool_use_id", "call_0"),
-                                      "output": tr.get("content", "")})
+                                      "output": _tool_output_str(tr.get("content", ""))})
                 else:
                     text = user_content_to_openai(content)
                     if isinstance(text, list):
@@ -1145,6 +1161,10 @@ def _ensure_control_plane() -> None:
             ("schema_version", str(CONTROL_PLANE_SCHEMA_VERSION)),
         )
         _seed_control_plane(conn)
+        try:
+            billing.ensure_schema(conn)
+        except Exception as exc:  # billing is additive; never block the control plane
+            log.error(f"billing schema init failed: {exc}")
         conn.commit()
         _control_plane_ready = True
     finally:
@@ -1179,6 +1199,12 @@ def _serialize_plan(row: sqlite3.Row) -> dict[str, Any]:
         "hosted_models_allowed": bool(row["hosted_models_allowed"]),
         "is_active": bool(row["is_active"]),
         "notes": row["notes"] or "",
+        "terms_status": row["terms_status"] if "terms_status" in row.keys() else "draft",
+        "billing_mode": row["billing_mode"] if "billing_mode" in row.keys() else "prepaid",
+        "trial_days": int(row["trial_days"] or 0) if "trial_days" in row.keys() else 0,
+        "proration_policy": row["proration_policy"] if "proration_policy" in row.keys() else "none",
+        "grace_period_days": int(row["grace_period_days"] or 0) if "grace_period_days" in row.keys() else 0,
+        "catalog_version": int(row["catalog_version"] or 1) if "catalog_version" in row.keys() else 1,
         "member_count": int(row["member_count"] or 0) if "member_count" in row.keys() else 0,
         "request_count": int(row["request_count"] or 0) if "request_count" in row.keys() else 0,
         "estimated_cost_usd": round(float(row["estimated_cost_usd"] or 0.0), 6) if "estimated_cost_usd" in row.keys() else 0.0,
@@ -1446,7 +1472,7 @@ def _upsert_credential_binding(
     )
 
 
-def _normalize_engine_messages(body: dict[str, Any]) -> tuple[str, list[dict[str, str]], list[dict[str, str]]]:
+def _normalize_engine_messages(body: dict[str, Any]) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     raw_messages = body.get("messages")
     if not isinstance(raw_messages, list) or not raw_messages:
         prompt = str(body.get("prompt", "")).strip()
@@ -1455,8 +1481,8 @@ def _normalize_engine_messages(body: dict[str, Any]) -> tuple[str, list[dict[str
         raw_messages = [{"role": "user", "content": prompt}]
 
     system_parts: list[str] = []
-    openai_messages: list[dict[str, str]] = []
-    anthropic_messages: list[dict[str, str]] = []
+    openai_messages: list[dict[str, Any]] = []
+    anthropic_messages: list[dict[str, Any]] = []
     for msg in raw_messages:
         if not isinstance(msg, dict):
             continue
@@ -1465,6 +1491,19 @@ def _normalize_engine_messages(body: dict[str, Any]) -> tuple[str, list[dict[str
         if isinstance(content, (dict, list)):
             content = json.dumps(content, ensure_ascii=False)
         content = str(content).strip()
+        if role == "tool":
+            openai_messages.append({"role": "tool", "tool_call_id": str(msg.get("tool_call_id", "")), "content": content})
+            anthropic_messages.append({"role": "user", "content": f"[tool result] {content}"})
+            continue
+        tool_calls = msg.get("tool_calls")
+        if role == "assistant" and isinstance(tool_calls, list) and tool_calls:
+            entry: dict[str, Any] = {"role": "assistant", "content": content or None, "tool_calls": tool_calls}
+            reasoning_details = msg.get("reasoning_details")
+            if isinstance(reasoning_details, list) and reasoning_details:
+                entry["reasoning_details"] = reasoning_details
+            openai_messages.append(entry)
+            anthropic_messages.append({"role": "assistant", "content": content or json.dumps(tool_calls, ensure_ascii=False)})
+            continue
         if not content:
             continue
         if role == "system":
@@ -1882,10 +1921,12 @@ async def tool_dsco_exec(name: str, input_data: dict) -> str:
         if not out:
             err = stderr.decode("utf-8", errors="replace").strip()
             return f"[tool {name} produced no output{': ' + err if err else ''}]"
-        # dsco emits {"ok":bool,"result":"..."} — unwrap it
+        # dsco emits {"ok":bool,"result":"..."} — unwrap it. `result` may be
+        # structured JSON; callers store this as tool output, and every
+        # backend requires tool output to be a string.
         try:
             payload = json.loads(out)
-            return payload.get("result", out)
+            return _tool_output_str(payload.get("result", out))
         except json.JSONDecodeError:
             return out
     except asyncio.TimeoutError:
@@ -2059,7 +2100,7 @@ def to_openai_messages(session: Session, msgs: list[dict[str, Any]]) -> list[dic
                         out.append({
                             "role": "tool",
                             "tool_call_id": tr.get("tool_use_id", "call_0"),
-                            "content": tr.get("content", ""),
+                            "content": _tool_output_str(tr.get("content", "")),
                         })
                 else:
                     out.append({"role": "user", "content": user_content_to_openai(content)})
@@ -2505,7 +2546,8 @@ def _auth_error() -> JSONResponse:
 
 
 def _is_public_http_path(path: str) -> bool:
-    return path in ("/", "/health", "/auth") or path.startswith("/static/")
+    return (path in ("/", "/health", "/auth") or path.startswith("/static/")
+            or path.startswith("/billing/invoice/"))
 
 
 app = FastAPI(title="dsco", docs_url=None, redoc_url=None)
@@ -2810,6 +2852,40 @@ async def control_save_plan(request: Request):
     return {"ok": True, "id": plan_id}
 
 
+@app.post("/api/control/plans/{plan_id}/ratify")
+async def control_ratify_plan(plan_id: str, request: Request):
+    """Explicitly publish commercial terms. Draft plans cannot be invoiced."""
+    body = await request.json()
+    billing_mode = str(body.get("billing_mode", "postpaid")).strip()
+    proration = str(body.get("proration_policy", "daily")).strip()
+    if billing_mode not in ("prepaid", "postpaid"):
+        return JSONResponse({"error": "billing_mode must be prepaid|postpaid"}, status_code=400)
+    if proration not in ("none", "daily"):
+        return JSONResponse({"error": "proration_policy must be none|daily"}, status_code=400)
+    retry_schedule = body.get("retry_schedule", [1, 3, 7])
+    if (not isinstance(retry_schedule, list) or not retry_schedule
+            or any(not isinstance(d, int) or d < 1 for d in retry_schedule)):
+        return JSONResponse({"error": "retry_schedule must be a non-empty list of positive days"}, status_code=400)
+    with _control_plane_conn() as conn:
+        current = conn.execute("SELECT catalog_version FROM plans WHERE id=?", (plan_id,)).fetchone()
+        if not current:
+            return JSONResponse({"error": "plan not found"}, status_code=404)
+        version = int(body.get("catalog_version", int(current["catalog_version"] or 0) + 1) or 1)
+        conn.execute(
+            """UPDATE plans SET catalog_version=?,terms_status='ratified',billing_mode=?,
+               trial_days=?,proration_policy=?,grace_period_days=?,retry_schedule_json=?,
+               ratified_at=?,updated_at=? WHERE id=?""",
+            (version, billing_mode, max(0, int(body.get("trial_days", 0) or 0)), proration,
+             max(0, int(body.get("grace_period_days", 7) or 7)),
+             json.dumps(sorted(set(retry_schedule))), _now_iso(), _now_iso(), plan_id),
+        )
+        conn.commit()
+    return {"ok": True, "id": plan_id, "catalog_version": version,
+            "terms_status": "ratified", "billing_mode": billing_mode,
+            "trial_days": max(0, int(body.get("trial_days", 0) or 0)),
+            "proration_policy": proration}
+
+
 @app.get("/api/control/people")
 async def control_people():
     with _control_plane_conn() as conn:
@@ -2941,6 +3017,154 @@ async def control_issue_project_key(project_id: str, request: Request):
         conn.commit()
     return {"id": key_id, "project_id": project_id, "api_key": secret,
             "warning": "Store this API key now; it cannot be retrieved again."}
+
+
+# ── Commercial billing / invoicing ───────────────────────────────────────────
+
+def _billing_link_sig(invoice_id: str) -> str:
+    return hmac.new(WEB_AUTH_TOKEN.encode(), f"invoice:{invoice_id}".encode(),
+                    hashlib.sha256).hexdigest()[:32]
+
+
+def _billing_stripe() -> "billing.StripeREST":
+    return billing.StripeREST()
+
+
+@app.get("/api/billing/accounts")
+async def billing_accounts():
+    with _control_plane_conn() as conn:
+        rows = conn.execute(
+            """SELECT a.*, p.name, p.email, p.plan_id, pl.name AS plan_name
+               FROM billing_accounts a JOIN people p ON p.id=a.person_id
+               JOIN plans pl ON pl.id=p.plan_id ORDER BY a.updated_at DESC"""
+        ).fetchall()
+    return {"accounts": [dict(r) for r in rows]}
+
+
+@app.post("/api/billing/accounts")
+async def billing_upsert_account(request: Request):
+    body = await request.json()
+    person_id = str(body.get("person_id", "")).strip()
+    if not person_id:
+        return JSONResponse({"error": "person_id is required"}, status_code=400)
+    now = _now_iso()
+    with _control_plane_conn() as conn:
+        person = _lookup_person(conn, person_id=person_id)
+        if not person:
+            return JSONResponse({"error": "person not found"}, status_code=404)
+        plan = _lookup_plan(conn, person["plan_id"])
+        trial_days = int((plan["trial_days"] if plan and "trial_days" in plan.keys() else 0) or 0)
+        trial_ends = (datetime.now(timezone.utc) + timedelta(days=trial_days)).isoformat(timespec="seconds") if trial_days else None
+        mode = str(body.get("billing_mode", "postpaid")).strip()
+        if mode not in ("prepaid", "postpaid"):
+            return JSONResponse({"error": "billing_mode must be prepaid|postpaid"}, status_code=400)
+        conn.execute(
+            """INSERT INTO billing_accounts
+               (person_id,billing_email,stripe_customer_id,billing_mode,status,access_state,
+                trial_ends_at,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(person_id) DO UPDATE SET billing_email=excluded.billing_email,
+                 billing_mode=excluded.billing_mode, updated_at=excluded.updated_at""",
+            (person_id, str(body.get("billing_email", "")).strip() or person["email"],
+             str(body.get("stripe_customer_id", "")).strip(), mode,
+             "trialing" if trial_days else "active", "allowed", trial_ends, now, now),
+        )
+        conn.commit()
+    return {"ok": True, "person_id": person_id, "billing_mode": mode, "trial_ends_at": trial_ends}
+
+
+@app.get("/api/billing/invoices")
+async def billing_list_invoices(person_id: str = "", status: str = "", limit: int = 50):
+    limit = max(1, min(int(limit or 50), MAX_LIST_LIMIT))
+    clauses, params = [], []
+    if person_id:
+        clauses.append("i.person_id = ?"); params.append(person_id)
+    if status:
+        clauses.append("i.status = ?"); params.append(status)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    with _control_plane_conn() as conn:
+        rows = conn.execute(
+            f"""SELECT i.*, p.name AS person_name, p.email FROM billing_invoices i
+                JOIN people p ON p.id=i.person_id {where}
+                ORDER BY i.period_start DESC, i.created_at DESC LIMIT ?""",
+            (*params, limit),
+        ).fetchall()
+        invoices = []
+        for row in rows:
+            data = billing.serialize_invoice(conn, row, include_items=False)
+            data["download_url"] = f"/billing/invoice/{row['id']}?sig={_billing_link_sig(row['id'])}"
+            invoices.append(data)
+    return {"invoices": invoices}
+
+
+@app.get("/api/billing/invoices/{invoice_id}")
+async def billing_get_invoice(invoice_id: str):
+    with _control_plane_conn() as conn:
+        row = conn.execute("SELECT * FROM billing_invoices WHERE id=?", (invoice_id,)).fetchone()
+        if not row:
+            return JSONResponse({"error": "invoice not found"}, status_code=404)
+        data = billing.serialize_invoice(conn, row, include_items=True)
+    data["download_url"] = f"/billing/invoice/{invoice_id}?sig={_billing_link_sig(invoice_id)}"
+    return data
+
+
+@app.get("/billing/invoice/{invoice_id}", response_class=HTMLResponse)
+async def billing_invoice_download(invoice_id: str, sig: str = ""):
+    # Public, signature-gated customer download link (no admin token required).
+    if not sig or not secrets.compare_digest(sig, _billing_link_sig(invoice_id)):
+        return JSONResponse({"error": "invalid or missing signature"}, status_code=403)
+    with _control_plane_conn() as conn:
+        try:
+            html_doc = billing.render_invoice_html(conn, invoice_id)
+        except ValueError:
+            return JSONResponse({"error": "invoice not found"}, status_code=404)
+    return HTMLResponse(html_doc)
+
+
+@app.post("/api/billing/close")
+async def billing_close(request: Request):
+    body = await request.json()
+    apply = bool(body.get("apply", False))
+    use_stripe = bool(body.get("stripe", False))
+    if use_stripe and not _billing_stripe().configured:
+        return JSONResponse({"error": "STRIPE_API_KEY not configured"}, status_code=400)
+    with _control_plane_conn() as conn:
+        try:
+            result = billing.close_period(
+                conn, period=str(body.get("period", "")).strip() or None,
+                dry_run=not apply, finalize=apply and use_stripe,
+                person_id=str(body.get("person_id", "")).strip(),
+                stripe=_billing_stripe() if use_stripe else None,
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if apply:
+            conn.commit()
+    return result
+
+
+@app.post("/api/billing/reconcile")
+async def billing_reconcile(request: Request):
+    body = await request.json()
+    use_stripe = bool(body.get("stripe", False))
+    with _control_plane_conn() as conn:
+        result = billing.reconcile(
+            conn, invoice_id=str(body.get("invoice_id", "")).strip(),
+            stripe=_billing_stripe() if use_stripe else None, apply=bool(body.get("apply", False)),
+        )
+        if body.get("apply"):
+            conn.commit()
+    return result
+
+
+@app.post("/api/billing/dunning")
+async def billing_dunning(request: Request):
+    body = await request.json()
+    with _control_plane_conn() as conn:
+        result = billing.run_dunning(conn, dry_run=not bool(body.get("apply", False)))
+        if body.get("apply"):
+            conn.commit()
+    return result
 
 
 @app.get("/api/control/backends")
@@ -3121,6 +3345,9 @@ async def engine_chat(request: Request):
         if policy_error:
             return JSONResponse({"error": policy_error}, status_code=403)
         month_usage = _person_month_usage(conn, person["id"])
+        billing_block = billing.access_error(conn, person["id"])
+    if billing_block:
+        return JSONResponse(billing_block, status_code=402)
 
     spend_limit = float(person["monthly_spend_limit"] or 0.0)
     if spend_limit > 0 and month_usage["spend_usd"] >= spend_limit:
@@ -3449,15 +3676,22 @@ def _gateway_apply_openai_compat_prompt_cache(ctx: dict[str, Any], create_kwargs
         create_kwargs["extra_body"] = extra_body
 
 
-def _completion_envelope(model: str, content: str, *, input_tokens: int = 0, output_tokens: int = 0, finish_reason: str = "stop") -> dict[str, Any]:
+def _completion_envelope(model: str, content: str, *, input_tokens: int = 0, output_tokens: int = 0, finish_reason: str = "stop", tool_calls: Optional[list[dict[str, Any]]] = None, reasoning_details: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
     """Build an OpenAI chat.completion response object."""
+    message: dict[str, Any] = {"role": "assistant", "content": content}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+    if reasoning_details:
+        # OpenRouter reasoning models require these echoed back verbatim on the
+        # assistant message to continue a tool loop.
+        message["reasoning_details"] = reasoning_details
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,
         "choices": [
-            {"index": 0, "message": {"role": "assistant", "content": content}, "logprobs": None, "finish_reason": finish_reason}
+            {"index": 0, "message": message, "logprobs": None, "finish_reason": finish_reason}
         ],
         "usage": {
             "prompt_tokens": input_tokens,
@@ -3689,13 +3923,25 @@ async def _gateway_complete(ctx: dict[str, Any]) -> dict[str, Any]:
             create_kwargs[k] = passthrough[k]
     _gateway_apply_openai_compat_prompt_cache(ctx, create_kwargs)
     resp = await client.chat.completions.create(**create_kwargs)
-    message = resp.choices[0].message if resp.choices else None
+    choice = resp.choices[0] if resp.choices else None
+    message = choice.message if choice else None
     content = _openai_message_text(message.content if message else "")
+    tool_calls = None
+    if message and getattr(message, "tool_calls", None):
+        tool_calls = [tc.model_dump() for tc in message.tool_calls]
+    reasoning_details = None
+    if message is not None:
+        rd = getattr(message, "reasoning_details", None) or (message.model_extra or {}).get("reasoning_details")
+        if isinstance(rd, list) and rd:
+            reasoning_details = rd
     usage = getattr(resp, "usage", None)
     return _completion_envelope(
         model_id, content,
         input_tokens=int(getattr(usage, "prompt_tokens", 0) or 0),
         output_tokens=int(getattr(usage, "completion_tokens", 0) or 0),
+        finish_reason=(getattr(choice, "finish_reason", None) or "stop"),
+        tool_calls=tool_calls,
+        reasoning_details=reasoning_details,
     )
 
 

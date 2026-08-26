@@ -281,6 +281,36 @@ td{color:#dce4dd}
       </table></div>
     </section>
   </section>
+
+  <section class="band">
+    <div class="band-head">
+      <div>
+        <h2>Billing</h2>
+        <p>postpaid invoices, customer downloads, retries, grace and access state</p>
+      </div>
+      <div class="actions">
+        <button class="btn" id="billingPreview" type="button">Preview Month Close</button>
+        <button class="btn" id="billingDunning" type="button">Preview Dunning</button>
+      </div>
+    </div>
+    <div class="grid-2">
+      <section class="panel">
+        <div class="panel-head"><h3>Accounts</h3><div class="sub" id="billingAccountsMeta">0 rows</div></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Customer</th><th>Plan</th><th>Mode</th><th>Standing</th></tr></thead>
+          <tbody id="billingAccountRows"></tbody>
+        </table></div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><h3>Invoices</h3><div class="sub" id="billingInvoicesMeta">0 rows</div></div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Period</th><th>Customer</th><th>Status</th><th>Total</th><th>Invoice</th></tr></thead>
+          <tbody id="billingInvoiceRows"></tbody>
+        </table></div>
+      </section>
+    </div>
+    <div class="status mono tiny" id="billingResult">dry-run only until Apply/Stripe is explicitly requested through the API or operator CLI</div>
+  </section>
 </main>
 
 <script>
@@ -289,7 +319,7 @@ const fmt = (n) => Number(n || 0).toLocaleString();
 const usd = (n) => Number(n || 0).toLocaleString(undefined, {style:'currency', currency:'USD', maximumFractionDigits:3});
 const when = (v) => v ? new Date(v).toLocaleString() : 'never';
 const short = (v) => v && v.length > 54 ? `${v.slice(0, 54)}…` : (v || '');
-const state = {overview:null, plans:[], people:[], backends:[], credentials:[], requests:[]};
+const state = {overview:null, plans:[], people:[], backends:[], credentials:[], requests:[], billingAccounts:[], invoices:[]};
 
 async function getJSON(url){
   const r = await fetch(url);
@@ -452,15 +482,37 @@ function renderRequests(){
     </tr>`).join('') : '<tr><td colspan="7" class="empty">No routed requests yet.</td></tr>';
 }
 
+function renderBilling(){
+  $('#billingAccountsMeta').textContent = `${fmt(state.billingAccounts.length)} rows`;
+  $('#billingAccountRows').innerHTML = state.billingAccounts.length ? state.billingAccounts.map(a => `
+    <tr>
+      <td><div>${a.name}</div><div class="muted tiny mono">${a.billing_email || a.email}</div></td>
+      <td><div>${a.plan_name}</div><div class="muted tiny mono">${a.plan_id}</div></td>
+      <td><span class="pill">${a.billing_mode}</span></td>
+      <td><div class="${a.access_state === 'allowed' ? 'ok' : a.access_state === 'grace' ? 'warn' : 'bad'}">${a.status}</div><div class="muted tiny">access ${a.access_state}</div></td>
+    </tr>`).join('') : '<tr><td colspan="4" class="empty">No billing accounts. Enroll a person through POST /api/billing/accounts.</td></tr>';
+  $('#billingInvoicesMeta').textContent = `${fmt(state.invoices.length)} rows`;
+  $('#billingInvoiceRows').innerHTML = state.invoices.length ? state.invoices.map(i => `
+    <tr>
+      <td class="mono tiny">${i.period_start.slice(0,7)}</td>
+      <td><div>${i.person_name}</div><div class="muted tiny mono">${i.email}</div></td>
+      <td><span class="pill">${i.status}</span><div class="muted tiny">${i.attempt_count || 0} retries</div></td>
+      <td>${usd(i.total_usd)}</td>
+      <td><a class="btn" href="${i.download_url}" target="_blank" rel="noopener">View / Download</a></td>
+    </tr>`).join('') : '<tr><td colspan="5" class="empty">No invoices yet. Preview month close before applying it.</td></tr>';
+}
+
 async function loadAll(){
   $('#status').textContent = 'loading control plane';
-  const [overview, plans, people, backends, credentials, requests] = await Promise.all([
+  const [overview, plans, people, backends, credentials, requests, billingAccounts, invoices] = await Promise.all([
     getJSON('/api/control/overview'),
     getJSON('/api/control/plans'),
     getJSON('/api/control/people'),
     getJSON('/api/control/backends'),
     getJSON('/api/control/credentials?limit=80'),
-    getJSON('/api/control/requests?limit=120')
+    getJSON('/api/control/requests?limit=120'),
+    getJSON('/api/billing/accounts'),
+    getJSON('/api/billing/invoices?limit=100')
   ]);
   state.overview = overview;
   state.plans = plans.plans || [];
@@ -468,6 +520,8 @@ async function loadAll(){
   state.backends = backends.backends || [];
   state.credentials = credentials.credentials || [];
   state.requests = requests.requests || [];
+  state.billingAccounts = billingAccounts.accounts || [];
+  state.invoices = invoices.invoices || [];
   renderMetrics();
   renderPlanOptions();
   renderPeople();
@@ -475,6 +529,7 @@ async function loadAll(){
   renderBackends();
   renderCredentials();
   renderRequests();
+  renderBilling();
   $('#status').textContent = `db ${overview.db_path} • ${overview.people.active}/${overview.people.total} people • ${overview.traffic.requests_24h} requests in last 24h`;
 }
 
@@ -508,6 +563,20 @@ async function bindForms(){
     e.currentTarget.reset();
     e.currentTarget.enabled.checked = true;
     await loadAll();
+  });
+  $('#billingPreview')?.addEventListener('click', async () => {
+    $('#billingResult').textContent = 'previewing month close (dry-run)…';
+    try {
+      const r = await postJSON('/api/billing/close', {});
+      $('#billingResult').textContent = `dry-run: ${r.invoice_count} invoice(s), ${usd((r.total_cents||0)/100)} across ${r.account_count} account(s) for ${r.period}. Apply via API/CLI to persist.`;
+    } catch(err){ $('#billingResult').textContent = `close preview failed: ${err.message}`; }
+  });
+  $('#billingDunning')?.addEventListener('click', async () => {
+    $('#billingResult').textContent = 'previewing dunning (dry-run)…';
+    try {
+      const r = await postJSON('/api/billing/dunning', {});
+      $('#billingResult').textContent = `dry-run dunning: ${r.action_count} overdue action(s) pending. Apply via API/CLI to send notices.`;
+    } catch(err){ $('#billingResult').textContent = `dunning preview failed: ${err.message}`; }
   });
 }
 

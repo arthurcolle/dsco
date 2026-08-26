@@ -1,4 +1,5 @@
 #include "provider_profiles.h"
+#include "config.h"
 #include "dcr.h"
 
 #include <string.h>
@@ -59,6 +60,20 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .aliases = {"or"},
         .default_model = "moonshotai/kimi-k2.7-code",
         .caps = CAP_OPENAI_COMPAT_VISION,
+    },
+    {
+        .name = "dsco-router",
+        .display_name = "Distributed Systems Router",
+        .description = "Distributed Systems multi-model OpenAI-compatible gateway.",
+        .api_mode = PROVIDER_API_CHAT_COMPLETIONS,
+        .auth_type = PROVIDER_AUTH_API_KEY,
+        .transport = PROVIDER_TRANSPORT_OPENAI_CHAT,
+        .base_url = "https://router.distributed.systems/v1",
+        .transport_base_url = "https://router.distributed.systems/v1",
+        .env_vars = {"DSCO_ROUTER_API_KEY"},
+        .aliases = {"router", "distributed-systems"},
+        .default_model = "openai/gpt-5.6-terra",
+        .caps = CAP_OPENAI_COMPAT_VISION | PROVIDER_CAP_REASONING,
     },
     {
         .name = "google",
@@ -181,6 +196,18 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .env_vars = {"COHERE_API_KEY"},
         .default_model = "command-a-03-2025",
         .caps = CAP_OPENAI_COMPAT,
+    },
+    {
+        .name = "kimi-code",
+        .display_name = "Kimi Code Subscription",
+        .description = "Kimi Code membership via native OAuth and in-process OpenAI-compatible transport.",
+        .api_mode = PROVIDER_API_CHAT_COMPLETIONS,
+        .auth_type = PROVIDER_AUTH_OAUTH_EXTERNAL,
+        .transport = PROVIDER_TRANSPORT_OPENAI_CHAT,
+        .base_url = "https://api.kimi.com/coding/v1",
+        .transport_base_url = "https://api.kimi.com/coding/v1",
+        .default_model = KIMI_CODE_DEFAULT_MODEL,
+        .caps = CAP_OPENAI_COMPAT_VISION | PROVIDER_CAP_REASONING,
     },
     {
         .name = "moonshot",
@@ -516,7 +543,7 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .transport = PROVIDER_TRANSPORT_CODEX_RESPONSES,
         .base_url = "https://chatgpt.com/backend-api/codex",
         .aliases = {"codex", "openai_codex"},
-        .default_model = "gpt-5.5",
+        .default_model = "gpt-5.6-luna",
         .caps = PROVIDER_CAP_TOOLS | PROVIDER_CAP_MULTITURN | PROVIDER_CAP_STREAMING |
                 PROVIDER_CAP_REASONING | PROVIDER_CAP_JSON,
     },
@@ -700,5 +727,6 @@ bool provider_profile_transport_supported(const provider_profile_t *profile) {
     if (!profile)
         return false;
     return profile->transport == PROVIDER_TRANSPORT_OPENAI_CHAT ||
-           profile->transport == PROVIDER_TRANSPORT_ANTHROPIC_MESSAGES;
+           profile->transport == PROVIDER_TRANSPORT_ANTHROPIC_MESSAGES ||
+           profile->transport == PROVIDER_TRANSPORT_CODEX_RESPONSES;
 }

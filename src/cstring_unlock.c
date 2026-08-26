@@ -152,7 +152,9 @@ static void cu_ks_xor(const uint8_t key[32], const uint8_t nonce[16],
             in[16 + i] = (uint8_t)((ctr >> (8 * i)) & 0xff);
         uint8_t ks[32];
         cu_hmac(key, in, 24, ks);
-        unsigned long n = (len - off < 32) ? (len - off) : 32;
+        unsigned long n = len - off;
+        if (n > sizeof(ks))
+            n = sizeof(ks);
         for (unsigned long i = 0; i < n; i++)
             buf[off + i] ^= ks[i];
         off += n;
@@ -172,7 +174,10 @@ int main(int argc, char **argv)
     FILE *kf = fopen(argv[1], "rb");
     if (!kf) return 3;
     uint8_t km[48];
-    if (fread(km, 1, 48, kf) != 48) return 4;
+    if (fread(km, 1, 48, kf) != 48) {
+        fclose(kf);
+        return 4;
+    }
     fclose(kf);
     uint8_t buf[1 << 20];
     size_t n = fread(buf, 1, sizeof(buf), stdin);

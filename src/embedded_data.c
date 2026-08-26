@@ -39,7 +39,9 @@ static void ks_xor(const uint8_t key[32], const uint8_t nonce[16], uint8_t *buf,
             in[16 + i] = (uint8_t)((ctr >> (8 * i)) & 0xff);
         uint8_t ks[32];
         hmac_sha256(key, 32, in, sizeof(in), ks);
-        size_t n = (len - off < 32) ? (len - off) : 32;
+        size_t n = len - off;
+        if (n > sizeof(ks))
+            n = sizeof(ks);
         for (size_t i = 0; i < n; i++)
             buf[off + i] ^= ks[i];
         off += n;
@@ -50,9 +52,11 @@ static void ks_xor(const uint8_t key[32], const uint8_t nonce[16], uint8_t *buf,
 const unsigned char *embedded_data_get(const char *name, size_t *out_len)
 {
     int idx = -1;
-    for (int i = 0; i < DSCO_EMBEDDED_MAX && dsco_embedded_registry_table[i].name; i++) {
+    const size_t registry_count =
+        sizeof(dsco_embedded_registry_table) / sizeof(dsco_embedded_registry_table[0]);
+    for (size_t i = 0; i < registry_count && dsco_embedded_registry_table[i].name; i++) {
         if (strcmp(dsco_embedded_registry_table[i].name, name) == 0) {
-            idx = i;
+            idx = (int)i;
             break;
         }
     }

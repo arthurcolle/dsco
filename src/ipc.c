@@ -261,6 +261,16 @@ static const char *SCHEMA_SQL =
     "  model TEXT DEFAULT '',"
     "  current_task TEXT DEFAULT '',"
     "  toolkit TEXT DEFAULT '*',"
+    "  organization_id TEXT DEFAULT '',"
+    "  deployment_id TEXT DEFAULT '',"
+    "  role_id TEXT DEFAULT '',"
+    "  policy_sha256 TEXT DEFAULT '',"
+    "  capsule_sha256 TEXT DEFAULT '',"
+    "  graphsub_namespace TEXT DEFAULT '',"
+    "  router_project_id TEXT DEFAULT '',"
+    "  capabilities TEXT DEFAULT '[]',"
+    "  budget_gsu REAL DEFAULT 0,"
+    "  budget_usd REAL DEFAULT 0,"
     "  started_at REAL,"
     "  last_heartbeat REAL"
     ");"
@@ -357,6 +367,16 @@ bool ipc_init(const char *db_path, const char *agent_id) {
         return false;
     }
     sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN model TEXT DEFAULT ''", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN organization_id TEXT DEFAULT ''", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN deployment_id TEXT DEFAULT ''", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN role_id TEXT DEFAULT ''", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN policy_sha256 TEXT DEFAULT ''", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN capsule_sha256 TEXT DEFAULT ''", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN graphsub_namespace TEXT DEFAULT ''", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN router_project_id TEXT DEFAULT ''", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN capabilities TEXT DEFAULT '[]'", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN budget_gsu REAL DEFAULT 0", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN budget_usd REAL DEFAULT 0", NULL, NULL, NULL);
 
     /* Clean up orphaned tasks — tasks assigned to agents that are no longer alive */
     sqlite3_exec(g_ipc.db,
@@ -521,20 +541,38 @@ bool ipc_register(const char *parent_id, int depth, const char *role, const char
 
 bool ipc_agent_define(const char *agent_id, const char *parent_id, int depth, const char *role,
                       const char *model, const char *toolkit) {
+    return ipc_agent_define_bound(agent_id, parent_id, depth, role, model, toolkit, NULL);
+}
+
+bool ipc_agent_define_bound(const char *agent_id, const char *parent_id, int depth, const char *role,
+                            const char *model, const char *toolkit,
+                            const ipc_agent_binding_t *binding) {
     if (!g_ipc.ready || !agent_id || !ipc_agent_id_is_valid(agent_id))
         return false;
     const char *safe_parent = (parent_id && ipc_agent_id_is_valid(parent_id)) ? parent_id : "";
     const char *sql =
         "INSERT INTO agents (id, parent_id, pid, depth, status, role, model, current_task, "
-        "toolkit, started_at, last_heartbeat) "
-        "VALUES (?, ?, 0, ?, 'durable', ?, ?, '', ?, ?, 0) "
+        "toolkit, organization_id, deployment_id, role_id, policy_sha256, capsule_sha256, "
+        "graphsub_namespace, router_project_id, capabilities, budget_gsu, budget_usd, "
+        "started_at, last_heartbeat) "
+        "VALUES (?, ?, 0, ?, 'durable', ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
         "ON CONFLICT(id) DO UPDATE SET "
         "parent_id=excluded.parent_id, "
         "depth=excluded.depth, "
         "status='durable', "
         "role=excluded.role, "
         "model=excluded.model, "
-        "toolkit=excluded.toolkit";
+        "toolkit=excluded.toolkit, "
+        "organization_id=excluded.organization_id, "
+        "deployment_id=excluded.deployment_id, "
+        "role_id=excluded.role_id, "
+        "policy_sha256=excluded.policy_sha256, "
+        "capsule_sha256=excluded.capsule_sha256, "
+        "graphsub_namespace=excluded.graphsub_namespace, "
+        "router_project_id=excluded.router_project_id, "
+        "capabilities=excluded.capabilities, "
+        "budget_gsu=excluded.budget_gsu, "
+        "budget_usd=excluded.budget_usd";
 
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -545,7 +583,17 @@ bool ipc_agent_define(const char *agent_id, const char *parent_id, int depth, co
     sqlite3_bind_text(stmt, 4, role ? role : "", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 5, model ? model : "", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 6, toolkit ? toolkit : "*", -1, SQLITE_STATIC);
-    sqlite3_bind_double(stmt, 7, now_ts());
+    sqlite3_bind_text(stmt, 7, binding && binding->organization_id ? binding->organization_id : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 8, binding && binding->deployment_id ? binding->deployment_id : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 9, binding && binding->role_id ? binding->role_id : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 10, binding && binding->policy_sha256 ? binding->policy_sha256 : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 11, binding && binding->capsule_sha256 ? binding->capsule_sha256 : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 12, binding && binding->graphsub_namespace ? binding->graphsub_namespace : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 13, binding && binding->router_project_id ? binding->router_project_id : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 14, binding && binding->capabilities ? binding->capabilities : "[]", -1, SQLITE_STATIC);
+    sqlite3_bind_double(stmt, 15, binding ? binding->budget_gsu : 0.0);
+    sqlite3_bind_double(stmt, 16, binding ? binding->budget_usd : 0.0);
+    sqlite3_bind_double(stmt, 17, now_ts());
     bool ok = sqlite3_step(stmt) == SQLITE_DONE;
     sqlite3_finalize(stmt);
     return ok;
@@ -614,7 +662,9 @@ int ipc_list_agents(ipc_agent_info_t *out, int max) {
         return 0;
 
     const char *sql = "SELECT id, parent_id, pid, depth, status, role, "
-                      "model, current_task, toolkit, started_at, last_heartbeat "
+                      "model, current_task, toolkit, started_at, last_heartbeat, "
+                      "organization_id, deployment_id, role_id, policy_sha256, capsule_sha256, "
+                      "graphsub_namespace, router_project_id, capabilities, budget_gsu, budget_usd "
                       "FROM agents ORDER BY depth, started_at";
 
     sqlite3_stmt *stmt;
@@ -640,6 +690,16 @@ int ipc_list_agents(ipc_agent_info_t *out, int max) {
                  sqlite3_column_text(stmt, 8) ? (const char *)sqlite3_column_text(stmt, 8) : "*");
         a->started_at = sqlite3_column_double(stmt, 9);
         a->last_heartbeat = sqlite3_column_double(stmt, 10);
+        snprintf(a->organization_id, sizeof(a->organization_id), "%s", sqlite3_column_text(stmt, 11) ? (const char *)sqlite3_column_text(stmt, 11) : "");
+        snprintf(a->deployment_id, sizeof(a->deployment_id), "%s", sqlite3_column_text(stmt, 12) ? (const char *)sqlite3_column_text(stmt, 12) : "");
+        snprintf(a->role_id, sizeof(a->role_id), "%s", sqlite3_column_text(stmt, 13) ? (const char *)sqlite3_column_text(stmt, 13) : "");
+        snprintf(a->policy_sha256, sizeof(a->policy_sha256), "%s", sqlite3_column_text(stmt, 14) ? (const char *)sqlite3_column_text(stmt, 14) : "");
+        snprintf(a->capsule_sha256, sizeof(a->capsule_sha256), "%s", sqlite3_column_text(stmt, 15) ? (const char *)sqlite3_column_text(stmt, 15) : "");
+        snprintf(a->graphsub_namespace, sizeof(a->graphsub_namespace), "%s", sqlite3_column_text(stmt, 16) ? (const char *)sqlite3_column_text(stmt, 16) : "");
+        snprintf(a->router_project_id, sizeof(a->router_project_id), "%s", sqlite3_column_text(stmt, 17) ? (const char *)sqlite3_column_text(stmt, 17) : "");
+        snprintf(a->capabilities, sizeof(a->capabilities), "%s", sqlite3_column_text(stmt, 18) ? (const char *)sqlite3_column_text(stmt, 18) : "[]");
+        a->budget_gsu = sqlite3_column_double(stmt, 19);
+        a->budget_usd = sqlite3_column_double(stmt, 20);
         count++;
     }
     sqlite3_finalize(stmt);
@@ -652,7 +712,9 @@ bool ipc_get_agent(const char *agent_id, ipc_agent_info_t *out) {
         return false;
 
     const char *sql = "SELECT id, parent_id, pid, depth, status, role, "
-                      "model, current_task, toolkit, started_at, last_heartbeat "
+                      "model, current_task, toolkit, started_at, last_heartbeat, "
+                      "organization_id, deployment_id, role_id, policy_sha256, capsule_sha256, "
+                      "graphsub_namespace, router_project_id, capabilities, budget_gsu, budget_usd "
                       "FROM agents WHERE id=?";
 
     sqlite3_stmt *stmt;
@@ -678,6 +740,16 @@ bool ipc_get_agent(const char *agent_id, ipc_agent_info_t *out) {
                  sqlite3_column_text(stmt, 8) ? (const char *)sqlite3_column_text(stmt, 8) : "*");
         out->started_at = sqlite3_column_double(stmt, 9);
         out->last_heartbeat = sqlite3_column_double(stmt, 10);
+        snprintf(out->organization_id, sizeof(out->organization_id), "%s", sqlite3_column_text(stmt, 11) ? (const char *)sqlite3_column_text(stmt, 11) : "");
+        snprintf(out->deployment_id, sizeof(out->deployment_id), "%s", sqlite3_column_text(stmt, 12) ? (const char *)sqlite3_column_text(stmt, 12) : "");
+        snprintf(out->role_id, sizeof(out->role_id), "%s", sqlite3_column_text(stmt, 13) ? (const char *)sqlite3_column_text(stmt, 13) : "");
+        snprintf(out->policy_sha256, sizeof(out->policy_sha256), "%s", sqlite3_column_text(stmt, 14) ? (const char *)sqlite3_column_text(stmt, 14) : "");
+        snprintf(out->capsule_sha256, sizeof(out->capsule_sha256), "%s", sqlite3_column_text(stmt, 15) ? (const char *)sqlite3_column_text(stmt, 15) : "");
+        snprintf(out->graphsub_namespace, sizeof(out->graphsub_namespace), "%s", sqlite3_column_text(stmt, 16) ? (const char *)sqlite3_column_text(stmt, 16) : "");
+        snprintf(out->router_project_id, sizeof(out->router_project_id), "%s", sqlite3_column_text(stmt, 17) ? (const char *)sqlite3_column_text(stmt, 17) : "");
+        snprintf(out->capabilities, sizeof(out->capabilities), "%s", sqlite3_column_text(stmt, 18) ? (const char *)sqlite3_column_text(stmt, 18) : "[]");
+        out->budget_gsu = sqlite3_column_double(stmt, 19);
+        out->budget_usd = sqlite3_column_double(stmt, 20);
         found = true;
     }
     sqlite3_finalize(stmt);
