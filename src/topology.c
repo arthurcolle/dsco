@@ -1621,7 +1621,7 @@ static const char *topology_native_lane_model(const provider_profile_t *profile,
     if (strcmp(p, "sakana") == 0)
         return tier == TIER_OPUS ? "fugu-ultra" : "fugu";
     if (strcmp(p, "anthropic") == 0)
-        return tier == TIER_HAIKU   ? "claude-haiku-4-5"
+        return tier == TIER_HAIKU   ? "claude-haiku-4-5-20251001"
                : tier == TIER_OPUS  ? "claude-opus-4-8"
                : tier == TIER_FABLE ? "claude-fable-5"
                                     : "claude-sonnet-5";

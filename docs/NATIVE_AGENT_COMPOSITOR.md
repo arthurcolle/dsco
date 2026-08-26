@@ -6,8 +6,11 @@ successive scenes, and sends the resulting paint operations to a backend. Kitty 
 is the first backend. Metal, ANSI, web, remote framebuffer, and accessibility trees
 can consume the same scene without reimplementing product behavior.
 
-The implementation lives in [`include/native_ui.h`](../include/native_ui.h) and
-[`src/native_ui.c`](../src/native_ui.c). The existing native terminal workspace uses
+The core implementation lives in [`include/native_ui.h`](../include/native_ui.h)
+and [`src/native_ui.c`](../src/native_ui.c). `native_masthead` and
+`native_composer` build the first live session regions entirely from stable
+retained nodes, while `px_backend` maps semantic tokens and primitives onto
+transport-owned raster operations. The native terminal workspace uses
 `native_ui_agent_shell_layout()` for its responsive regions.
 
 ## Composition model
@@ -105,7 +108,19 @@ as separate values. Density breakpoints always consume logical dimensions. This 
 essential on Retina displays: a 1120-point window backed by 2240 pixels remains a
 1120-pixel semantic viewport instead of becoming a fake expanded desktop with
 half-size typography. `DSCO_PIXEL_TUI_DPR=1..4` is the explicit override for unusual
-font or display configurations.
+font or display configurations. The live RGB surface is allocated at the exact
+physical backing dimensions while every layout coordinate and type size remains
+logical; Kitty therefore places pixels 1:1 instead of stretching a half-resolution
+frame and resampling glyph edges.
+
+During reasoning and response streaming, the shell becomes transcript-first: the
+optional inspector rail yields its width, activity stays in the retained masthead,
+and compact 12-point body text uses two pixels of leading. Token callbacks only
+mutate retained text; the compositor coalesces them on a 30 Hz frame boundary and
+sends bounded Kitty damage patches. Each retained event can hold up to 128 KiB of
+UTF-8 text. Rich-token and wrapped-line storage grows with the response and is
+reused across frames, so long Markdown responses do not stop at the former fixed
+token/line limits or allocate large parser arrays on the render-thread stack.
 
 ## Rendering contract
 
@@ -154,6 +169,109 @@ All interactive elements need:
 - Capability and permission surfaces display scope and decision from the governed
   execution path; the compositor never grants authority.
 - Backend output is generated from scene state, never scraped back into state.
+
+## Live retained regions
+
+The masthead and composer are the first complete session regions migrated from
+immediate painting to the retained architecture. `native_masthead_build()` owns
+identity, model/slot, resource summary, lifecycle badge, accessibility labels,
+and the Overmind Soul placeholder through stable 64-bit keys.
+`native_composer_build()` owns command-deck layout, queue/clock projection,
+multiline cursor semantics, accessibility, and bounded editor damage. The
+shared cell editor remains authoritative for editing, history, bracketed paste,
+completion, image selection, and submission; the retained custom input node
+renders that same editor rather than forking input behavior.
+
+Each migrated region keeps two fixed scene slots, so previous/current layout
+and semantic damage are available without allocating in the frame hot path.
+
+`px_backend` is the shared semantic-to-raster adapter. It owns token resolution
+and standard meter, sparkline, image, clipping, text, icon, and surface behavior;
+Kitty supplies the low-level canvas operations and the animated Soul extension.
+The generative JSON scene path, live masthead, and live composer now use the
+same adapter.
+
+`pixel_tui_write_session_ppm()` renders the complete workspace without a TTY.
+`make test_pixel` exercises compact, dense, and expanded session artifacts, all
+four lifecycle states, retained masthead/composer layout and damage, compositor
+geometry, Kitty transport framing, and native plan surfaces.
+
+### Frame telemetry
+
+Frame instrumentation is opt-in, so disabled sessions do not add clocks or locks
+to raster and transport work. Set `DSCO_PIXEL_TUI_PERF=1` to print one JSON line
+after the native session closes, or set it to an absolute path to append JSONL
+there. The `dsco.pixel_compositor_perf.v1` record separates:
+
+- producer lock wait, oldest queued-token latency, layout/raster, tile diff,
+  compression/base64 encode, terminal upload, flush, and whole-frame time;
+- bounded 0.25 ms histogram P50/P95/P99 values plus exact maxima for every timing;
+- identical, damage-patch, full, and failed frames;
+- raw, compressed, base64, and exact Kitty wire bytes plus chunk counts;
+- streaming requests, coalesced requests, throttled repaints, and their combined
+  dropped-or-deferred count;
+- peak retained compositor storage and peak per-frame transport allocation;
+- scheduler wakeups/renders, deadline misses, long rendered-frame gaps, wake
+  lateness, and maximum/average rendered-frame gap. These distinguish motion
+  cadence breaks from raster or terminal-upload cost.
+
+Upload timing measures local terminal writes and `fflush()`. It is not presented as
+a terminal-side decode or display acknowledgement.
+
+`dsco --compositor-stream-bench [CHUNKS]` runs a deterministic provider-like stream
+through the actual live native session and emits a
+`dsco.compositor_stream_bench.v1` JSON summary after restoring the terminal. It
+requires a Kitty-compatible TTY, defaults to 900 chunks at a 2 ms arrival interval,
+and does not call a model provider. `DSCO_COMPOSITOR_BENCH_INTERVAL_US` changes the
+arrival interval for burst and sparse-stream tests.
+
+The resident image uses 32-pixel tile diffs and in-place Kitty frame edits. The
+measured default permits a patch while dirty tiles cover at most 70% of the frame;
+`DSCO_PIXEL_TUI_DAMAGE_COVERAGE=0.10..0.95` is an A/B/debug override. Structural
+changes, fragmented damage, failed patches, and every 65th changed frame still use
+an authoritative full upload. `DSCO_PIXEL_TUI_PATCH=0` disables patching.
+
+## Dual-compositor parity contract
+
+The native compositor is additive. The established ANSI/cell TUI remains a
+first-class renderer and input implementation while native mechanisms mature.
+On a Kitty-compatible terminal, `dsco --native` or `DSCO_PIXEL_TUI=1` selects
+the pixel backend; `dsco --tui` or `DSCO_PIXEL_TUI=0` keeps the established
+renderer.
+
+Parity is maintained at the behavior boundary rather than by cloning business
+logic into a second UI:
+
+| Original surface | Native behavior |
+|---|---|
+| streaming transcript, Markdown, code, math, citations | retained messages and rich-text runs |
+| multiline editing, history, paste, cursor movement | the shared cell-composer engine owns editing; native layout renders up to eight wrapped rows |
+| slash completion and `@` image picker | shared registries and selection state rendered as native popovers |
+| model/slot, input/output tokens, cost, budget, runway, burn, turn, tools, queue, clock | retained status projection |
+| panel notices and terminal notifications | native toasts plus preserved terminal BEL/OSC delivery |
+| permission, confirmation, question, and hierarchical-menu prompts | native modal overlays using the original decision/input loops |
+| tool lifecycle, parallel batches, swarm topology, plans | one retained operation row per governed call, updated in place from running to result; live cards are transient projections |
+| ordinary legacy tables, diffs, diagnostics, and command output | ANSI is stripped and published into the native transcript by the compatibility capture boundary |
+| pager, secure lock screen, raw-stdin tools, and terminal-native specialty renderers | compositor suspend → established TUI/real TTY → atomic compositor resume |
+
+No feature may silently disappear behind the pixel framebuffer. A new legacy
+surface must either publish semantic retained state, pass through transcript
+capture, or use the explicit terminal handoff. This also keeps the original TUI
+independently testable instead of turning it into dead fallback code.
+
+Native tool history is outcome-dense rather than a raw execution log. The default
+`DSCO_PIXEL_TUI_TOOLS=results` shows the call immediately, then updates that same
+row with status, elapsed time, result size, the first useful result line, and a
+hidden-line count. `calls` suppresses result text; `full` permits a bounded 10-line,
+2 KiB preview. The complete result remains available to the model and durable
+Chronicle/VFS paths in every mode.
+
+Run `dsco --compositor-parity /tmp/dsco-compositor-parity` to materialize the
+shared deterministic corpus. It emits the established renderer as `legacy.ansi`
+and `legacy.txt`, the populated native session as `native.ppm`, the semantic
+fixture, and machine-readable density metrics. Regression tests require the
+native 1120x700 review viewport to retain every fixture message and at least 95%
+of the established viewport's visible transcript characters.
 
 ## Adding a UI capability
 

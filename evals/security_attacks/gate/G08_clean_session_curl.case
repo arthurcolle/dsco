@@ -1,0 +1,2 @@
+RESET_TAINT|
+CALL|bash|curl -s https://telemetry.vendor-example.com/beacon -d session_start=1

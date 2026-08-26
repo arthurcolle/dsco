@@ -63,7 +63,30 @@ typedef struct {
     double started_at;
     double last_heartbeat;
     char   toolkit[2048];        /* JSON array of tool names, or "*" for all */
+    char   organization_id[64];
+    char   deployment_id[64];
+    char   role_id[64];
+    char   policy_sha256[65];
+    char   capsule_sha256[65];
+    char   graphsub_namespace[192];
+    char   router_project_id[64];
+    char   capabilities[4096];   /* JSON capability envelope */
+    double budget_gsu;
+    double budget_usd;
 } ipc_agent_info_t;
+
+typedef struct {
+    const char *organization_id;
+    const char *deployment_id;
+    const char *role_id;
+    const char *policy_sha256;
+    const char *capsule_sha256;
+    const char *graphsub_namespace;
+    const char *router_project_id;
+    const char *capabilities;
+    double budget_gsu;
+    double budget_usd;
+} ipc_agent_binding_t;
 
 /* ── Message ───────────────────────────────────────────────────────────── */
 
@@ -134,6 +157,12 @@ bool ipc_register(const char *parent_id, int depth, const char *role,
  * workers can later register with the same ID to become live. */
 bool ipc_agent_define(const char *agent_id, const char *parent_id, int depth,
                       const char *role, const char *model, const char *toolkit);
+
+/* Define a durable agent and atomically bind it to one admitted organization
+ * deployment. Existing callers may continue to use ipc_agent_define(). */
+bool ipc_agent_define_bound(const char *agent_id, const char *parent_id, int depth,
+                            const char *role, const char *model, const char *toolkit,
+                            const ipc_agent_binding_t *binding);
 
 /* Update own status */
 bool ipc_set_status(ipc_agent_status_t status, const char *current_task);

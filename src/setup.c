@@ -2,6 +2,8 @@
 #include "provider.h"
 #include "openai_oauth.h"
 #include "local_llm.h"
+#include "cloud_runtime.h"
+#include "sealed_store.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -710,7 +712,13 @@ static int load_env_from_path(const char *path) {
     for (int i = 0; i < l.count; i++) {
         if (setup_env_key_is_blocked(l.items[i].key))
             continue;
-        if (!getenv(l.items[i].key)) {
+        const char *existing = getenv(l.items[i].key);
+        /* sealed_store_init() intentionally clears sensitive environment
+         * values in place.  That empty string is still an existing launch
+         * credential and must retain first-writer precedence over ~/.dsco/env;
+         * otherwise a stale saved key silently replaces the real shell key. */
+        const char *sealed = sealed_store_peek(l.items[i].key);
+        if ((!existing || !existing[0]) && (!sealed || !sealed[0])) {
             setenv(l.items[i].key, l.items[i].value, 1);
             loaded++;
         }
@@ -721,6 +729,8 @@ static int load_env_from_path(const char *path) {
 }
 
 int dsco_setup_load_saved_env(void) {
+    if (dsco_cloud_runtime_active() || setup_env_truthy(getenv("DSCO_CLOUD_SKIP_SAVED_ENV")))
+        return 0;
     /* 1. Load from ~/.dsco/env (or profile-specific path) */
     int loaded = load_env_from_path(resolve_env_path());
 

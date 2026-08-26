@@ -585,7 +585,16 @@ native_ui_agent_shell_layout_t native_ui_agent_shell_layout(int width, int heigh
     layout.outer_margin = 8;
     layout.inner_padding = 12;
     layout.gap = layout.shows_inspector ? 6 : 0;
-    int header_height = height < 300 ? 52 : 56;
+    /* Keep the native welcome identity as a compact persistent brand card in
+     * the upper-left instead of turning the entire top edge into a splash.
+     * Forty-four pixels is the masthead's minimum complete retained layout;
+     * the width targets half the viewport while remaining usable on compact
+     * terminals and bounded on very wide displays. */
+    int header_height = 48;
+    int header_width = width / 2;
+    if (header_width < 320) header_width = width - layout.outer_margin * 2;
+    if (header_width > 640) header_width = 640;
+    if (header_width < 0) header_width = 0;
     int composer_height = height / 6;
     if (composer_height < 62) composer_height = 62;
     if (composer_height > 78) composer_height = 78;
@@ -602,8 +611,7 @@ native_ui_agent_shell_layout_t native_ui_agent_shell_layout(int width, int heigh
     int content_width = width - layout.outer_margin * 2 - inspector_width - layout.gap;
     if (content_width < 0) content_width = 0;
     layout.header = (native_ui_rect_t){layout.outer_margin, 4,
-                                      width - layout.outer_margin * 2,
-                                      header_height - 4};
+                                      header_width, header_height - 4};
     layout.transcript = (native_ui_rect_t){layout.outer_margin, transcript_y,
                                           content_width, transcript_height};
     layout.inspector = (native_ui_rect_t){layout.outer_margin + content_width + layout.gap,
@@ -615,6 +623,119 @@ native_ui_agent_shell_layout_t native_ui_agent_shell_layout(int width, int heigh
     if (layout.header.height < 0) layout.header.height = 0;
     if (layout.composer.width < 0) layout.composer.width = 0;
     if (layout.composer.height < 0) layout.composer.height = 0;
+    return layout;
+}
+
+static size_t composer_utf8_advance(const char *s, size_t remaining,
+                                    int *cell_width) {
+    if (cell_width) *cell_width = 1;
+    if (!s || remaining == 0) return 0;
+    const unsigned char c = (unsigned char)s[0];
+    size_t n = 1;
+    unsigned int cp = c;
+    if ((c & 0xe0) == 0xc0 && remaining >= 2) {
+        n = 2;
+        cp = ((unsigned int)(c & 0x1f) << 6) |
+             (unsigned int)((unsigned char)s[1] & 0x3f);
+    } else if ((c & 0xf0) == 0xe0 && remaining >= 3) {
+        n = 3;
+        cp = ((unsigned int)(c & 0x0f) << 12) |
+             ((unsigned int)((unsigned char)s[1] & 0x3f) << 6) |
+             (unsigned int)((unsigned char)s[2] & 0x3f);
+    } else if ((c & 0xf8) == 0xf0 && remaining >= 4) {
+        n = 4;
+        cp = ((unsigned int)(c & 0x07) << 18) |
+             ((unsigned int)((unsigned char)s[1] & 0x3f) << 12) |
+             ((unsigned int)((unsigned char)s[2] & 0x3f) << 6) |
+             (unsigned int)((unsigned char)s[3] & 0x3f);
+    }
+    /* A compact wcwidth-compatible subset keeps CJK/emoji cursor placement
+     * sane without adding locale state to the compositor hot path. */
+    if (cell_width &&
+        ((cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2329 && cp <= 0x232a) ||
+         (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3) ||
+         (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xfe10 && cp <= 0xfe6f) ||
+         (cp >= 0xff00 && cp <= 0xff60) || (cp >= 0x1f300 && cp <= 0x1faff)))
+        *cell_width = 2;
+    return n;
+}
+
+static int composer_scan_rows(const char *text, size_t len, size_t cursor,
+                              int columns, int first_wanted, int max_rows,
+                              native_ui_composer_layout_t *layout,
+                              bool collect) {
+    size_t row_start = 0;
+    size_t at = 0;
+    int row = 0;
+    int column = 0;
+    bool cursor_recorded = false;
+
+    while (at < len) {
+        if (!cursor_recorded && at >= cursor) {
+            layout->cursor_row = row;
+            layout->cursor_column = column;
+            cursor_recorded = true;
+        }
+        if (text[at] == '\n') {
+            if (collect && row >= first_wanted && layout->row_count < max_rows)
+                layout->rows[layout->row_count++] =
+                    (native_ui_composer_row_t){row_start, at};
+            row++;
+            at++;
+            row_start = at;
+            column = 0;
+            continue;
+        }
+        int cell_width = 1;
+        size_t advance = composer_utf8_advance(text + at, len - at, &cell_width);
+        if (advance == 0) advance = 1;
+        if (column > 0 && column + cell_width > columns) {
+            if (collect && row >= first_wanted && layout->row_count < max_rows)
+                layout->rows[layout->row_count++] =
+                    (native_ui_composer_row_t){row_start, at};
+            row++;
+            row_start = at;
+            column = 0;
+            continue;
+        }
+        at += advance;
+        column += cell_width;
+    }
+
+    if (!cursor_recorded) {
+        layout->cursor_row = row;
+        layout->cursor_column = column;
+    }
+    if (collect && row >= first_wanted && layout->row_count < max_rows)
+        layout->rows[layout->row_count++] =
+            (native_ui_composer_row_t){row_start, len};
+    return row + 1;
+}
+
+native_ui_composer_layout_t native_ui_composer_layout(const char *text,
+                                                      size_t cursor_byte,
+                                                      int columns,
+                                                      int max_rows) {
+    native_ui_composer_layout_t layout;
+    memset(&layout, 0, sizeof(layout));
+    if (!text) text = "";
+    size_t len = strlen(text);
+    if (cursor_byte > len) cursor_byte = len;
+    if (columns < 1) columns = 1;
+    if (max_rows < 1) max_rows = 1;
+    if (max_rows > NATIVE_UI_COMPOSER_MAX_ROWS)
+        max_rows = NATIVE_UI_COMPOSER_MAX_ROWS;
+
+    layout.total_rows = composer_scan_rows(text, len, cursor_byte, columns,
+                                           0, max_rows, &layout, false);
+    layout.first_row = layout.cursor_row - max_rows + 1;
+    if (layout.first_row < 0) layout.first_row = 0;
+    if (layout.first_row + max_rows > layout.total_rows)
+        layout.first_row = layout.total_rows - max_rows;
+    if (layout.first_row < 0) layout.first_row = 0;
+    layout.row_count = 0;
+    (void)composer_scan_rows(text, len, cursor_byte, columns,
+                             layout.first_row, max_rows, &layout, true);
     return layout;
 }
 

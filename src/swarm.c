@@ -1,3 +1,7 @@
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE 1
+#endif
+
 #include "swarm.h"
 #include "kitty_agent_windows.h"
 #include "openrouter_cache.h"
@@ -27,6 +31,7 @@
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #include <libgen.h>
+#include <libproc.h>
 #include <sys/event.h> /* kqueue */
 #endif
 
@@ -34,9 +39,180 @@
 
 static void parse_child_cost_report(swarm_child_t *c);
 
+/* Tool runners intentionally create their own process groups so a tool-level
+ * timeout can stop the command it owns. That means killing only a swarm
+ * worker's process group is insufficient: nested tool groups would be
+ * reparented and continue running. Walk the live descendant tree first and
+ * terminate every subordinate process, then terminate the worker group. */
+static void swarm_signal_descendants(pid_t parent, int sig, int depth) {
+    if (parent <= 1 || depth > 16)
+        return;
+#ifdef __APPLE__
+    pid_t children[256];
+    int count = proc_listchildpids(parent, children, (int)sizeof(children));
+    if (count < 0)
+        return;
+    if (count > (int)(sizeof(children) / sizeof(children[0])))
+        count = (int)(sizeof(children) / sizeof(children[0]));
+    for (int i = 0; i < count; i++) {
+        pid_t child = children[i];
+        if (child <= 1 || child == getpid())
+            continue;
+        swarm_signal_descendants(child, sig, depth + 1);
+        (void)kill(child, sig);
+    }
+#elif defined(__linux__)
+    char path[96];
+    snprintf(path, sizeof(path), "/proc/%d/task/%d/children", (int)parent, (int)parent);
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return;
+    pid_t child = -1;
+    while (fscanf(f, "%d", &child) == 1) {
+        if (child <= 1 || child == getpid())
+            continue;
+        swarm_signal_descendants(child, sig, depth + 1);
+        (void)kill(child, sig);
+    }
+    fclose(f);
+#else
+    (void)sig;
+    (void)depth;
+#endif
+}
+
+static void swarm_terminate_worker_tree(pid_t worker_pid, int worker_signal) {
+    if (worker_pid <= 1)
+        return;
+    /* Descendant tools get no independent lifetime after their worker is
+     * cancelled. TERM permits normal cleanup; KILL immediately closes the
+     * reparenting race before the worker itself exits. */
+    swarm_signal_descendants(worker_pid, SIGTERM, 0);
+    swarm_signal_descendants(worker_pid, SIGKILL, 0);
+    (void)kill(-worker_pid, worker_signal);
+}
+
+/* ── Worker environment isolation ──────────────────────────────────────────
+ * A forked worker must NOT inherit the parent's full environment: that leaks
+ * every API key / OAuth token to an unrelated provider lane (the credential
+ * exposure seen in provider-fabric transcripts) and silently escalates the
+ * worker's authority via inherited DSCO_ALLOW_ and DSCO_GOV_ flags (governance
+ * drift). This runs POST-FORK in the child only, before the provider-specific
+ * credential for THIS lane is re-exported. It is a substring/suffix scrub over
+ * the live environ, so it also catches vendor-specific names we don't
+ * enumerate. Opt out (debugging only) with DSCO_SWARM_INHERIT_ENV=1. */
+extern char **environ;
+
+static bool swarm_env_name_is_sensitive(const char *name) {
+    if (!name || !name[0])
+        return false;
+    /* Substring markers: catch *_KEY, *_TOKEN, *_SECRET, OAUTH, BEARER, etc. */
+    static const char *markers[] = {
+        "KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "OAUTH",
+        "AUTHORIZATION", "AUTH_TOKEN", "COOKIE", "BEARER", "PRIVATE", "SESSION",
+        "API_SECRET", "CLIENT_SECRET", "ACCESS_TOKEN", "REFRESH_TOKEN", NULL};
+    for (int i = 0; markers[i]; i++)
+        if (strstr(name, markers[i]))
+            return true;
+    return false;
+}
+
+static bool swarm_env_name_is_authority(const char *name) {
+    if (!name || !name[0])
+        return false;
+    /* Authority / governance escalation flags must never be inherited: the
+     * worker must derive its own posture, not silently run with the parent's
+     * exfil override, control-plane grant, or governance bypass. */
+    if (strncmp(name, "DSCO_ALLOW_", 11) == 0)
+        return true;
+    static const char *flags[] = {
+        "DSCO_GOV_BYPASS", "DSCO_GOV_MODEL", "DSCO_SYSTEMS_AGENT", "DSCO_NET_FORCE",
+        "DSCO_APPROVAL_MODE", "DSCO_APPROVAL_NEVER", "DSCO_NO_APPROVAL_PROMPTS",
+        "DSCO_SECURE_STORE_NO_PROMPT", "DSCO_TRUST_TIER", NULL};
+    for (int i = 0; flags[i]; i++)
+        if (strcmp(name, flags[i]) == 0)
+            return true;
+    return false;
+}
+
+/* Scrub inherited credentials and/or authority flags from the child's
+ * environment. Must be called post-fork, pre-exec. Collects names first
+ * (mutating environ while iterating it is unsafe), then unsets them.
+ * scrub_credentials=false keeps API keys/tokens intact (external executor
+ * CLIs manage their own auth) while still removing authority-escalation flags. */
+static void swarm_scrub_child_environment_ex(bool scrub_credentials) {
+    const char *inherit = getenv("DSCO_SWARM_INHERIT_ENV");
+    if (inherit && inherit[0] && inherit[0] != '0')
+        return; /* explicit debugging opt-out: inherit everything */
+    if (!environ)
+        return;
+
+    /* Authority/operational-flag isolation is OPT-IN. By default a worker
+     * inherits the parent's governance/approval/trust posture so it runs at
+     * full speed (Arthur's --gov-model none / --systems-agent / autonomous
+     * workflow must not degrade into per-worker approval stalls). Turn on
+     * DSCO_SWARM_ISOLATE_AUTHORITY=1 for untrusted-benchmark worker runs.
+     * Credential isolation is ALWAYS on for cross-provider safety and has no
+     * speed cost: the lane's own credential is re-exported right after. */
+    const char *iso = getenv("DSCO_SWARM_ISOLATE_AUTHORITY");
+    bool scrub_authority = iso && iso[0] && iso[0] != '0';
+
+    if (!scrub_credentials && !scrub_authority)
+        return; /* nothing to do — keep the child env untouched */
+
+    /* Snapshot names to remove. Bounded; environments are small. */
+    char *victims[512];
+    int nv = 0;
+    for (char **e = environ; *e && nv < (int)(sizeof(victims) / sizeof(victims[0])); e++) {
+        const char *eq = strchr(*e, '=');
+        if (!eq)
+            continue;
+        size_t nlen = (size_t)(eq - *e);
+        if (nlen == 0 || nlen >= 256)
+            continue;
+        char name[256];
+        memcpy(name, *e, nlen);
+        name[nlen] = '\0';
+        bool remove = (scrub_authority && swarm_env_name_is_authority(name)) ||
+                      (scrub_credentials && swarm_env_name_is_sensitive(name));
+        if (remove) {
+            victims[nv] = strdup(name);
+            if (victims[nv])
+                nv++;
+        }
+    }
+    for (int i = 0; i < nv; i++) {
+        unsetenv(victims[i]);
+        free(victims[i]);
+    }
+}
+
+static void swarm_scrub_child_environment(void) {
+    swarm_scrub_child_environment_ex(true);
+}
+
 static void swarm_export_child_credential_for_provider(const char *provider,
                                                        const char *credential) {
     provider_export_child_process_credentials_for_provider(provider, credential);
+}
+
+/* provider_resolve_request_api_key() may return storage owned by environ.
+ * Credential isolation unsets that environment entry before re-exporting the
+ * selected lane, which invalidates the returned pointer on some libc
+ * implementations. Snapshot it first so scrub-then-export is reliable for
+ * ordinary env keys as well as sealed-store credentials. */
+static char *swarm_snapshot_credential(const char *credential) {
+    return (credential && credential[0]) ? strdup(credential) : NULL;
+}
+
+static void swarm_forget_credential(char *credential) {
+    if (!credential)
+        return;
+    volatile unsigned char *p = (volatile unsigned char *)credential;
+    size_t len = strlen(credential);
+    while (len--)
+        *p++ = 0;
+    free(credential);
 }
 
 static const char *swarm_provider_cli_name(const char *provider) {
@@ -55,7 +231,7 @@ static bool swarm_provider_cli_pin_supported(const char *provider) {
     static const char *supported[] = {
         "anthropic", "openai", "openai-codex", "openrouter", "google", "groq",
         "deepseek", "mistral", "xai", "together", "perplexity", "cerebras",
-        "cohere", "moonshot", "sakana", "zai", "alibaba", "alibaba-coding-plan",
+        "cohere", "moonshot", "kimi-code", "sakana", "zai", "alibaba", "alibaba-coding-plan",
         "qwen-oauth", "ollama", "lmstudio", "mlx", "vllm", "llamacpp", "localai",
         "jan", "gpt4all", "koboldcpp", "textgen", "tgi", "sglang", "llamafile",
         "local", NULL
@@ -197,12 +373,32 @@ void swarm_init(swarm_t *s, const char *api_key, const char *model) {
 }
 
 void swarm_destroy(swarm_t *s) {
+    /* In-process swarms normally die with their owning runtime. During a
+     * controlled long-running handoff, workers are deliberately owned by the
+     * durable swarm daemon instead; never tear down detached children merely
+     * because an observing frontend is exiting/restarting. */
+    const char *preserve = getenv("DSCO_SWARM_PRESERVE_CHILDREN");
+    if (preserve && preserve[0] && preserve[0] != '0') {
+        for (int i = 0; i < s->child_count; i++) {
+            swarm_child_t *c = &s->children[i];
+            if (c->pipe_fd >= 0) close(c->pipe_fd);
+            if (c->err_fd >= 0) close(c->err_fd);
+            free(c->output);
+            free(c->stream_buf);
+        }
+        free((void *)s->dsco_path);
+        s->dsco_path = NULL;
+#ifdef __APPLE__
+        if (s->kq_fd >= 0) close(s->kq_fd);
+#endif
+        return;
+    }
     /* Kill all running children — SIGTERM first, then SIGKILL after grace period */
     bool signaled = false;
     for (int i = 0; i < s->child_count; i++) {
         swarm_child_t *c = &s->children[i];
         if (c->status == SWARM_RUNNING || c->status == SWARM_STREAMING) {
-            kill(-c->pid, SIGTERM); /* kill process group */
+            swarm_terminate_worker_tree(c->pid, SIGTERM);
             signaled = true;
         }
     }
@@ -220,7 +416,7 @@ void swarm_destroy(swarm_t *s) {
             pid_t w = waitpid(c->pid, &status, WNOHANG);
             if (w == 0) {
                 /* Still alive — force kill */
-                kill(-c->pid, SIGKILL);
+                swarm_terminate_worker_tree(c->pid, SIGKILL);
                 waitpid(c->pid, NULL, 0); /* blocking reap */
             }
         }
@@ -365,14 +561,14 @@ static struct {
     bool set;
     char effort[16];
     double temperature, top_p;
-    int top_k, thinking_budget;
+    int top_k, thinking_budget, max_agent_turns;
     char tool_choice[128];
     char *system_prompt;
 } s_next_instance;
 
 void swarm_set_next_instance(const char *effort, double temperature, double top_p, int top_k,
                              int thinking_budget, const char *tool_choice,
-                             const char *system_prompt) {
+                             const char *system_prompt, int max_agent_turns) {
     free(s_next_instance.system_prompt);
     memset(&s_next_instance, 0, sizeof(s_next_instance));
     s_next_instance.set = true;
@@ -382,6 +578,7 @@ void swarm_set_next_instance(const char *effort, double temperature, double top_
     s_next_instance.top_p = top_p;
     s_next_instance.top_k = top_k;
     s_next_instance.thinking_budget = thinking_budget;
+    s_next_instance.max_agent_turns = max_agent_turns;
     if (tool_choice)
         snprintf(s_next_instance.tool_choice, sizeof(s_next_instance.tool_choice), "%s",
                  tool_choice);
@@ -411,6 +608,10 @@ static void swarm_apply_instance_env(void) {
     if (s_next_instance.thinking_budget > 0) {
         snprintf(b, sizeof b, "%d", s_next_instance.thinking_budget);
         setenv("DSCO_THINKING_BUDGET", b, 1);
+    }
+    if (s_next_instance.max_agent_turns > 0) {
+        snprintf(b, sizeof b, "%d", s_next_instance.max_agent_turns);
+        setenv("DSCO_MAX_AGENT_TURNS", b, 1);
     }
     if (s_next_instance.tool_choice[0])
         setenv("DSCO_TOOL_CHOICE", s_next_instance.tool_choice, 1);
@@ -477,7 +678,7 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
         const char *m = model ? model : s->default_model;
         if (!model) {
             /* Unpinned worker: default to the cheap parallel swarm model
-               (gpt-5.4-mini) for embarrassingly parallel fanouts. Opt out
+               (gpt-5.6-luna) for embarrassingly parallel fanouts. Opt out
                with DSCO_SWARM_DEFAULT_MINI=0 to inherit the parent model. */
             const char *swarm_def = dsco_swarm_default_model(s->api_key);
             if (swarm_def && swarm_def[0])
@@ -525,8 +726,16 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
             child_provider = provider_route_for_model(m, s->api_key, NULL);
             child_key = provider_resolve_request_api_key(child_provider, s->api_key);
         }
-        if (child_key && child_key[0])
-            swarm_export_child_credential_for_provider(child_provider, child_key);
+        /* Isolate the worker environment BEFORE re-exporting this lane's
+         * credential: strips inherited API keys / OAuth tokens for other
+         * providers and inherited DSCO_ALLOW_ / governance escalation flags.
+         * Snapshot first because child_key may point directly into environ. */
+        char *child_credential = swarm_snapshot_credential(child_key);
+        swarm_scrub_child_environment();
+
+        if (child_credential)
+            swarm_export_child_credential_for_provider(child_provider, child_credential);
+        swarm_forget_credential(child_credential);
 
         /* ── Clear DSCO_EXEC so the child uses native dsco routing, not an
          * external CLI executor.  The parent may have DSCO_EXEC=claude or
@@ -750,7 +959,17 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task, const char 
         } else {
             resolved_credential = provider_resolve_request_api_key(provider, s->api_key);
         }
-        swarm_export_child_credential_for_provider(provider, resolved_credential);
+        /* Isolate worker env before re-exporting this lane's credential.
+         * resolved_credential may point into environ, so preserve it across
+         * unsetenv() before exporting only the selected provider credential. */
+        char *child_credential = swarm_snapshot_credential(resolved_credential);
+        swarm_scrub_child_environment();
+        swarm_export_child_credential_for_provider(provider, child_credential);
+        swarm_forget_credential(child_credential);
+
+        /* Provider-pinned spawns obey the same one-shot instance contract as
+         * ordinary swarm_spawn*() calls (effort, tool policy, turn ceiling). */
+        swarm_apply_instance_env();
 
         /* Key: --provider <provider> keeps the child on dsco's native provider
          * router. Fall back to --exec only for generic custom providers that
@@ -773,6 +992,7 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task, const char 
 
     /* ── Parent ── */
     close(stdout_pipe[1]);
+    swarm_clear_next_instance();
     fcntl(stdout_pipe[0], F_SETFL, O_NONBLOCK);
 
     swarm_child_t *c = &s->children[id];
@@ -811,6 +1031,25 @@ int swarm_spawn_provider(swarm_t *s, int group_id, const char *task, const char 
             g->child_ids[g->child_count++] = id;
     }
 
+    return id;
+}
+
+int swarm_spawn_provider_auth_lane(swarm_t *s, int group_id, const char *task,
+                                   const char *model, const char *provider,
+                                   const char *auth_class) {
+    const char *old = getenv("DSCO_SAKANA_KEY_CLASS");
+    char *saved = old ? safe_strdup(old) : NULL;
+    if (provider && strcmp(provider, "sakana") == 0 && auth_class && auth_class[0])
+        setenv("DSCO_SAKANA_KEY_CLASS", auth_class, 1);
+    int id = swarm_spawn_provider(s, group_id, task, model, provider);
+    if (saved) setenv("DSCO_SAKANA_KEY_CLASS", saved, 1);
+    else unsetenv("DSCO_SAKANA_KEY_CLASS");
+    free(saved);
+    if (id >= 0 && auth_class && auth_class[0]) {
+        swarm_child_t *c = swarm_get(s, id);
+        if (c)
+            snprintf(c->provider, sizeof(c->provider), "%s:%s", provider, auth_class);
+    }
     return id;
 }
 
@@ -1045,12 +1284,25 @@ static void child_read(swarm_child_t *c, int fd, swarm_stream_cb cb, void *ctx) 
 
         if (cb)
             cb(c->id, buf, n, ctx);
-        c->status = SWARM_STREAMING;
-        kitty_agent_window_append(c->id, buf, (size_t)n);
-        pixel_tui_session_swarm_update(stderr, c->id, "streaming", c->task, c->model,
-                                       c->output_len,
-                                       c->reported_cost_usd > 0 ? c->reported_cost_usd
-                                                               : c->est_cost_usd);
+        /* Preserve a terminal kill state while draining its final output. */
+        if (c->status != SWARM_KILLED)
+            c->status = SWARM_STREAMING;
+
+        /* Pipe draining is lossless; expensive terminal/UI work is not on the
+         * hot path. Emit at most every 100ms or 256KiB, while completion still
+         * always emits a final state update in post_complete(). */
+        const double now = now_sec();
+        const size_t ui_bytes = c->output_len - c->ui_bytes_emitted;
+        if (c->ui_last_emit_time == 0 || now - c->ui_last_emit_time >= 0.100 ||
+            ui_bytes >= 256 * 1024) {
+            kitty_agent_window_append(c->id, buf, (size_t)n);
+            pixel_tui_session_swarm_update(stderr, c->id, "streaming", c->task, c->model,
+                                           c->output_len,
+                                           c->reported_cost_usd > 0 ? c->reported_cost_usd
+                                                                   : c->est_cost_usd);
+            c->ui_last_emit_time = now;
+            c->ui_bytes_emitted = c->output_len;
+        }
     }
     if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
         c->status = SWARM_ERROR;
@@ -1151,8 +1403,15 @@ int swarm_poll_stream(swarm_t *s, int timeout_ms, swarm_stream_cb cb, void *ctx)
         }
     }
 
-    /* Enforce budget limits after polling */
-    swarm_enforce_budgets(s);
+    /* Budget enforcement is bounded to 100ms when idle, but runs immediately
+     * after stream/reap events. This keeps capability/budget enforcement while
+     * avoiding O(children) scans on zero-time status polls. */
+    static double last_budget_enforcement = 0;
+    double budget_now = now_sec();
+    if (events > 0 || budget_now - last_budget_enforcement >= 0.100) {
+        swarm_enforce_budgets(s);
+        last_budget_enforcement = budget_now;
+    }
 
     return events;
 }
@@ -1256,7 +1515,7 @@ bool swarm_kill(swarm_t *s, int child_id) {
         return false;
     if (c->status != SWARM_RUNNING && c->status != SWARM_STREAMING)
         return false;
-    kill(-c->pid, SIGTERM);
+    swarm_terminate_worker_tree(c->pid, SIGTERM);
     c->status = SWARM_KILLED;
     c->end_time = now_sec();
     return true;
@@ -1281,6 +1540,10 @@ const char *executor_type_name(executor_type_t t) {
             return "claude";
         case EXECUTOR_CODEX:
             return "codex";
+        case EXECUTOR_GROK:
+            return "grok";
+        case EXECUTOR_KIMI:
+            return "kimi";
     }
     return "unknown";
 }
@@ -1335,7 +1598,14 @@ static bool detect_binary(const char *name, char *out_path, size_t out_len) {
     }
 
     /* Fallback: check common absolute locations even when PATH is minimal. */
-    const char *candidates[] = {"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", NULL};
+    const char *home = getenv("HOME");
+    char grok_dir[1024] = "", kimi_dir[1024] = "";
+    if (home && home[0]) {
+        snprintf(grok_dir, sizeof(grok_dir), "%s/.grok/bin", home);
+        snprintf(kimi_dir, sizeof(kimi_dir), "%s/.kimi-code/bin", home);
+    }
+    const char *candidates[] = {grok_dir, kimi_dir, "/opt/homebrew/bin", "/usr/local/bin",
+                                "/usr/bin", NULL};
     for (int i = 0; candidates[i]; i++) {
         if (detect_binary_at(candidates[i], name, out_path, out_len))
             return true;
@@ -1387,12 +1657,37 @@ void swarm_detect_executors(swarm_t *s) {
         }
     }
 
-    /* Detect OpenAI Codex CLI */
+    /* Detect subscription-backed coding CLIs. Authentication remains inside
+     * each CLI; local state is used only as an availability signal. */
     if (detect_binary("codex", e->codex_path, sizeof(e->codex_path))) {
         e->codex_available = check_codex_auth();
         if (e->codex_available) {
             snprintf(e->codex_model, sizeof(e->codex_model), "gpt-5.5");
         }
+    }
+
+    if (detect_binary("grok", e->grok_path, sizeof(e->grok_path))) {
+        const char *home = getenv("HOME");
+        char state[1024];
+        snprintf(state, sizeof(state), "%s/.grok", home ? home : "");
+        e->grok_available = getenv("XAI_API_KEY") != NULL || access(state, R_OK) == 0;
+        if (e->grok_available)
+            /* Current Grok CLI subscription/API lane advertises grok-4.5.
+             * Keep this overridable through spawn_executor's model field. */
+            snprintf(e->grok_model, sizeof(e->grok_model), "grok-4.5");
+    }
+
+    if (detect_binary("kimi", e->kimi_path, sizeof(e->kimi_path))) {
+        const char *home = getenv("HOME");
+        char state[1024];
+        snprintf(state, sizeof(state), "%s/.kimi-code/config.toml", home ? home : "");
+        e->kimi_available = getenv("KIMI_API_KEY") != NULL || access(state, R_OK) == 0;
+        if (e->kimi_available)
+            /* K3 is the flagship subscription lane. The fully-qualified alias
+             * matches Kimi Code's generated config and avoids ambiguity with
+             * Moonshot API/OpenRouter model IDs. K3 currently accepts max
+             * reasoning only and exposes up to a 1M-token context window. */
+            snprintf(e->kimi_model, sizeof(e->kimi_model), "%s", KIMI_CODE_DEFAULT_MODEL);
     }
 }
 
@@ -1478,15 +1773,33 @@ int swarm_spawn_executor(swarm_t *s, int group_id, const char *task, const char 
             return -1;
         bin = e->codex_path;
         const char *m = (model && model[0]) ? model : e->codex_model;
-        exec_argv[0] = bin;
-        exec_argv[1] = "exec";
-        exec_argv[2] = "--json";
-        exec_argv[3] = "-m";
-        exec_argv[4] = m;
+        exec_argv[0] = bin; exec_argv[1] = "exec"; exec_argv[2] = "--json";
+        exec_argv[3] = "-m"; exec_argv[4] = m;
         exec_argv[5] = "--dangerously-bypass-approvals-and-sandbox";
-        exec_argv[6] = "--ephemeral";
-        exec_argv[7] = task;
-        exec_argv[8] = NULL;
+        /* Isolate the swimlane from incompatible user defaults such as the
+         * legacy `model_reasoning_effort = "max"`; current Codex accepts
+         * xhigh, not max. Authentication is still loaded with --ignore-user-config. */
+        exec_argv[6] = "--ignore-user-config";
+        exec_argv[7] = "-c"; exec_argv[8] = "model_reasoning_effort=\"xhigh\"";
+        exec_argv[9] = "--ephemeral"; exec_argv[10] = task; exec_argv[11] = NULL;
+    } else if (executor == EXECUTOR_GROK) {
+        if (!e->grok_available) return -1;
+        bin = e->grok_path;
+        const char *m = (model && model[0]) ? model : e->grok_model;
+        exec_argv[0] = bin; exec_argv[1] = "--single"; exec_argv[2] = task;
+        exec_argv[3] = "--output-format"; exec_argv[4] = "json";
+        exec_argv[5] = "--model"; exec_argv[6] = m;
+        exec_argv[7] = "--permission-mode"; exec_argv[8] = "bypassPermissions";
+        exec_argv[9] = "--no-memory"; exec_argv[10] = NULL;
+    } else if (executor == EXECUTOR_KIMI) {
+        if (!e->kimi_available) return -1;
+        bin = e->kimi_path;
+        const char *m = (model && model[0]) ? model : e->kimi_model;
+        exec_argv[0] = bin; exec_argv[1] = "--prompt"; exec_argv[2] = task;
+        /* Kimi Code rejects --yolo together with non-interactive --prompt.
+         * Prompt mode is already non-interactive, so do not add --yolo here. */
+        exec_argv[3] = "--output-format"; exec_argv[4] = "stream-json";
+        exec_argv[5] = "--model"; exec_argv[6] = m; exec_argv[7] = NULL;
     } else {
         return -1;
     }
@@ -1519,6 +1832,10 @@ int swarm_spawn_executor(swarm_t *s, int group_id, const char *task, const char 
         if (getcwd(cwd, sizeof(cwd)))
             chdir(cwd);
 
+        /* External executor CLIs manage their own auth; keep provider
+         * credentials but still strip inherited authority-escalation flags so
+         * the worker cannot silently inherit the parent's governance posture. */
+        swarm_scrub_child_environment_ex(false);
         swarm_prepare_executor_env(s, executor);
 
         execv(bin, (char *const *)argv);
@@ -1546,7 +1863,9 @@ int swarm_spawn_executor(swarm_t *s, int group_id, const char *task, const char 
     if (model)
         snprintf(c->model, sizeof(c->model), "%s", model);
     else {
-        const char *dm = (executor == EXECUTOR_CLAUDE) ? e->claude_model : e->codex_model;
+        const char *dm = executor == EXECUTOR_CLAUDE ? e->claude_model
+                         : executor == EXECUTOR_CODEX ? e->codex_model
+                         : executor == EXECUTOR_GROK ? e->grok_model : e->kimi_model;
         snprintf(c->model, sizeof(c->model), "%s", dm);
     }
 
@@ -1594,7 +1913,8 @@ bool swarm_child_is_subsidized(const swarm_child_t *c) {
         const char *nm = executor_type_name(c->executor);
         return nm && strstr(ov, nm) != NULL;
     }
-    return c->executor == EXECUTOR_CLAUDE || c->executor == EXECUTOR_CODEX;
+    return c->executor == EXECUTOR_CLAUDE || c->executor == EXECUTOR_CODEX ||
+           c->executor == EXECUTOR_GROK || c->executor == EXECUTOR_KIMI;
 }
 
 double swarm_budget_remaining(swarm_t *s) {
@@ -1625,7 +1945,8 @@ double swarm_estimate_task_cost(swarm_t *s, const char *model) {
         return st->ema_cost_per_turn;
     }
     /* Fallback: estimate from registry (assume ~2k input + 500 output tokens) */
-    const model_info_t *mi = model_lookup(model);
+    model_info_t priced_model;
+    const model_info_t *mi = model_lookup_priced(model, &priced_model);
     if (mi) {
         return mi->input_price * 2000 / 1e6 + mi->output_price * 500 / 1e6;
     }
@@ -1703,7 +2024,8 @@ static void parse_child_cost_report(swarm_child_t *c) {
         int output_tokens = atoi(out_tok + 20);
         c->est_input_tokens = input_tokens;
         c->est_output_tokens = output_tokens;
-        const model_info_t *mi = model_lookup(c->model);
+        model_info_t priced_model;
+        const model_info_t *mi = model_lookup_priced(c->model, &priced_model);
         if (mi) {
             c->reported_cost_usd =
                 input_tokens * mi->input_price / 1e6 + output_tokens * mi->output_price / 1e6;
@@ -1995,7 +2317,8 @@ int swarm_group_render_frame(swarm_t *s, int group_id, const char *run_id,
 
 int swarm_group_persist_run(swarm_t *s, int group_id, const char *run_id,
                             const char *topology, const char *user_prompt,
-                            const char *coordinator_output,
+                            const char *coordinator_output, bool run_complete,
+                            const char *reason,
                             char *out_dir, size_t out_dir_len) {
     if (!s || group_id < 0 || group_id >= s->group_count) return -1;
     swarm_poll(s, 0);
@@ -2013,34 +2336,71 @@ int swarm_group_persist_run(swarm_t *s, int group_id, const char *run_id,
     if (swarm_v1_mkdir_p(root) != 0) return -1;
     if (out_dir && out_dir_len) snprintf(out_dir, out_dir_len, "%s", root);
 
+    if (topology && topology[0] && strcmp(topology, "collect") != 0 &&
+        strcmp(topology, "status") != 0)
+        snprintf(g->topology, sizeof(g->topology), "%s", topology);
+    const char *effective_topology = g->topology[0] ? g->topology
+                                                    : (topology ? topology : "map_reduce");
+
     int done = swarm_group_done_count(s, group_id);
     int errors = swarm_group_error_count(s, group_id) + swarm_group_killed_count(s, group_id);
-    const char *status = errors ? (done ? "partial" : "failed") : (swarm_group_complete(s, group_id) ? "done" : "mapping");
+    int active = swarm_group_active_count(s, group_id);
+    const char *status = run_complete ? (errors ? "partial" : "complete")
+                                      : (active > 0 ? "mapping" : "failed");
 
+    char num[128];
     jbuf_t b; jbuf_init(&b, 8192);
     jbuf_append(&b, "{\"schema\":\"dsco.swarm_run.v2\",\"run_id\":");
     jbuf_append_json_str(&b, safe_id);
     jbuf_append(&b, ",\"name\":"); jbuf_append_json_str(&b, g->name);
-    jbuf_append(&b, ",\"topology\":"); jbuf_append_json_str(&b, topology ? topology : "map_reduce");
+    jbuf_append(&b, ",\"group\":"); jbuf_append_json_str(&b, g->name);
+    jbuf_append(&b, ",\"group_id\":");
+    snprintf(num, sizeof(num), "%d", group_id); jbuf_append(&b, num);
+    jbuf_append(&b, ",\"topology\":"); jbuf_append_json_str(&b, effective_topology);
     jbuf_append(&b, ",\"status\":"); jbuf_append_json_str(&b, status);
-    char num[128];
+    jbuf_append(&b, ",\"complete\":"); jbuf_append(&b, run_complete ? "true" : "false");
+    jbuf_append(&b, ",\"reason\":");
+    if (reason && reason[0]) jbuf_append_json_str(&b, reason); else jbuf_append(&b, "null");
     snprintf(num, sizeof(num), ",\"worker_count\":%d,\"completed_workers\":%d,\"failed_workers\":%d,\"estimated_cost_usd\":%.6f",
              g->child_count, done, errors, swarm_group_est_cost_usd(s, group_id));
     jbuf_append(&b, num);
     jbuf_append(&b, ",\"user_prompt\":"); jbuf_append_json_str(&b, user_prompt ? user_prompt : "");
     jbuf_append(&b, ",\"coordinator_output\":"); jbuf_append_json_str(&b, coordinator_output ? coordinator_output : "");
+    jbuf_append(&b, ",\"tasks\":[");
+    for (int i = 0; i < g->child_count; i++) {
+        if (i) jbuf_append(&b, ",");
+        jbuf_append_json_str(&b, s->children[g->child_ids[i]].task);
+    }
+    jbuf_append(&b, "]");
     jbuf_append(&b, ",\"workers\":[");
     for (int i = 0; i < g->child_count; i++) {
         swarm_child_t *c = &s->children[g->child_ids[i]];
         if (i) jbuf_append(&b, ",");
-        jbuf_append(&b, "{\"worker_id\":");
+        jbuf_append(&b, "{\"id\":");
         snprintf(num, sizeof(num), "%d", c->id); jbuf_append(&b, num);
+        jbuf_append(&b, ",\"worker_id\":");
+        snprintf(num, sizeof(num), "%d", c->id); jbuf_append(&b, num);
+        jbuf_append(&b, ",\"task\":"); jbuf_append_json_str(&b, c->task);
         jbuf_append(&b, ",\"role\":"); jbuf_append_json_str(&b, c->task);
         jbuf_append(&b, ",\"status\":"); jbuf_append_json_str(&b, swarm_v1_status_word(c));
-        snprintf(num, sizeof(num), ",\"elapsed_seconds\":%.3f,\"estimated_cost_usd\":%.6f,\"output\":",
-                 swarm_child_elapsed_sec(c), c->est_cost_usd);
+        snprintf(num, sizeof(num),
+                 ",\"exit_code\":%d,\"elapsed_sec\":%.3f,\"elapsed_seconds\":%.3f,"
+                 "\"estimated_cost_usd\":%.6f,\"output\":",
+                 c->exit_code, swarm_child_elapsed_sec(c), swarm_child_elapsed_sec(c),
+                 c->est_cost_usd);
         jbuf_append(&b, num);
         jbuf_append_json_str(&b, c->output ? c->output : "");
+        jbuf_append(&b, "}");
+    }
+    jbuf_append(&b, "],\"results\":[");
+    for (int i = 0; i < g->child_count; i++) {
+        swarm_child_t *c = &s->children[g->child_ids[i]];
+        if (i) jbuf_append(&b, ",");
+        jbuf_append(&b, "{\"id\":");
+        snprintf(num, sizeof(num), "%d", c->id); jbuf_append(&b, num);
+        jbuf_append(&b, ",\"status\":"); jbuf_append_json_str(&b, swarm_v1_status_word(c));
+        jbuf_append(&b, ",\"output_bytes\":");
+        snprintf(num, sizeof(num), "%zu", c->output_len); jbuf_append(&b, num);
         jbuf_append(&b, "}");
     }
     jbuf_append(&b, "]}");

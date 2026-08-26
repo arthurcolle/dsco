@@ -60,6 +60,9 @@ static void agents_usage(FILE *out, const char *prog) {
     fprintf(out,
             "usage:\n"
             "  %s agents create <id> [--parent ID] [--role ROLE] [--model MODEL] [--toolkit JSON]\n"
+            "       [--organization ID --deployment ID --role-id ID --policy-sha256 HEX]\n"
+            "       [--capsule-sha256 HEX --graphsub-namespace NS --router-project ID]\n"
+            "       [--capabilities JSON --budget-gsu N --budget-usd N]\n"
             "  %s agents list [--json]\n"
             "  %s agents status <id> [--json]\n"
             "  %s agents tui [--once] [--interval-ms N] [--limit N] [--plain]\n"
@@ -467,6 +470,26 @@ static void append_agent_json(jbuf_t *b, const ipc_agent_info_t *a) {
     jbuf_append_json_str(b, a->model);
     jbuf_append(b, ",\"toolkit\":");
     jbuf_append_json_str(b, a->toolkit);
+    jbuf_append(b, ",\"organization_id\":");
+    jbuf_append_json_str(b, a->organization_id);
+    jbuf_append(b, ",\"deployment_id\":");
+    jbuf_append_json_str(b, a->deployment_id);
+    jbuf_append(b, ",\"role_id\":");
+    jbuf_append_json_str(b, a->role_id);
+    jbuf_append(b, ",\"policy_sha256\":");
+    jbuf_append_json_str(b, a->policy_sha256);
+    jbuf_append(b, ",\"capsule_sha256\":");
+    jbuf_append_json_str(b, a->capsule_sha256);
+    jbuf_append(b, ",\"graphsub_namespace\":");
+    jbuf_append_json_str(b, a->graphsub_namespace);
+    jbuf_append(b, ",\"router_project_id\":");
+    jbuf_append_json_str(b, a->router_project_id);
+    jbuf_append(b, ",\"capabilities\":");
+    jbuf_append_json_str(b, a->capabilities);
+    jbuf_append(b, ",\"budget_gsu\":");
+    jbuf_appendf(b, "%.15g", a->budget_gsu);
+    jbuf_append(b, ",\"budget_usd\":");
+    jbuf_appendf(b, "%.15g", a->budget_usd);
     jbuf_append(b, ",\"pid\":");
     jbuf_append_int(b, a->pid);
     jbuf_append(b, ",\"alive\":");
@@ -560,6 +583,27 @@ int durable_agents_cli(int argc, char **argv) {
         const char *role = arg_value(argc - 4, argv + 4, "--role", "");
         const char *model = arg_value(argc - 4, argv + 4, "--model", "claude-fable-5");
         const char *toolkit = arg_value(argc - 4, argv + 4, "--toolkit", "*");
+        ipc_agent_binding_t binding = {
+            .organization_id = arg_value(argc - 4, argv + 4, "--organization", ""),
+            .deployment_id = arg_value(argc - 4, argv + 4, "--deployment", ""),
+            .role_id = arg_value(argc - 4, argv + 4, "--role-id", ""),
+            .policy_sha256 = arg_value(argc - 4, argv + 4, "--policy-sha256", ""),
+            .capsule_sha256 = arg_value(argc - 4, argv + 4, "--capsule-sha256", ""),
+            .graphsub_namespace = arg_value(argc - 4, argv + 4, "--graphsub-namespace", ""),
+            .router_project_id = arg_value(argc - 4, argv + 4, "--router-project", ""),
+            .capabilities = arg_value(argc - 4, argv + 4, "--capabilities", "[]"),
+            .budget_gsu = atof(arg_value(argc - 4, argv + 4, "--budget-gsu", "0")),
+            .budget_usd = atof(arg_value(argc - 4, argv + 4, "--budget-usd", "0")),
+        };
+        bool has_binding = binding.organization_id[0] || binding.deployment_id[0] ||
+                           binding.role_id[0] || binding.policy_sha256[0] ||
+                           binding.capsule_sha256[0];
+        if (has_binding && (!binding.organization_id[0] || !binding.deployment_id[0] ||
+                            !binding.role_id[0] || strlen(binding.policy_sha256) != 64 ||
+                            strlen(binding.capsule_sha256) != 64)) {
+            fprintf(stderr, "dsco agents create: incomplete organization binding\n");
+            return 2;
+        }
         if (!open_agents_db("agents-cli")) {
             fprintf(stderr, "dsco agents: could not open durable bus\n");
             return 1;
@@ -569,7 +613,8 @@ int durable_agents_cli(int argc, char **argv) {
             ipc_agent_info_t p;
             depth = ipc_get_agent(parent, &p) ? p.depth + 1 : 1;
         }
-        bool ok = ipc_agent_define(id, parent, depth, role, model, toolkit);
+        bool ok = ipc_agent_define_bound(id, parent, depth, role, model, toolkit,
+                                         has_binding ? &binding : NULL);
         ipc_shutdown();
         if (!ok) {
             fprintf(stderr, "dsco agents: failed to create %s\n", id);

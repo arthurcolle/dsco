@@ -14,6 +14,7 @@
 #define NATIVE_UI_MAX_DIRTY_REGIONS 32
 #define NATIVE_UI_TEXT_CAP 192
 #define NATIVE_UI_LABEL_CAP 96
+#define NATIVE_UI_COMPOSER_MAX_ROWS 8
 
 typedef struct { int x, y, width, height; } native_ui_rect_t;
 typedef struct { int top, right, bottom, left; } native_ui_insets_t;
@@ -249,6 +250,23 @@ typedef struct {
     int backing_scale;
 } native_ui_viewport_metrics_t;
 
+/* Backend-neutral wrapping for the persistent composer. Byte offsets always
+ * point into the caller-owned UTF-8 string; a backend can shape each visible
+ * row with its own font while sharing cursor/scroll behavior with ANSI. */
+typedef struct {
+    size_t byte_start;
+    size_t byte_end;
+} native_ui_composer_row_t;
+
+typedef struct {
+    native_ui_composer_row_t rows[NATIVE_UI_COMPOSER_MAX_ROWS];
+    int row_count;
+    int total_rows;
+    int first_row;
+    int cursor_row;
+    int cursor_column;
+} native_ui_composer_layout_t;
+
 /* Rendering stays backend-neutral. Any callback may be NULL. */
 typedef struct {
     void (*begin_frame)(void *context, native_ui_rect_t viewport,
@@ -296,6 +314,10 @@ native_ui_viewport_metrics_t native_ui_terminal_viewport(int columns, int rows,
                                                          int physical_height,
                                                          int requested_scale);
 native_ui_agent_shell_layout_t native_ui_agent_shell_layout(int width, int height);
+native_ui_composer_layout_t native_ui_composer_layout(const char *text,
+                                                      size_t cursor_byte,
+                                                      int columns,
+                                                      int max_rows);
 const char *native_ui_role_name(native_ui_role_t role);
 const char *native_ui_agent_state_name(native_ui_agent_state_t state);
 

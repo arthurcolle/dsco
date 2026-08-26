@@ -102,7 +102,7 @@ and no mandatory hosted control plane.
 
 | Property | Current value |
 |---|---:|
-| Version | `1.0.2` |
+| Version | `1.1.0` candidate (not yet tagged or published) |
 | Runtime | Native C, default build standard `c2y` |
 | Source size | ~199K LOC across top-level `src/*.c` + `include/*.h` |
 | Source files | 136 `.c` / 138 `.h` top-level |
@@ -147,7 +147,7 @@ new operator should know first.
 | MCP servers | 64 | Upper bound for configured MCP server processes. |
 | MCP tools | 2,048 | Upper bound for MCP-discovered tools before profile/dynamic loading. |
 | MCP line size | 256 KiB | JSON-RPC stdio line bound for MCP transport. |
-| Default model alias | `openai/gpt-5.5` | ChatGPT subscription-routed default in `include/config.h`; can be overridden with `-m` or `DSCO_MODEL`. |
+| Default provider / model / effort | `openai-codex` / `gpt-5.6-luna` / `xhigh` | Native ChatGPT subscription route from `include/config.h`; override with `--provider`, `-m`, `--effort`, or their environment equivalents. |
 | Max output reserve | 16,384 tokens | Default output token reserve; `DSCO_MAX_TOKENS` can override. |
 | Agent checkpoint cadence | 40 turns | `MAX_AGENT_TURNS` is a progress checkpoint cadence, not the primary stop wall. |
 | Hard turn ceiling | 100,000 | Emergency runaway backstop; normal stops are budget/context/interrupt/no-progress. |
@@ -160,6 +160,27 @@ new operator should know first.
 The exhaustive generated reference lives at
 [`docs/CONSTANTS_ENV_INDEX.md`](docs/CONSTANTS_ENV_INDEX.md) and the machine
 index at `data/constants_env_index.json`.
+
+## Native subscription throughput
+
+DSCO keeps paid subscription allocations distinct from metered API keys and can
+probe the configured tier-1 transports without spawning provider CLIs:
+
+```bash
+./dsco --subscription-lanes
+./dsco --subscription-bench --subscription-bench-rounds 3 \
+  --subscription-bench-max-tokens 128 \
+  -p 'Write one compact paragraph of about 80 tokens.'
+```
+
+The current tier-1 catalog covers Claude Max, ChatGPT Codex, Kimi Code (`kimi-code/k3`), Sakana
+Fugu, and Z.AI Coding Plan. The JSON benchmark reports native endpoint/auth
+classification, TTFT, total latency, and defensible decode throughput. Direct
+OpenAI/Anthropic API keys, Sakana PAYG, and OpenRouter remain metered and are
+excluded from this surface. Kimi OAuth expiry and 401 recovery are handled
+in-process with atomic credential rotation. See
+[`docs/fabric/LANES.md`](docs/fabric/LANES.md) for the lane contract and output
+semantics.
 
 ## Quick install
 
@@ -223,6 +244,21 @@ ape ./dsco.distributed.systems --version      # macOS zsh / Apple Silicon
 
 See [`docs/COSMOPOLITAN.md`](docs/COSMOPOLITAN.md) for the portable build lane,
 toolchain pin, and native-dependency boundaries.
+
+### Google Pixel Fold field runtime
+
+The Android lane builds DSCO natively inside official Termux and installs a
+fold-aware, capability-minimal `dsco-device` entrypoint:
+
+```bash
+cd ~/dsco/dsco-cli
+bash scripts/pixel-fold/install-termux
+dsco-device
+```
+
+See [`docs/PIXEL_FOLD_FIELD_RUNTIME.md`](docs/PIXEL_FOLD_FIELD_RUNTIME.md) for
+deployment, governance defaults, device verification, and the native adaptive
+shell roadmap.
 
 ## First run
 

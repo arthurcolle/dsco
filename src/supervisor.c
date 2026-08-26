@@ -19,6 +19,7 @@
 
 #include "supervisor.h"
 #include "env_config.h"
+#include "ring_buffer.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -77,6 +78,8 @@
 #define DSCO_SESSION_MIN_BUDGET_MB  256
 
 #define INCIDENT_SNIPPET_BYTES  8192
+
+static metric_ring_t g_metrics_ring;
 
 static double now_monotonic(void) {
     struct timespec ts;
@@ -280,13 +283,23 @@ bool supervisor_resolve_hotswap_exec(const char *current_path,
 
 static void append_child_metric(const char *path, pid_t child, double uptime,
                                 uint64_t rss, uint64_t peak_rss, int pressure) {
+    /* Push into the in-memory ring buffer for heatgraph export */
+    metric_sample_t s = {
+        .ts = (uint64_t)time(NULL),
+        .child = child,
+        .rss = rss,
+        .peak_rss = peak_rss,
+        .pressure = pressure,
+    };
+    ring_push(&g_metrics_ring, &s);
+
     FILE *f = fopen(path, "a");
     if (!f) return;
     fprintf(f,
             "{\"ts\":%lld,\"supervisor_pid\":%d,\"child_pid\":%d,"
             "\"uptime_s\":%.3f,\"rss_mb\":%llu,\"peak_rss_mb\":%llu,"
             "\"mem_pressure\":%d}\n",
-            (long long)time(NULL), (int)getpid(), (int)child, uptime,
+            (long long)s.ts, (int)getpid(), (int)child, uptime,
             (unsigned long long)(rss >> 20),
             (unsigned long long)(peak_rss >> 20),
             pressure);
@@ -1521,5 +1534,147 @@ int supervisor_run(int child_argc, char **child_argv) {
         sleep_ms(current_backoff);
         current_backoff *= 2;
         if (current_backoff > backoff_max_ms) current_backoff = backoff_max_ms;
+    }
+}
+
+/* ── Heatgraph export implementation ──────────────────────────────────────── */
+
+size_t supervisor_metrics_count(void) {
+    return ring_count(&g_metrics_ring);
+}
+
+static int dump_json(const char *output_path) {
+    FILE *f = output_path ? fopen(output_path, "w") : stdout;
+    if (!f) return -1;
+
+    fprintf(f, "{\"samples\":[\n");
+    size_t n = ring_count(&g_metrics_ring);
+    for (size_t i = 0; i < n; i++) {
+        const metric_sample_t *s = ring_get(&g_metrics_ring, i);
+        if (!s) continue;
+        fprintf(f, "{\"ts\":%llu,\"child\":%d,\"rss\":%llu,\"peak_rss\":%llu,\"pressure\":%d}",
+                (unsigned long long)s->ts, (int)s->child,
+                (unsigned long long)s->rss, (unsigned long long)s->peak_rss,
+                s->pressure);
+        if (i + 1 < n) fprintf(f, ",");
+        fprintf(f, "\n");
+    }
+    fprintf(f, "]}\n");
+
+    if (output_path) fclose(f);
+    return 0;
+}
+
+static int dump_csv(const char *output_path) {
+    FILE *f = output_path ? fopen(output_path, "w") : stdout;
+    if (!f) return -1;
+
+    fprintf(f, "timestamp,child_pid,rss_bytes,peak_rss_bytes,pressure\n");
+    size_t n = ring_count(&g_metrics_ring);
+    for (size_t i = 0; i < n; i++) {
+        const metric_sample_t *s = ring_get(&g_metrics_ring, i);
+        if (!s) continue;
+        fprintf(f, "%llu,%d,%llu,%llu,%d\n",
+                (unsigned long long)s->ts, (int)s->child,
+                (unsigned long long)s->rss, (unsigned long long)s->peak_rss,
+                s->pressure);
+    }
+
+    if (output_path) fclose(f);
+    return 0;
+}
+
+static int dump_heatgraph(const char *output_path) {
+    FILE *f = output_path ? fopen(output_path, "w") : stdout;
+    if (!f) return -1;
+
+    /* Aggregate by time bucket (10-second windows) and child */
+    #define BUCKET_SIZE 10
+    #define MAX_CHILDREN 64
+
+    size_t n = ring_count(&g_metrics_ring);
+    if (n == 0) {
+        fprintf(f, "{\"buckets\":[],\"children\":[]}\n");
+        if (output_path) fclose(f);
+        return 0;
+    }
+
+    /* Collect unique children */
+    pid_t children[MAX_CHILDREN];
+    size_t child_count = 0;
+    for (size_t i = 0; i < n && child_count < MAX_CHILDREN; i++) {
+        const metric_sample_t *s = ring_get(&g_metrics_ring, i);
+        if (!s) continue;
+        bool found = false;
+        for (size_t j = 0; j < child_count; j++) {
+            if (children[j] == s->child) { found = true; break; }
+        }
+        if (!found) children[child_count++] = s->child;
+    }
+
+    /* Find time range */
+    const metric_sample_t *first = ring_get(&g_metrics_ring, 0);
+    const metric_sample_t *last = ring_get(&g_metrics_ring, n - 1);
+    uint64_t t_start = first->ts;
+    uint64_t t_end = last->ts;
+
+    /* Create buckets */
+    size_t num_buckets = (t_end - t_start) / BUCKET_SIZE + 1;
+    if (num_buckets > 10000) num_buckets = 10000; /* safety limit */
+
+    fprintf(f, "{\"time_start\":%llu,\"time_end\":%llu,\"bucket_size\":%d,",
+            (unsigned long long)t_start, (unsigned long long)t_end, BUCKET_SIZE);
+    fprintf(f, "\"children\":[");
+    for (size_t i = 0; i < child_count; i++) {
+        fprintf(f, "%d", (int)children[i]);
+        if (i + 1 < child_count) fprintf(f, ",");
+    }
+    fprintf(f, "],\"buckets\":[\n");
+
+    for (size_t b = 0; b < num_buckets; b++) {
+        uint64_t bucket_ts = t_start + b * BUCKET_SIZE;
+        fprintf(f, "{\"ts\":%llu,\"data\":{", (unsigned long long)bucket_ts);
+
+        for (size_t c = 0; c < child_count; c++) {
+            uint64_t sum_rss = 0, sum_pressure = 0;
+            size_t count = 0;
+
+            for (size_t i = 0; i < n; i++) {
+                const metric_sample_t *s = ring_get(&g_metrics_ring, i);
+                if (!s) continue;
+                if (s->child != children[c]) continue;
+                if (s->ts < bucket_ts || s->ts >= bucket_ts + BUCKET_SIZE) continue;
+                sum_rss += s->rss;
+                sum_pressure += s->pressure;
+                count++;
+            }
+
+            if (count > 0) {
+                fprintf(f, "\"%d\":{\"avg_rss\":%llu,\"avg_pressure\":%.1f,\"samples\":%zu}",
+                        (int)children[c],
+                        (unsigned long long)(sum_rss / count),
+                        (double)sum_pressure / count,
+                        count);
+                if (c + 1 < child_count) fprintf(f, ",");
+            }
+        }
+
+        fprintf(f, "}}");
+        if (b + 1 < num_buckets) fprintf(f, ",");
+        fprintf(f, "\n");
+    }
+
+    fprintf(f, "]}\n");
+
+    if (output_path) fclose(f);
+    return 0;
+}
+
+int supervisor_metrics_dump(metrics_format_t format, const char *output_path) {
+    switch (format) {
+        case METRICS_FORMAT_JSON: return dump_json(output_path);
+        case METRICS_FORMAT_CSV: return dump_csv(output_path);
+        case METRICS_FORMAT_HEATGRAPH: return dump_heatgraph(output_path);
+        default: return -1;
     }
 }

@@ -6,16 +6,49 @@ The format loosely follows Keep a Changelog with an `Unreleased` section.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [1.1.0] - 2026-08-26
+
+Promoted from the mixed working tree per the principal's release authorization:
+candidate isolated and committed (`5fc0d8b`), full test suite green
+(5,227/5,227), capability-gate end-to-end claim verifier passed (6/0/2 env-skipped),
+build clean on arm64 macOS.
+
 ### Added
 
-- Chronicle local activity ledger docs now cover startup behavior, env controls, and timeline-server endpoints.
+- Agent Client Protocol server mode, cloud/runtime ceilings, Context Fabric,
+  expanded provider subscription lanes, and native compositor subsystems.
+- Durable swarm supervision, provider-fabric coverage scheduling, richer executor
+  lanes, and evidence-preserving composite reduction.
+- A 48-slot adaptive tool register with larger quorum-scored working and compact
+  progressive-discovery banks.
+- Deno-style resource-scoped capability grants (`--allow-read=/path`,
+  `--allow-net=host`) and background-shell manager tools.
+- Chronicle local activity ledger docs now cover startup behavior, env controls,
+  and timeline-server endpoints.
 - Integration catalog docs now surface Codex app-directory discovery and doctor tooling.
 - External tool catalog docs now materialize the cached Codex app-directory universe separately from built-in tools.
 - Repository coverage docs now generate a tracked-file manifest for docs review.
 - Cosmopolitan build docs now include the Makefile `cosmo-info` target and native-dependency gating notes.
 
+### Changed
+
+- Swarm workers now return engineering-grade evidence, failure modes,
+  implementation details, and verification criteria for composite synthesis.
+- Tool execution, dynamic external tools, and field-device launchers use tighter
+  capability classification and non-escalatable control defaults.
+- Regenerated generated docs: API reference, built-in tool catalog, and constants/env index.
+- `make docs` / `make docs-check` now include constants/env, external tool catalog, and repo coverage generators.
+- README and docs index now reflect current source counts, built-in tool count, Chronicle, integrations, and Cosmopolitan build lane.
+
 ### Fixed
 
+- Corrected register-bank allocation invariants and canonical Python tool naming.
+- Bounded embedded-data registry traversal and cryptographic keystream blocks.
+- Removed undefined standard-stream manipulation from TUI tests and closed a
+  C-string self-test failure-path resource leak.
+- Classified `tm__*` dynamic tools as network plus untrusted-input capabilities.
 - Vision input: downscaled images now report the correct media type. When a large
   PNG/HEIC/WEBP is resized to JPEG, `load_and_encode_image` now propagates the
   corrected `image/jpeg` media type to the caller instead of mislabeling the JPEG
@@ -23,12 +56,6 @@ The format loosely follows Keep a Changelog with an `Unreleased` section.
 - Hardened `print_tool_result_ex` against a NULL `result` pointer (latent null
   dereference in the size-preview path; the function already null-guards the body
   preview below it).
-
-### Changed
-
-- Regenerated generated docs: API reference, built-in tool catalog, and constants/env index.
-- `make docs` / `make docs-check` now include constants/env, external tool catalog, and repo coverage generators.
-- README and docs index now reflect current source counts, built-in tool count, Chronicle, integrations, and Cosmopolitan build lane.
 
 ## [1.0.2] - 2026-06-26
 

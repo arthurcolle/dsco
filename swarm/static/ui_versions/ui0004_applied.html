@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SWARM CONSOLE</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --surface:#1a1a19; --panel:#201f1e; --panel-2:#242322; --line:#2e2d2b; --line-2:#3a3835;
+  --ink:#e8e6df; --ink-2:#a6a49a; --ink-3:#6f6d64;
+  --s1:#3987e5; --s2:#199e70; --s3:#c98500; --s4:#008300; --s5:#9085e9; --s6:#e66767;
+  --good:#0ca30c; --warn:#fab219; --serious:#ec835a; --critical:#d03b3b;
+  --seq-lo:#184f95; --seq-hi:#3987e5;
+  --disp:"Big Shoulders Display",sans-serif; --mono:"IBM Plex Mono",monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{background:var(--surface)}
+body{
+  font-family:var(--mono); color:var(--ink); font-size:13px; min-height:100vh;
+  background:
+    repeating-linear-gradient(0deg, transparent 0 2px, rgba(255,255,255,.006) 2px 4px),
+    radial-gradient(1200px 500px at 70% -10%, rgba(57,135,229,.05), transparent 60%),
+    var(--surface);
+}
+.wrap{max-width:1480px;margin:0 auto;padding:0 20px 80px}
+
+/* ── top bar ── */
+header{
+  display:flex;align-items:baseline;gap:18px;padding:18px 0 14px;
+  border-bottom:1px solid var(--line-2);
+}
+.brand{font-family:var(--disp);font-weight:800;font-size:34px;letter-spacing:.04em;line-height:1}
+.brand em{font-style:normal;color:var(--s1)}
+.rec{display:inline-flex;align-items:center;gap:7px;color:var(--ink-2);font-size:11px;letter-spacing:.14em}
+.rec i{width:8px;height:8px;border-radius:50%;background:var(--critical);animation:pulse 1.6s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+.meta{margin-left:auto;color:var(--ink-3);font-size:11px;text-align:right;line-height:1.7}
+.meta b{color:var(--ink-2);font-weight:500}
+
+/* ── ticker ── */
+.ticker{display:flex;gap:26px;overflow:hidden;padding:8px 0;border-bottom:1px solid var(--line);
+  color:var(--ink-3);font-size:11px;white-space:nowrap}
+.ticker span b{color:var(--ink-2);font-weight:500}
+
+/* ── stat tiles ── */
+.tiles{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:18px 0}
+.tile{
+  background:var(--panel);border:1px solid var(--line);padding:14px 16px 12px;position:relative;
+  clip-path:polygon(0 0,100% 0,100% calc(100% - 14px),calc(100% - 14px) 100%,0 100%);
+}
+.tile .k{font-size:10px;letter-spacing:.22em;color:var(--ink-3)}
+.tile .v{font-family:var(--disp);font-weight:700;font-size:44px;line-height:1.05;margin-top:2px;
+  font-variant-numeric:tabular-nums}
+.tile .sub{font-size:10px;color:var(--ink-3);margin-top:2px}
+.tile.accent .v{color:var(--s1)}
+.tile.good .v{color:var(--good)} .tile.warn .v{color:var(--warn)} .tile.crit .v{color:var(--critical)}
+.tile::after{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--line-2)}
+.tile.good::after{background:var(--good)} .tile.warn::after{background:var(--warn)}
+.tile.crit::after{background:var(--critical)} .tile.accent::after{background:var(--s1)}
+
+/* ── panels & grid ── */
+.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:10px}
+.panel{background:var(--panel);border:1px solid var(--line);padding:0 0 10px;min-width:0}
+.panel h2{
+  font-family:var(--disp);font-weight:700;font-size:17px;letter-spacing:.12em;color:var(--ink-2);
+  padding:10px 14px 8px;border-bottom:1px solid var(--line);display:flex;align-items:baseline;gap:10px}
+.panel h2 small{font-family:var(--mono);font-weight:400;font-size:10px;color:var(--ink-3);letter-spacing:.05em}
+.span8{grid-column:span 8}.span4{grid-column:span 4}.span12{grid-column:span 12}
+.pad{padding:12px 14px}
+@media (max-width:1050px){.span8,.span4{grid-column:span 12}.tiles{grid-template-columns:repeat(2,1fr)}}
+
+/* ── swimlane board ── */
+.lane-row{display:grid;grid-template-columns:190px 1fr 120px;align-items:center;gap:0;
+  border-bottom:1px dashed var(--line);min-height:52px}
+.lane-row:last-child{border-bottom:0}
+.lane-name{display:flex;align-items:center;gap:8px;padding:0 12px;font-size:11px;color:var(--ink-2);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip{width:10px;height:10px;flex:none;border-radius:2px}
+.lane-stats{font-size:10px;color:var(--ink-3);text-align:right;padding-right:14px;line-height:1.6}
+.lane-stats b{color:var(--ink-2);font-weight:500}
+.lane-track{position:relative;height:52px;border-left:1px solid var(--line)}
+.lane-track svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.board-axis{display:grid;grid-template-columns:190px 1fr 120px;color:var(--ink-3);font-size:9px}
+.board-axis .ax{border-left:1px solid var(--line);position:relative;height:16px}
+.board-axis .ax span{position:absolute;top:2px;transform:translateX(-50%)}
+
+/* ── bars ── */
+.bars svg{display:block;width:100%}
+.bar-label{font-size:11px;fill:var(--ink-2)}
+.bar-val{font-size:11px;fill:var(--ink);font-weight:600}
+.meter{height:4px;background:var(--panel-2);position:relative}
+.meter i{position:absolute;left:0;top:0;bottom:0;background:var(--good)}
+
+/* ── state strip ── */
+.strip{display:flex;height:26px;gap:2px;margin:4px 0 10px}
+.strip i{display:block;min-width:3px;transition:width .4s}
+.strip-legend{display:flex;flex-wrap:wrap;gap:14px;font-size:10px;color:var(--ink-2)}
+.strip-legend .chip{border-radius:50%}
+.strip-legend span{display:inline-flex;align-items:center;gap:6px}
+
+/* ── charts ── */
+.chart{position:relative}
+.chart svg{display:block;width:100%}
+.axis-t{font-size:9px;fill:var(--ink-3)}
+.gridline{stroke:var(--line);stroke-width:1}
+.crosshair{stroke:var(--line-2);stroke-width:1;stroke-dasharray:3 3}
+.flow{animation:dashflow 1.6s linear infinite;stroke-linecap:round}
+@keyframes dashflow{to{stroke-dashoffset:-18}}
+
+/* ── table ── */
+table{width:100%;border-collapse:collapse;font-size:11px}
+th{font-size:9px;letter-spacing:.18em;color:var(--ink-3);text-align:left;font-weight:500;
+  padding:8px 10px;border-bottom:1px solid var(--line)}
+td{padding:7px 10px;border-bottom:1px solid var(--line);color:var(--ink-2);vertical-align:top}
+tr.row{cursor:pointer}
+tr.row:hover td{background:var(--panel-2);color:var(--ink)}
+.mono-id{color:var(--ink-3)}
+.state{display:inline-flex;align-items:center;gap:6px;font-size:10px;letter-spacing:.08em}
+.state i{width:7px;height:7px;border-radius:50%}
+.lane-tag{display:inline-flex;align-items:center;gap:6px;font-size:10px}
+
+/* ── tooltip ── */
+#tip{position:fixed;pointer-events:none;background:#0d0d0c;border:1px solid var(--line-2);
+  padding:7px 10px;font-size:11px;color:var(--ink);z-index:50;display:none;max-width:320px;line-height:1.5}
+#tip .t2{color:var(--ink-3);font-size:10px}
+
+/* ── drawer ── */
+#drawer{position:fixed;top:0;right:0;bottom:0;width:min(620px,94vw);background:var(--panel);
+  border-left:1px solid var(--line-2);transform:translateX(102%);transition:transform .22s ease;
+  z-index:40;overflow-y:auto;box-shadow:-30px 0 60px rgba(0,0,0,.5)}
+#drawer.open{transform:none}
+#drawer .head{position:sticky;top:0;background:var(--panel);border-bottom:1px solid var(--line-2);
+  padding:14px 18px;display:flex;align-items:center;gap:12px}
+#drawer .head h3{font-family:var(--disp);font-size:22px;font-weight:700;letter-spacing:.08em}
+#drawer .close{margin-left:auto;cursor:pointer;color:var(--ink-3);border:1px solid var(--line);
+  padding:4px 10px;font-size:11px;background:none;font-family:var(--mono)}
+#drawer .close:hover{color:var(--ink);border-color:var(--line-2)}
+#drawer .body{padding:16px 18px}
+.kv{display:grid;grid-template-columns:110px 1fr;gap:4px 12px;font-size:11px;margin-bottom:14px}
+.kv .k{color:var(--ink-3)}
+pre{background:#141413;border:1px solid var(--line);padding:12px;font-size:11px;line-height:1.55;
+  overflow-x:auto;white-space:pre-wrap;color:var(--ink-2);margin:6px 0 16px}
+.crumb{font-size:10px;color:var(--ink-3);margin-bottom:10px}
+.crumb a{color:var(--s1);text-decoration:none;cursor:pointer}
+.child{display:flex;gap:10px;align-items:center;padding:6px 0;border-bottom:1px dashed var(--line);
+  font-size:11px;cursor:pointer}
+.child:hover{color:var(--ink)}
+section h4{font-size:10px;letter-spacing:.2em;color:var(--ink-3);margin:14px 0 6px;font-weight:500}
+</style>
+</head>
+<body data-palette="#3987e5,#199e70,#c98500,#008300,#9085e9,#e66767">
+<div class="wrap">
+  <header>
+    <div class="brand">SWARM<em>//</em>CONSOLE</div>
+    <div class="rec"><i></i>LIVE</div>
+    <div class="meta"><b id="m-db">—</b><br><span id="m-clock">—</span> · poll 2.5s</div>
+  </header>
+  <div class="ticker" id="ticker"></div>
+
+  <div class="tiles" id="tiles"></div>
+
+  <div class="grid">
+    <div class="panel span12">
+      <h2>ARCHITECTURE <small>outer loop = gated RSI supervisor · inner loop = task engine · live state</small></h2>
+      <div class="pad" id="arch"></div>
+    </div>
+
+    <div class="panel span8">
+      <h2>SWIMLANES <small>completions · last 30 min · one row per lane</small></h2>
+      <div class="pad" id="board"></div>
+    </div>
+    <div class="span4" style="display:flex;flex-direction:column;gap:10px">
+      <div class="panel">
+        <h2>TASK STATES <small>all time</small></h2>
+        <div class="pad" id="states"></div>
+      </div>
+      <div class="panel" style="flex:1">
+        <h2>LANE LATENCY <small>EMA seconds · meter = success EMA</small></h2>
+        <div class="pad bars" id="latency"></div>
+      </div>
+    </div>
+
+    <div class="panel span12">
+      <h2>THROUGHPUT <small>tasks completed per minute · last hour</small></h2>
+      <div class="pad chart" id="throughput"></div>
+    </div>
+
+    <div class="panel span4">
+      <h2>TASK KINDS <small>count by pipeline stage</small></h2>
+      <div class="pad bars" id="kinds"></div>
+    </div>
+    <div class="panel span8">
+      <h2>RECENT TASKS <small>click a row to inspect</small></h2>
+      <div id="table"></div>
+    </div>
+  </div>
+</div>
+
+<div id="tip"></div>
+<div id="drawer">
+  <div class="head"><h3 id="d-title">TASK</h3><button class="close" onclick="closeDrawer()">ESC / CLOSE</button></div>
+  <div class="body" id="d-body"></div>
+</div>
+
+<script>
+const SLOTS=["#3987e5","#199e70","#c98500","#008300","#9085e9","#e66767","#d55181","#d95926"];
+const STATUS={done:"var(--good)",running:"var(--warn)",pending:"var(--ink-3)",
+              failed:"var(--serious)",dead:"var(--critical)"};
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let laneColor={}, lastData=null;
+
+function assignLanes(names){        // color follows the entity: next FREE slot, never reassigned
+  const used=new Set(Object.values(laneColor));
+  [...names].sort().forEach(n=>{
+    if(!(n in laneColor)){ const c=SLOTS.find(s=>!used.has(s))||"#8a887e"; laneColor[n]=c; used.add(c); }
+  });
+}
+const lc=n=>laneColor[n]||"#8a887e";
+const ago=t=>{const d=Date.now()/1e3-t; return d<60?`${d|0}s`:d<3600?`${d/60|0}m`:`${d/3600|0}h`;};
+const hhmm=t=>new Date(t*1e3).toTimeString().slice(0,5);
+
+/* tooltip */
+const tip=$("#tip");
+function showTip(e,html){tip.innerHTML=html;tip.style.display="block";moveTip(e);}
+function moveTip(e){const w=tip.offsetWidth,h=tip.offsetHeight;
+  tip.style.left=Math.max(12,Math.min(e.clientX+14,innerWidth-w-12))+"px";
+  tip.style.top=Math.max(12,Math.min(e.clientY+14,innerHeight-h-12))+"px";}
+function hideTip(){tip.style.display="none";}
+
+/* ── tiles ── */
+function renderTiles(d){
+  const s=d.states, active=(s.pending||0)+(s.running||0);
+  const rate=d.throughput.slice(-11,-1).reduce((a,b)=>a+b.n,0)/10;
+  $("#tiles").innerHTML=[
+    ["QUEUE DEPTH",(s.pending||0),"pending","accent"],
+    ["IN FLIGHT",(s.running||0),"running now","warn"],
+    ["COMPLETED",(s.done||0),"all time","good"],
+    ["DEAD LETTER",(s.dead||0),"exhausted retries",(s.dead?"crit":"")],
+    ["RATE",rate.toFixed(1),"done / min · 10m avg","accent"],
+  ].map(([k,v,sub,cls])=>`<div class="tile ${cls}"><div class="k">${k}</div>
+     <div class="v">${v}</div><div class="sub">${sub}${k==="QUEUE DEPTH"&&active?` · ${active} active`:""}</div></div>`).join("");
+}
+
+/* ── swimlane board ── */
+function renderBoard(d){
+  const lanes=d.lanes.map(l=>l.lane); assignLanes(lanes);
+  const t1=d.now, t0=t1-1800;
+  const byLane={}; lanes.forEach(n=>byLane[n]=[]);
+  d.dots.forEach(o=>{ (byLane[o.lane]=byLane[o.lane]||[]).push(o); });
+  const rows=d.lanes.map(l=>{
+    const dots=(byLane[l.lane]||[]).map(o=>{
+      const x=((o.t-t0)/(t1-t0)*100).toFixed(2);
+      const deadDot=o.state==="dead";
+      return `<g class="dot" data-id="${o.id}" data-kind="${o.kind}" data-t="${o.t}" data-state="${o.state}">
+        <circle cx="${x}%" cy="26" r="11" fill="transparent"/>
+        <circle cx="${x}%" cy="26" r="${deadDot?4:5}" fill="${deadDot?"var(--critical)":lc(l.lane)}"
+          stroke="var(--panel)" stroke-width="2"/></g>`;
+    }).join("");
+    return `<div class="lane-row">
+      <div class="lane-name"><i class="chip" style="background:${lc(l.lane)}"></i>${esc(l.lane)}</div>
+      <div class="lane-track"><svg preserveAspectRatio="none">${dots}</svg></div>
+      <div class="lane-stats"><b>${l.calls}</b> calls · <b>${l.errors}</b> err<br>ok ${(l.ema_success*100|0)}%</div>
+    </div>`;}).join("");
+  const ticks=[0,.25,.5,.75,1].map(f=>`<span style="left:${f*100}%">${f===1?"now":hhmm(t0+f*1800)}</span>`).join("");
+  $("#board").innerHTML=rows+`<div class="board-axis"><div></div><div class="ax">${ticks}</div><div></div></div>`;
+  $("#board").querySelectorAll(".dot").forEach(g=>{
+    g.style.cursor="pointer";
+    g.addEventListener("mousemove",e=>showTip(e,`<b>${esc(g.dataset.kind)}</b> · ${g.dataset.state}<br>
+      <span class="t2">${g.dataset.id} · ${hhmm(+g.dataset.t)} (${ago(+g.dataset.t)} ago)</span>`));
+    g.addEventListener("mouseleave",hideTip);
+    g.addEventListener("click",()=>openTask(g.dataset.id));
+  });
+}
+
+/* ── state strip ── */
+function renderStates(d){
+  const order=["done","running","pending","failed","dead"];
+  const total=order.reduce((a,k)=>a+(d.states[k]||0),0)||1;
+  const seg=order.filter(k=>d.states[k]).map(k=>
+    `<i style="width:${(d.states[k]/total*100)}%;background:${STATUS[k]}" data-k="${k}" data-n="${d.states[k]}"></i>`).join("");
+  const leg=order.map(k=>`<span><i class="chip" style="background:${STATUS[k]}"></i>${k} <b>${d.states[k]||0}</b></span>`).join("");
+  $("#states").innerHTML=`<div class="strip">${seg}</div><div class="strip-legend">${leg}</div>`;
+  $("#states").querySelectorAll(".strip i").forEach(i=>{
+    i.addEventListener("mousemove",e=>showTip(e,`<b>${i.dataset.k}</b> · ${i.dataset.n} tasks`));
+    i.addEventListener("mouseleave",hideTip);
+  });
+}
+
+/* ── lane latency bars ── */
+function renderLatency(d){
+  assignLanes(d.lanes.map(l=>l.lane));
+  const max=Math.max(...d.lanes.map(l=>l.ema_latency),1);
+  const H=46, rows=d.lanes.map((l,i)=>{
+    const y=i*H, w=Math.max(l.ema_latency/max*62,1.5);
+    return `<g class="lat" data-lane="${esc(l.lane)}" data-v="${l.ema_latency.toFixed(1)}" data-ok="${(l.ema_success*100|0)}">
+      <text class="bar-label" x="0" y="${y+12}">${esc(l.lane)}</text>
+      <rect x="0" y="${y+18}" width="${w}%" height="10" rx="2" fill="${lc(l.lane)}"/>
+      <text class="bar-val" x="${w}%" dx="7" y="${y+27}">${l.ema_latency.toFixed(1)}s</text>
+      <rect x="0" y="${y+33}" width="30%" height="3" fill="var(--panel-2)"/>
+      <rect x="0" y="${y+33}" width="${l.ema_success*30}%" height="3" fill="${l.ema_success<.5?"var(--serious)":"var(--good)"}"/>
+    </g>`;}).join("");
+  $("#latency").innerHTML=`<svg height="${d.lanes.length*H}" style="overflow:visible">${rows}</svg>`;
+  $("#latency").querySelectorAll(".lat").forEach(g=>{
+    g.addEventListener("mousemove",e=>showTip(e,`<b>${esc(g.dataset.lane)}</b><br>
+      <span class="t2">EMA latency ${g.dataset.v}s · success ${g.dataset.ok}%</span>`));
+    g.addEventListener("mouseleave",hideTip);
+  });
+}
+
+/* ── throughput line ── */
+function renderThroughput(d){
+  const W=1200,H=170,P={l:34,r:12,t:12,b:22};
+  const pts=d.throughput, max=Math.max(...pts.map(p=>p.n),4);
+  const X=i=>P.l+i/(pts.length-1)*(W-P.l-P.r);
+  const Y=v=>H-P.b-(v/max)*(H-P.t-P.b);
+  const line=pts.map((p,i)=>`${i?"L":"M"}${X(i).toFixed(1)},${Y(p.n).toFixed(1)}`).join(" ");
+  const area=line+` L${X(pts.length-1)},${H-P.b} L${X(0)},${H-P.b} Z`;
+  const gy=[0,.5,1].map(f=>{const v=Math.round(max*f);
+    return `<line class="gridline" x1="${P.l}" x2="${W-P.r}" y1="${Y(v)}" y2="${Y(v)}"/>
+            <text class="axis-t" x="${P.l-6}" y="${Y(v)+3}" text-anchor="end">${v}</text>`;}).join("");
+  const gx=[0,.25,.5,.75,1].map(f=>{const i=Math.round((pts.length-1)*f);
+    return `<text class="axis-t" x="${X(i)}" y="${H-6}" text-anchor="middle">${f===1?"now":hhmm(pts[i].t)}</text>`;}).join("");
+  $("#throughput").innerHTML=`<svg viewBox="0 0 ${W} ${H}">
+    <defs><linearGradient id="ag" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="var(--seq-hi)" stop-opacity=".28"/>
+      <stop offset="1" stop-color="var(--seq-hi)" stop-opacity="0"/></linearGradient></defs>
+    ${gy}${gx}
+    <path d="${area}" fill="url(#ag)"/>
+    <path d="${line}" fill="none" stroke="var(--seq-hi)" stroke-width="2"/>
+    <line id="xh" class="crosshair" y1="${P.t}" y2="${H-P.b}" x1="-10" x2="-10"/>
+    <circle id="xhd" r="4" fill="var(--seq-hi)" stroke="var(--surface)" stroke-width="2" cx="-10" cy="-10"/>
+    <rect id="hover" x="${P.l}" y="0" width="${W-P.l-P.r}" height="${H}" fill="transparent"/>
+  </svg>`;
+  const svg=$("#throughput svg");
+  $("#hover").addEventListener("mousemove",e=>{
+    const r=svg.getBoundingClientRect(), fx=(e.clientX-r.left)/r.width*W;
+    const i=Math.max(0,Math.min(pts.length-1,Math.round((fx-P.l)/(W-P.l-P.r)*(pts.length-1))));
+    $("#xh").setAttribute("x1",X(i)); $("#xh").setAttribute("x2",X(i));
+    $("#xhd").setAttribute("cx",X(i)); $("#xhd").setAttribute("cy",Y(pts[i].n));
+    showTip(e,`<b>${pts[i].n} done</b><br><span class="t2">${hhmm(pts[i].t)}–${hhmm(pts[i].t+60)}</span>`);
+  });
+  $("#hover").addEventListener("mouseleave",()=>{hideTip();
+    $("#xh").setAttribute("x1",-10);$("#xh").setAttribute("x2",-10);$("#xhd").setAttribute("cy",-10);});
+}
+
+/* ── kinds bars (single-hue ordinal) ── */
+function renderKinds(d){
+  const max=Math.max(...d.kinds.map(k=>k.n),1), H=34;
+  const rows=d.kinds.map((k,i)=>{
+    const y=i*H, w=Math.max(k.n/max*58,2);
+    return `<g><text class="bar-label" x="0" y="${y+11}">${esc(k.kind)}</text>
+      <rect x="0" y="${y+16}" width="${w}%" height="10" rx="2" fill="var(--seq-hi)" opacity="${.55+.45*(k.n/max)}"/>
+      <text class="bar-val" x="${w}%" dx="7" y="${y+25}">${k.n}</text></g>`;}).join("");
+  $("#kinds").innerHTML=`<svg height="${d.kinds.length*H}" style="overflow:visible">${rows}</svg>`;
+}
+
+/* ── table ── */
+function renderTable(d){
+  const rows=d.recent.map(t=>`<tr class="row" onclick="openTask('${t.id}')">
+    <td class="mono-id">${t.id}</td><td>${esc(t.kind)}</td>
+    <td><span class="state"><i style="background:${STATUS[t.state]||"var(--ink-3)"}"></i>${t.state}</span></td>
+    <td>${t.lane?`<span class="lane-tag"><i class="chip" style="background:${lc(t.lane)}"></i>${esc(t.lane)}</span>`:"—"}</td>
+    <td>${t.attempts}</td><td>${ago(t.updated_at)}</td>
+    <td style="max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink-3)">${esc(t.error||"")}</td>
+  </tr>`).join("");
+  $("#table").innerHTML=`<table><thead><tr><th>ID</th><th>KIND</th><th>STATE</th><th>LANE</th>
+    <th>TRIES</th><th>AGE</th><th>LAST ERROR</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+/* ── ticker ── */
+function renderTicker(d){
+  $("#ticker").innerHTML=d.events.map(e=>
+    `<span>${hhmm(e.ts)} <b>${esc(e.event)}</b> ${esc(e.task_id||"")}${e.lane?" · "+esc(e.lane):""}</span>`).join("");
+}
+
+/* ── drawer ── */
+async function openTask(id){
+  const t=await (await fetch(`/api/task/${id}`)).json();
+  if(t.error) return;
+  $("#d-title").textContent=`${t.kind.toUpperCase()} · ${t.id}`;
+  const crumb=t.ancestry.length?`<div class="crumb">lineage: ${t.ancestry.map(a=>
+    `<a onclick="openTask('${a.id}')">${a.kind}:${a.id}</a>`).join(" ← ")}</div>`:"";
+  const kv=`<div class="kv">
+    <div class="k">state</div><div><span class="state"><i style="background:${STATUS[t.state]||"var(--ink-3)"}"></i>${t.state}</span></div>
+    <div class="k">lane</div><div>${t.lane?`<span class="lane-tag"><i class="chip" style="background:${lc(t.lane)}"></i>${esc(t.lane)}</span>`:"—"}</div>
+    <div class="k">attempts</div><div>${t.attempts} / ${t.max_attempts}</div>
+    <div class="k">created</div><div>${new Date(t.created_at*1e3).toLocaleTimeString()} (${ago(t.created_at)} ago)</div>
+    <div class="k">updated</div><div>${new Date(t.updated_at*1e3).toLocaleTimeString()} (${ago(t.updated_at)} ago)</div>
+  </div>`;
+  let result="";
+  if(t.result){
+    const verdict=t.result.verdict||t.result.content;
+    result=verdict?`<section><h4>OUTPUT${t.result.judge_lane?` · judged by ${esc(t.result.judge_lane)}`:""}</h4><pre>${esc(verdict)}</pre></section>`:"";
+    result+=`<section><h4>RESULT JSON</h4><pre>${esc(JSON.stringify(t.result,null,2))}</pre></section>`;
+  }
+  const kids=t.children.length?`<section><h4>CHILDREN · ${t.children.length}</h4>${t.children.map(c=>
+    `<div class="child" onclick="openTask('${c.id}')">
+       <span class="state"><i style="background:${STATUS[c.state]||"var(--ink-3)"}"></i>${c.state}</span>
+       <b>${esc(c.kind)}</b> <span class="mono-id">${c.id}</span>
+       ${c.lane?`<span class="lane-tag"><i class="chip" style="background:${lc(c.lane)}"></i>${esc(c.lane)}</span>`:""}
+     </div>`).join("")}</section>`:"";
+  $("#d-body").innerHTML=crumb+kv+
+    `<section><h4>PAYLOAD</h4><pre>${esc(JSON.stringify(t.payload,null,2))}</pre></section>`+result+kids+
+    (t.error?`<section><h4>LAST ERROR</h4><pre>${esc(t.error)}</pre></section>`:"");
+  $("#drawer").classList.add("open");
+  history.replaceState(null,"",`#task=${t.id}`);
+}
+function closeDrawer(){$("#drawer").classList.remove("open");history.replaceState(null,"",location.pathname);}
+if(location.hash.startsWith("#task=")) openTask(location.hash.slice(6));
+addEventListener("keydown",e=>{if(e.key==="Escape")closeDrawer();});
+
+/* ── architecture diagram (generated from /api/rsi) ── */
+function archBox(x,y,w,h,title,lines,stroke,glow){
+  return `<g>${glow?`<rect x="${x-3}" y="${y-3}" width="${w+6}" height="${h+6}" fill="none"
+      stroke="${stroke}" stroke-opacity=".25" rx="4">
+      <animate attributeName="stroke-opacity" values=".12;.5;.12" dur="2.6s" repeatCount="indefinite"/></rect>`:""}
+    <rect x="${x}" y="${y}" width="${w}" height="${h}" fill="var(--panel-2)" stroke="${stroke}" rx="3"/>
+    <text x="${x+12}" y="${y+21}" style="font-family:var(--disp);font-weight:700;font-size:15px;
+      letter-spacing:.1em" fill="var(--ink)">${title}</text>
+    ${lines.map((l,i)=>`<text x="${x+12}" y="${y+38+i*13}" font-size="10" fill="var(--ink-2)">${l}</text>`).join("")}</g>`;
+}
+function archNode(x,y,label,active,done){
+  const c=active?"var(--warn)":done?"var(--good)":"var(--line-2)";
+  return `<g><circle cx="${x}" cy="${y}" r="17" fill="var(--panel-2)" stroke="${c}" stroke-width="${active?2.5:1.5}"/>
+    ${active?`<circle cx="${x}" cy="${y}" r="19" fill="none" stroke="${c}">
+      <animate attributeName="r" values="19;26;19" dur="1.6s" repeatCount="indefinite"/>
+      <animate attributeName="stroke-opacity" values=".55;.02;.55" dur="1.6s" repeatCount="indefinite"/></circle>`:""}
+    <text x="${x}" y="${y-24}" text-anchor="middle" font-size="9" letter-spacing=".15em"
+      fill="${active?"var(--ink)":"var(--ink-3)"}">${label}</text></g>`;
+}
+function apath(id,d,color,opts={}){
+  return `<path id="${id}" d="${d}" fill="none" stroke="${color||"var(--line-2)"}" stroke-width="1.5"
+    ${opts.dash?`stroke-dasharray="5 4" ${opts.still?"":'class="flow"'}`:""}
+    ${opts.noArrow?"":'marker-end="url(#arr)"'}>${opts.pulse?
+    `<animate attributeName="stroke-opacity" values="1;.25;1" dur=".9s" repeatCount="indefinite"/>`:""}</path>`;
+}
+function mote(pathId,dur,delay,color,r=2.6){
+  return `<circle r="${r}" fill="${color}" opacity="0">
+    <animate attributeName="opacity" values="0;.95;.95;0" keyTimes="0;.07;.9;1" dur="${dur}s"
+      begin="${delay}s" repeatCount="indefinite"/>
+    <animateMotion dur="${dur}s" begin="${delay}s" repeatCount="indefinite" calcMode="linear">
+      <mpath href="#${pathId}"/></animateMotion></circle>`;
+}
+let archKey="";
+function renderArch(r,ov){
+  if(!r||!r.enabled){$("#arch").innerHTML=
+    `<div style="color:var(--ink-3);font-size:11px;padding:20px">no RSI supervisor state yet —
+     run <b style="color:var(--ink-2)">rsi_supervisor.py</b> to activate the outer loop</div>`;return;}
+  const rt=r.runtime||{}, pv=rt.primary_v, bv=rt.backup_v;
+  const cyc=r.cycles?.[0]||{}, stage=cyc.stage||"idle";
+  const gv=r.gates.length?Math.max(...r.gates.map(g=>g.v)):null;
+  const cand=r.versions.find(v=>v.v===gv);
+  const gateFor=g=>r.gates.find(x=>x.v===gv&&x.gate.startsWith(g));
+  const alive=r.primary_alive;
+  const lanes=ov?ov.lanes.map(l=>l.lane):[];
+  const pending=ov?.states?.pending||0, running=ov?.states?.running||0;
+  const busy=alive&&(pending+running>0);
+  const cycling=alive&&!["idle","done"].includes(stage);
+  const lastSwap=r.swaps?.[0], swapFresh=lastSwap&&(Date.now()/1e3-lastSwap.ts)<120;
+  // skip re-render when state unchanged, so SMIL animations don't restart each poll
+  const key=JSON.stringify([pv,bv,alive,stage,cyc.outcome,gv,cand?.status,r.swaps?.length,
+    pending,running,lanes,swapFresh,Math.floor((Date.now()/1e3-(rt.primary_started||0))/60)]);
+  if(key===archKey&&$("#arch svg"))return;
+  archKey=key;
+  const stages=["observe","propose","gate","swap"];
+  const si=stages.indexOf(stage==="build"?"propose":stage==="done"?"idle":stage);
+  // outer loop node ring
+  const ring=[[95,70,"OBSERVE"],[205,70,"PROPOSE"],[205,190,"GATE"],[95,190,"HOT-SWAP"]];
+  const nodes=ring.map((n,i)=>archNode(n[0],n[1],n[2],si===i,si>i||stage==="done")).join("");
+  const loopArrows=[apath("po1","M122,70 L178,70"),apath("po2","M205,97 L205,163"),
+    apath("po3","M178,190 L122,190"),apath("po4","M95,163 L95,97")].join("")+
+    `<path id="p-outer" d="M95,70 L205,70 L205,190 L95,190 Z" fill="none" stroke="none"/>`+
+    (cycling?mote("p-outer",4.5,0,"var(--warn)")+mote("p-outer",4.5,2.2,"var(--warn)",2)
+            :alive?mote("p-outer",9,0,"var(--ink-3)",2):"");
+  // gate chips
+  const chips=["G1-syntax","G2-smoke","G3-durability","G4-perf"].map((g,i)=>{
+    const gr=gateFor(g.slice(0,2));
+    const col=gr?(gr.ok?"var(--good)":"var(--critical)"):"var(--line-2)";
+    const sym=gr?(gr.ok?"✓":"✕"):"·";
+    return `<g><rect x="${330+i*118}" y="255" width="108" height="26" fill="var(--panel-2)"
+      stroke="${col}" rx="3"/><text x="${384+i*118}" y="272" text-anchor="middle" font-size="10"
+      fill="var(--ink-2)">${sym} ${g}</text></g>`;}).join("");
+  const candLabel=cand?`last gated: v${String(cand.v).padStart(4,"0")} · ${cand.status.replace("_"," ")}`:"no candidate yet";
+  // swap ledger
+  const ledger=(r.swaps||[]).slice(0,3).map((s,i)=>
+    `<text x="1010" y="${248+i*14}" font-size="9" fill="var(--ink-3)">${hhmm(s.ts)} v${s.old_v??"—"} → v${s.new_v} · ${esc(s.reason)}</text>`).join("");
+  const laneChips=lanes.slice(0,6).map((n,i)=>
+    `<g><circle cx="1022" cy="${64+i*22}" r="4" fill="${lc(n)}"/>
+     <text x="1034" y="${67+i*22}" font-size="9" fill="var(--ink-2)">${esc(n)}</text></g>`).join("");
+  $("#arch").innerHTML=`<svg viewBox="0 0 1200 292" style="overflow:visible">
+    <defs><marker id="arr" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+      <path d="M0,0 L7,3.5 L0,7 Z" fill="var(--line-2)"/></marker></defs>
+    <text x="150" y="24" text-anchor="middle" style="font-family:var(--disp);font-weight:700;
+      font-size:14px;letter-spacing:.2em" fill="var(--ink-3)">OUTER LOOP · RSI</text>
+    ${loopArrows}${nodes}
+    <text x="150" y="132" text-anchor="middle" font-size="9" fill="var(--ink-3)">cycle: ${esc(cyc.outcome||stage)}</text>
+
+    ${apath("p-deploy","M232,130 L338,110","var(--s1)")}
+    ${cycling?mote("p-deploy",1.6,0,"var(--s1)"):""}
+    <text x="285" y="102" text-anchor="middle" font-size="9" fill="var(--ink-3)">deploys</text>
+
+    ${archBox(340,58,240,86,`PRIMARY · v${pv!=null?String(pv).padStart(4,"0"):"—"}`,
+      [alive?`● SERVING — pid ${rt.primary_pid}`:"○ stopped",
+       rt.primary_started?`up ${ago(rt.primary_started)}`:"", "initial server · live queue"],
+      alive?"var(--good)":"var(--line-2)",alive)}
+    ${archBox(340,178,240,64,`BACKUP · v${bv!=null?String(bv).padStart(4,"0"):"—"}`,
+      ["standby · instant rollback"],"var(--line-2)",false)}
+    ${apath("ps1","M452,144 L452,178","var(--warn)",{pulse:swapFresh})}
+    ${apath("ps2","M468,178 L468,144","var(--warn)",{dash:true,still:!swapFresh,pulse:swapFresh})}
+    <text x="492" y="165" font-size="9" fill="var(--ink-3)">hot swap ↑↓ rollback${swapFresh?" · JUST SWAPPED":""}</text>
+    <text x="340" y="252" font-size="9" fill="var(--ink-3)">${esc(candLabel)} — gates:</text>
+    ${chips}
+
+    ${apath("p-drive","M580,100 L660,100","var(--s1)")}
+    ${alive?mote("p-drive",1.4,0,"var(--s1)")+(busy?mote("p-drive",1.4,.7,"var(--s1)",2):""):""}
+    <text x="620" y="92" text-anchor="middle" font-size="9" fill="var(--ink-3)">drives</text>
+    <text x="810" y="24" text-anchor="middle" style="font-family:var(--disp);font-weight:700;
+      font-size:14px;letter-spacing:.2em" fill="var(--ink-3)">INNER LOOP · ENGINE</text>
+    ${archBox(662,58,110,52,"QUEUE",[`${pending} pending`],"var(--line-2)")}
+    ${archBox(802,58,110,52,"WORKERS",[`${running} in flight`],"var(--line-2)")}
+    ${archBox(942,44,180,150,"LANES",[""],"var(--line-2)")}
+    ${laneChips}
+    ${apath("pq1","M772,84 L802,84",busy?"var(--s1)":null,{dash:busy})}
+    ${apath("pq2","M912,84 L942,84",busy?"var(--s1)":null,{dash:busy})}
+    ${apath("p-loop","M 1032 194 C 1032 226 717 230 717 114",null,{dash:true,still:!busy})}
+    ${busy?mote("p-loop",3.2,0,"var(--s2)")+mote("p-loop",3.2,1.6,"var(--s2)",2):""}
+    <text x="880" y="222" text-anchor="middle" font-size="9" fill="var(--ink-3)">results → joins → new tasks (continual)</text>
+    ${ledger?`<text x="1010" y="234" font-size="9" letter-spacing=".15em" fill="var(--ink-3)">SWAP LEDGER</text>${ledger}`:""}
+  </svg>`;
+}
+
+/* ── poll loop ── */
+async function tick(){
+  try{
+    const [d,r]=await Promise.all([
+      fetch("/api/overview").then(x=>x.json()),
+      fetch("/api/rsi").then(x=>x.json()).catch(()=>null)]);
+    lastData=d;
+    $("#m-db").textContent=d.db.replace(/^\/Users\/[^/]+/,"~");
+    $("#m-clock").textContent=new Date(d.now*1e3).toLocaleTimeString();
+    renderTiles(d);renderBoard(d);renderStates(d);renderLatency(d);
+    renderThroughput(d);renderKinds(d);renderTable(d);renderTicker(d);renderArch(r,d);
+  }catch(e){ $("#m-clock").textContent="RECONNECTING…"; }
+}
+tick(); setInterval(tick,2500);
+</script>
+</body>
+</html>

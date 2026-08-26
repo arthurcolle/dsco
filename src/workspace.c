@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -23,6 +24,7 @@
 
 static char *s_workspace_prompt = NULL;
 static bool s_workspace_prompt_loaded = false;
+static pthread_mutex_t s_workspace_prompt_mu = PTHREAD_MUTEX_INITIALIZER;
 static char *s_skill_prompt = NULL;
 
 static const char *k_identity_template =
@@ -760,9 +762,12 @@ static int append_project_agents_prompt(char *dst, size_t dst_len, size_t *pos) 
 }
 
 const char *dsco_workspace_prompt(void) {
-    if (s_workspace_prompt_loaded)
-        return s_workspace_prompt;
-    s_workspace_prompt_loaded = true;
+    pthread_mutex_lock(&s_workspace_prompt_mu);
+    if (s_workspace_prompt_loaded) {
+        const char *prompt = s_workspace_prompt;
+        pthread_mutex_unlock(&s_workspace_prompt_mu);
+        return prompt;
+    }
 
     char *buf = safe_malloc(WORKSPACE_PROMPT_LIMIT);
     size_t pos = 0;
@@ -808,7 +813,10 @@ const char *dsco_workspace_prompt(void) {
     }
 
     s_workspace_prompt = buf;
-    return s_workspace_prompt && s_workspace_prompt[0] ? s_workspace_prompt : NULL;
+    s_workspace_prompt_loaded = true;
+    const char *prompt = s_workspace_prompt && s_workspace_prompt[0] ? s_workspace_prompt : NULL;
+    pthread_mutex_unlock(&s_workspace_prompt_mu);
+    return prompt;
 }
 
 const char *dsco_workspace_skill_prompt(const char *name) {
@@ -825,9 +833,11 @@ const char *dsco_workspace_skill_prompt(const char *name) {
 }
 
 void dsco_workspace_prompt_invalidate(void) {
+    pthread_mutex_lock(&s_workspace_prompt_mu);
     free(s_workspace_prompt);
     s_workspace_prompt = NULL;
     s_workspace_prompt_loaded = false;
+    pthread_mutex_unlock(&s_workspace_prompt_mu);
     free(s_skill_prompt);
     s_skill_prompt = NULL;
 }

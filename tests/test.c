@@ -15,6 +15,8 @@
 #include "plugin.h"
 #include "provider.h"
 #include "provider_pool.h"
+#include "subscription_bench.h"
+#include "subscription_gate.h"
 #include "provider_profiles.h"
 #include "openai_oauth.h"
 #include "plan.h"
@@ -51,6 +53,7 @@
 #include "vfs.h"
 #include "memory_tier.h"
 #include "capability.h"
+#include "activation_lease.h"
 #include "kitty_tools.h"
 #include "native_ui.h"
 #include "pixel_fx.h"
@@ -63,10 +66,12 @@
 #include <unistd.h>
 #include <math.h>
 #include <errno.h>
+#include <signal.h>
 #include <time.h>
 #include <ctype.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <dirent.h>
 #include <pthread.h>
@@ -627,6 +632,9 @@ static void test_json_is_valid_container(void) {
     ASSERT(!json_is_valid_container("{\"a\":true,}"), "trailing comma accepted");
     ASSERT(!json_is_valid_container("{\"a\":\"bad\\q\"}"), "bad string escape accepted");
     ASSERT(!json_is_valid_container("{unquoted:1}"), "unquoted object key accepted");
+    ASSERT(!json_is_valid_container(
+               "{\"result\":{\"tools\":[{\"inputSchema\":{}}]}"),
+           "partial nested JSON-RPC response ending on an inner brace accepted");
     PASS();
 }
 
@@ -1053,14 +1061,13 @@ static void test_build_request_ex_effort(void) {
     conv_add_user_text(&conv, "hello");
 
     session_state_t session;
-    session_state_init(&session, "haiku");
+    session_state_init(&session, "sonnet");
     snprintf(session.effort, sizeof(session.effort), "low");
 
     char *req = llm_build_request_ex(&conv, &session, 1024);
     ASSERT(req != NULL, "request should not be NULL");
-    /* Check for output_config */
     ASSERT(strstr(req, "output_config") != NULL,
-           "should contain output_config for non-high effort");
+           "thinking-capable model should contain output_config for explicit effort");
     ASSERT(strstr(req, "\"low\"") != NULL, "should contain effort value");
 
     free(req);
@@ -1069,6 +1076,14 @@ static void test_build_request_ex_effort(void) {
     ASSERT(req != NULL, "request should not be NULL for high effort");
     ASSERT(strstr(req, "\"output_config\":{\"effort\":\"high\"}") != NULL,
            "explicit high effort should be serialized");
+
+    free(req);
+    session_state_init(&session, "haiku");
+    snprintf(session.effort, sizeof(session.effort), "low");
+    req = llm_build_request_ex(&conv, &session, 1024);
+    ASSERT(req != NULL, "pre-thinking model request should build");
+    ASSERT(strstr(req, "output_config") == NULL,
+           "pre-thinking model must omit unsupported output_config");
 
     free(req);
     conv_free(&conv);
@@ -1501,6 +1516,8 @@ static void test_spend_governor_phases(void) {
     ASSERT(strcmp(p.effort_ceiling, EFFORT_MEDIUM) == 0, "orange caps effort at medium");
     ASSERT(p.max_output_tokens > 0, "orange caps output tokens");
     ASSERT(p.suggest_model_downshift, "orange suggests downshift");
+    ASSERT(strstr(p.reason, "runway -1") == NULL,
+           "unknown runway sentinel must not leak into orange status");
 
     sig.session_spent_usd = 9.5; /* 95% */
     p = spend_governor_plan(&sig);
@@ -1508,6 +1525,8 @@ static void test_spend_governor_phases(void) {
     ASSERT(strcmp(p.effort_ceiling, EFFORT_LOW) == 0, "red caps effort at low");
     ASSERT(p.strip_binaries, "red strips binaries");
     ASSERT(!p.block_turn, "red still allows the turn");
+    ASSERT(strstr(p.reason, "runway -1") == NULL,
+           "unknown runway sentinel must not leak into red status");
 
     sig.session_spent_usd = 10.5; /* 105% */
     p = spend_governor_plan(&sig);
@@ -2609,7 +2628,7 @@ static void test_claude_code_oauth_builtin_bare_matrix(void) {
         "write_file",
         "edit_file",
         "bash",
-        "python",
+        "dsco-python-3x",
         "git",
         "jq",
         "curl_raw",
@@ -2964,11 +2983,38 @@ static void test_openrouter_request_includes_external_tools_and_tool_choice(void
     ASSERT(req != NULL, "request should not be NULL");
     ASSERT(strstr(req, "\"name\":\"test_openrouter_ext_tool\"") != NULL,
            "should include external tool");
-    ASSERT(strstr(req, "\"tool_choice\":\"required\"") != NULL, "should map any -> required");
+    /* Kimi K2.x models reject tool_choice "required" (K3-only per the model
+     * parameter reference), so "any" must degrade to "auto" here. */
+    ASSERT(strstr(req, "\"tool_choice\":\"auto\"") != NULL,
+           "kimi-k2.5 should map any -> auto (required is K3-only)");
     /* thinking:type=disabled was removed because kimi-k2.7-code rejects it.
        In tool mode, thinking is disabled by omission. Verify it's NOT present. */
     ASSERT(strstr(req, "\"thinking\":{\"type\":\"disabled\"}") == NULL,
            "kimi openrouter request should NOT emit type=disabled (rejected by kimi-k2.7-code)");
+
+    /* K3 is the one Kimi model that supports tool_choice "required". */
+    session_state_t k3_session;
+    session_state_init(&k3_session, "kimi-code/k3");
+    snprintf(k3_session.tool_choice, sizeof(k3_session.tool_choice), "%s", "any");
+    char *k3_req = p->build_request(p, &conv, &k3_session, 1024, NULL);
+    ASSERT(k3_req != NULL, "k3 request should build");
+    ASSERT(strstr(k3_req, "\"tool_choice\":\"required\"") != NULL,
+           "k3 should map any -> required");
+    ASSERT(strstr(k3_req, "\"reasoning_effort\":\"max\"") != NULL,
+           "k3 should pin reasoning_effort to max");
+    ASSERT(strstr(k3_req, "\"thinking\"") == NULL,
+           "k3 has no thinking request field");
+    free(k3_req);
+
+    session.direct_answer_mode = true;
+    snprintf(session.tool_choice, sizeof(session.tool_choice), "%s", "none");
+    char *direct_req = p->build_request(p, &conv, &session, 1024, NULL);
+    ASSERT(direct_req != NULL, "direct-answer request should build");
+    ASSERT(strstr(direct_req, "\"tools\":[") == NULL,
+           "OpenAI-compatible direct-answer request should omit unused tool schemas");
+    ASSERT(strstr(direct_req, "\"tool_choice\"") == NULL,
+           "OpenAI-compatible direct-answer request should omit tool-choice controls");
+    free(direct_req);
 
     free(req);
     provider_free(p);
@@ -3102,6 +3148,20 @@ static void test_provider_request_model_prefix_routing(void) {
            "native Moonshot should not receive OpenRouter namespace");
     free(moonshot_req);
     provider_free(moonshot);
+
+    session_state_t kimi_k3_session;
+    session_state_init(&kimi_k3_session, KIMI_CODE_DEFAULT_MODEL);
+    provider_t *kimi_code = provider_create("kimi-code");
+    ASSERT(kimi_code != NULL, "Kimi Code provider should be created");
+    char *kimi_k3_req =
+        kimi_code->build_request(kimi_code, &conv, &kimi_k3_session, 1024, NULL);
+    ASSERT(kimi_k3_req != NULL, "Kimi K3 request should not be NULL");
+    ASSERT(strstr(kimi_k3_req, "\"model\":\"k3\"") != NULL,
+           "Kimi Code endpoint should receive bare K3 model id");
+    ASSERT(strstr(kimi_k3_req, "\"model\":\"kimi-code/k3\"") == NULL,
+           "Kimi Code request should strip its route namespace");
+    free(kimi_k3_req);
+    provider_free(kimi_code);
 
     session_state_t fugu_session;
     session_state_init(&fugu_session, "sakana/fugu-ultra");
@@ -3413,6 +3473,114 @@ static void test_openai_sse_data_without_space_streams_reasoning_details(void) {
     ASSERT(streamed, "summary and text reasoning details should reach the thinking stream");
     ASSERT(preserved_reasoning == 1,
            "reasoning-only details should be preserved exactly once in the parsed response");
+    PASS();
+}
+
+static void test_kimi_schema_ensure_property_types(void) {
+    TEST("kimi schema patcher fills missing property types");
+    /* enum-only property (the MCP shape Moonshot 400s on) */
+    char *patched = json_schema_ensure_property_types(
+        "{\"type\":\"object\",\"properties\":{"
+        "\"mode\":{\"enum\":[\"smart\",\"full\"]},"
+        "\"count\":{\"enum\":[1,2,3]},"
+        "\"opts\":{\"properties\":{\"deep\":{\"enum\":[true,false]}}},"
+        "\"typed\":{\"type\":\"string\"},"
+        "\"combo\":{\"anyOf\":[{\"enum\":[\"a\"]}]}}}");
+    ASSERT(patched != NULL, "schema with untyped properties should be patched");
+    ASSERT(strstr(patched, "\"mode\"") && strstr(patched, "\"string\""),
+           "string enum should gain type string");
+    /* count: integer enum -> integer */
+    bool count_int = false;
+    {
+        const char *c = strstr(patched, "\"count\"");
+        count_int = c && strstr(c, "\"integer\"") != NULL;
+    }
+    ASSERT(count_int, "integer enum should gain type integer");
+    /* nested object property inherits object type; its bool enum gains boolean */
+    bool deep_bool = false;
+    {
+        const char *d = strstr(patched, "\"deep\"");
+        deep_bool = d && strstr(d, "\"boolean\"") != NULL;
+    }
+    ASSERT(deep_bool, "nested boolean enum should gain type boolean");
+    /* combinator property itself must NOT get a type slapped on */
+    bool combo_untouched = false;
+    {
+        const char *c = strstr(patched, "\"combo\"");
+        const char *anyof = c ? strstr(c, "\"anyOf\"") : NULL;
+        combo_untouched = c && anyof;
+    }
+    ASSERT(combo_untouched, "combinator property should keep anyOf without forced type");
+    free(patched);
+
+    /* fully-typed schema needs no patch -> NULL means use the original */
+    char *unchanged = json_schema_ensure_property_types(
+        "{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}");
+    ASSERT(unchanged == NULL, "already-typed schema should return NULL (unchanged)");
+    PASS();
+}
+
+static void test_kimi_assistant_replay_forces_reasoning_content(void) {
+    TEST("kimi assistant tool-call replay always carries reasoning_content");
+    conversation_t conv;
+    conv_init(&conv);
+    conv_add_user_text(&conv, "run the tool");
+    /* Assistant turn with a tool call but no stored thinking block. */
+    conv_add_assistant_tool_use(&conv, "toolu_km_1", "run_command",
+                                "{\"command\":\"date\"}");
+    conv_add_tool_result(&conv, "toolu_km_1", "Fri Jul 17", false);
+
+    session_state_t session;
+    session_state_init(&session, "kimi-code/k3");
+    provider_t *p = provider_create("openrouter");
+    ASSERT(p != NULL, "provider should be created");
+    char *req = p->build_request(p, &conv, &session, 1024, NULL);
+    ASSERT(req != NULL, "request should build");
+    ASSERT(strstr(req, "\"reasoning_content\":\"\"") != NULL,
+           "tool-call replay without thinking must round-trip empty reasoning_content");
+    free(req);
+
+    /* Non-kimi models must NOT get the forced field. */
+    session_state_t oai_session;
+    session_state_init(&oai_session, "gpt-5.6-luna");
+    char *oai_req = p->build_request(p, &conv, &oai_session, 1024, NULL);
+    ASSERT(oai_req != NULL, "openai request should build");
+    ASSERT(strstr(oai_req, "\"reasoning_content\":\"\"") == NULL,
+           "non-kimi replay should not carry forced reasoning_content");
+    free(oai_req);
+
+    provider_free(p);
+    conv_free(&conv);
+    PASS();
+}
+
+static void test_openai_sse_choice_level_usage_is_metered(void) {
+    TEST("OpenAI SSE choice-level usage (Moonshot/Kimi) is metered");
+    /* Kimi/kimi-code attach usage to the finish choice, not the top-level
+     * chunk, and report reasoning under completion_tokens_details plus cache
+     * hits under usage.cached_tokens. */
+    const char *sse =
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"hm\"},"
+        "\"finish_reason\":null}]}\n"
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},"
+        "\"finish_reason\":null}]}\n"
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\","
+        "\"usage\":{\"prompt_tokens\":176,\"completion_tokens\":110,\"total_tokens\":286,"
+        "\"cached_tokens\":170,\"completion_tokens_details\":{\"reasoning_tokens\":47},"
+        "\"prompt_tokens_details\":{\"cached_tokens\":170}}}]}\n"
+        "data: [DONE]\n";
+    provider_test_openai_sse_result_t result = {0};
+    bool parsed = provider_test_parse_openai_sse(sse, strlen(sse), &result);
+    bool metered = parsed && result.usage.input_tokens == 176 &&
+                   result.usage.output_tokens == 110;
+    bool reasoning_counted = parsed && result.reasoning_tokens == 47;
+    bool cache_counted = parsed && result.cached_tokens == 170;
+    provider_test_free_openai_sse_result(&result);
+
+    ASSERT(parsed, "offline SSE parse should succeed");
+    ASSERT(metered, "usage nested in choices[0] must reach usage accounting");
+    ASSERT(reasoning_counted, "completion_tokens_details.reasoning_tokens must be read");
+    ASSERT(cache_counted, "usage.cached_tokens must count as cache hits");
     PASS();
 }
 
@@ -4577,8 +4745,10 @@ static void test_session_state_init(void) {
     session_state_t s;
     session_state_init(&s, "sonnet");
     ASSERT(strcmp(s.model, "claude-sonnet-5") == 0, "model should be resolved");
-    ASSERT(s.effort[0] == '\0', "default effort should preserve provider default");
-    ASSERT(strcmp(dsco_effort_display(s.effort), "auto") == 0, "default effort displays as auto");
+    ASSERT(strcmp(s.effort, DEFAULT_EFFORT) == 0,
+           "session should inherit the issued xhigh reasoning default");
+    ASSERT(strcmp(dsco_effort_display(s.effort), DEFAULT_EFFORT) == 0,
+           "default effort display should match the issued default");
     ASSERT(s.context_window == 1000000, "context window should be 1M");
     ASSERT(s.trust_tier == DSCO_TRUST_STANDARD, "trust tier should default to standard");
     ASSERT(s.web_search == true, "web_search should default true");
@@ -4704,7 +4874,7 @@ static void test_realtime_voice_tool_selection_routes_domain_tools(void) {
            "voice calculator context exposes calc");
     ASSERT(test_tool_name_list_has(math_tools, math_count, "file_tree"),
            "voice default context keeps sized filesystem inspection available");
-    ASSERT(!test_tool_name_list_has(math_tools, math_count, "python"),
+    ASSERT(!test_tool_name_list_has(math_tools, math_count, "dsco-python-3x"),
            "voice calculator context does not expose generic python execution");
     ASSERT(!test_tool_name_list_has(math_tools, math_count, "bash"),
            "voice calculator context does not expose generic shell execution");
@@ -4716,8 +4886,8 @@ static void test_realtime_voice_tool_selection_routes_domain_tools(void) {
 
     ASSERT(test_tool_name_list_has(operator_tools, operator_count, "bash"),
            "voice explicit shell context exposes bash");
-    ASSERT(test_tool_name_list_has(operator_tools, operator_count, "python"),
-           "voice explicit Python context exposes python");
+    ASSERT(test_tool_name_list_has(operator_tools, operator_count, "dsco-python-3x"),
+           "voice explicit Python context exposes dsco-python-3x");
 
     char weather_tools[TOOL_REGISTER_CAP][DSCO_REALTIME_TOOL_NAME_MAX];
     int weather_count = realtime_voice_select_tool_names_for_context(
@@ -4973,6 +5143,60 @@ static void test_discover_tools_grouped_json_has_no_leading_commas(void) {
     ASSERT(ok, "discover_tools empty/mcp listing should succeed");
     ASSERT(strstr(result, "\"tools\":[,") == NULL,
            "discover_tools filtered listing must not emit a leading comma");
+    PASS();
+}
+
+static void test_discover_tools_fuzzy_fallback_on_no_strict_match(void) {
+    TEST("discover_tools falls back to fuzzy ranking when strict match is empty");
+    tools_init();
+    char result[32768] = {0};
+
+    /* One real token ("bash") + noise tokens: strict AND-of-all-tokens finds
+     * nothing, so the fallback must return the closest tools, flagged fuzzy. */
+    bool ok = tools_execute(
+        "discover_tools",
+        "{\"query\":\"bash zzqx_nonexistent_token wvzk_other_noise\",\"limit\":8}", result,
+        sizeof(result));
+    ASSERT(ok, "discover_tools fuzzy query should succeed");
+    ASSERT(strstr(result, "\"fuzzy\":true") != NULL,
+           "empty strict match must be flagged fuzzy");
+    ASSERT(strstr(result, "\"matches\":[]") == NULL,
+           "fuzzy fallback must not return an empty match list");
+    ASSERT(strstr(result, "\"name\":\"bash\"") != NULL,
+           "fuzzy fallback should surface the closest tool by token overlap");
+
+    /* A clean single-token query still takes the strict path. */
+    result[0] = '\0';
+    ok = tools_execute("discover_tools", "{\"query\":\"bash\",\"limit\":8}", result,
+                       sizeof(result));
+    ASSERT(ok, "discover_tools strict query should succeed");
+    ASSERT(strstr(result, "\"fuzzy\":false") != NULL,
+           "strict matches must not be flagged fuzzy");
+    ASSERT(strstr(result, "\"name\":\"bash\"") != NULL,
+           "strict query should still match bash");
+    PASS();
+}
+
+static void test_discover_tools_matches_mcp_server_identity(void) {
+    TEST("discover_tools matches configured MCP service identity");
+    tools_init();
+    tools_reset_external();
+    tools_register_external("mcp__email__inbox", "List newest inbox messages",
+                            "{\"type\":\"object\",\"properties\":{}}",
+                            test_external_tool_stub, NULL);
+    tools_register_external_metadata(
+        "mcp__email__inbox", "email", "Deployed ProtonMail/cloudmail MCP on Modal", "mcp",
+        "MCP", "Deployed ProtonMail/cloudmail MCP on Modal", "external_mcp", 0, "live");
+
+    char result[32768] = {0};
+    bool ok = tools_execute("discover_tools", "{\"query\":\"cloudmail-mcp\",\"limit\":8}",
+                            result, sizeof(result));
+    ASSERT(ok, "discover_tools should search MCP server metadata");
+    ASSERT(strstr(result, "\"name\":\"mcp__email__inbox\"") != NULL,
+           "Cloudmail service name should resolve its email inbox tool");
+    ASSERT(strstr(result, "\"fuzzy\":false") != NULL,
+           "configured identity should be a strict discovery match");
+    tools_reset_external();
     PASS();
 }
 
@@ -6255,6 +6479,16 @@ static bool test_write_text_file(const char *path, const char *body) {
     return fclose(f) == 0;
 }
 
+typedef struct {
+    const char *prompt;
+} test_workspace_prompt_load_t;
+
+static void *test_workspace_prompt_load_worker(void *arg) {
+    test_workspace_prompt_load_t *load = arg;
+    load->prompt = dsco_workspace_prompt();
+    return NULL;
+}
+
 static void test_workspace_agents_md_hierarchical_prompt(void) {
     TEST("workspace prompt loads hierarchical AGENTS.md");
 
@@ -6281,6 +6515,7 @@ static void test_workspace_agents_md_hierarchical_prompt(void) {
     bool has_pkg = false;
     bool has_outside = false;
     bool order_ok = false;
+    bool concurrent_load_ok = false;
 
     if (!have_old_cwd)
         goto cleanup;
@@ -6308,7 +6543,21 @@ static void test_workspace_agents_md_hierarchical_prompt(void) {
     dsco_workspace_status_t st;
     char summary[768];
     dsco_workspace_status(&st, summary, sizeof(summary));
-    const char *prompt = dsco_workspace_prompt();
+    pthread_t prompt_threads[8];
+    bool prompt_thread_started[8] = {false};
+    test_workspace_prompt_load_t prompt_loads[8] = {{0}};
+    for (int i = 0; i < 8; i++) {
+        if (pthread_create(&prompt_threads[i], NULL, test_workspace_prompt_load_worker,
+                           &prompt_loads[i]) == 0)
+            prompt_thread_started[i] = true;
+    }
+    for (int i = 0; i < 8; i++)
+        if (prompt_thread_started[i])
+            pthread_join(prompt_threads[i], NULL);
+    const char *prompt = prompt_loads[0].prompt;
+    concurrent_load_ok = prompt != NULL;
+    for (int i = 0; i < 8; i++)
+        concurrent_load_ok &= prompt_thread_started[i] && prompt_loads[i].prompt == prompt;
     const char *root_pos = prompt ? strstr(prompt, "ROOT_AGENT") : NULL;
     const char *pkg_pos = prompt ? strstr(prompt, "PKG_AGENT") : NULL;
 
@@ -6334,6 +6583,8 @@ cleanup:
     ASSERT(has_pkg, "prompt should include nested AGENTS.md");
     ASSERT(!has_outside, "prompt should stop at repo root and skip parent AGENTS.md");
     ASSERT(order_ok, "prompt should merge AGENTS.md from root to leaf");
+    ASSERT(concurrent_load_ok,
+           "concurrent prompt loads should all observe the fully initialized prompt");
     PASS();
 }
 
@@ -9557,6 +9808,30 @@ static void test_tools_normalize_schema_scalars(void) {
     PASS();
 }
 
+static void test_tools_normalize_repairs_raw_control_chars(void) {
+    TEST("tools_normalize_input repairs raw control chars in strings");
+    tools_init();
+
+    /* Simulates a model emitting a large write_file call whose content
+     * string contains a literal, unescaped newline instead of "\\n" --
+     * strict-invalid JSON that a naive concatenation of streamed tool-call
+     * argument deltas can produce. */
+    const char *raw = "{\"path\":\"/tmp/example.md\",\"content\":\"# Title\n\nBody line.\"}";
+
+    char *norm = tools_normalize_input("write_file", raw);
+    ASSERT(norm != NULL, "normalize repairs the raw control character");
+    ASSERT(strstr(norm, "\\n\\nBody line.") != NULL, "newline re-escaped as \\n");
+
+    /* tools_validate_input() normalizes internally, so it must accept the
+     * raw (originally strict-invalid) tool-call input end to end. */
+    char err[256];
+    bool ok = tools_validate_input("write_file", raw, err, sizeof(err));
+    ASSERT(ok, "validate_input repairs and accepts the raw tool-call input");
+    free(norm);
+
+    PASS();
+}
+
 static void test_tools_normalize_schema_containers(void) {
     TEST("tools_normalize_input schema containers");
     tools_init();
@@ -10591,6 +10866,79 @@ static void test_swarm_group_status_json_includes_executor_metadata(void) {
     PASS();
 }
 
+static void test_swarm_persisted_run_schema_is_complete_and_consistent(void) {
+    TEST("swarm persisted run exposes one consistent inspectable schema");
+
+    char old_cwd[PATH_MAX];
+    ASSERT(getcwd(old_cwd, sizeof(old_cwd)) != NULL, "capture cwd for persistence fixture");
+    char root[256];
+    snprintf(root, sizeof(root), "/tmp/dsco_swarm_schema_%d_%ld", (int)getpid(),
+             (long)time(NULL));
+    ASSERT(mkdir(root, 0700) == 0, "create persistence fixture directory");
+    ASSERT(chdir(root) == 0, "enter persistence fixture directory");
+
+    swarm_t sw;
+    swarm_init(&sw, NULL, "default-model");
+    int gid = swarm_group_create(&sw, "schema-contract");
+    bool setup_ok = gid >= 0;
+    if (setup_ok) {
+        sw.child_count = 1;
+        swarm_child_t *c = &sw.children[0];
+        memset(c, 0, sizeof(*c));
+        c->id = 0;
+        c->pid = -1;
+        c->pipe_fd = -1;
+        c->err_fd = -1;
+        c->status = SWARM_DONE;
+        c->exit_code = 0;
+        c->group_id = gid;
+        c->start_time = 10.0;
+        c->end_time = 11.25;
+        snprintf(c->task, sizeof(c->task), "%s", "bounded worker task");
+        c->output = safe_strdup("worker result");
+        c->output_len = strlen(c->output);
+        sw.groups[gid].child_ids[0] = 0;
+        sw.groups[gid].child_count = 1;
+    }
+
+    char artifact_dir[64] = {0};
+    int persist_rc = setup_ok ? swarm_group_persist_run(
+                                    &sw, gid, "stable-run-id", "map_reduce", "user prompt",
+                                    "coordinator result", true, NULL, artifact_dir,
+                                    sizeof(artifact_dir))
+                              : -1;
+    char json[8192] = {0};
+    bool read_ok = persist_rc == 0 && test_read_file_small(".swarm/latest.json", json, sizeof(json));
+
+    swarm_destroy(&sw);
+    unlink(".swarm/latest.json");
+    unlink(".swarm/runs.jsonl");
+    rmdir(".swarm");
+    ASSERT(chdir(old_cwd) == 0, "restore cwd after persistence fixture");
+    rmdir(root);
+
+    ASSERT(setup_ok && persist_rc == 0 && read_ok, "persisted run should be readable");
+    ASSERT(strstr(json, "\"group\":\"schema-contract\"") != NULL,
+           "durable schema should expose group alias");
+    ASSERT(strstr(json, "\"group_id\":0") != NULL,
+           "durable schema should expose group_id");
+    ASSERT(strstr(json, "\"status\":\"complete\"") != NULL,
+           "terminal success should use complete status");
+    ASSERT(strstr(json, "\"complete\":true") != NULL,
+           "durable schema should expose terminal boolean");
+    ASSERT(strstr(json, "\"reason\":null") != NULL,
+           "successful run should expose a null reason");
+    ASSERT(strstr(json, "\"tasks\":[\"bounded worker task\"]") != NULL,
+           "durable schema should expose tasks");
+    ASSERT(strstr(json, "\"results\":[{") != NULL,
+           "durable schema should expose results");
+    ASSERT(strstr(json, "\"id\":0,\"worker_id\":0") != NULL,
+           "worker records should expose id and compatibility worker_id");
+    ASSERT(strstr(json, "\"exit_code\":0,\"elapsed_sec\":1.250") != NULL,
+           "worker records should expose exit and elapsed aliases");
+    PASS();
+}
+
 static void test_tool_allowlist_filters_visible_tools(void) {
     TEST("DSCO_TOOL_ALLOWLIST filters visible tools");
     char saved[512];
@@ -10911,12 +11259,12 @@ static void test_supervisor_hotswap_exec_is_non_mutating(void) {
 }
 
 static void test_register_cap_enforced(void) {
-    TEST("register file hard cap at 32");
+    TEST("register file hard cap at configured width");
     tools_init();
     /* Even with max_tools=200, should never exceed TOOL_REGISTER_CAP */
     tool_page_result_t paged = tools_get_paged("build a web scraper", 200, 1.0f);
     int total = paged.pinned_count + paged.working_count + paged.discovery_count;
-    ASSERT(total <= TOOL_REGISTER_CAP, "total tools <= 32 register cap");
+    ASSERT(total <= TOOL_REGISTER_CAP, "total tools within register cap");
     ASSERT(total > 0, "at least some tools selected");
     tool_page_result_free(&paged);
     PASS();
@@ -10926,7 +11274,7 @@ static void test_register_always_core_never_evicted(void) {
     TEST("ALWAYS core tools present at all budget levels");
     tools_init();
     const char *must_have[] = {"bash",
-                               "python",
+                               "dsco-python-3x",
                                "discover_tools",
                                "load_tools",
                                "evict_tools",
@@ -11135,7 +11483,7 @@ static void test_config_register_constants(void) {
     ASSERT(TOOL_REG_ALWAYS + TOOL_REG_WARM + TOOL_REG_WORKING + TOOL_REG_DISCOVERY ==
                TOOL_REGISTER_CAP,
            "register banks sum to cap");
-    ASSERT(TOOL_REGISTER_CAP == 32, "register cap is 32");
+    ASSERT(TOOL_REGISTER_CAP == 48, "register cap is 48");
     ASSERT(QUORUM_MIN_SIGNALS == 2, "quorum requires 2 signals");
     PASS();
 }
@@ -11148,10 +11496,15 @@ static void test_core_always_is_subset(void) {
     int total;
     const tool_def_t *all = tools_get_all(&total);
     const char *always[] = {"bash",
-                            "python",
+                            "dsco-python-3x",
                             "discover_tools",
                             "load_tools",
+                            "invoke_tool",
                             "evict_tools",
+                            "context_status",
+                            "context_compact",
+                            "context_control",
+                            "context_recall",
                             "StartOfLoopConstruct",
                             "EndOfLoopConstruct",
                             NULL};
@@ -11792,6 +12145,8 @@ static void test_model_resolve_alias_extended(void) {
            "codex alias should resolve to ChatGPT Codex default");
     ASSERT(strcmp(model_resolve_alias("kimi"), "moonshotai/kimi-k2.7-code") == 0,
            "kimi alias should resolve to K2.7 Code on OpenRouter");
+    ASSERT(strcmp(model_resolve_alias("kimi-k3"), KIMI_CODE_DEFAULT_MODEL) == 0,
+           "kimi-k3 alias should resolve to the Kimi Code subscription route");
     ASSERT(strcmp(model_resolve_alias("kimi-k2.7-code"), "kimi-k2.7-code") == 0,
            "native Kimi K2.7 Code should resolve to itself");
     /* Unknown name returns itself */
@@ -11914,6 +12269,124 @@ static void test_provider_chatgpt_429_classification(void) {
     PASS();
 }
 
+static void test_provider_chatgpt_retry_after_parser(void) {
+    TEST("ChatGPT Retry-After parser honors backend wording and long waits");
+    char saved_max[64];
+    bool had_max = false;
+    test_capture_env("DSCO_CHATGPT_MAX_RETRY_DELAY_MS", saved_max, sizeof(saved_max), &had_max);
+    setenv("DSCO_CHATGPT_MAX_RETRY_DELAY_MS", "120000", 1);
+
+    ASSERT(provider_test_chatgpt_retry_after_ms(
+               "{\"message\":\"Please try again after 60.616292 seconds\"}") == 60617,
+           "try-again-after seconds should preserve delays beyond 30 seconds");
+    ASSERT(provider_test_chatgpt_retry_after_ms("{\"retry_after\":60.25}") == 60250,
+           "numeric retry_after seconds should parse");
+    ASSERT(provider_test_chatgpt_retry_after_ms("retry after 250 ms") == 250,
+           "retry-after milliseconds should parse");
+
+    test_restore_env("DSCO_CHATGPT_MAX_RETRY_DELAY_MS", saved_max, had_max);
+    PASS();
+}
+
+static long long test_monotonic_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+}
+
+static void test_subscription_gate_cross_process_cooldown(void) {
+    TEST("ChatGPT subscription gate serializes processes and shares cooldown");
+    test_env_snapshot_t env[] = {
+        {.name = "HOME"},
+        {.name = "DSCO_CHATGPT_GLOBAL_GATE"},
+        {.name = "DSCO_CHATGPT_MIN_INTERVAL_MS"},
+        {.name = "DSCO_CHATGPT_GATE_MAX_WAIT_MS"},
+    };
+    test_capture_env_list(env, sizeof(env) / sizeof(env[0]));
+
+    char home[512];
+    snprintf(home, sizeof(home), "/tmp/dsco_subscription_gate_%d_%ld", (int)getpid(),
+             (long)time(NULL));
+    bool setup_ok = mkdir(home, 0700) == 0;
+    setenv("HOME", home, 1);
+    setenv("DSCO_CHATGPT_GLOBAL_GATE", "1", 1);
+    setenv("DSCO_CHATGPT_MIN_INTERVAL_MS", "0", 1);
+    setenv("DSCO_CHATGPT_GATE_MAX_WAIT_MS", "2000", 1);
+
+    int start_pipe[2] = {-1, -1};
+    int acquired_pipe[2] = {-1, -1};
+    setup_ok = setup_ok && pipe(start_pipe) == 0 && pipe(acquired_pipe) == 0;
+    pid_t child = setup_ok ? fork() : -1;
+    if (child == 0) {
+        close(start_pipe[1]);
+        close(acquired_pipe[0]);
+        char signal_byte = 0;
+        if (read(start_pipe[0], &signal_byte, 1) != 1)
+            _exit(2);
+        volatile int interrupted = 0;
+        subscription_gate_t child_gate = {.fd = -1, .held = false};
+        long waited_ms = 0;
+        if (!subscription_gate_acquire(&child_gate, "test-account", &interrupted, &waited_ms))
+            _exit(3);
+        signal_byte = 'A';
+        if (write(acquired_pipe[1], &signal_byte, 1) != 1)
+            _exit(4);
+        subscription_gate_release(&child_gate, 0);
+        _exit(0);
+    }
+
+    bool parent_acquired = false;
+    bool child_blocked = false;
+    bool child_acquired = false;
+    bool cooldown_honored = false;
+    int child_status = -1;
+    subscription_gate_t parent_gate = {.fd = -1, .held = false};
+    if (child > 0) {
+        close(start_pipe[0]);
+        close(acquired_pipe[1]);
+        volatile int interrupted = 0;
+        long waited_ms = 0;
+        parent_acquired = subscription_gate_acquire(&parent_gate, "test-account", &interrupted,
+                                                    &waited_ms) && parent_gate.held;
+        char signal_byte = 'S';
+        if (parent_acquired)
+            (void)write(start_pipe[1], &signal_byte, 1);
+        struct pollfd pfd = {.fd = acquired_pipe[0], .events = POLLIN};
+        child_blocked = parent_acquired && poll(&pfd, 1, 150) == 0;
+        long long released_at_ms = test_monotonic_ms();
+        subscription_gate_release(&parent_gate, 250);
+        pfd.revents = 0;
+        int ready = poll(&pfd, 1, 2000);
+        if (ready == 1 && (pfd.revents & POLLIN)) {
+            char acquired_byte = 0;
+            child_acquired = read(acquired_pipe[0], &acquired_byte, 1) == 1 &&
+                             acquired_byte == 'A';
+            cooldown_honored = test_monotonic_ms() - released_at_ms >= 150;
+        }
+        if (!child_acquired)
+            kill(child, SIGKILL);
+        (void)waitpid(child, &child_status, 0);
+        close(start_pipe[1]);
+        close(acquired_pipe[0]);
+    } else {
+        subscription_gate_release(&parent_gate, 0);
+        for (size_t i = 0; i < 2; i++) {
+            if (start_pipe[i] >= 0) close(start_pipe[i]);
+            if (acquired_pipe[i] >= 0) close(acquired_pipe[i]);
+        }
+    }
+
+    test_restore_env_list(env, sizeof(env) / sizeof(env[0]));
+    test_rm_rf(home);
+    ASSERT(setup_ok && child > 0, "subscription gate test process setup should succeed");
+    ASSERT(parent_acquired, "parent should acquire the account gate");
+    ASSERT(child_blocked, "a second process must remain blocked while the lease is held");
+    ASSERT(child_acquired && WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0,
+           "child should acquire the lease after release");
+    ASSERT(cooldown_honored, "release cooldown must delay the next process");
+    PASS();
+}
+
 static void test_provider_credit_reset_at_parser(void) {
     TEST("provider_credit_reset_at parser handles reset fields and headers");
     time_t now = (time_t)1700000000;
@@ -11972,6 +12445,10 @@ static void test_provider_detect_namespaced_models(void) {
            "anthropic namespaced model should prefer Anthropic-family routing");
     ASSERT(strcmp(provider_detect("moonshotai/kimi-k2.7-code", NULL), "moonshot") == 0,
            "moonshotai namespaced model should route to native Moonshot");
+    ASSERT(strcmp(provider_detect(KIMI_CODE_DEFAULT_MODEL, NULL), "kimi-code") == 0,
+           "Kimi Code namespace should route to the subscription provider");
+    ASSERT(strcmp(provider_route_for_model(KIMI_CODE_DEFAULT_MODEL, NULL, NULL), "kimi-code") == 0,
+           "Kimi Code subscription route should resolve from its explicit namespace");
     ASSERT(strcmp(provider_detect("sakana/fugu-ultra", NULL), "sakana") == 0,
            "sakana namespaced model should route to native Sakana");
     ASSERT(strcmp(provider_detect("cerebras/qwen-3-235b-a22b-instruct-2507", NULL), "cerebras") ==
@@ -11995,6 +12472,10 @@ static void test_provider_detect_namespaced_models(void) {
            "z-ai namespace is the OpenRouter GLM catalog namespace");
     ASSERT(strcmp(provider_detect("openrouter/openai/gpt-5.5", NULL), "openrouter") == 0,
            "openrouter-prefixed provider namespace should route through OpenRouter");
+    ASSERT(strcmp(provider_detect("dsco-router/chimera:latest", NULL), "dsco-router") == 0,
+           "Distributed Systems Router catalog namespace should route through DSCO Router");
+    ASSERT(strcmp(provider_detect("router:gpt-5.6-terra", NULL), "dsco-router") == 0,
+           "router colon selector should route arbitrary models through DSCO Router");
     ASSERT(strcmp(provider_detect("ollama/kimi-k2.7-code:cloud", NULL), "ollama") == 0,
            "ollama slash namespace should route to local Ollama");
     ASSERT(strcmp(provider_detect("ollama/gpt-oss:20b", NULL), "ollama") == 0,
@@ -12022,6 +12503,10 @@ static void test_provider_model_family_detects_underlying_family(void) {
            "ollama colon namespace should map to local Ollama family");
     ASSERT(strcmp(provider_model_family("google/gemini-2.5-pro"), "google") == 0,
            "google namespace should map to google family");
+    ASSERT(strcmp(provider_model_family("dsco-router/chimera:latest"), "dsco-router") == 0,
+           "Router-owned catalog models should remain on the DSCO Router family");
+    ASSERT(strcmp(provider_model_family("router:gpt-5.6-terra"), "dsco-router") == 0,
+           "Router selector should preserve the DSCO Router family");
     ASSERT(strcmp(provider_model_family("claude-sonnet-4-6"), "anthropic") == 0,
            "bare Claude models should map to anthropic family");
     PASS();
@@ -12052,6 +12537,12 @@ static void test_provider_profile_catalog_lifts_hermes_contract(void) {
     const provider_profile_t *codex = provider_profile_find("codex");
     ASSERT(codex && strcmp(codex->name, "openai-codex") == 0,
            "Codex alias should resolve to openai-codex profile");
+    ASSERT(strcmp(codex->name, DEFAULT_PROVIDER) == 0,
+           "issued default provider should resolve to the native Codex profile");
+    ASSERT(strcmp(codex->default_model, DEFAULT_MODEL) == 0,
+           "OpenAI Codex profile should use the issued default model");
+    ASSERT(provider_profile_transport_supported(codex),
+           "OpenAI Codex Responses transport should be recognized as native");
     ASSERT(strcmp(provider_auth_type_name(codex->auth_type), "oauth_external") == 0,
            "Codex profile should preserve OAuth-external auth metadata");
 
@@ -12059,6 +12550,77 @@ static void test_provider_profile_catalog_lifts_hermes_contract(void) {
     ASSERT(qwen && strcmp(qwen->name, "qwen-oauth") == 0,
            "Qwen CLI alias should resolve to qwen-oauth profile");
 
+    const provider_profile_t *router = provider_profile_find("router");
+    ASSERT(router && strcmp(router->name, "dsco-router") == 0,
+           "Router alias should resolve to the Distributed Systems provider profile");
+    ASSERT(strcmp(router->base_url, "https://router.distributed.systems/v1") == 0,
+           "Distributed Systems provider should use the owned Router endpoint");
+    ASSERT(provider_profile_has_env_var(router, "DSCO_ROUTER_API_KEY"),
+           "Distributed Systems provider should use its own scoped credential");
+    ASSERT(strcmp(router->default_model, "openai/gpt-5.6-terra") == 0,
+           "Distributed Systems provider should default to GPT-5.6 Terra");
+
+    PASS();
+}
+
+static void test_subscription_lane_catalog_is_native_and_complete(void) {
+    TEST("tier-1 subscription lane catalog is native and complete");
+
+    size_t count = dsco_subscription_lane_count();
+    ASSERT(count == 5, "current paid subscription catalog should expose five tier-1 lanes");
+    ASSERT(dsco_subscription_lane_at(count) == NULL, "lane lookup should reject past-end index");
+
+    bool saw_anthropic = false, saw_codex = false, saw_kimi = false;
+    bool saw_sakana = false, saw_zai = false;
+    for (size_t i = 0; i < count; i++) {
+        const dsco_subscription_lane_spec_t *lane = dsco_subscription_lane_at(i);
+        ASSERT(lane && lane->provider && lane->provider[0], "lane provider should be present");
+        ASSERT(lane->model && lane->model[0], "lane model should be present");
+        ASSERT(lane->expected_auth_mode && lane->expected_auth_mode[0],
+               "lane auth class should be explicit");
+        const provider_profile_t *profile = provider_profile_find(lane->provider);
+        ASSERT(profile != NULL, "subscription lane should have a provider profile");
+        ASSERT(provider_profile_transport_supported(profile),
+               "tier-1 subscription lane must use an in-process transport");
+        for (size_t j = i + 1; j < count; j++) {
+            const dsco_subscription_lane_spec_t *other = dsco_subscription_lane_at(j);
+            ASSERT(other && strcmp(lane->provider, other->provider) != 0,
+                   "tier-1 subscription providers should be unique");
+        }
+        saw_anthropic |= strcmp(lane->provider, "anthropic") == 0;
+        if (strcmp(lane->provider, "openai-codex") == 0) {
+            saw_codex = true;
+            ASSERT(strcmp(lane->model, DEFAULT_MODEL) == 0,
+                   "Codex subscription lane should benchmark the issued default model");
+        }
+        if (strcmp(lane->provider, "kimi-code") == 0) {
+            saw_kimi = true;
+            ASSERT(strcmp(lane->model, KIMI_CODE_DEFAULT_MODEL) == 0,
+                   "Kimi Code subscription lane should use the namespaced K3 model");
+        }
+        saw_sakana |= strcmp(lane->provider, "sakana") == 0;
+        saw_zai |= strcmp(lane->provider, "zai") == 0;
+    }
+    ASSERT(saw_anthropic && saw_codex && saw_kimi && saw_sakana && saw_zai,
+           "catalog should cover Claude, Codex, Kimi, Sakana, and Z.AI subscriptions");
+    PASS();
+}
+
+static void test_provider_subscription_auth_accounting(void) {
+    TEST("provider auth accounting separates subscriptions from metered API keys");
+
+    ASSERT(provider_usage_is_included("anthropic", "sk-ant-oat-test"),
+           "Claude Code OAuth should be subscription usage");
+    ASSERT(provider_usage_is_included("openai-codex", "chatgpt-test"),
+           "native Codex OAuth should be subscription usage");
+    ASSERT(!provider_usage_is_included("openai", "sk-openai-metered"),
+           "direct OpenAI API keys must remain metered");
+    ASSERT(provider_usage_is_included("kimi-code", "kimi-oauth-test"),
+           "Kimi Code OAuth should be subscription usage");
+    ASSERT(provider_usage_is_included("zai", "zai-coding-plan-test"),
+           "Z.AI Coding Plan keys should be subscription usage");
+    ASSERT(!provider_usage_is_included("openrouter", "sk-or-metered"),
+           "OpenRouter API keys must remain metered");
     PASS();
 }
 
@@ -12396,6 +12958,10 @@ static void test_provider_sakana_payg_key_is_additive(void) {
            "auth mode should expose subscription Sakana key class");
     ASSERT(strcmp(provider_auth_mode("sakana", "fish_payg"), "sakana-payg-api-key") == 0,
            "auth mode should follow an explicitly resolved PAYG Sakana key");
+    ASSERT(provider_usage_is_included("sakana", key),
+           "Sakana subscription allocation should be included usage");
+    ASSERT(!provider_usage_is_included("sakana", "fish_payg"),
+           "Sakana PAYG key should remain metered usage");
 
     setenv("DSCO_SAKANA_KEY_CLASS", "payg", 1);
     key = provider_resolve_api_key("sakana");
@@ -12435,6 +13001,58 @@ static void test_provider_sakana_payg_key_is_additive(void) {
     test_restore_env("DSCO_FUGU_KEY_CLASS", saved_fugu_class, had_fugu_class);
     test_restore_env("DSCO_PREFER_METERED_API", saved_metered, had_metered);
     test_restore_env("DSCO_API_BILLING_FALLBACK", saved_billing_fb, had_billing_fb);
+    PASS();
+}
+
+static void test_provider_pool_subscription_labels_match_billing_path(void) {
+    TEST("provider pool subscription labels match billing path");
+
+    char saved_home[512], saved_kimi_home[512];
+    char saved_openai[256], saved_fugu[256], saved_glm[256];
+    bool had_home = false, had_kimi_home = false;
+    bool had_openai = false, had_fugu = false, had_glm = false;
+    test_capture_env("HOME", saved_home, sizeof(saved_home), &had_home);
+    test_capture_env("KIMI_CODE_HOME", saved_kimi_home, sizeof(saved_kimi_home), &had_kimi_home);
+    test_capture_env("OPENAI_API_KEY", saved_openai, sizeof(saved_openai), &had_openai);
+    test_capture_env("FUGU_API_KEY", saved_fugu, sizeof(saved_fugu), &had_fugu);
+    test_capture_env("GLM_API_KEY", saved_glm, sizeof(saved_glm), &had_glm);
+
+    char home[512], kimi_home[512];
+    snprintf(home, sizeof(home), "/tmp/dsco_subscription_pool_%d_%ld", (int)getpid(),
+             (long)time(NULL));
+    snprintf(kimi_home, sizeof(kimi_home), "%s/kimi", home);
+    ASSERT(mkdir(home, 0700) == 0, "mkdir subscription pool HOME failed");
+    setenv("HOME", home, 1);
+    setenv("KIMI_CODE_HOME", kimi_home, 1);
+    setenv("OPENAI_API_KEY", "sk-openai-metered", 1);
+    setenv("FUGU_API_KEY", "fish_subscription", 1);
+    setenv("GLM_API_KEY", "zai-coding-plan", 1);
+
+    provider_pool_shutdown();
+    provider_pool_init(NULL);
+    provider_slot_t *openai = provider_pool_slot("openai");
+    provider_slot_t *codex = provider_pool_slot("openai-codex");
+    provider_slot_t *kimi = provider_pool_slot("kimi-code");
+    provider_slot_t *sakana = provider_pool_slot("sakana");
+    provider_slot_t *zai = provider_pool_slot("zai");
+    ASSERT(openai && !openai->is_subscription,
+           "direct OpenAI API key should be registered as metered");
+    ASSERT(codex && codex->is_subscription,
+           "ChatGPT Codex transport should be registered as subscription");
+    ASSERT(kimi && kimi->is_subscription,
+           "Kimi Code transport should be registered as subscription");
+    ASSERT(sakana && sakana->is_subscription,
+           "Sakana subscription key should register a subscription lane");
+    ASSERT(zai && zai->is_subscription,
+           "Z.AI Coding Plan should register a subscription lane");
+
+    provider_pool_shutdown();
+    test_restore_env("HOME", saved_home, had_home);
+    test_restore_env("KIMI_CODE_HOME", saved_kimi_home, had_kimi_home);
+    test_restore_env("OPENAI_API_KEY", saved_openai, had_openai);
+    test_restore_env("FUGU_API_KEY", saved_fugu, had_fugu);
+    test_restore_env("GLM_API_KEY", saved_glm, had_glm);
+    test_rm_rf(home);
     PASS();
 }
 
@@ -12539,6 +13157,43 @@ static void test_provider_pool_expired_reset_reenables_sakana_subscription(void)
     test_restore_env("FUGU_PAYG_API_KEY", saved_payg, had_payg);
     test_restore_env("DSCO_SAKANA_KEY_CLASS", saved_class, had_class);
     test_restore_env("DSCO_FUGU_KEY_CLASS", saved_fugu_class, had_fugu_class);
+    test_rm_rf(home);
+    PASS();
+}
+
+static void test_provider_pool_circuit_breaker_blocks_acquire(void) {
+    TEST("provider_pool circuit breaker blocks acquisition until reset");
+    char saved_home[512], saved_fugu[256];
+    bool had_home = false, had_fugu = false;
+    test_capture_env("HOME", saved_home, sizeof(saved_home), &had_home);
+    test_capture_env("FUGU_API_KEY", saved_fugu, sizeof(saved_fugu), &had_fugu);
+
+    char home[512];
+    snprintf(home, sizeof(home), "/tmp/dsco_provider_breaker_%d_%ld", (int)getpid(),
+             (long)time(NULL));
+    ASSERT(mkdir(home, 0700) == 0, "mkdir provider breaker HOME failed");
+    setenv("HOME", home, 1);
+    setenv("FUGU_API_KEY", "fish_subscription", 1);
+
+    provider_pool_shutdown();
+    provider_pool_init(NULL);
+    ASSERT(provider_pool_acquire("sakana") != NULL, "healthy provider should be acquirable");
+    provider_pool_report("sakana", false, 1.0);
+    provider_pool_report("sakana", false, 1.0);
+    provider_pool_report("sakana", false, 1.0);
+    provider_slot_t *slot = provider_pool_slot("sakana");
+    ASSERT(slot && slot->state == POOL_SLOT_TRIPPED, "three failures should trip the provider");
+    ASSERT(provider_pool_acquire("sakana") == NULL,
+           "an open provider circuit must reject acquisition");
+
+    slot->tripped_until = time(NULL) - 1;
+    ASSERT(provider_pool_acquire("sakana") != NULL,
+           "provider should become acquirable after breaker expiry");
+    ASSERT(provider_pool_healthy("sakana"), "expired breaker should restore healthy state");
+
+    provider_pool_shutdown();
+    test_restore_env("HOME", saved_home, had_home);
+    test_restore_env("FUGU_API_KEY", saved_fugu, had_fugu);
     test_rm_rf(home);
     PASS();
 }
@@ -12735,7 +13390,7 @@ static void test_provider_build_default_fallback_models_prefers_codex_subscripti
     ASSERT(count >= 3, "fallback chain should include subscription and metered routes");
     ASSERT(strcmp(models[0], "claude-sonnet-5") == 0,
            "first fallback may stay in Anthropic family for non-exhaustion failures");
-    ASSERT(strcmp(models[1], "gpt-5.5") == 0,
+    ASSERT(strcmp(models[1], DEFAULT_MODEL) == 0,
            "Codex subscription should outrank metered cross-lab routes");
     ASSERT(strcmp(provider_route_for_model(models[1], NULL, NULL), "openai-codex") == 0,
            "Codex subscription fallback should route through openai-codex");
@@ -13972,12 +14627,18 @@ static void test_provider_route_prefers_codex_subscription_for_openai_models(voi
     conv_init(&codex_conv);
     conv_add_user_text(&codex_conv, "hello");
     session_state_t codex_session;
-    session_state_init(&codex_session, "codex");
+    session_state_init(&codex_session, DEFAULT_MODEL);
     char *codex_req = codex_provider ? codex_provider->build_request(codex_provider, &codex_conv,
                                                                      &codex_session, 1024, req_key)
                                      : NULL;
     char *codex_req_model = codex_req ? json_get_str(codex_req, "model") : NULL;
     char *codex_req_instructions = codex_req ? json_get_str(codex_req, "instructions") : NULL;
+    codex_session.direct_answer_mode = true;
+    snprintf(codex_session.tool_choice, sizeof(codex_session.tool_choice), "%s", "none");
+    char *codex_direct_req = codex_provider
+                                 ? codex_provider->build_request(codex_provider, &codex_conv,
+                                                                 &codex_session, 1024, req_key)
+                                 : NULL;
     session_state_t terra_session;
     session_state_init(&terra_session, "openai/gpt-5.6-terra");
     char *terra_req = codex_provider ? codex_provider->build_request(codex_provider, &codex_conv,
@@ -13995,23 +14656,30 @@ static void test_provider_route_prefers_codex_subscription_for_openai_models(voi
            "Codex subscription usage should be classified as included, not metered API spend");
     ASSERT(!provider_usage_is_included("openai", "sk-openai-native"),
            "direct OpenAI API-key usage must remain metered");
-    ASSERT(openai_default && strcmp(openai_default, "gpt-5.5") == 0,
-           "OpenAI-family fallback should use Codex gpt-5.5 when ChatGPT auth exists");
+    ASSERT(openai_default && strcmp(openai_default, DEFAULT_MODEL) == 0,
+           "OpenAI-family fallback should use the issued Codex default when ChatGPT auth exists");
     ASSERT(strcmp(legacy_route, "openai") == 0,
            "gpt-4.1 should not be routed through ChatGPT Codex");
-    ASSERT(test_model_list_contains(fallback_models, fallback_count, "gpt-5.5"),
+    ASSERT(test_model_list_contains(fallback_models, fallback_count, DEFAULT_MODEL),
            "GLM fallback chain should include Codex subscription when OpenRouter also exists");
     ASSERT(!test_model_list_contains(fallback_models, fallback_count, "openrouter/openai/gpt-5.4"),
            "GLM fallback chain should not replace Codex subscription with OpenRouter OpenAI");
     ASSERT(codex_provider && codex_provider->data &&
                strcmp((const char *)codex_provider->data, "chatgpt_native") == 0,
            "openai-codex should prefer native ChatGPT streaming when OAuth is available");
-    ASSERT(codex_req_model && strcmp(codex_req_model, "gpt-5.5") == 0,
-           "Native Codex request should resolve alias to bare Codex model");
+    ASSERT(codex_req_model && strcmp(codex_req_model, DEFAULT_MODEL) == 0,
+           "Native Codex request should emit the issued default model");
+    ASSERT(strstr(codex_req, "\"reasoning\":{\"effort\":\"xhigh\"}") != NULL,
+           "Native Codex request should emit the issued xhigh reasoning effort");
     ASSERT(terra_req_model && strcmp(terra_req_model, "gpt-5.6-terra") == 0,
            "Native Codex request should preserve bare GPT-5.6 model ids");
     ASSERT(codex_req_instructions && strstr(codex_req, "\"input\"") != NULL,
            "Native Codex request should use Responses instructions/input shape");
+    ASSERT(codex_direct_req && strstr(codex_direct_req, "\"tools\":[") == NULL,
+           "Native Codex direct-answer request should omit unused tool schemas");
+    ASSERT(codex_direct_req && strstr(codex_direct_req, "\"tool_choice\"") == NULL,
+           "Native Codex direct-answer request should omit tool-choice controls");
+    free(codex_direct_req);
     free(terra_req_model);
     free(terra_req);
     free(codex_req_instructions);
@@ -14396,6 +15064,60 @@ static void test_swarm_poll_reaps_killed_child_without_readable_fds(void) {
     PASS();
 }
 
+static void test_swarm_kill_terminates_nested_tool_process_group(void) {
+    TEST("swarm kill terminates nested tool process groups");
+
+    char pid_path[] = "/tmp/dsco_swarm_descendant_XXXXXX";
+    int pid_fd = mkstemp(pid_path);
+    ASSERT(pid_fd >= 0, "create descendant pid fixture");
+    close(pid_fd);
+    unlink(pid_path);
+
+    char script_body[1024];
+    snprintf(script_body, sizeof(script_body),
+             "#!/bin/sh\n"
+             "/usr/bin/python3 -c 'import os,time; os.setpgid(0,0); "
+             "open(\"%s\",\"w\").write(str(os.getpid())); time.sleep(30)' &\n"
+             "wait\n",
+             pid_path);
+    char script_path[128];
+    ASSERT(test_write_temp_script(script_path, sizeof(script_path), script_body),
+           "create nested process-group fixture");
+
+    swarm_t sw;
+    swarm_init(&sw, "xai-test-key", "grok-4-fast");
+    free((void *)sw.dsco_path);
+    sw.dsco_path = safe_strdup(script_path);
+    int cid = swarm_spawn(&sw, "nested process fixture", "grok-4-fast");
+    ASSERT(cid >= 0, "spawn worker with nested process group");
+
+    char pid_buf[64] = {0};
+    bool got_pid = false;
+    for (int i = 0; i < 80; i++) {
+        if (test_read_file_small(pid_path, pid_buf, sizeof(pid_buf)) && atoi(pid_buf) > 1) {
+            got_pid = true;
+            break;
+        }
+        usleep(25000);
+    }
+    ASSERT(got_pid, "nested process should publish its pid");
+    pid_t nested_pid = (pid_t)atoi(pid_buf);
+    ASSERT(kill(nested_pid, 0) == 0, "nested process should be alive before worker cancellation");
+
+    ASSERT(swarm_kill(&sw, cid), "cancel worker tree");
+    for (int i = 0; i < 80 && kill(nested_pid, 0) == 0; i++) {
+        swarm_poll(&sw, 25);
+        usleep(25000);
+    }
+    bool nested_gone = kill(nested_pid, 0) != 0 && errno == ESRCH;
+
+    swarm_destroy(&sw);
+    unlink(script_path);
+    unlink(pid_path);
+    ASSERT(nested_gone, "nested process group must not survive worker cancellation");
+    PASS();
+}
+
 /* Integration contract: a swarm child must be the shipped dsco executable, not
  * the test runner or a shell stand-in. --version is a credential-free sub-goal
  * with a deterministic completion signal, so this exercises the real fork/exec,
@@ -14499,6 +15221,53 @@ static void test_swarm_spawn_uses_worker_profile(void) {
     test_restore_env("GROK_API_KEY", saved_grok, had_grok);
     test_restore_env("X_AI_API_KEY", saved_x_ai, had_x_ai);
     test_restore_env("OPENROUTER_API_KEY", saved_or, had_or);
+    PASS();
+}
+
+static void test_swarm_provider_spawn_honors_bounded_instance_policy(void) {
+    TEST("provider-pinned swarm spawn honors turn and tool ceilings");
+
+    char envlog_path[] = "/tmp/dsco_swarm_instance_env_XXXXXX";
+    int envlog_fd = mkstemp(envlog_path);
+    ASSERT(envlog_fd >= 0, "create instance environment log");
+    close(envlog_fd);
+
+    char script_body[512];
+    snprintf(script_body, sizeof(script_body),
+             "#!/bin/sh\n"
+             "printf 'turns=%%s\\ntools=%%s\\n' \"$DSCO_MAX_AGENT_TURNS\" "
+             "\"$DSCO_TOOL_CHOICE\" > '%s'\n",
+             envlog_path);
+    char script_path[128];
+    ASSERT(test_write_temp_script(script_path, sizeof(script_path), script_body),
+           "create instance environment capture script");
+
+    swarm_t sw;
+    swarm_init(&sw, "xai-test-key", "grok-4-fast");
+    free((void *)sw.dsco_path);
+    sw.dsco_path = safe_strdup(script_path);
+    int gid = swarm_group_create(&sw, "bounded-provider-worker");
+    ASSERT(gid >= 0, "create provider worker group");
+
+    swarm_set_next_instance(NULL, -1, -1, -1, -1, "none", NULL, 7);
+    int cid = swarm_spawn_provider(&sw, gid, "bounded task", "grok-4-fast", "xai");
+    ASSERT(cid >= 0, "spawn provider-pinned bounded worker");
+    for (int i = 0; i < 40 && sw.active.count > 0; i++) {
+        swarm_poll(&sw, 50);
+        usleep(25000);
+    }
+
+    char envlog[256] = {0};
+    bool read_ok = test_read_file_small(envlog_path, envlog, sizeof(envlog));
+    swarm_destroy(&sw);
+    unlink(script_path);
+    unlink(envlog_path);
+
+    ASSERT(read_ok, "read provider worker instance environment");
+    ASSERT(strstr(envlog, "turns=7\n") != NULL,
+           "provider worker should inherit hard turn ceiling");
+    ASSERT(strstr(envlog, "tools=none\n") != NULL,
+           "provider worker should inherit reducer tool policy");
     PASS();
 }
 
@@ -14947,7 +15716,9 @@ static void test_swarm_provider_fabric_saturates_subscription_lanes(void) {
         {.name = "DSCO_PREFER_METERED_API"},
         {.name = "DSCO_API_BILLING_FALLBACK"},
         {.name = "ANTHROPIC_API_KEY"},
+        {.name = "DSCO_CLAUDE_CODE_OAUTH_TOKEN"},
         {.name = "DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY"},
+        {.name = "DSCO_KIMI_CODE_OAUTH_TOKEN"},
         {.name = "DSCO_CHATGPT_OAUTH_TOKEN"},
         {.name = "CHATGPT_OAUTH_TOKEN"},
         {.name = "DSCO_DISABLE_CODEX_OAUTH_DISCOVERY"},
@@ -14984,8 +15755,10 @@ static void test_swarm_provider_fabric_saturates_subscription_lanes(void) {
     unsetenv("DSCO_FUGU_KEY_CLASS");
     unsetenv("DSCO_PREFER_METERED_API");
     unsetenv("DSCO_API_BILLING_FALLBACK");
-    setenv("ANTHROPIC_API_KEY", "sk-ant-native", 1);
-    setenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", "1", 1);
+    unsetenv("ANTHROPIC_API_KEY");
+    setenv("DSCO_CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-fabric", 1);
+    unsetenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY");
+    setenv("DSCO_KIMI_CODE_OAUTH_TOKEN", "kimi-oauth-fabric", 1);
     setenv("DSCO_CHATGPT_OAUTH_TOKEN", "chatgpt-oauth-fabric", 1);
     unsetenv("CHATGPT_OAUTH_TOKEN");
     unsetenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY");
@@ -15042,11 +15815,11 @@ static void test_swarm_provider_fabric_saturates_subscription_lanes(void) {
     bool ok = tools_execute(
         "swarm",
         "{\"action\":\"provider_fabric\",\"name\":\"fabric-test\",\"task\":\"probe fabric\","
-        "\"mode\":\"spawn\",\"replicas\":1,\"fugu_replicas\":2,\"max_agents\":7}",
+        "\"mode\":\"spawn\",\"replicas\":1,\"fugu_replicas\":2,\"max_agents\":9}",
         result, sizeof(result));
     ASSERT(ok, "provider_fabric should spawn subscription workers");
-    /* 7 = codex sub-lanes (sol, terra, 5.5) + fugu x2 + anthropic + zai */
-    ASSERT(strstr(result, "\"agents_spawned\":7") != NULL,
+    /* 9 = Codex sol/terra/luna/5.5 + Fugu x2 + Claude + Kimi + Z.AI. */
+    ASSERT(strstr(result, "\"agents_spawned\":9") != NULL,
            "provider_fabric should spawn the requested subscription fabric size");
     ASSERT(strstr(result, "\"provider\":\"sakana\"") != NULL,
            "provider_fabric should include Sakana Fugu lane");
@@ -15054,6 +15827,8 @@ static void test_swarm_provider_fabric_saturates_subscription_lanes(void) {
            "provider_fabric should include Anthropic lane");
     ASSERT(strstr(result, "\"provider\":\"openai-codex\"") != NULL,
            "provider_fabric should include ChatGPT/Codex lane");
+    ASSERT(strstr(result, "\"provider\":\"kimi-code\"") != NULL,
+           "provider_fabric should include Kimi Code lane");
     ASSERT(strstr(result, "\"provider\":\"zai\"") != NULL,
            "provider_fabric should include Z.AI lane");
     ASSERT(strstr(result, "\"include_metered\":false") != NULL,
@@ -15065,7 +15840,9 @@ static void test_swarm_provider_fabric_saturates_subscription_lanes(void) {
     }
     ASSERT(swarm_active_count(sw) == 0, "provider fabric argv children should finish");
 
-    char buf[4096];
+    /* Nine lane argv/prompt records exceed 4 KiB; size for the complete
+     * fixture so concurrent write order cannot hide the second Fugu replica. */
+    char buf[8192];
     ASSERT(test_read_file_small(arglog_path, buf, sizeof(buf)),
            "failed to read provider fabric arg log");
     ASSERT(test_count_substr(buf, "--provider\nsakana\n") == 2,
@@ -15110,7 +15887,9 @@ static void test_swarm_provider_fabric_race_kills_losers(void) {
         {.name = "DSCO_PREFER_METERED_API"},
         {.name = "DSCO_API_BILLING_FALLBACK"},
         {.name = "ANTHROPIC_API_KEY"},
+        {.name = "DSCO_CLAUDE_CODE_OAUTH_TOKEN"},
         {.name = "DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY"},
+        {.name = "DSCO_KIMI_CODE_OAUTH_TOKEN"},
         {.name = "DSCO_CHATGPT_OAUTH_TOKEN"},
         {.name = "CHATGPT_OAUTH_TOKEN"},
         {.name = "DSCO_DISABLE_CODEX_OAUTH_DISCOVERY"},
@@ -15147,8 +15926,10 @@ static void test_swarm_provider_fabric_race_kills_losers(void) {
     unsetenv("DSCO_FUGU_KEY_CLASS");
     unsetenv("DSCO_PREFER_METERED_API");
     unsetenv("DSCO_API_BILLING_FALLBACK");
-    setenv("ANTHROPIC_API_KEY", "sk-ant-native", 1);
-    setenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", "1", 1);
+    unsetenv("ANTHROPIC_API_KEY");
+    setenv("DSCO_CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-fabric", 1);
+    unsetenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY");
+    setenv("DSCO_KIMI_CODE_OAUTH_TOKEN", "kimi-oauth-fabric", 1);
     setenv("DSCO_CHATGPT_OAUTH_TOKEN", "chatgpt-oauth-fabric", 1);
     unsetenv("CHATGPT_OAUTH_TOKEN");
     unsetenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY");
@@ -15196,7 +15977,7 @@ static void test_swarm_provider_fabric_race_kills_losers(void) {
     bool ok = tools_execute(
         "swarm",
         "{\"action\":\"provider_fabric\",\"name\":\"fabric-race-test\",\"task\":\"race fabric\","
-        "\"replicas\":1,\"fugu_replicas\":1,\"max_agents\":6,\"timeout\":3}",
+        "\"replicas\":1,\"fugu_replicas\":1,\"max_agents\":8,\"timeout\":3}",
         result, sizeof(result));
     ASSERT(ok, "provider_fabric race should return the first successful lane");
     ASSERT(strstr(result, "\"mode\":\"race\"") != NULL,
@@ -15205,9 +15986,8 @@ static void test_swarm_provider_fabric_race_kills_losers(void) {
            "provider_fabric race should return fastest Z.AI lane");
     ASSERT(strstr(result, "\"model\":\"glm-5.2\"") != NULL,
            "provider_fabric race should preserve winner model");
-    /* 6 lanes race (codex sol/terra/5.5 + fugu + anthropic + zai); zai wins,
-     * the other 5 are reaped. */
-    ASSERT(strstr(result, "\"killed\":5") != NULL,
+    /* Eight subscription lanes race; Z.AI wins and the other seven are reaped. */
+    ASSERT(strstr(result, "\"killed\":7") != NULL,
            "provider_fabric race should kill slower provider lanes");
     ASSERT(strstr(result, "winner:zai:glm-5.2") != NULL,
            "provider_fabric race should include winner output");
@@ -15238,7 +16018,9 @@ static void test_swarm_provider_fabric_cache_policy_prunes_long_prompt(void) {
         {.name = "FISH_PAYG_API_KEY"},
         {.name = "SAKANA_PAYG_TOKEN"},
         {.name = "ANTHROPIC_API_KEY"},
+        {.name = "DSCO_CLAUDE_CODE_OAUTH_TOKEN"},
         {.name = "DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY"},
+        {.name = "DSCO_KIMI_CODE_OAUTH_TOKEN"},
         {.name = "DSCO_CHATGPT_OAUTH_TOKEN"},
         {.name = "CHATGPT_OAUTH_TOKEN"},
         {.name = "DSCO_DISABLE_CODEX_OAUTH_DISCOVERY"},
@@ -15263,8 +16045,10 @@ static void test_swarm_provider_fabric_cache_policy_prunes_long_prompt(void) {
     test_capture_env_list(envs, env_count);
 
     setenv("FUGU_API_KEY", "fish_subscription_test", 1);
-    setenv("ANTHROPIC_API_KEY", "sk-ant-native", 1);
-    setenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", "1", 1);
+    unsetenv("ANTHROPIC_API_KEY");
+    setenv("DSCO_CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-fabric", 1);
+    unsetenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY");
+    setenv("DSCO_KIMI_CODE_OAUTH_TOKEN", "kimi-oauth-fabric", 1);
     setenv("DSCO_CHATGPT_OAUTH_TOKEN", "chatgpt-oauth-fabric", 1);
     setenv("ZAI_CODING_PLAN_API_KEY", "glm-native", 1);
     unsetenv("DSCO_FABRIC_LOCAL_LANES");
@@ -15347,7 +16131,9 @@ static void test_swarm_provider_fabric_scopes_cache_hint_to_provider(void) {
         {.name = "FISH_PAYG_API_KEY"},
         {.name = "SAKANA_PAYG_TOKEN"},
         {.name = "ANTHROPIC_API_KEY"},
+        {.name = "DSCO_CLAUDE_CODE_OAUTH_TOKEN"},
         {.name = "DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY"},
+        {.name = "DSCO_KIMI_CODE_OAUTH_TOKEN"},
         {.name = "DSCO_CHATGPT_OAUTH_TOKEN"},
         {.name = "CHATGPT_OAUTH_TOKEN"},
         {.name = "DSCO_DISABLE_CODEX_OAUTH_DISCOVERY"},
@@ -15368,8 +16154,10 @@ static void test_swarm_provider_fabric_scopes_cache_hint_to_provider(void) {
     test_capture_env_list(envs, env_count);
 
     setenv("FUGU_API_KEY", "fish_subscription_test", 1);
-    setenv("ANTHROPIC_API_KEY", "sk-ant-native", 1);
-    setenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", "1", 1);
+    unsetenv("ANTHROPIC_API_KEY");
+    setenv("DSCO_CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat-fabric", 1);
+    unsetenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY");
+    setenv("DSCO_KIMI_CODE_OAUTH_TOKEN", "kimi-oauth-fabric", 1);
     setenv("DSCO_CHATGPT_OAUTH_TOKEN", "chatgpt-oauth-fabric", 1);
     unsetenv("CHATGPT_OAUTH_TOKEN");
     unsetenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY");
@@ -18254,7 +19042,7 @@ static void test_session_state_defaults(void) {
 
     session_state_t s;
     session_state_init(&s, "opus");
-    ASSERT(s.effort[0] == '\0', "default effort auto");
+    ASSERT(strcmp(s.effort, DEFAULT_EFFORT) == 0, "default effort xhigh");
     ASSERT(s.trust_tier == DSCO_TRUST_STANDARD, "default trust standard");
     ASSERT(s.total_input_tokens == 0, "no tokens yet");
     ASSERT(s.turn_count == 0, "no turns yet");
@@ -19029,8 +19817,9 @@ static void test_tui_swarm_panel_smoke(void) {
 /* --- TUI Cursor Primitives --- */
 static void test_tui_cursor_primitives(void) {
     TEST("tui cursor hide/show/save/restore/move/clear");
-    FILE *save = stderr;
-    stderr = fopen("/dev/null", "w");
+    /* Do not assign to the implementation-defined stderr macro. These
+     * primitives are smoke-tested directly; escape output is harmless in the
+     * non-TTY test harness. */
     tui_cursor_hide();
     tui_cursor_show();
     tui_save_cursor();
@@ -19038,9 +19827,6 @@ static void test_tui_cursor_primitives(void) {
     tui_cursor_move(5, 10);
     tui_clear_line();
     tui_clear_screen();
-    tui_terminal_restore_sane();
-    fclose(stderr);
-    stderr = save;
     PASS();
 }
 
@@ -21854,6 +22640,9 @@ static void test_capability_classifier(void) {
     unsigned mcp = dsco_caps_for_tool("mcp__server__tool", NULL);
     ASSERT((mcp & (CAP_NET | CAP_UNTRUSTED_IN)) == (CAP_NET | CAP_UNTRUSTED_IN),
            "mcp__ prefixed tool should carry CAP_NET|CAP_UNTRUSTED_IN");
+    unsigned tm = dsco_caps_for_tool("tm__registry_tool", NULL);
+    ASSERT((tm & (CAP_NET | CAP_UNTRUSTED_IN)) == (CAP_NET | CAP_UNTRUSTED_IN),
+           "tm__ dynamic tool should carry CAP_NET|CAP_UNTRUSTED_IN");
 
     /* bash inspecting a network command escalates to CAP_NET. */
     unsigned bash_net = dsco_caps_for_tool("bash", "{\"command\":\"curl http://x\"}");
@@ -22341,6 +23130,30 @@ int main(void) {
     unsetenv("DSCO_GOV_MODEL");
     gov_experiment_reset();
 
+    /* session_state_init() reads the per-child "model-instance spec" env vars
+     * (DSCO_EFFORT et al.) by design, so a swarm worker can wrap a distinct
+     * model instance. An operator shell that legitimately exports these for
+     * its own dsco session (e.g. DSCO_EFFORT=max) leaks them into every
+     * session_state_init() call this in-process suite makes, silently
+     * flipping asserted defaults like the Codex reasoning-effort test's
+     * expected "xhigh". Worse: that assertion fails and macro-returns before
+     * the test's own PATH/HOME fixture cleanup runs, corrupting every test
+     * that follows in the same process. Scrub the whole family up front so
+     * the suite exercises code defaults, not the operator's live session. */
+    unsetenv("DSCO_EFFORT");
+    unsetenv("DSCO_TEMPERATURE");
+    unsetenv("DSCO_TOP_P");
+    unsetenv("DSCO_TOP_K");
+    unsetenv("DSCO_THINKING_BUDGET");
+    unsetenv("DSCO_TOOL_CHOICE");
+    unsetenv("DSCO_STRUCTURED_OUTPUT");
+    unsetenv("DSCO_STRUCTURED_OUTPUT_NAME");
+    unsetenv("DSCO_STRUCTURED_OUTPUT_SCHEMA");
+    unsetenv("DSCO_STRUCTURED_OUTPUT_STRICT");
+    unsetenv("DSCO_STRUCTURED_OUTPUT_REPAIRS");
+    unsetenv("DSCO_PROMPT_CACHE_KEY");
+    unsetenv("DSCO_PROMPT_CACHE_RETENTION");
+
     /* Initialize VOS arena subsystem — required by pipeline and other modules */
     arena_subsystem_init();
 
@@ -22373,10 +23186,21 @@ int main(void) {
                 tests_failed);
         return tests_failed ? 1 : 0;
     }
+    if (test_only && strcmp(test_only, "codex-rate") == 0) {
+        test_provider_chatgpt_429_classification();
+        test_provider_chatgpt_retry_after_parser();
+        test_subscription_gate_cross_process_cooldown();
+        test_provider_pool_circuit_breaker_blocks_acquire();
+        fprintf(stderr, "\n  codex-rate: %d passed, %d failed\n", tests_passed, tests_failed);
+        return tests_failed ? 1 : 0;
+    }
     if (test_only && strcmp(test_only, "provider-stream") == 0) {
         test_openai_request_defaults_auto_tool_choice();
         test_openrouter_gpt56_tools_chat_completions_compat();
         test_openai_sse_data_without_space_streams_reasoning_details();
+        test_openai_sse_choice_level_usage_is_metered();
+        test_kimi_schema_ensure_property_types();
+        test_kimi_assistant_replay_forces_reasoning_content();
         test_openai_sse_legacy_reasoning_takes_precedence_over_details();
         test_openai_sse_tool_call_after_reasoning_accumulates_exactly();
         test_openai_sse_legacy_function_call_streams_args();
@@ -22500,6 +23324,9 @@ int main(void) {
     test_openai_request_normalizes_max_effort();
     test_openrouter_gpt56_tools_chat_completions_compat();
     test_openai_sse_data_without_space_streams_reasoning_details();
+    test_openai_sse_choice_level_usage_is_metered();
+    test_kimi_schema_ensure_property_types();
+    test_kimi_assistant_replay_forces_reasoning_content();
     test_openai_sse_legacy_reasoning_takes_precedence_over_details();
     test_openai_sse_tool_call_after_reasoning_accumulates_exactly();
     test_openai_sse_legacy_function_call_streams_args();
@@ -22552,6 +23379,8 @@ int main(void) {
     test_openai_image_generate_tool_registered_and_gated();
     test_expanded_text_tools_json_serializers();
     test_discover_tools_grouped_json_has_no_leading_commas();
+    test_discover_tools_fuzzy_fallback_on_no_strict_match();
+    test_discover_tools_matches_mcp_server_identity();
     test_tool_execute_self_exiting_alias();
     test_loop_construct_tools_control_turns();
     test_loop_construct_dsl_program_controls_flow();
@@ -22804,6 +23633,7 @@ int main(void) {
     test_tools_shell_schemas_expose_artifact_aliases();
     test_tools_copy_move_accept_dest_alias();
     test_tools_normalize_schema_scalars();
+    test_tools_normalize_repairs_raw_control_chars();
     test_tools_normalize_schema_containers();
     test_tools_external_output_schema_contracts();
     test_tools_builtin_output_schema_discovery();
@@ -22832,6 +23662,7 @@ int main(void) {
     test_agent_and_swarm_tool_schemas_expose_spawn_fields();
     test_kitty_tool_registry_contract();
     test_swarm_group_status_json_includes_executor_metadata();
+    test_swarm_persisted_run_schema_is_complete_and_consistent();
     test_tool_allowlist_filters_visible_tools();
     test_restricted_tool_profile();
     test_worker_core_tools_survive_restrictive_agent_profile();
@@ -22918,11 +23749,15 @@ int main(void) {
     test_provider_msg_is_context_overflow();
     test_provider_msg_is_credit_too_low_classifies_exhaustion();
     test_provider_chatgpt_429_classification();
+    test_provider_chatgpt_retry_after_parser();
+    test_subscription_gate_cross_process_cooldown();
     test_provider_credit_reset_at_parser();
     test_provider_detect_matrix();
     test_provider_detect_namespaced_models();
     test_provider_model_family_detects_underlying_family();
     test_provider_profile_catalog_lifts_hermes_contract();
+    test_subscription_lane_catalog_is_native_and_complete();
+    test_provider_subscription_auth_accounting();
     test_provider_profile_env_resolution_uses_aliases();
     test_provider_local_headers_omit_synthetic_auth();
     test_provider_create_uses_profile_alias_transport();
@@ -22931,8 +23766,10 @@ int main(void) {
     test_provider_configurable_base_requires_explicit_base();
     test_provider_resolve_api_key_supports_aliases();
     test_provider_sakana_payg_key_is_additive();
+    test_provider_pool_subscription_labels_match_billing_path();
     test_provider_pool_payg_success_preserves_sakana_subscription_reset();
     test_provider_pool_expired_reset_reenables_sakana_subscription();
+    test_provider_pool_circuit_breaker_blocks_acquire();
     test_provider_resolve_api_key_supports_generic_providers();
     test_provider_select_default_primary_model_prefers_zai_coding_plan();
     test_provider_build_default_fallback_models_cross_lab();
@@ -22973,8 +23810,10 @@ int main(void) {
     test_swarm_child_slots_recycle_past_lifetime_cap();
     test_swarm_reclaim_refuses_active_group();
     test_swarm_poll_reaps_killed_child_without_readable_fds();
+    test_swarm_kill_terminates_nested_tool_process_group();
     test_dsco_binary_completes_credential_free_subgoal();
     test_swarm_spawn_uses_worker_profile();
+    test_swarm_provider_spawn_honors_bounded_instance_policy();
     test_swarm_spawn_pins_openai_codex_provider();
     test_swarm_spawn_exports_chatgpt_oauth_env_to_codex_child();
     test_swarm_spawn_codex_discovery_disabled_pins_openai();

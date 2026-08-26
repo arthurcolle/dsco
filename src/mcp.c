@@ -4,6 +4,7 @@
 #include "config.h"
 #include "mcp_names.h"
 #include "tools.h"
+#include "tui.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/time.h>
+#include <time.h>
 #include <pthread.h>
 #include <curl/curl.h>
 
@@ -29,6 +31,13 @@ void mcp_set_silent(bool silent) {
 }
 
 static volatile int g_mcp_cancel = 0;
+static pthread_once_t g_mcp_sigpipe_once = PTHREAD_ONCE_INIT;
+
+/* A stdio MCP peer can exit before its first RPC. Convert its closed-pipe
+ * writes to EPIPE rather than allowing SIGPIPE to terminate DSCO. */
+static void mcp_ignore_sigpipe_once(void) {
+    (void)signal(SIGPIPE, SIG_IGN);
+}
 
 static bool mcp_cancelled(void) {
     return __atomic_load_n(&g_mcp_cancel, __ATOMIC_ACQUIRE) != 0;
@@ -44,8 +53,11 @@ void mcp_cancel_reset(void) {
 
 #define MCP_LOG(...)                                                                               \
     do {                                                                                           \
-        if (!g_mcp_silent)                                                                         \
+        if (!g_mcp_silent) {                                                                       \
+            tui_prepare_external_output();                                                         \
             fprintf(stderr, __VA_ARGS__);                                                          \
+            fflush(stderr);                                                                        \
+        }                                                                                          \
     } while (0)
 
 /* ── Small helpers ─────────────────────────────────────────────────────── */
@@ -474,7 +486,11 @@ static char *rpc_read_response(int fd, int timeout_ms) {
         }
 
         char *t = trim_inplace(line.data);
-        if (line.len > 2 && t[0] == '{' && t[strlen(t) - 1] == '}') {
+        /* Some servers flush a complete JSON-RPC object without a trailing
+         * newline. Do not mistake an arbitrary pipe read that happens to end
+         * on an inner '}' for a complete response: large nested tool schemas
+         * routinely cross the 4096-byte read boundary. */
+        if (line.len > 2 && t[0] == '{' && json_is_valid_container(t)) {
             char *out = safe_strdup(t);
             jbuf_free(&line);
             return out;
@@ -524,8 +540,8 @@ static size_t http_header_cb(char *buffer, size_t size, size_t nitems, void *use
     return total;
 }
 
-static int http_cancel_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
-                          curl_off_t ultotal, curl_off_t ulnow) {
+static int http_cancel_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal,
+                          curl_off_t ulnow) {
     (void)clientp;
     (void)dltotal;
     (void)dlnow;
@@ -569,10 +585,11 @@ static char *http_post_rpc(mcp_server_t *srv, const char *payload, int timeout_m
     if (mcp_cancelled())
         return NULL;
 
+    dsco_http_global_init();
     CURL *curl = curl_easy_init();
-    dsco_http_pool_apply(curl);
     if (!curl)
         return NULL;
+    dsco_http_pool_apply(curl);
 
     http_buf_t resp = {0};
     resp.cap = 8192;
@@ -625,23 +642,53 @@ static char *http_post_rpc(mcp_server_t *srv, const char *payload, int timeout_m
     curl_easy_cleanup(curl);
 
     if (res != CURLE_OK || code < 200 || code >= 300) {
+        if (getenv("DSCO_MCP_DEBUG")) {
+            fprintf(stderr, "mcp: HTTP request failed: %s (status %ld, body %zu bytes)\n",
+                    curl_easy_strerror(res), code, resp.len);
+        }
         free(resp.data);
         return NULL;
     }
 
     char *json = extract_first_json_object(resp.data);
+    if (!json && getenv("DSCO_MCP_DEBUG"))
+        fprintf(stderr,
+                "mcp: HTTP response contained no JSON object (status %ld, body %zu bytes)\n", code,
+                resp.len);
     free(resp.data);
     return json;
+}
+
+/* A configured stdio MCP process may exit between spawn and its first RPC.
+ * Darwin's F_SETNOSIGPIPE turns a closed-pipe write into EPIPE rather than
+ * terminating the process. The descriptor is marked during spawn below. */
+static bool mcp_write_all(int fd, const char *data) {
+    /* Other embedded subsystems may restore signal dispositions; reassert this
+     * at the syscall boundary that can encounter a closed child pipe. */
+    (void)signal(SIGPIPE, SIG_IGN);
+    if (fd < 0 || !data)
+        return false;
+    size_t offset = 0;
+    size_t len = strlen(data);
+    while (offset < len) {
+        ssize_t written = write(fd, data + offset, len - offset);
+        if (written > 0) {
+            offset += (size_t)written;
+            continue;
+        }
+        if (written < 0 && errno == EINTR)
+            continue;
+        return false;
+    }
+    return true;
 }
 
 static char *send_rpc_request(mcp_server_t *srv, const char *req, int timeout_ms) {
     if (mcp_cancelled())
         return NULL;
-    if (srv->transport == MCP_TRANSPORT_HTTP) {
+    if (srv->transport == MCP_TRANSPORT_HTTP)
         return http_post_rpc(srv, req, timeout_ms);
-    }
-    ssize_t w = write(srv->stdin_fd, req, strlen(req));
-    if (w <= 0)
+    if (!mcp_write_all(srv->stdin_fd, req))
         return NULL;
     return rpc_read_response(srv->stdout_fd, timeout_ms);
 }
@@ -651,8 +698,8 @@ static void send_rpc_notification(mcp_server_t *srv, const char *method) {
     if (srv->transport == MCP_TRANSPORT_HTTP) {
         char *resp = http_post_rpc(srv, req, mcp_timeout_ms(10000));
         free(resp);
-    } else if (srv->stdin_fd >= 0) {
-        (void)write(srv->stdin_fd, req, strlen(req));
+    } else {
+        (void)mcp_write_all(srv->stdin_fd, req);
     }
     free(req);
 }
@@ -740,6 +787,11 @@ static bool spawn_server(mcp_server_t *srv) {
     srv->stdin_fd = in_pipe[1];
     srv->stdout_fd = out_pipe[0];
 
+#ifdef F_SETNOSIGPIPE
+    /* Never let an exited MCP child terminate the DSCO process on write. */
+    (void)fcntl(srv->stdin_fd, F_SETNOSIGPIPE, 1);
+#endif
+
     int flags = fcntl(srv->stdout_fd, F_GETFL, 0);
     if (flags >= 0)
         fcntl(srv->stdout_fd, F_SETFL, flags | O_NONBLOCK);
@@ -752,10 +804,12 @@ static bool initialize_server(mcp_server_t *srv) {
     char *init_req =
         rpc_build(srv->rpc_id++, "initialize",
                   "{\"protocolVersion\":\"2024-11-05\","
-                  "\"capabilities\":{\"tools\":{}},"
+                  "\"capabilities\":{},"
                   "\"clientInfo\":{\"name\":\"dsco\",\"version\":\"" DSCO_VERSION "\"}}");
 
-    char *resp = send_rpc_request(srv, init_req, mcp_timeout_ms(10000));
+    char *resp = NULL;
+    for (int attempt = 0; attempt < 2 && !resp && !mcp_cancelled(); attempt++)
+        resp = send_rpc_request(srv, init_req, mcp_timeout_ms(30000));
     free(init_req);
     if (!resp)
         return false;
@@ -768,8 +822,14 @@ static bool initialize_server(mcp_server_t *srv) {
 
 static void stop_server(mcp_server_t *srv) {
     /* Close pipes first so the child sees EOF on stdin */
-    if (srv->stdin_fd >= 0)  { close(srv->stdin_fd);  srv->stdin_fd  = -1; }
-    if (srv->stdout_fd >= 0) { close(srv->stdout_fd); srv->stdout_fd = -1; }
+    if (srv->stdin_fd >= 0) {
+        close(srv->stdin_fd);
+        srv->stdin_fd = -1;
+    }
+    if (srv->stdout_fd >= 0) {
+        close(srv->stdout_fd);
+        srv->stdout_fd = -1;
+    }
     if (srv->pid > 0) {
         /* SIGTERM then wait up to 2s for graceful exit, then SIGKILL */
         kill(srv->pid, SIGTERM);
@@ -779,7 +839,8 @@ static void stop_server(mcp_server_t *srv) {
         for (;;) {
             int status = 0;
             pid_t r = waitpid(srv->pid, &status, WNOHANG);
-            if (r == srv->pid || r < 0) break;  /* exited or error */
+            if (r == srv->pid || r < 0)
+                break; /* exited or error */
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
             if (now.tv_sec > ts_end.tv_sec ||
@@ -876,26 +937,62 @@ static int discover_tools(mcp_registry_t *reg, int server_idx) {
     if (!srv->initialized)
         return 0;
 
-    char *req = rpc_build(srv->rpc_id++, "tools/list", "{}");
-    char *resp = send_rpc_request(srv, req, mcp_timeout_ms(10000));
-    free(req);
-    if (!resp)
-        return 0;
-
-    char *result = json_get_raw(resp, "result");
-    if (!result) {
-        free(resp);
-        return 0;
-    }
-
     tools_list_ctx_t ctx = {.reg = reg, .server_idx = server_idx};
     int before = reg->tool_count;
-    json_array_foreach(result, "tools", parse_tool_entry, &ctx);
-    int discovered = reg->tool_count - before;
 
-    free(result);
-    free(resp);
-    return discovered;
+    /* tools/list can be very large (the primary tools.distributed.systems
+     * catalog returns ~1.2 MB / thousands of tools) and the server's cold start
+     * is slow and flaky (observed 8-15 s responses and intermittent 5xx). Give
+     * discovery a longer budget than the interactive default, retry once on a
+     * transport-level failure so a single slow/500 response doesn't mark the
+     * whole server failed, and follow MCP `nextCursor` pagination so a
+     * page-limited server still yields its full catalog. */
+    char *cursor = NULL; /* owned; NULL for the first page */
+    int page_guard = 0;
+    do {
+        char params[512];
+        if (cursor && *cursor) {
+            /* Minimal JSON-string escaping for the opaque cursor token. */
+            char esc[384];
+            size_t o = 0;
+            for (const char *p = cursor; *p && o + 2 < sizeof(esc); p++) {
+                if (*p == '"' || *p == '\\')
+                    esc[o++] = '\\';
+                esc[o++] = *p;
+            }
+            esc[o] = '\0';
+            snprintf(params, sizeof(params), "{\"cursor\":\"%s\"}", esc);
+        } else {
+            snprintf(params, sizeof(params), "{}");
+        }
+
+        char *resp = NULL;
+        for (int attempt = 0; attempt < 2 && !resp && !mcp_cancelled(); attempt++) {
+            char *req = rpc_build(srv->rpc_id++, "tools/list", params);
+            resp = send_rpc_request(srv, req, mcp_timeout_ms(30000));
+            free(req);
+        }
+        free(cursor);
+        cursor = NULL;
+        if (!resp)
+            break;
+
+        char *result = json_get_raw(resp, "result");
+        if (!result) {
+            free(resp);
+            break;
+        }
+
+        json_array_foreach(result, "tools", parse_tool_entry, &ctx);
+
+        /* Follow the opaque continuation token if the server paginated. */
+        cursor = json_get_str(result, "nextCursor");
+        free(result);
+        free(resp);
+    } while (cursor && *cursor && !mcp_cancelled() && ++page_guard < 64);
+
+    free(cursor);
+    return reg->tool_count - before;
 }
 
 /* ── Config import ─────────────────────────────────────────────────────── */
@@ -1027,6 +1124,27 @@ static bool mcp_server_filter_allows(const char *server_name) {
     return false;
 }
 
+/* A hosted MCP endpoint goes dark whenever its workspace disconnects, which
+ * would otherwise drop the whole server for the run. When the config declares a
+ * local mirror via "fallback_url", retry there instead of giving up. The first
+ * attempt is already bounded by DSCO_MCP_TIMEOUT_MS, so this costs one short
+ * timeout rather than a hang. */
+static bool try_fallback_url(mcp_server_t *srv) {
+    if (srv->transport != MCP_TRANSPORT_HTTP || !srv->fallback_url[0])
+        return false;
+    if (strcmp(srv->url, srv->fallback_url) == 0)
+        return false; /* already on the mirror — nothing left to try */
+
+    MCP_LOG("  \033[2mmcp: %s unreachable, falling back to %s\033[0m\n", srv->name,
+            srv->fallback_url);
+    copy_str(srv->url, sizeof(srv->url), srv->fallback_url);
+    copy_str(srv->command, sizeof(srv->command), srv->fallback_url);
+    srv->session_id[0] = '\0'; /* session belonged to the dead endpoint */
+    srv->initialized = false;
+    srv->rpc_id = 1;
+    return initialize_server(srv);
+}
+
 static void start_configured_server(mcp_registry_t *reg, const mcp_server_t *cfg) {
     if (!cfg->command[0] && !cfg->url[0])
         return;
@@ -1087,6 +1205,8 @@ static void start_configured_server(mcp_registry_t *reg, const mcp_server_t *cfg
     bool ok = false;
     if (srv.transport == MCP_TRANSPORT_HTTP) {
         ok = initialize_server(&reg->servers[idx]);
+        if (!ok)
+            ok = try_fallback_url(&reg->servers[idx]);
     } else {
         ok = spawn_server(&reg->servers[idx]) && initialize_server(&reg->servers[idx]);
     }
@@ -1139,6 +1259,8 @@ static void *mcp_connect_worker(void *arg) {
         bool ok;
         if (srv.transport == MCP_TRANSPORT_HTTP) {
             ok = initialize_server(&srv);
+            if (!ok && !mcp_cancelled())
+                ok = try_fallback_url(&srv);
         } else {
             pthread_mutex_lock(&p->spawn_lock);
             bool spawned = !mcp_cancelled() && spawn_server(&srv);
@@ -1168,18 +1290,13 @@ static void *mcp_connect_worker(void *arg) {
     return NULL;
 }
 
-static void mcp_curl_global_init_once(void) {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
-}
-
 static void mcp_connect_all(mcp_registry_t *reg, pending_list_t *pending) {
     if (pending->count <= 0)
         return;
 
     /* Ensure libcurl's global state is initialised once before any worker calls
      * curl_easy_init concurrently (the implicit lazy init is not thread-safe). */
-    static pthread_once_t curl_once = PTHREAD_ONCE_INIT;
-    pthread_once(&curl_once, mcp_curl_global_init_once);
+    dsco_http_global_init();
 
     connect_pool_t pool;
     pool.reg = reg;
@@ -1233,10 +1350,16 @@ static void parse_server_common(mcp_registry_t *reg, const char *raw_name, const
     char *type = json_get_str(obj, "type");
     char *transport = json_get_str(obj, "transport");
     char *cwd = json_get_str(obj, "cwd");
+    char *description = json_get_str(obj, "description");
+    char *fburl = json_get_str(obj, "fallback_url");
+    if (fburl)
+        normalize_http_url(fburl, srv.fallback_url, sizeof(srv.fallback_url));
     if (cmd)
         copy_str(srv.command, sizeof(srv.command), cmd);
     if (cwd)
         copy_str(srv.cwd, sizeof(srv.cwd), cwd);
+    if (description)
+        copy_str(srv.description, sizeof(srv.description), description);
     if (url)
         normalize_http_url(url, srv.url, sizeof(srv.url));
     if (type && (strcasecmp(type, "http") == 0 || strcasecmp(type, "sse") == 0))
@@ -1278,6 +1401,8 @@ static void parse_server_common(mcp_registry_t *reg, const char *raw_name, const
     free(type);
     free(transport);
     free(cwd);
+    free(description);
+    free(fburl);
     if (!srv.command[0] && !srv.url[0])
         return;
     start_configured_server(reg, &srv);
@@ -1854,10 +1979,9 @@ static bool yaml_split_key_value(char *s, char **key_out, char **val_out) {
 static bool yaml_common_server_key(const char *key) {
     return strcmp(key, "command") == 0 || strcmp(key, "cmd") == 0 || strcmp(key, "args") == 0 ||
            strcmp(key, "env") == 0 || strcmp(key, "headers") == 0 ||
-           strcmp(key, "http_headers") == 0 || strcmp(key, "url") == 0 ||
-           strcmp(key, "cwd") == 0 || strcmp(key, "type") == 0 ||
-           strcmp(key, "transport") == 0 || strcmp(key, "disabled") == 0 ||
-           strcmp(key, "enabled") == 0;
+           strcmp(key, "http_headers") == 0 || strcmp(key, "url") == 0 || strcmp(key, "cwd") == 0 ||
+           strcmp(key, "type") == 0 || strcmp(key, "transport") == 0 ||
+           strcmp(key, "disabled") == 0 || strcmp(key, "enabled") == 0;
 }
 
 static void yaml_apply_server_field(mcp_server_t *srv, const char *key, const char *val,
@@ -1966,8 +2090,7 @@ static void load_hermes_yaml_config(mcp_registry_t *reg, const char *path, const
             continue;
 
         bool server_decl = indent > root_indent && !val[0] &&
-                           (current < 0 || indent <= server_indent) &&
-                           !yaml_common_server_key(key);
+                           (current < 0 || indent <= server_indent) && !yaml_common_server_key(key);
         if (server_decl) {
             current = find_or_add_toml_server(parsed, &parsed_count, key, source);
             server_indent = indent;
@@ -2025,6 +2148,7 @@ static void load_hermes_yaml_config(mcp_registry_t *reg, const char *path, const
 /* ── Public API ────────────────────────────────────────────────────────── */
 
 int mcp_init(mcp_registry_t *reg) {
+    (void)pthread_once(&g_mcp_sigpipe_once, mcp_ignore_sigpipe_once);
     memset(reg, 0, sizeof(*reg));
 
     const char *home = getenv("HOME");
@@ -2062,8 +2186,8 @@ int mcp_init(mcp_registry_t *reg) {
      * opt-in (DSCO_MCP_IMPORT_CLAUDE_DESKTOP=1) so the default never reaches into
      * another app's container. */
     if (getenv("DSCO_MCP_IMPORT_CLAUDE_DESKTOP")) {
-        snprintf(path, sizeof(path), "%s/Library/Application Support/Claude/claude_desktop_config.json",
-                 home);
+        snprintf(path, sizeof(path),
+                 "%s/Library/Application Support/Claude/claude_desktop_config.json", home);
         load_json_config(reg, path, "claude:desktop", false, false);
         snprintf(path, sizeof(path), "%s/Library/Application Support/Claude/config.json", home);
         load_json_config(reg, path, "claude:desktop-config", false, false);

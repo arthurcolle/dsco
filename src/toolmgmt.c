@@ -6,10 +6,12 @@
 #include "tools.h"
 #include "config.h"
 #include "crypto.h"
+#include "cloud_runtime.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
 #include <pthread.h>
 #include <time.h>
@@ -20,6 +22,7 @@
 
 static char s_url_override[512];
 static char s_tok_override[1024];
+static _Thread_local const char *s_idempotency_key;
 
 const char *toolmgmt_base_url(void) {
     if (s_url_override[0])
@@ -42,6 +45,30 @@ const char *toolmgmt_token(void) {
     e = getenv("AUTH_TOKEN");
     if (e && e[0])
         return e;
+    /* File fallback: ~/.dsco/tools_api_token (0600, single line). Lets the
+     * operator token persist on-machine without shell exports. Loaded once. */
+    static char s_file_tok[512];
+    static int s_file_tried = 0;
+    if (!s_file_tried) {
+        s_file_tried = 1;
+        const char *home = getenv("HOME");
+        if (home && *home) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/.dsco/tools_api_token", home);
+            FILE *f = fopen(path, "r");
+            if (f) {
+                if (fgets(s_file_tok, sizeof(s_file_tok), f)) {
+                    size_t n = strlen(s_file_tok);
+                    while (n > 0 && (s_file_tok[n - 1] == '\n' || s_file_tok[n - 1] == '\r' ||
+                                     s_file_tok[n - 1] == ' '))
+                        s_file_tok[--n] = '\0';
+                }
+                fclose(f);
+            }
+        }
+    }
+    if (s_file_tok[0])
+        return s_file_tok;
     return NULL;
 }
 
@@ -75,13 +102,6 @@ static int tm_max_retries(void) {
     return 2;
 }
 
-/* curl_global_init is not thread-safe; do it exactly once before any worker
- * thread spins up its own easy handle. */
-static pthread_once_t s_curl_once = PTHREAD_ONCE_INIT;
-static void tm_curl_global_init(void) {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
-}
-
 /* ── HTTP ──────────────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -106,10 +126,22 @@ static size_t tm_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
     return total;
 }
 
+static bool tm_header_value_safe(const char *s) {
+    return s && *s && !strchr(s, '\r') && !strchr(s, '\n');
+}
+
+static void tm_append_config_header(struct curl_slist **hdrs, const char *header,
+                                    const char *value) {
+    if (!hdrs || !tm_header_value_safe(value)) return;
+    char line[1280];
+    snprintf(line, sizeof(line), "%s: %s", header, value);
+    *hdrs = curl_slist_append(*hdrs, line);
+}
+
 static long tm_request_once(const char *method, const char *path, const char *body, char **out) {
     if (out)
         *out = NULL;
-    pthread_once(&s_curl_once, tm_curl_global_init);
+    dsco_http_global_init();
 
     CURL *c = curl_easy_init();
     dsco_http_pool_apply(c);
@@ -119,6 +151,7 @@ static long tm_request_once(const char *method, const char *path, const char *bo
     /* Join base + path, dropping any trailing slash on the base. */
     char url[1024];
     const char *base = toolmgmt_base_url();
+    if (!dsco_cloud_destination_allowed(base)) return -1;
     size_t bl = strlen(base);
     while (bl > 0 && base[bl - 1] == '/')
         bl--;
@@ -142,6 +175,12 @@ static long tm_request_once(const char *method, const char *path, const char *bo
         snprintf(auth, sizeof(auth), "Authorization: Bearer %s", tok);
         hdrs = curl_slist_append(hdrs, auth);
     }
+    tm_append_config_header(&hdrs, "X-DSCO-Workload-Identity", getenv("DSCO_WORKLOAD_IDENTITY"));
+    tm_append_config_header(&hdrs, "X-DSCO-Tenant", getenv("DSCO_TENANT_ID"));
+    tm_append_config_header(&hdrs, "X-DSCO-Policy", getenv("DSCO_POLICY_ID"));
+    tm_append_config_header(&hdrs, "X-DSCO-Activation-Lease",
+                            dsco_cloud_lease_id() ? dsco_cloud_lease_id() : getenv("DSCO_LEASE_ID"));
+    tm_append_config_header(&hdrs, "Idempotency-Key", s_idempotency_key);
 
     if (getenv("TOOLS_API_DEBUG"))
         fprintf(stderr, "[tm] %s %s body=%s\n", method, url, body ? body : "(none)");
@@ -189,7 +228,9 @@ long toolmgmt_request(const char *method, const char *path, const char *body, ch
         free(resp);
         resp = NULL;
         code = tm_request_once(method, path, body, &resp);
-        bool retryable = (code < 0 || code == 429 || (code >= 500 && code < 600));
+        bool mutating = method && strcasecmp(method, "GET") != 0 && strcasecmp(method, "HEAD") != 0;
+        bool retryable = (code < 0 || code == 429 || (code >= 500 && code < 600)) &&
+                         (!mutating || (s_idempotency_key && s_idempotency_key[0]));
         if (!retryable || attempt >= retries)
             break;
         /* backoff: 200ms, 400ms, 800ms … plus up to 100ms jitter */
@@ -332,8 +373,13 @@ static char *tm_exec(const char *tool, const char *args_json, int timeout_ms, lo
     if (esc)
         curl_free(esc);
 
+    char idempotency_key[37];
+    uuid_v4(idempotency_key);
+    const char *prior_key = s_idempotency_key;
+    s_idempotency_key = idempotency_key;
     char *out = NULL;
     long st = toolmgmt_request("POST", path, b.data, &out);
+    s_idempotency_key = prior_key;
     jbuf_free(&b);
     if (status)
         *status = st;
@@ -430,8 +476,13 @@ char *toolmgmt_batch(const char *calls_json, bool parallel) {
     jbuf_append(&b, ",\"parallel\":");
     jbuf_append(&b, parallel ? "true" : "false");
     jbuf_append(&b, "}");
+    char idempotency_key[37];
+    uuid_v4(idempotency_key);
+    const char *prior_key = s_idempotency_key;
+    s_idempotency_key = idempotency_key;
     char *out = NULL;
     long st = toolmgmt_request("POST", "/api/v1/batch", b.data, &out);
+    s_idempotency_key = prior_key;
     jbuf_free(&b);
     if (st >= 200 && st < 300)
         return out;
@@ -449,8 +500,13 @@ char *toolmgmt_recommend(const char *intent, const char *query, int max_steps) {
     jbuf_append(&b, ",\"max_steps\":");
     jbuf_append_int(&b, max_steps > 0 ? max_steps : 5);
     jbuf_append(&b, ",\"available_data\":{}}");
+    char idempotency_key[37];
+    uuid_v4(idempotency_key);
+    const char *prior_key = s_idempotency_key;
+    s_idempotency_key = idempotency_key;
     char *out = NULL;
     long st = toolmgmt_request("POST", "/api/v1/orchestration/recommend", b.data, &out);
+    s_idempotency_key = prior_key;
     jbuf_free(&b);
     if (st >= 200 && st < 300)
         return out;
@@ -486,7 +542,7 @@ int toolmgmt_parallel(tm_call_t *calls, int n, int max_concurrency) {
     if (max_concurrency > n)
         max_concurrency = n;
 
-    pthread_once(&s_curl_once, tm_curl_global_init);
+    dsco_http_global_init();
 
     tm_pool_t pool = {calls, n, 0};
     pthread_t *th = calloc((size_t)max_concurrency, sizeof(pthread_t));

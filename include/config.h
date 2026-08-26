@@ -8,7 +8,7 @@
 #include <ctype.h>
 #include "env_config.h"
 
-#define DSCO_VERSION "1.0.2"
+#define DSCO_VERSION "1.1.0"
 
 /* Build info — set via Makefile CFLAGS */
 #ifndef BUILD_DATE
@@ -26,15 +26,16 @@
 #define MAX_MESSAGES        128
 #define MAX_TOOLS           512
 
-/* Tool register file: hard cap on tools per API request.
- * Like CPU registers — 32 slots max, tools evicted/loaded dynamically.
- * bash+python always core; everything else loaded via load_tools/hints.
- * Budget-adaptive: full=32, mid=24, low=14, critical=7 */
-#define TOOL_REGISTER_CAP       32
-#define TOOL_REG_ALWAYS          8   /* bash,python,discover,load,invoke,evict,loop controls */
-#define TOOL_REG_WARM           10   /* file I/O + run_command, evictable */
-#define TOOL_REG_WORKING        10   /* quorum-scored, frozen for cache stability */
-#define TOOL_REG_DISCOVERY       4   /* R28-R31: progressive schema, ephemeral */
+/* Tool register file: bounded tools per API request.
+ * Like a wide CPU register file: 48 slots max, dynamically paged by relevance.
+ * ALWAYS remains small and cache-stable; added density goes to quorum-scored
+ * working tools and compact progressive discovery schemas.
+ * Budget-adaptive: full=48, mid=31, low=20, critical=12. */
+#define TOOL_REGISTER_CAP       48
+#define TOOL_REG_ALWAYS         12   /* execution, disclosure, context controls, loop controls */
+#define TOOL_REG_WARM           12   /* file I/O + run_command, evictable */
+#define TOOL_REG_WORKING        18   /* quorum-scored, frozen for cache stability */
+#define TOOL_REG_DISCOVERY       6   /* compact progressive schema, ephemeral */
 #define QUORUM_MIN_SIGNALS       2   /* min independent signals to load a tool */
 #define MAX_INPUT_LINE      65536
 
@@ -43,8 +44,12 @@
  * except discover_tools/load_tools/evict_tools (which let the model page them in/out). */
 extern int g_cheap_mode;
 
-/* API defaults */
-#define DEFAULT_MODEL       "gpt-5.6-luna"
+/* API defaults. Explicit CLI, environment, and saved-profile settings remain
+ * layerable overrides; these values define the no-flag native runtime. */
+#define DEFAULT_PROVIDER         "openai-codex"
+#define DEFAULT_MODEL            "gpt-5.6-luna"
+#define DEFAULT_EFFORT           "xhigh"
+#define KIMI_CODE_DEFAULT_MODEL  "kimi-code/k3"
 
 /* ── Compile-time runtime posture defaults ─────────────────────────────────
    The issued binary bakes in --interactive, --gov-model none, and --autonomous
@@ -68,10 +73,11 @@ extern int g_cheap_mode;
 
 /* Default swarm worker model for embarrassingly parallel work. Unpinned
  * sub-agents (map_reduce / fanout) route here so wide fanouts stay cheap.
- * gpt-5.4-mini: 400K ctx, $0.75/$4.50 per 1M — ~3x cheaper than the
- * top-tier default. Structural fanout cap is SWARM_MAX_CHILDREN (64).
+ * GPT-5.6 Luna's 2026-07-30 API reduction ($0.20/$1.20 per 1M; $0.02
+ * cached input) makes it cheaper than GPT-5.4 mini while keeping the current
+ * 5.6 agent/tool behavior. Structural fanout cap is SWARM_MAX_CHILDREN (64).
  * Gate off with DSCO_SWARM_DEFAULT_MINI=0 to inherit the parent model. */
-#define DEFAULT_SWARM_MODEL "openai/gpt-5.4-mini"
+#define DEFAULT_SWARM_MODEL "openai/gpt-5.6-luna"
 static inline const char *dsco_swarm_default_model(const char *api_key_unused) {
     (void)api_key_unused;
     const char *v = getenv("DSCO_SWARM_DEFAULT_MINI");
@@ -200,6 +206,15 @@ static const model_info_t MODEL_REGISTRY[] = {
     { "or-opus45",    "anthropic/claude-opus-4.5",     200000, 32000,  5.0,  25.0,  0, 0, 1 },
     { "or-sonnet45",  "anthropic/claude-sonnet-4.5",  1000000, 16000,  3.0,  15.0,  0, 0, 1 },
     /* ── OpenAI — GPT-5.x family (2026 frontier) ────────────────────── */
+    /* GPT-5.6 standard API pricing effective 2026-07-30. Bare IDs are
+     * ChatGPT/Codex subscription lanes (zero marginal API cost); namespaced
+     * IDs are metered OpenAI/OpenRouter lanes used by cost-aware routing. */
+    { "gpt-5.6-sol",   "gpt-5.6-sol",                1050000, 128000,  0.0,  0.0, 0, 0, 1 },
+    { "gpt-5.6-terra", "gpt-5.6-terra",              1050000, 128000,  0.0,  0.0, 0, 0, 1 },
+    { "gpt-5.6-luna",  "gpt-5.6-luna",               1050000, 128000,  0.0,  0.0, 0, 0, 1 },
+    { "gpt56-sol",     "openai/gpt-5.6-sol",          1050000, 128000,  5.0, 30.0, 0.50, 0, 1 },
+    { "gpt56-terra",   "openai/gpt-5.6-terra",        1050000, 128000,  2.0, 12.0, 0.20, 0, 1 },
+    { "gpt56-luna",    "openai/gpt-5.6-luna",         1050000, 128000,  0.20, 1.20, 0.02, 0, 1 },
     { "gpt54-pro",    "openai/gpt-5.4-pro",          1050000, 128000, 30.0, 180.0,  0, 0, 1 },
     { "gpt54",        "openai/gpt-5.4",              1050000, 128000,  2.50, 15.0,  0.25, 0, 1 },
     { "gpt54-mini",   "openai/gpt-5.4-mini",           400000, 128000,  0.75,  4.50, 0.075, 0, 0 },
@@ -264,6 +279,12 @@ static const model_info_t MODEL_REGISTRY[] = {
      * the background fetch lands. */
     { "moonshotai/kimi-k2.7-code", "moonshotai/kimi-k2.7-code", 262144, 16384, 0.74, 3.50, 0.15, 0, 1 },
     { "moonshotai/kimi-k2.7-code-highspeed", "moonshotai/kimi-k2.7-code-highspeed", 262144, 16384, 0.45, 8.00, 0.19, 0, 1 },
+    /* Kimi Code subscription aliases are namespaced so they cannot be
+     * confused with metered Moonshot/OpenRouter models. The canonical row
+     * (alias == model_id) must precede the short alias: model_lookup matches
+     * model_id in pass 1, so a preceding alias row would shadow it. */
+    { KIMI_CODE_DEFAULT_MODEL, KIMI_CODE_DEFAULT_MODEL, 1048576, 131072, 0, 0, 0, 0, 1 },
+    { "kimi-k3",      KIMI_CODE_DEFAULT_MODEL,          1048576, 131072, 0, 0, 0, 0, 1 },
     { "kimi",         "moonshotai/kimi-k2.7-code",     262144, 16384,  0.74,  3.50, 0.15, 0, 1 },
     { "kimi-code",    "moonshotai/kimi-k2.7-code",     262144, 16384,  0.74,  3.50, 0.15, 0, 1 },
     { "or-kimi-code", "moonshotai/kimi-k2.7-code",     262144, 16384,  0.74,  3.50, 0.15, 0, 1 },
@@ -484,6 +505,23 @@ static inline const model_info_t *model_lookup(const char *name) {
     /* Pass 3: runtime OpenRouter catalog — any real slug resolves with live
      * context/pricing once the background fetch has populated the cache. */
     return openrouter_cache_lookup(name);
+}
+
+/* Return registry metadata with runtime-refreshed vendor prices when present.
+ * The caller supplies storage so the static registry remains immutable. */
+#include "model_pricing.h"
+static inline const model_info_t *model_lookup_priced(const char *name,
+                                                       model_info_t *storage) {
+    const model_info_t *base = model_lookup(name);
+    if (!base || !storage) return base;
+    *storage = *base;
+    model_price_t price;
+    if (strncmp(base->model_id, "openai/", 7) == 0 &&
+        model_pricing_lookup("openai", base->model_id, &price)) {
+        storage->input_price = price.input;
+        storage->output_price = price.output;
+    }
+    return storage;
 }
 
 static inline const char *model_resolve_alias(const char *name) {

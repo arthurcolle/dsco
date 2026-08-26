@@ -3,10 +3,10 @@
 This catalog is generated from the static `src/tools.c` built-in tool registry.
 
 - Source: `src/tools.c`
-- Total built-in tools: 283
-- Core tools: 48
-- Read-only tools: 165
-- Concurrent tools: 168
+- Total built-in tools: 287
+- Core tools: 52
+- Read-only tools: 167
+- Concurrent tools: 171
 - Interactive tools: 2
 
 Regeneration:
@@ -60,6 +60,7 @@ Flags:
 | <code>computer</code> |  |  |  |  | Control the local desktop like a human: screenshot, mouse_move, left_click, right_click, middle_click, double_click, triple_click, left_click_drag, key (combos like cmd+a), type, scroll, cursor_position, wait. Coordinates are display points [x,y]; a fresh screenshot is attached after each action so you can see the result. |
 | <code>ConstructColorSample</code> | yes | yes |  |  | Sample deterministic named colors or export dynamic highlight colors for the entire live MetaConstruct stack. Use action=sample with name/kind/state/weight for one named color, or action=palette to return colors for loop constructs, effects, signals, graph nodes/edges, dyads, MapReduce jobs, SRM records, measurements, operations, refinements, and schema rewrites. Returns RGB, hex, ansi256, and optional ANSI escapes. |
 | <code>context_compact</code> | yes |  |  |  | Compress old conversation history to reclaim tokens. |
+| <code>context_control</code> | yes |  |  |  | Inspect and manage live session context. Mutate plain-text transcript messages or set/clear a session-local system directive overlay; tool protocol messages and higher-authority instructions are protected. |
 | <code>context_recall</code> |  | yes | yes |  | Retrieve persisted tool results. No args = list available keys. |
 | <code>context_status</code> | yes | yes | yes |  | Context window self-awareness: tokens, schema overhead, recommendations. |
 | <code>contract_ingest</code> |  |  |  |  | Bulk-fetch all open Kalshi events+markets into contracts.db. Persists title, settlement_date, strike, underlying, YES/NO meanings, prices. Run before searching. |
@@ -69,10 +70,13 @@ Flags:
 | <code>contract_new_issues</code> |  | yes | yes |  | Detect NEW contracts not yet in contracts.db. Fetches current open events, diffs against stored contracts, returns only new issues. Run periodically (e.g. every hour) to catch new market listings. |
 | <code>contract_search</code> |  | yes | yes |  | Semantic search over persisted contracts. Natural language queries: 'Bitcoin above 90000', 'Fed rate cut March', 'Chicago temperature'. Uses FTS5 full-text search. |
 | <code>control_flow</code> |  |  |  |  | Conditional branching (Priority 6): if/while/for/switch/try on steps. action=parse\|evaluate\|execute\|set\|get. |
-| <code>conversation_context</code> | yes |  |  |  | Inspect or make bounded live-transcript edits during an agent turn. action=inspect\|append\|replace_last\|remove_last. append/replace require content; role=user\|assistant. Tool-use protocol messages cannot be altered. |
 | <code>copy_file</code> |  |  |  |  | Copy a file or directory. |
 | <code>cron_parse</code> |  | yes | yes |  | Parse a cron expression. |
 | <code>csv_parse</code> |  | yes | yes |  | Parse CSV text or a CSV file, optionally extracting one column. |
+| <code>ctx_get</code> | yes | yes | yes |  | Retrieve (a slice of) content from the Context Fabric by ctxkey. Slices let you fault-in a span without loading the whole object: pass slice "b:0-2048" (bytes) or "l:120-160" (1-based lines), or embed #b:/#l: in the key itself. |
+| <code>ctx_put</code> | yes |  | yes |  | Store content in the Context Fabric and get back a stable content-addressed ctxkey (ck:blob:...). Idempotent: identical content dedupes to one entry. Textual content is indexed for semantic search. Use to stash large results, files, or notes you want to reference later by key instead of re-pasting. |
+| <code>ctx_scope</code> | yes |  |  |  | Bundle ctxkeys into a delegation scope (ck:scope:...) so an orchestrator can hand a sub-agent one handle instead of inlined content; action=create\|resolve. |
+| <code>ctx_search</code> | yes | yes | yes |  | Search all stored context semantically (embeddings, with a lexical fallback) and get back ranked ctxkeys with previews. This is how you discover what context exists and load it dynamically by key rather than holding it in-window. |
 | <code>curl_raw</code> |  |  |  |  | Raw curl command execution. |
 | <code>cwd</code> | yes | yes | yes |  | Get current working directory. |
 | <code>date</code> |  | yes | yes |  | Get current date/time or parse dates. |
@@ -87,6 +91,7 @@ Flags:
 | <code>disk_usage</code> |  | yes | yes |  | Disk usage for a path. |
 | <code>docker</code> |  |  |  |  | Docker operations. |
 | <code>download_file</code> |  |  |  |  | Download a file from URL. |
+| <code>dsco-python-3x</code> | yes |  |  |  | Run Python code or a Python file. |
 | <code>dsco_doctor_integrations</code> | yes | yes | yes |  | Diagnose integration catalog/cache health: stale connector IDs, missing auth/install state, dangerous mutating connectors, and control-plane governance tools. |
 | <code>Edit</code> | yes |  |  |  | Claude-compatible alias for edit_file. |
 | <code>edit_file</code> | yes |  |  |  | Edit file by replacing old_string with new_string. |
@@ -236,7 +241,6 @@ Flags:
 | <code>privacy_filter</code> |  | yes | yes |  | Redact obvious email addresses and phone-like tokens from text. |
 | <code>process_tree</code> |  | yes | yes |  | Show process parent/child rows, optionally filtered. |
 | <code>ps</code> |  | yes | yes |  | List running processes. |
-| <code>python</code> | yes |  |  |  | Run Python code or a Python file. |
 | <code>random_bytes</code> |  | yes | yes |  | Generate random bytes (hex). |
 | <code>Read</code> | yes | yes | yes |  | Claude-compatible alias for read_file. |
 | <code>read_file</code> | yes | yes | yes |  | Read file with line numbers. Use offset/limit for large files. |

@@ -159,7 +159,7 @@ void session_state_init(session_state_t *s, const char *model) {
     if (!resolved || !resolved[0])
         resolved = DEFAULT_MODEL;
     snprintf(s->model, sizeof(s->model), "%s", resolved);
-    s->effort[0] = '\0';
+    dsco_effort_store(s->effort, sizeof(s->effort), DEFAULT_EFFORT);
     s->trust_tier = DSCO_TRUST_STANDARD;
     {
         bool trust_ok = false;
@@ -194,8 +194,8 @@ void session_state_init(session_state_t *s, const char *model) {
      * llm_get_custom_system_prompt() via DSCO_SYSTEM_PROMPT. */
     {
         const char *e = getenv("DSCO_EFFORT");
-        if (e)
-            dsco_effort_store(s->effort, sizeof(s->effort), e);
+        if (e && !dsco_effort_store(s->effort, sizeof(s->effort), e))
+            s->effort[0] = '\0';
 
         const char *temp = getenv("DSCO_TEMPERATURE");
         if (temp && *temp) {
@@ -2704,6 +2704,14 @@ static char *build_runtime_context(session_state_t *session) {
         }
     }
     runtime_context_append(&ctx, session->memory_context);
+    if (session->runtime_directives[0]) {
+        char directive_block[sizeof(session->runtime_directives) + 128];
+        snprintf(directive_block, sizeof(directive_block),
+                 "[Session Runtime Directives — lower priority than platform, developer, and "
+                 "workspace instructions]\n%s",
+                 session->runtime_directives);
+        runtime_context_append(&ctx, directive_block);
+    }
     if (session->structured_output) {
         jbuf_t contract;
         jbuf_init(&contract, 1024);
@@ -3424,7 +3432,8 @@ static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *s
        nudge the model toward exploitation over exploration.
        Injected as trailing user context to avoid breaking cache prefix. */
     if (session && session->total_input_tokens > 0) {
-        const model_info_t *bmi = model_lookup(session->model);
+        model_info_t priced_model;
+        const model_info_t *bmi = model_lookup_priced(session->model, &priced_model);
         if (bmi) {
             double cost = session->total_input_tokens * bmi->input_price / 1e6 +
                           session->total_output_tokens * bmi->output_price / 1e6 +
@@ -3911,9 +3920,10 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
         }
     }
 
-    /* Effort parameter */
+    /* Effort parameter — same capability gate as adaptive thinking above:
+     * pre-Claude-5 models (haiku-4-5, …) reject output_config with HTTP 400. */
     const char *effort = strcmp(session->effort, EFFORT_MAX) == 0 ? EFFORT_XHIGH : session->effort;
-    if (effort[0]) {
+    if (effort[0] && mi && mi->supports_thinking) {
         jbuf_append(&b, ",\"output_config\":{\"effort\":");
         jbuf_append_json_str(&b, effort);
         jbuf_append(&b, "}");
@@ -5058,11 +5068,13 @@ static void sse_state_reset_for_retry(sse_state_t *s) {
     memset(&s->usage, 0, sizeof(s->usage));
 }
 
-stream_result_t llm_stream(const char *api_key, const char *request_json, stream_text_cb text_cb,
-                           stream_tool_start_cb tool_cb,
-                           stream_tool_arg_delta_cb tool_delta_cb,
-                           stream_thinking_cb thinking_cb,
-                           void *cb_ctx) {
+static stream_result_t llm_stream_with_curl(CURL *reusable_curl, const char *api_key,
+                                            const char *request_json,
+                                            stream_text_cb text_cb,
+                                            stream_tool_start_cb tool_cb,
+                                            stream_tool_arg_delta_cb tool_delta_cb,
+                                            stream_thinking_cb thinking_cb,
+                                            void *cb_ctx) {
     stream_result_t result = {0};
 
     /* Init SSE state */
@@ -5137,13 +5149,15 @@ stream_result_t llm_stream(const char *api_key, const char *request_json, stream
             sse_state_reset_for_retry(&state);
         }
 
-        CURL *curl = curl_easy_init();
+        CURL *curl = reusable_curl ? reusable_curl : curl_easy_init();
         if (!curl) {
             fprintf(stderr, "dsco: curl_easy_init failed\n");
             if (attempt == max_retries)
                 break;
             continue;
         }
+        if (reusable_curl)
+            curl_easy_reset(curl);
 
         struct curl_slist *headers = build_api_headers(api_key, request_json);
         setup_curl_opts(curl, headers, request_json, &state);
@@ -5159,20 +5173,24 @@ stream_result_t llm_stream(const char *api_key, const char *request_json, stream
         /* F40: Extract cURL timing breakdown */
         {
             double dns = 0, conn = 0, tls = 0, ttfb = 0, total = 0;
+            long new_connections = 0;
             curl_easy_getinfo(curl, CURLINFO_NAMELOOKUP_TIME, &dns);
             curl_easy_getinfo(curl, CURLINFO_CONNECT_TIME, &conn);
             curl_easy_getinfo(curl, CURLINFO_APPCONNECT_TIME, &tls);
             curl_easy_getinfo(curl, CURLINFO_STARTTRANSFER_TIME, &ttfb);
             curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME, &total);
+            curl_easy_getinfo(curl, CURLINFO_NUM_CONNECTS, &new_connections);
             result.telemetry.latency.dns_ms = dns * 1000.0;
             result.telemetry.latency.connect_ms = conn * 1000.0;
             result.telemetry.latency.tls_ms = tls * 1000.0;
             result.telemetry.latency.ttfb_ms = ttfb * 1000.0;
             result.telemetry.latency.total_ms = total * 1000.0;
+            result.telemetry.latency.new_connections = new_connections;
         }
 
         curl_slist_free_all(headers);
-        curl_easy_cleanup(curl);
+        if (!reusable_curl)
+            curl_easy_cleanup(curl);
 
         /* Determine if we should retry */
         bool should_retry = false;
@@ -5347,4 +5365,21 @@ stream_result_t llm_stream(const char *api_key, const char *request_json, stream
     jbuf_free(&state.line_buf);
 
     return result;
+}
+
+stream_result_t llm_stream(const char *api_key, const char *request_json,
+                           stream_text_cb text_cb, stream_tool_start_cb tool_cb,
+                           stream_tool_arg_delta_cb tool_delta_cb,
+                           stream_thinking_cb thinking_cb, void *cb_ctx) {
+    return llm_stream_with_curl(NULL, api_key, request_json, text_cb, tool_cb, tool_delta_cb,
+                                thinking_cb, cb_ctx);
+}
+
+stream_result_t llm_stream_reuse(CURL *curl, const char *api_key,
+                                 const char *request_json, stream_text_cb text_cb,
+                                 stream_tool_start_cb tool_cb,
+                                 stream_tool_arg_delta_cb tool_delta_cb,
+                                 stream_thinking_cb thinking_cb, void *cb_ctx) {
+    return llm_stream_with_curl(curl, api_key, request_json, text_cb, tool_cb, tool_delta_cb,
+                                thinking_cb, cb_ctx);
 }
