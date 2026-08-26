@@ -8,6 +8,9 @@
 /* Forward-declare event loop handle (avoid pulling in event_loop.h) */
 typedef struct ev_loop ev_loop_t;
 
+/* Forward-declare event loop handle (avoid pulling in event_loop.h) */
+typedef struct ev_loop ev_loop_t;
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * Inter-Agent Communication Layer
  *
