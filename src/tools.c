@@ -7,6 +7,7 @@
 
 #include "tools.h"
 #include "capability.h"
+#include "cloud_runtime.h"
 #include "http_pool.h"
 #include "net_server.h"
 #include "mesh.h"
@@ -29,6 +30,7 @@
 #include "md.h"
 #include "baseline.h"
 #include "chronicle.h"
+#include "context_fabric.h"
 #include "crypto.h"
 #include "pipeline.h"
 #include "eval.h"
@@ -36,6 +38,7 @@
 #include "trace.h"
 #include "provider.h"
 #include "provider_pool.h"
+#include "subscription_bench.h"
 #include "topology.h"
 #include "task_profile.h"
 #include "plan_optimizer.h"
@@ -343,6 +346,29 @@ static bool require_regular_file(const char *path, char *result, size_t rlen) {
     return true;
 }
 
+/* Return a byte prefix that ends on a UTF-8 codepoint boundary. Terminal
+ * previews are byte-capped, so a raw %.*s cutoff can otherwise manufacture
+ * replacement characters even when the worker emitted valid UTF-8. */
+static size_t utf8_safe_prefix_len(const char *s, size_t len, size_t cap) {
+    if (!s || len == 0 || cap == 0)
+        return 0;
+    size_t n = len < cap ? len : cap;
+    if (n == len)
+        return n;
+    while (n > 0 && (((unsigned char)s[n] & 0xc0u) == 0x80u))
+        n--;
+    return n;
+}
+
+static size_t utf8_safe_suffix_start(const char *s, size_t len, size_t cap) {
+    if (!s || len <= cap)
+        return 0;
+    size_t start = len - cap;
+    while (start < len && (((unsigned char)s[start] & 0xc0u) == 0x80u))
+        start++;
+    return start;
+}
+
 /* Default swarm stream callback — streams child tokens to stderr in real-time.
  * This is used by swarm_wait_any (agent_race), agent_wait, etc. so
  * the user sees tokens from sub-agents as they arrive, not just at the end. */
@@ -364,7 +390,7 @@ static void default_swarm_stream_cb(int child_id, const char *data, size_t len, 
         if (ch == '\n') {
             /* Flush line */
             if (c->stream_buf_len > 0) {
-                int display_len = (int)(c->stream_buf_len > 160 ? 160 : c->stream_buf_len);
+                int display_len = (int)utf8_safe_prefix_len(c->stream_buf, c->stream_buf_len, 160);
                 fprintf(stderr, "  \033[2m│\033[0m \033[36m[agent %d]\033[0m %.*s%s\n", child_id,
                         display_len, c->stream_buf, c->stream_buf_len > 160 ? "..." : "");
                 c->stream_buf_len = 0;
@@ -374,7 +400,7 @@ static void default_swarm_stream_cb(int child_id, const char *data, size_t len, 
         }
 
         if (c->stream_buf_len >= 4095) {
-            int display_len = (int)(c->stream_buf_len > 160 ? 160 : c->stream_buf_len);
+            int display_len = (int)utf8_safe_prefix_len(c->stream_buf, c->stream_buf_len, 160);
             fprintf(stderr, "  \033[2m│\033[0m \033[36m[agent %d]\033[0m %.*s...\n", child_id,
                     display_len, c->stream_buf);
             c->stream_buf_len = 0;
@@ -8428,7 +8454,7 @@ static bool tool_spawn_agent(const char *input, char *result, size_t rlen) {
     int topk = json_get_int(input, "top_k", -1);
     int think = json_get_int(input, "thinking_budget", -1);
     if (effort || toolc || sysprompt || temp >= 0 || topp >= 0 || topk > 0 || think > 0)
-        swarm_set_next_instance(effort, temp, topp, topk, think, toolc, sysprompt);
+        swarm_set_next_instance(effort, temp, topp, topk, think, toolc, sysprompt, -1);
     free(effort);
     free(toolc);
     free(sysprompt);
@@ -8520,7 +8546,9 @@ static bool tool_agent_wait(const char *input, char *result, size_t rlen) {
     ensure_swarm();
     int id = json_get_int(input, "id", -1);
     int timeout = json_get_int(input, "timeout", 120);
-    timeout = clamp_timeout_seconds(timeout, 120, 1, 3600);
+    /* Allow multi-hour waits for long-running sub-agents (was capped at 3600s,
+     * which killed joins well before the agent_wait watchdog). */
+    timeout = clamp_timeout_seconds(timeout, 120, 1, 21600);
     if (id < 0 && g_swarm.child_count == 0) {
         snprintf(result, rlen, "{\"error\":\"no agents to wait for\"}");
         return false;
@@ -9619,7 +9647,7 @@ static bool tool_topology_solve(const char *input, char *result, size_t rlen) {
         free(task);
         return false;
     }
-    int timeout = clamp_timeout_seconds(json_get_int(input, "timeout", 300), 300, 30, 3600);
+    int timeout = clamp_timeout_seconds(json_get_int(input, "timeout", 300), 300, 30, 21600);
 
     const char *api_key = tools_runtime_api_key();
     /* Topologies may execute entirely through OAuth subscriptions or local
@@ -10105,7 +10133,9 @@ static bool tool_create_swarm(const char *input, char *result, size_t rlen) {
     char run_id[256];
     char artifact_dir[1024] = {0};
     swarm_v1_default_run_id(&g_swarm, gid, "create", run_id, sizeof(run_id));
+    bool create_complete = swarm_group_complete(&g_swarm, gid);
     if (swarm_group_persist_run(&g_swarm, gid, run_id, "create", g->name, NULL,
+                                create_complete, create_complete ? NULL : "workers_running",
                                 artifact_dir, sizeof(artifact_dir)) == 0) {
         swarm_v1_append_artifact_fields(&b, run_id, artifact_dir);
     }
@@ -10160,6 +10190,10 @@ static bool tool_swarm_status(const char *input, char *result, size_t rlen) {
 
 static void swarm_v1_default_run_id(swarm_t *sw, int gid, const char *topology, char *buf, size_t n) {
     if (!buf || n == 0) return;
+    if (sw && gid >= 0 && gid < sw->group_count && sw->groups[gid].durable_run_id[0]) {
+        snprintf(buf, n, "%s", sw->groups[gid].durable_run_id);
+        return;
+    }
     const char *name = "swarm";
     if (sw && gid >= 0 && gid < sw->group_count && sw->groups[gid].name[0])
         name = sw->groups[gid].name;
@@ -10172,8 +10206,14 @@ static void swarm_v1_default_run_id(swarm_t *sw, int gid, const char *topology, 
         else safe[j++] = '_';
     }
     safe[j] = '\0';
-    snprintf(buf, n, "swarm_%ld_g%d_%s_%s", (long)time(NULL), gid,
+    char generated[256];
+    snprintf(generated, sizeof(generated), "swarm_%ld_g%d_%s_%s", (long)time(NULL), gid,
              topology && topology[0] ? topology : "run", safe[0] ? safe : "unnamed");
+    if (sw && gid >= 0 && gid < sw->group_count &&
+        swarm_group_ensure_durable_run(sw, gid, topology, generated) == 0)
+        snprintf(buf, n, "%s", sw->groups[gid].durable_run_id);
+    else
+        snprintf(buf, n, "%s", generated);
 }
 
 static void swarm_v1_append_artifact_fields(jbuf_t *b, const char *run_id, const char *artifact_dir) {
@@ -10216,6 +10256,15 @@ static void swarm_collect_results(swarm_t *sw, int gid, char *result, size_t rle
     jbuf_append(&b, ",\"killed\":");
     jbuf_append_int(&b, swarm_group_killed_count(sw, gid));
     jbuf_append(&b, ",\"results\":[");
+
+    /* Reserve response space for metadata and split the remainder across
+     * children. Full output remains in the durable swarm artifact. */
+    size_t inline_output_cap = 256;
+    if (g->child_count > 0 && rlen > 2048) {
+        inline_output_cap = ((size_t)rlen - 2048) / (size_t)g->child_count;
+        if (inline_output_cap > 8192) inline_output_cap = 8192;
+        if (inline_output_cap < 256) inline_output_cap = 256;
+    }
 
     for (int i = 0; i < g->child_count; i++) {
         if (i > 0)
@@ -10262,12 +10311,16 @@ static void swarm_collect_results(swarm_t *sw, int gid, char *result, size_t rle
         /* Truncate very long outputs to keep the result under rlen */
         const char *out = c->output ? c->output : "";
         size_t olen = strlen(out);
-        if (olen > 8192) {
-            /* Last 8k chars for long outputs */
-            char truncated[8256];
-            snprintf(truncated, sizeof(truncated), "[...truncated %zu bytes...]\n%s", olen - 8192,
-                     out + olen - 8192);
-            jbuf_append_json_str(&b, truncated);
+        if (olen > inline_output_cap) {
+            /* Tail is generally where CLI executors place their final answer. */
+            jbuf_t excerpt;
+            jbuf_init(&excerpt, inline_output_cap + 96);
+            size_t tail_start = utf8_safe_suffix_start(out, olen, inline_output_cap);
+            jbuf_appendf(&excerpt, "[...truncated %zu bytes; full output in swarm artifact...]\n",
+                         tail_start);
+            jbuf_append(&excerpt, out + tail_start);
+            jbuf_append_json_str(&b, excerpt.data ? excerpt.data : "");
+            jbuf_free(&excerpt);
         } else {
             jbuf_append_json_str(&b, out);
         }
@@ -10277,7 +10330,7 @@ static void swarm_collect_results(swarm_t *sw, int gid, char *result, size_t rle
     char run_id[256];
     char artifact_dir[1024] = {0};
     swarm_v1_default_run_id(sw, gid, "collect", run_id, sizeof(run_id));
-    if (swarm_group_persist_run(sw, gid, run_id, "collect", g->name, NULL,
+    if (swarm_group_persist_run(sw, gid, run_id, "collect", g->name, NULL, complete, reason,
                                 artifact_dir, sizeof(artifact_dir)) == 0) {
         swarm_v1_append_artifact_fields(&b, run_id, artifact_dir);
     }
@@ -10300,7 +10353,7 @@ static void swarm_live_print_line(int child_id, const char *line, size_t line_le
     if (!line || line_len == 0)
         return;
 
-    int display_len = (int)(line_len > 120 ? 120 : line_len);
+    int display_len = (int)utf8_safe_prefix_len(line, line_len, 120);
     fprintf(stderr, "  %s│%s %s[agent %d]%s %.*s%s\n", TUI_DIM, TUI_RESET, TUI_CYAN, child_id,
             TUI_RESET, display_len, line, line_len > 120 ? "..." : "");
 }
@@ -10549,7 +10602,7 @@ static bool tool_swarm_collect(const char *input, char *result, size_t rlen) {
     ensure_swarm();
     int gid = json_get_int(input, "group_id", -1);
     int timeout = json_get_int(input, "timeout", 300);
-    timeout = clamp_timeout_seconds(timeout, 300, 1, 3600);
+    timeout = clamp_timeout_seconds(timeout, 300, 1, 21600);
 
     if (gid < 0 || gid >= g_swarm.group_count) {
         snprintf(result, rlen, "{\"error\":\"invalid group_id\"}");
@@ -10578,16 +10631,24 @@ static bool tool_swarm_collect(const char *input, char *result, size_t rlen) {
 
         /* Ctrl+C: abort swarm gracefully */
         if (g_interrupted) {
+            /* NEVER kill workers from the collect/watchdog path. The collect
+             * call is a read/observation operation; its transport watchdog,
+             * Ctrl+C, or parent interruption must not become a destructive
+             * swarm abort. Explicit destruction is a separate governed action
+             * (swarm abort/kill) and is the only path allowed to call
+             * swarm_group_abort_and_drain(). Clear the process-local interrupt
+             * so the durable workers can continue and a later collect(group_id)
+             * can reconnect. */
             const char *reason = g_tool_timed_out ? "tool_timeout" : "interrupted";
-            fprintf(stderr, "  %s⚠ %s — killing swarm \"%s\"%s\n", TUI_BRED, reason, grp->name,
-                    TUI_RESET);
-            int killed = swarm_group_abort_and_drain(&g_swarm, gid, &live_ctx, 1500, reason);
+            g_interrupted = 0;
             swarm_collect_results(&g_swarm, gid, result, rlen, false, reason);
-            swarm_emit_group_event("swarm.collect.completed", &g_swarm, gid, reason, killed, -1,
-                                   1500);
-            fprintf(stderr, "  %s└─ swarm stopped (%d kill request%s)%s\n\n", TUI_BRED, killed,
-                    killed == 1 ? "" : "s", TUI_RESET);
-            return false;
+            swarm_emit_group_event("swarm.collect.partial", &g_swarm, gid, reason, 0, -1,
+                                   timeout * 1000);
+            fprintf(stderr,
+                    "  %s└─ collect interrupted; workers preserved — use collect(%d) to resume, "
+                    "abort(%d) to explicitly stop%s\n\n",
+                    TUI_BYELLOW, gid, gid, TUI_RESET);
+            return true;
         }
 
         /* Show status line when agent count changes */
@@ -10609,15 +10670,15 @@ static bool tool_swarm_collect(const char *input, char *result, size_t rlen) {
 
         double elapsed = now_sec_helper() - start;
         if (elapsed >= timeout) {
-            fprintf(stderr, "  %s⚠ swarm \"%s\" timed out after %.0fs — killing active agents%s\n",
-                    TUI_BYELLOW, grp->name, elapsed, TUI_RESET);
-            int killed = swarm_group_abort_and_drain(&g_swarm, gid, &live_ctx, 1500, "timeout");
-            swarm_collect_results(&g_swarm, gid, result, rlen, false, "timeout");
-            swarm_emit_group_event("swarm.collect.completed", &g_swarm, gid, "timeout", killed, -1,
-                                   1500);
+            /* Collection timeout is observational, never destructive. The
+             * group remains live and can be collected later by group_id. */
             fprintf(stderr,
-                    "  %s└─ partial results returned; swarm stopped (%d kill request%s)%s\n\n",
-                    TUI_BYELLOW, killed, killed == 1 ? "" : "s", TUI_RESET);
+                    "  %s⚠ collect window closed after %.0fs — workers preserved; "
+                    "use collect(%d) to resume%s\n",
+                    TUI_BYELLOW, elapsed, gid, TUI_RESET);
+            swarm_collect_results(&g_swarm, gid, result, rlen, false, "collect_timeout");
+            swarm_emit_group_event("swarm.collect.partial", &g_swarm, gid, "collect_timeout", 0,
+                                   -1, 0);
             return true;
         }
     }
@@ -10716,7 +10777,12 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
     char *model = json_get_str(input, "model");
     char *coordinator = json_get_str(input, "coordinator");
     char *coord_model = json_get_str(input, "coordinator_model");
-    int timeout = clamp_timeout_seconds(json_get_int(input, "timeout", 300), 300, 5, 3600);
+    int timeout = clamp_timeout_seconds(json_get_int(input, "timeout", 300), 300, 5, 21600);
+    int max_worker_turns = clamp_timeout_seconds(json_get_int(input, "max_worker_turns", 12),
+                                                 12, 1, 64);
+    int max_coordinator_turns =
+        clamp_timeout_seconds(json_get_int(input, "max_coordinator_turns", 3), 3, 1, 16);
+    bool preserve_on_timeout = json_get_bool(input, "preserve_on_timeout", false);
     double budget = json_get_double(input, "budget", 0);
 
     if (!name || !name[0] || !coordinator || !coordinator[0]) {
@@ -10770,6 +10836,9 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
     /* Wire the (previously dormant) coordinator field for status visibility. */
     snprintf(g_swarm.groups[gid].coordinator_task, sizeof(g_swarm.groups[gid].coordinator_task),
              "%s", coordinator);
+    snprintf(g_swarm.groups[gid].topology, sizeof(g_swarm.groups[gid].topology), "%s",
+             "map_reduce");
+    (void)swarm_group_ensure_durable_run(&g_swarm, gid, "map_reduce", NULL);
 
     /* Optional budget partition across the whole map-reduce op. */
     if (budget > 0)
@@ -10784,6 +10853,9 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
         const char *tp = (parse_ctx.specs[i].provider && parse_ctx.specs[i].provider[0])
                              ? parse_ctx.specs[i].provider
                              : NULL;
+        /* A synchronous map phase is a bounded operation. The child runtime
+         * enforces this turn ceiling even if a worker keeps choosing tools. */
+        swarm_set_next_instance(NULL, -1, -1, -1, -1, NULL, NULL, max_worker_turns);
         int cid = tp ? swarm_spawn_provider(&g_swarm, gid, parse_ctx.specs[i].task, tm, tp)
                      : swarm_spawn_in_group(&g_swarm, gid, parse_ctx.specs[i].task, tm);
         if (cid >= 0) {
@@ -10801,20 +10873,9 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
             TUI_BYELLOW, TUI_RESET, name, spawned, depth + 1, TUI_RESET);
     fprintf(stderr, "  %s┌─ map phase ─ streaming live%s\n", TUI_BYELLOW, TUI_RESET);
 
-    /* ── BARRIER ── */
-    double start = now_sec_helper();
-    int wait_st = swarm_barrier_wait(gid, timeout, start);
-    if (wait_st <= 0) {
-        const char *reason = wait_st < 0 ? "interrupted" : "timeout";
-        swarm_live_ctx_t live_ctx;
-        memset(&live_ctx, 0, sizeof(live_ctx));
-        live_ctx.group_id = gid;
-        live_ctx.swarm = &g_swarm;
-        int killed = swarm_group_abort_and_drain(&g_swarm, gid, &live_ctx, 1500, reason);
-        swarm_collect_results(&g_swarm, gid, result, rlen, false, reason);
-        fprintf(stderr, "  %s└─ map %s — workers stopped (%d kill request%s)%s\n\n",
-                wait_st < 0 ? TUI_BRED : TUI_BYELLOW, reason, killed, killed == 1 ? "" : "s",
-                TUI_RESET);
+    if (spawned == 0) {
+        swarm_collect_results(&g_swarm, gid, result, rlen, false, "no_workers_spawned");
+        fprintf(stderr, "  %s└─ map failed — no workers spawned%s\n\n", TUI_BRED, TUI_RESET);
         free_swarm_task_specs(&parse_ctx);
         free(name);
         free(model);
@@ -10823,15 +10884,40 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
         free(tasks_raw);
         return false;
     }
-    bool map_timed_out = (wait_st == 0);
+
+    /* ── BARRIER ── */
+    double start = now_sec_helper();
+    int wait_st = swarm_barrier_wait(gid, timeout, start);
+    if (wait_st <= 0) {
+        const char *reason = wait_st < 0 ? "interrupted" : "timeout";
+        /* Unlike collect(), synchronous map_reduce owns the work it starts.
+         * Fail closed by default so a timed-out tool call cannot strand
+         * indefinitely-tooling children. Resumability is explicit opt-in. */
+        if (!preserve_on_timeout) {
+            swarm_live_ctx_t live_ctx = {.group_id = gid, .swarm = &g_swarm};
+            (void)swarm_group_abort_and_drain(&g_swarm, gid, &live_ctx, 1500, reason);
+        }
+        swarm_collect_results(&g_swarm, gid, result, rlen, false, reason);
+        swarm_emit_group_event("swarm.collect.partial", &g_swarm, gid, reason, 0, -1, 0);
+        fprintf(stderr, "  %s└─ map %s — workers %s%s\n\n",
+                wait_st < 0 ? TUI_BRED : TUI_BYELLOW, reason,
+                preserve_on_timeout ? "preserved; collect can resume" : "terminated", TUI_RESET);
+        if (wait_st < 0)
+            g_interrupted = 0;
+        free_swarm_task_specs(&parse_ctx);
+        free(name);
+        free(model);
+        free(coordinator);
+        free(coord_model);
+        free(tasks_raw);
+        return false;
+    }
     {
         swarm_group_t *g = &g_swarm.groups[gid];
         int done = swarm_group_done_count(&g_swarm, gid);
         int errs = swarm_group_error_count(&g_swarm, gid);
-        fprintf(stderr, "  %s└─ map %s: %d/%d done, %d errors (%.1fs)%s\n",
-                map_timed_out ? TUI_BYELLOW : TUI_GREEN,
-                map_timed_out ? "timed out (partial)" : "complete", done, g->child_count, errs,
-                now_sec_helper() - start, TUI_RESET);
+        fprintf(stderr, "  %s└─ map complete: %d/%d done, %d errors (%.1fs)%s\n", TUI_GREEN,
+                done, g->child_count, errs, now_sec_helper() - start, TUI_RESET);
     }
 
     /* ── REDUCE: assemble a bounded synthesis prompt from worker outputs ── */
@@ -10839,12 +10925,29 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
     jbuf_t rp;
     jbuf_init(&rp, 16384);
     jbuf_append(&rp, coordinator);
-    jbuf_append(&rp, "\n\nYou are the coordinator of a worker swarm. Synthesize "
-                     "the worker outputs below into a single coherent result. "
-                     "Reconcile disagreements, drop dead-ends, and cite which "
-                     "worker each conclusion came from.\n");
-    /* Per-worker output cap keeps the prompt well under ARG_MAX (execl). */
-    const size_t PER_WORKER_CAP = 6000;
+    jbuf_append(&rp, "\n\nThe worker outputs below are the complete source material for this "
+                     "reduce phase. Do not call tools, spawn agents, browse, or delegate. "
+                     "Synthesize the final answer directly. You are the composite engineer for "
+                     "a worker swarm. Produce one "
+                     "implementation-ready result, not a summary collage. First extract each "
+                     "worker's claims, evidence, artifacts, constraints, and failure modes. "
+                     "Then reconcile contradictions explicitly, prefer independently corroborated "
+                     "claims, preserve strong minority findings, and discard unsupported dead-ends. "
+                     "Your final response must contain: (1) integrated conclusion, (2) concrete "
+                     "design or patch plan, (3) evidence matrix citing worker IDs, (4) unresolved "
+                     "risks, and (5) verification/acceptance criteria. Never invent evidence absent "
+                     "from the worker outputs.\n");
+    /* Dense composite context: share a bounded prompt budget fairly across all
+     * workers instead of fixing 6 KiB per worker. This admits substantially more
+     * evidence for small/medium swarms while staying below exec argument limits. */
+    const size_t COMPOSITE_OUTPUT_BUDGET = 131072;
+    size_t per_worker_cap = grp->child_count > 0
+                                ? COMPOSITE_OUTPUT_BUDGET / (size_t)grp->child_count
+                                : COMPOSITE_OUTPUT_BUDGET;
+    if (per_worker_cap < 4096)
+        per_worker_cap = 4096;
+    if (per_worker_cap > 16384)
+        per_worker_cap = 16384;
     for (int i = 0; i < grp->child_count; i++) {
         swarm_child_t *c = &g_swarm.children[grp->child_ids[i]];
         char hdr[SWARM_LABEL_LEN + 64];
@@ -10853,9 +10956,17 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
         jbuf_append(&rp, hdr);
         const char *out = c->output ? c->output : "(no output)";
         size_t olen = strlen(out);
-        if (olen > PER_WORKER_CAP) {
-            jbuf_append(&rp, "[...truncated, tail follows...]\n");
-            jbuf_append(&rp, out + olen - PER_WORKER_CAP);
+        if (olen > per_worker_cap) {
+            /* Preserve both premise and conclusion: worker outputs commonly put
+             * setup/evidence first and recommendations last. */
+            size_t head_cap = per_worker_cap / 3;
+            size_t tail_cap = per_worker_cap - head_cap;
+            size_t head_len = utf8_safe_prefix_len(out, olen, head_cap);
+            size_t tail_start = utf8_safe_suffix_start(out, olen, tail_cap);
+            jbuf_append_len(&rp, out, head_len);
+            jbuf_appendf(&rp, "\n[...truncated %zu middle bytes...]\n",
+                         tail_start > head_len ? tail_start - head_len : 0);
+            jbuf_append(&rp, out + tail_start);
         } else {
             jbuf_append(&rp, out);
         }
@@ -10865,6 +10976,9 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
         (coord_model && coord_model[0]) ? coord_model : ((model && model[0]) ? model : NULL);
     fprintf(stderr, "  %s┌─ reduce phase ─ coordinator synthesizing%s\n", TUI_BYELLOW, TUI_RESET);
 
+    /* Reducers only transform the supplied worker material. Disable tool use
+     * and cap turns so the coordinator cannot recursively enter a tool loop. */
+    swarm_set_next_instance(NULL, -1, -1, -1, -1, "none", NULL, max_coordinator_turns);
     int coord_id = swarm_spawn(&g_swarm, rp.data ? rp.data : coordinator, cm);
     if (coord_id >= 0) {
         swarm_emit_child_event("swarm.child.spawned", swarm_get(&g_swarm, coord_id),
@@ -10873,7 +10987,11 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
     jbuf_free(&rp);
 
     char *coord_out = NULL;
+    bool coordinator_complete = false;
+    const char *run_reason = NULL;
+    const char *coordinator_status = "spawn_failed";
     if (coord_id < 0) {
+        run_reason = "coordinator_spawn_failed";
         fprintf(stderr, "  %s└─ coordinator spawn failed — returning raw map%s\n\n", TUI_BRED,
                 TUI_RESET);
     } else {
@@ -10899,12 +11017,38 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
         }
         if (coord_abort_reason)
             (void)swarm_child_abort_and_drain(&g_swarm, coord_id, 1500, coord_abort_reason);
+        if (coord_abort_reason && strcmp(coord_abort_reason, "interrupted") == 0)
+            g_interrupted = 0;
         swarm_child_t *cc = swarm_get(&g_swarm, coord_id);
         if (cc && cc->output)
             coord_out = cc->output;
-        fprintf(stderr, "  %s└─ reduce complete (%.1fs)%s\n\n", TUI_GREEN,
-                now_sec_helper() - cstart, TUI_RESET);
+        coordinator_status = cc ? swarm_status_str(cc->status) : "missing";
+        coordinator_complete = cc && cc->status == SWARM_DONE && cc->output_len > 0;
+        if (coord_abort_reason)
+            run_reason = strcmp(coord_abort_reason, "timeout") == 0 ? "coordinator_timeout"
+                                                                    : "coordinator_interrupted";
+        else if (!cc)
+            run_reason = "coordinator_missing";
+        else if (cc->status == SWARM_ERROR)
+            run_reason = "coordinator_error";
+        else if (cc->status == SWARM_KILLED)
+            run_reason = "coordinator_killed";
+        else if (cc->status == SWARM_DONE && cc->output_len == 0)
+            run_reason = "coordinator_empty";
+        if (coordinator_complete) {
+            fprintf(stderr, "  %s└─ reduce complete (%.1fs)%s\n\n", TUI_GREEN,
+                    now_sec_helper() - cstart, TUI_RESET);
+        } else {
+            fprintf(stderr, "  %s└─ reduce failed: %s (%.1fs)%s\n\n", TUI_BRED,
+                    run_reason ? run_reason : coordinator_status, now_sec_helper() - cstart,
+                    TUI_RESET);
+        }
     }
+
+    int map_errors = swarm_group_error_count(&g_swarm, gid) +
+                     swarm_group_killed_count(&g_swarm, gid);
+    if (coordinator_complete && map_errors > 0)
+        run_reason = "worker_failures";
 
     /* ── Build result: synthesized answer + per-worker summary ── */
     jbuf_t b;
@@ -10915,15 +11059,22 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
     jbuf_append_json_str(&b, name);
     jbuf_append(&b, ",\"workers\":");
     jbuf_append_int(&b, grp->child_count);
+    jbuf_append(&b, ",\"complete\":");
+    jbuf_append(&b, coordinator_complete ? "true" : "false");
+    jbuf_append(&b, ",\"reason\":");
+    if (run_reason) jbuf_append_json_str(&b, run_reason); else jbuf_append(&b, "null");
     jbuf_append(&b, ",\"map_complete\":");
-    jbuf_append(&b, map_timed_out ? "false" : "true");
+    jbuf_append(&b, "true");
+    jbuf_append(&b, ",\"coordinator_status\":");
+    jbuf_append_json_str(&b, coordinator_status);
     jbuf_append(&b, ",\"coordinator_output\":");
     if (coord_out) {
         size_t col = strlen(coord_out);
         if (col > 16384) {
             char trunc[16448];
-            snprintf(trunc, sizeof(trunc), "[...truncated %zu bytes...]\n%s", col - 16384,
-                     coord_out + col - 16384);
+            size_t tail_start = utf8_safe_suffix_start(coord_out, col, 16384);
+            snprintf(trunc, sizeof(trunc), "[...truncated %zu bytes...]\n%s", tail_start,
+                     coord_out + tail_start);
             jbuf_append_json_str(&b, trunc);
         } else {
             jbuf_append_json_str(&b, coord_out);
@@ -10949,7 +11100,8 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
     char artifact_dir[1024] = {0};
     swarm_v1_default_run_id(&g_swarm, gid, "map_reduce", run_id, sizeof(run_id));
     if (swarm_group_persist_run(&g_swarm, gid, run_id, "map_reduce", name, coord_out,
-                                artifact_dir, sizeof(artifact_dir)) == 0) {
+                                coordinator_complete, run_reason, artifact_dir,
+                                sizeof(artifact_dir)) == 0) {
         swarm_v1_append_artifact_fields(&b, run_id, artifact_dir);
     }
     jbuf_append(&b, "}");
@@ -10970,7 +11122,7 @@ static bool tool_swarm_map_reduce(const char *input, char *result, size_t rlen) 
     free(coordinator);
     free(coord_model);
     free(tasks_raw);
-    return true;
+    return coordinator_complete;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -11243,6 +11395,12 @@ static executor_type_t parse_executor_type(const char *name) {
     if (strcmp(name, "codex") == 0 || strcmp(name, "openai-codex") == 0 ||
         strcmp(name, "chatgpt-codex") == 0)
         return EXECUTOR_CODEX;
+    if (strcmp(name, "grok") == 0 || strcmp(name, "xai") == 0)
+        return EXECUTOR_GROK;
+    /* Kimi membership is a native dsco provider. A spawn requesting the old
+     * executor spelling becomes a dsco child pinned by its kimi-code model. */
+    if (strcmp(name, "kimi") == 0 || strcmp(name, "kimi-code") == 0)
+        return EXECUTOR_DSCO;
     return EXECUTOR_DSCO;
 }
 
@@ -11276,6 +11434,15 @@ static bool tool_executor_status(const char *input, char *result, size_t rlen) {
     }
     jbuf_append(&b, "}");
 
+    jbuf_appendf(&b, ",\"grok\":{\"available\":%s", e->grok_available ? "true" : "false");
+    if (e->grok_available) { jbuf_append(&b, ",\"path\":"); jbuf_append_json_str(&b, e->grok_path);
+        jbuf_append(&b, ",\"model\":"); jbuf_append_json_str(&b, e->grok_model); }
+    jbuf_append(&b, "}");
+    jbuf_appendf(&b, ",\"kimi\":{\"available\":%s", e->kimi_available ? "true" : "false");
+    if (e->kimi_available) { jbuf_append(&b, ",\"path\":"); jbuf_append_json_str(&b, e->kimi_path);
+        jbuf_append(&b, ",\"model\":"); jbuf_append_json_str(&b, e->kimi_model); }
+    jbuf_append(&b, "}");
+
     /* Budget info */
     if (g_swarm.swarm_budget_usd > 0) {
         char bud[32], spent[32];
@@ -11306,6 +11473,14 @@ static bool tool_executor_status(const char *input, char *result, size_t rlen) {
         fprintf(stderr, " codex=%s✓%s(%s)", TUI_GREEN, TUI_RESET, e->codex_model);
     else
         fprintf(stderr, " codex=%s✗%s", TUI_RED, TUI_RESET);
+    if (e->grok_available)
+        fprintf(stderr, " grok=%s✓%s(%s)", TUI_GREEN, TUI_RESET, e->grok_model);
+    else
+        fprintf(stderr, " grok=%s✗%s", TUI_RED, TUI_RESET);
+    if (e->kimi_available)
+        fprintf(stderr, " kimi=%s✓%s(%s)", TUI_GREEN, TUI_RESET, e->kimi_model);
+    else
+        fprintf(stderr, " kimi=%s✗%s", TUI_RED, TUI_RESET);
     fprintf(stderr, "\n");
 
     return true;
@@ -11393,6 +11568,17 @@ static bool tool_spawn_executor(const char *input, char *result, size_t rlen) {
         return false;
     }
 
+    if (exec_type == EXECUTOR_GROK && !g_swarm.executors.grok_available) {
+        snprintf(result, rlen, "{\"error\":\"grok CLI not available — install Grok and sign in\"}");
+        if (owns_group) retire_swarm_group(&g_swarm, group_id);
+        free(task); free(model); free(exec_name); free(group_name); return false;
+    }
+    if (exec_type == EXECUTOR_KIMI && !g_swarm.executors.kimi_available) {
+        snprintf(result, rlen, "{\"error\":\"kimi CLI not available — install Kimi Code and run kimi login\"}");
+        if (owns_group) retire_swarm_group(&g_swarm, group_id);
+        free(task); free(model); free(exec_name); free(group_name); return false;
+    }
+
     /* Budget check before spawn */
     if (g_swarm.swarm_budget_usd > 0) {
         double remaining = swarm_budget_remaining(&g_swarm);
@@ -11433,7 +11619,9 @@ static bool tool_spawn_executor(const char *input, char *result, size_t rlen) {
     c->est_cost_usd = swarm_estimate_task_cost(
         &g_swarm, model ? model
                         : (exec_type == EXECUTOR_CLAUDE ? g_swarm.executors.claude_model
-                                                        : g_swarm.executors.codex_model));
+                        : exec_type == EXECUTOR_CODEX ? g_swarm.executors.codex_model
+                        : exec_type == EXECUTOR_GROK ? g_swarm.executors.grok_model
+                                                     : g_swarm.executors.kimi_model));
     swarm_emit_child_event("swarm.child.spawned", c, "swarm.spawn_executor", NULL);
     if (owns_group)
         swarm_emit_group_event("swarm.group.created", &g_swarm, group_id, "swarm.spawn_executor", 1,
@@ -11571,14 +11759,25 @@ static bool tool_spawn_provider(const char *input, char *result, size_t rlen) {
     return true;
 }
 
+#define PROVIDER_FABRIC_MAX_CANDIDATES 512
+
 typedef struct {
     char provider[64];
     char model[128];
     char effort[16]; /* empty = model/provider default reasoning effort */
+    char auth_class[16]; /* subscription|payg|api|oauth|local */
+    char upstream[64];   /* concrete aggregator upstream, if pinned */
+    char quantization[16];
+    char lane_id[384];
     int replicas;
     bool subscription;
     bool local;
     bool metered;
+    double input_price_per_m;
+    double output_price_per_m;
+    double quality;
+    int context_window;
+    int max_output;
     int score;
     int prompt_tokens;
     int expected_hit_tokens;
@@ -11645,6 +11844,14 @@ static void fabric_append_lanes_json(jbuf_t *b, provider_fabric_lane_t lanes[], 
             jbuf_append(b, ",\"effort\":");
             jbuf_append_json_str(b, lanes[li].effort);
         }
+        jbuf_append(b, ",\"auth_class\":");
+        jbuf_append_json_str(b, lanes[li].auth_class);
+        jbuf_append(b, ",\"upstream\":");
+        jbuf_append_json_str(b, lanes[li].upstream);
+        jbuf_append(b, ",\"quantization\":");
+        jbuf_append_json_str(b, lanes[li].quantization);
+        jbuf_append(b, ",\"lane_id\":");
+        jbuf_append_json_str(b, lanes[li].lane_id);
         jbuf_append(b, ",\"replicas\":");
         jbuf_append_int(b, lanes[li].replicas);
         jbuf_append(b, ",\"subscription\":");
@@ -11653,6 +11860,13 @@ static void fabric_append_lanes_json(jbuf_t *b, provider_fabric_lane_t lanes[], 
         jbuf_append(b, lanes[li].local ? "true" : "false");
         jbuf_append(b, ",\"metered\":");
         jbuf_append(b, lanes[li].metered ? "true" : "false");
+        jbuf_appendf(b, ",\"input_price_per_m\":%.6f", lanes[li].input_price_per_m);
+        jbuf_appendf(b, ",\"output_price_per_m\":%.6f", lanes[li].output_price_per_m);
+        jbuf_appendf(b, ",\"quality\":%.2f", lanes[li].quality);
+        jbuf_append(b, ",\"context_window\":");
+        jbuf_append_int(b, lanes[li].context_window);
+        jbuf_append(b, ",\"max_output\":");
+        jbuf_append_int(b, lanes[li].max_output);
         jbuf_append(b, ",\"score\":");
         jbuf_append_int(b, lanes[li].score);
         jbuf_append(b, ",\"expected_hit_tokens\":");
@@ -11669,10 +11883,14 @@ static void fabric_append_lanes_json(jbuf_t *b, provider_fabric_lane_t lanes[], 
 }
 
 static bool fabric_lane_exists(provider_fabric_lane_t lanes[], int count, const char *provider,
-                               const char *model, const char *effort) {
+                               const char *model, const char *effort, const char *auth_class,
+                               const char *upstream, const char *quantization) {
     for (int i = 0; i < count; i++) {
         if (strcmp(lanes[i].provider, provider) == 0 && strcmp(lanes[i].model, model) == 0 &&
-            strcmp(lanes[i].effort, effort ? effort : "") == 0)
+            strcmp(lanes[i].effort, effort ? effort : "") == 0 &&
+            strcmp(lanes[i].auth_class, auth_class ? auth_class : "") == 0 &&
+            strcmp(lanes[i].upstream, upstream ? upstream : "") == 0 &&
+            strcmp(lanes[i].quantization, quantization ? quantization : "") == 0)
             return true;
     }
     return false;
@@ -11702,10 +11920,26 @@ static bool fabric_add_lane(provider_fabric_lane_t lanes[], int *count, int max_
         /* Invalid effort suffix: treat '@' as part of the model id. */
     }
 
-    if (fabric_lane_exists(lanes, *count, provider, model_buf, effort_buf))
+    const char *auth_class = subscription ? "subscription" : metered ? "payg" :
+                             provider_is_local_endpoint(provider) ? "local" : "api";
+    if (fabric_lane_exists(lanes, *count, provider, model_buf, effort_buf, auth_class, "", ""))
         return false;
     if (!provider_has_usable_key(provider, api_key))
         return false;
+    if (subscription) {
+        const dsco_subscription_lane_spec_t *subscription_lane = NULL;
+        for (size_t i = 0; i < dsco_subscription_lane_count(); i++) {
+            const dsco_subscription_lane_spec_t *candidate = dsco_subscription_lane_at(i);
+            if (candidate && strcmp(candidate->provider, provider) == 0) {
+                subscription_lane = candidate;
+                break;
+            }
+        }
+        if (!subscription_lane ||
+            !dsco_subscription_lane_native_ready(subscription_lane, api_key, NULL, 0, NULL, 0,
+                                                 NULL, 0))
+            return false;
+    }
     /* Credentials alone are insufficient: omit lanes that the durable pool has
      * marked exhausted or breaker-tripped, rather than spending a worker on a
      * failure we already observed. But the pool only registers its core[]
@@ -11719,10 +11953,46 @@ static bool fabric_add_lane(provider_fabric_lane_t lanes[], int *count, int max_
     snprintf(lanes[*count].provider, sizeof(lanes[*count].provider), "%s", provider);
     snprintf(lanes[*count].model, sizeof(lanes[*count].model), "%s", model_buf);
     snprintf(lanes[*count].effort, sizeof(lanes[*count].effort), "%s", effort_buf);
+    snprintf(lanes[*count].auth_class, sizeof(lanes[*count].auth_class), "%s", auth_class);
+    snprintf(lanes[*count].lane_id, sizeof(lanes[*count].lane_id), "%s|%s|%s|%s", provider,
+             model_buf, effort_buf[0] ? effort_buf : "default", auth_class);
     lanes[*count].replicas = replicas;
     lanes[*count].subscription = subscription;
     lanes[*count].local = provider_is_local_endpoint(provider);
     lanes[*count].metered = metered;
+    (*count)++;
+    return true;
+}
+
+/* Add a fully-qualified lane without first collapsing endpoint/auth dimensions.
+ * The base helper remains for ordinary direct-provider lanes. */
+static bool fabric_add_exact_lane(provider_fabric_lane_t lanes[], int *count, int max_lanes,
+                                  const char *provider, const char *model, const char *effort,
+                                  const char *auth_class, const char *upstream,
+                                  const char *quantization, int replicas, bool subscription,
+                                  bool metered, const char *api_key) {
+    if (!lanes || !count || *count >= max_lanes || !provider || !model || replicas < 1)
+        return false;
+    const char *e = effort ? effort : "", *a = auth_class ? auth_class : "api";
+    const char *u = upstream ? upstream : "", *q = quantization ? quantization : "";
+    if (fabric_lane_exists(lanes, *count, provider, model, e, a, u, q))
+        return false;
+    if (!provider_has_usable_key(provider, api_key))
+        return false;
+    provider_fabric_lane_t *l = &lanes[*count];
+    memset(l, 0, sizeof(*l));
+    snprintf(l->provider, sizeof(l->provider), "%s", provider);
+    snprintf(l->model, sizeof(l->model), "%s", model);
+    snprintf(l->effort, sizeof(l->effort), "%s", e);
+    snprintf(l->auth_class, sizeof(l->auth_class), "%s", a);
+    snprintf(l->upstream, sizeof(l->upstream), "%s", u);
+    snprintf(l->quantization, sizeof(l->quantization), "%s", q);
+    snprintf(l->lane_id, sizeof(l->lane_id), "%s|%s|%s|%s|%s|%s", provider, model,
+             u[0] ? u : "direct", q[0] ? q : "default", e[0] ? e : "default", a);
+    l->replicas = replicas;
+    l->subscription = subscription;
+    l->metered = metered;
+    l->local = provider_is_local_endpoint(provider);
     (*count)++;
     return true;
 }
@@ -11909,6 +12179,12 @@ static void fabric_score_lanes(provider_fabric_lane_t lanes[], int lane_count, i
             score -= prompt_tokens / 64;
         if (l->metered)
             score -= prompt_tokens / 32;
+        if (l->quality > 0)
+            score += (int)(l->quality * 3.0);
+        if (l->input_price_per_m > 0 || l->output_price_per_m > 0) {
+            double blended = l->input_price_per_m + l->output_price_per_m * 0.35;
+            score -= (int)(blended * 8.0);
+        }
 
         l->score = score;
     }
@@ -11932,6 +12208,54 @@ static int fabric_count_local_lanes(provider_fabric_lane_t lanes[], int lane_cou
         if (lanes[i].local)
             n++;
     return n;
+}
+
+/* Reorder a score-sorted lane list for provider COVERAGE: the first block is
+ * the single highest-scored lane for each distinct provider (so a fanout cap of
+ * N distinct providers actually spawns N distinct providers instead of N model
+ * sub-lanes of the top provider), followed by the remaining lanes in score
+ * order. Stable within each provider. Distinct providers are also counted so we
+ * can lift the fanout cap to cover them. Returns the number of distinct
+ * providers. */
+static int fabric_reorder_for_coverage(provider_fabric_lane_t lanes[], int lane_count) {
+    if (lane_count <= 1)
+        return lane_count;
+    provider_fabric_lane_t out[PROVIDER_FABRIC_MAX_CANDIDATES];
+    bool taken[PROVIDER_FABRIC_MAX_CANDIDATES];
+    memset(taken, 0, sizeof(taken));
+    int n = 0;
+    int distinct = 0;
+    /* Pass 1: first (highest-scored, already sorted) lane per distinct provider. */
+    for (int i = 0; i < lane_count && n < lane_count; i++) {
+        if (taken[i])
+            continue;
+        bool seen = false;
+        for (int k = 0; k < i; k++) {
+            if (taken[k])
+                continue; /* only compare against not-yet-taken earlier dupes */
+        }
+        /* Has this provider already been placed in pass 1? */
+        for (int j = 0; j < n; j++) {
+            if (strcmp(out[j].provider, lanes[i].provider) == 0) {
+                seen = true;
+                break;
+            }
+        }
+        if (seen)
+            continue;
+        out[n++] = lanes[i];
+        taken[i] = true;
+        distinct++;
+    }
+    /* Pass 2: append the rest in original (score) order. */
+    for (int i = 0; i < lane_count && n < lane_count; i++) {
+        if (taken[i])
+            continue;
+        out[n++] = lanes[i];
+        taken[i] = true;
+    }
+    memcpy(lanes, out, sizeof(provider_fabric_lane_t) * (size_t)n);
+    return distinct;
 }
 
 static char *fabric_trim(char *s) {
@@ -12097,18 +12421,16 @@ static bool tool_provider_fabric_race(int gid, provider_fabric_lane_t lanes[], i
 
     swarm_child_t *winner = swarm_get(&g_swarm, winner_id);
     int killed = 0;
-    int kill_requests = 0;
     for (int i = 0; i < grp->child_count; i++) {
-        int cid = grp->child_ids[i];
-        if (cid == winner_id)
-            continue;
-        swarm_child_t *loser = swarm_get(&g_swarm, cid);
-        if (loser && (loser->status == SWARM_RUNNING || loser->status == SWARM_STREAMING))
+        swarm_child_t *loser = swarm_get(&g_swarm, grp->child_ids[i]);
+        if (loser && loser->id != winner_id &&
+            (loser->status == SWARM_RUNNING || loser->status == SWARM_STREAMING))
             killed++;
-        kill_requests += swarm_child_abort_and_drain(&g_swarm, cid, 1500, "provider_fabric_loser");
     }
-    swarm_emit_group_event("swarm.group.abort.completed", &g_swarm, gid, "provider_fabric_losers",
-                           kill_requests, -1, 1500);
+    /* Signal all losers first, then drain under one shared grace window.
+     * The winner is terminal, so swarm_group_abort_and_drain skips it. */
+    int kill_requests = swarm_group_abort_and_drain(&g_swarm, gid, &live_ctx, 1500,
+                                                     "provider_fabric_losers");
 
     double elapsed = winner ? swarm_child_elapsed_sec(winner) : 0.0;
     fprintf(stderr, "  %sfabric winner%s #%d %s/%s in %.2fs; killed %d slower lanes\n", TUI_GREEN,
@@ -12240,19 +12562,24 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
 
     /* Sized to the swarm's structural child cap: a full catalog unroll can
      * field one lane per model; max_agents still governs actual fanout. */
-    provider_fabric_lane_t lanes[SWARM_MAX_CHILDREN];
+    provider_fabric_lane_t lanes[PROVIDER_FABRIC_MAX_CANDIDATES];
     memset(lanes, 0, sizeof(lanes));
     int lane_count = 0;
     const char *api_key = g_swarm.api_key;
 
-    bool fugu_is_subscription = provider_sakana_current_key_is_subscription();
-    if (fugu_is_subscription || include_metered) {
+    /* Sakana exposes two independent quota/billing pools on one endpoint.
+     * Materialize both; auth_class is part of lane identity and each child is
+     * pinned to the corresponding credential rather than relying on fallback. */
+    if (provider_sakana_subscription_request_key())
         fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "sakana",
-                        fugu_model, fugu_replicas, fugu_is_subscription, !fugu_is_subscription,
-                        api_key);
-    }
+                        fugu_model, fugu_replicas, true, false, api_key);
+    if (include_metered && provider_sakana_payg_request_key())
+        fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "sakana",
+                        fugu_model, fugu_replicas, false, true, api_key);
     fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "anthropic",
                     "claude-sonnet-5", replicas, true, false, api_key);
+    fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "kimi-code",
+                    KIMI_CODE_DEFAULT_MODEL, replicas, true, false, api_key);
     /* openai-codex fields sub-lanes for the important gpt-5.6 models (sol,
      * terra, luna) alongside the gpt-5.5 baseline. Sub-lanes are distinct
      * lanes per model[@effort]; scoring/max_agents still cap actual fanout. */
@@ -12260,9 +12587,10 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
                     "gpt-5.6-sol", replicas, true, false, api_key);
     fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "openai-codex",
                     "gpt-5.6-terra", replicas, true, false, api_key);
-    /* gpt-5.6-luna: observed HTTP 404 on the ChatGPT subscription backend
-     * (2026-07-12); not a default lane until it resolves. Opt in via
-     * DSCO_FABRIC_SUBLANES=openai-codex:gpt-5.6-luna[@effort]. */
+    /* Luna is the issued default and was live-verified on the subscription
+     * Responses endpoint on 2026-07-16. Keep it in the ordinary fabric. */
+    fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "openai-codex",
+                    DEFAULT_MODEL, replicas, true, false, api_key);
     fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "openai-codex",
                     "gpt-5.5", replicas, true, false, api_key);
     fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "zai", "glm-5.2",
@@ -12283,20 +12611,31 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
          * The planner supplies the cheapest capability-compatible frontier,
          * rather than collapsing the entire catalog into one glm lane. */
         if (provider_has_usable_key("openrouter", api_key)) {
-            openrouter_lane_t or_lanes[16];
+            openrouter_lane_t or_lanes[PROVIDER_FABRIC_MAX_CANDIDATES];
             openrouter_lane_query_t or_query = {
                 .min_context = fabric_rough_tokens(task) + 8192,
                 .min_quality = 20.0,
-                .max_models = 8,
+                .max_models = fabric_env_int("DSCO_FABRIC_OR_MAX_MODELS", 64, 1, 512),
                 .require_tools = true,
-                .diversify_org = true,
+                .diversify_org = !fabric_env_falsey("DSCO_FABRIC_OR_DIVERSIFY_ORGS"),
                 .task = task,
             };
+            or_query.endpoints_per_model = fabric_env_int("DSCO_FABRIC_OR_ENDPOINTS_PER_MODEL", 4, 0, 16);
             int or_count = openrouter_lanes_build(&or_query, or_lanes,
                                                   (int)(sizeof(or_lanes) / sizeof(or_lanes[0])));
-            for (int i = 0; i < or_count; i++)
-                fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])),
-                                "openrouter", or_lanes[i].model, replicas, false, true, api_key);
+            for (int i = 0; i < or_count; i++) {
+                int slot = lane_count;
+                if (fabric_add_exact_lane(lanes, &lane_count,
+                                          (int)(sizeof(lanes) / sizeof(lanes[0])), "openrouter",
+                                          or_lanes[i].model, "", "api", or_lanes[i].upstream,
+                                          or_lanes[i].quantization, replicas, false, true, api_key)) {
+                    lanes[slot].input_price_per_m = or_lanes[i].input_price_per_m;
+                    lanes[slot].output_price_per_m = or_lanes[i].output_price_per_m;
+                    lanes[slot].quality = or_lanes[i].quality;
+                    lanes[slot].context_window = or_lanes[i].context_window;
+                    lanes[slot].max_output = or_lanes[i].max_output;
+                }
+            }
         }
         fabric_add_lane(lanes, &lane_count, (int)(sizeof(lanes) / sizeof(lanes[0])), "openai",
                         "gpt-4.1", replicas, false, true, api_key);
@@ -12373,9 +12712,37 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
                        affinity_model, cache_hint_scoped);
     fabric_sort_lanes(lanes, lane_count);
 
+    /* Provider-coverage scheduling: with selection=coverage|balanced or
+     * one_per_provider=true, reorder so distinct providers fill the first
+     * slots (one worker per provider) instead of letting the top provider's
+     * model sub-lanes crowd out other providers. Lift the fanout cap to the
+     * distinct-provider count (bounded by max_available) so coverage is real.
+     * Coverage also disables the cache-aware race hedge, which otherwise
+     * collapses fanout to 1-2 lanes. */
+    char *selection = json_get_str(input, "provider_selection");
+    if (!selection || !selection[0]) {
+        free(selection);
+        selection = json_get_str(input, "selection");
+    }
+    bool one_per_provider = json_get_bool(input, "one_per_provider", false);
+    bool coverage = one_per_provider ||
+                    (selection && (strcmp(selection, "coverage") == 0 ||
+                                   strcmp(selection, "balanced") == 0 ||
+                                   strcmp(selection, "one_per_provider") == 0));
+    free(selection);
+    if (coverage) {
+        int distinct = fabric_reorder_for_coverage(lanes, lane_count);
+        if (distinct > max_agents) {
+            max_agents = distinct;
+            if (max_agents > max_available)
+                max_agents = max_available;
+        }
+        original_max_agents = max_agents;
+    }
+
     bool diverse_hedge = false;
     int local_lane_count = fabric_count_local_lanes(lanes, lane_count);
-    if (cache_aware && race) {
+    if (cache_aware && race && !coverage) {
         int cap = max_agents;
         bool high_scoped_hit =
             effective_hit_tokens >= high_cache_tokens && effective_hit_tokens > 0;
@@ -12436,6 +12803,19 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
     int skipped = 0;
     for (int li = 0; li < lane_count && spawned < max_agents; li++) {
         provider_fabric_lane_t *lane = &lanes[li];
+        /* Preflight: skip lanes whose provider has no usable credential rather
+         * than spawning workers that immediately die with HTTP 401/auth errors
+         * (the failure storm seen when metered lanes lack keys). Local lanes
+         * and subscription lanes are validated by their own auth path. */
+        if (!lane->local) {
+            const char *lane_key = provider_resolve_request_api_key(lane->provider, api_key);
+            bool usable = (lane_key && lane_key[0]) ||
+                          provider_has_usable_key(lane->provider, api_key);
+            if (!usable) {
+                skipped += lane->replicas;
+                continue;
+            }
+        }
         for (int ri = 0; ri < lane->replicas && spawned < max_agents; ri++) {
             jbuf_t prompt;
             jbuf_init(&prompt, strlen(task) + 256);
@@ -12452,8 +12832,13 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
             jbuf_append_int(&prompt, ri + 1);
             jbuf_append(&prompt, " of ");
             jbuf_append_int(&prompt, lane->replicas);
-            jbuf_append(&prompt, "\nReturn a complete result for this lane; the parent may race, "
-                                 "compare, or synthesize outputs.");
+            jbuf_append(&prompt, "\nAct as an independent engineering specialist. Return a complete, "
+                                 "evidence-bearing result for this lane: state assumptions, inspect "
+                                 "or compute where possible, identify failure modes, propose concrete "
+                                 "implementation details, and define verification criteria. Distinguish "
+                                 "observed facts from inference. The parent will race, compare, or "
+                                 "compose outputs, so maximize complementary signal rather than generic "
+                                 "agreement.");
             /* Per-lane reasoning-effort sub-lane: the child inherits env across
              * fork/exec, so pin DSCO_EFFORT around the spawn and restore. */
             const char *prev_effort = getenv("DSCO_EFFORT");
@@ -12462,7 +12847,17 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
                 snprintf(prev_effort_buf, sizeof(prev_effort_buf), "%s", prev_effort);
             if (lane->effort[0])
                 setenv("DSCO_EFFORT", lane->effort, 1);
-            int cid = swarm_spawn_provider(&g_swarm, gid, prompt.data ? prompt.data : task,
+            int cid;
+            if (strcmp(lane->provider, "openrouter") == 0 && lane->upstream[0])
+                cid = swarm_spawn_openrouter_lane(&g_swarm, gid,
+                                                  prompt.data ? prompt.data : task, lane->model,
+                                                  lane->upstream, lane->quantization);
+            else if (strcmp(lane->provider, "sakana") == 0 && lane->auth_class[0])
+                cid = swarm_spawn_provider_auth_lane(&g_swarm, gid,
+                                                      prompt.data ? prompt.data : task, lane->model,
+                                                      lane->provider, lane->auth_class);
+            else
+                cid = swarm_spawn_provider(&g_swarm, gid, prompt.data ? prompt.data : task,
                                            lane->model, lane->provider);
             if (lane->effort[0]) {
                 if (prev_effort)
@@ -12563,6 +12958,8 @@ static bool tool_provider_fabric(const char *input, char *result, size_t rlen) {
     jbuf_append(&b, ",\"name\":");
     jbuf_append_json_str(&b, name);
     jbuf_append(&b, ",\"mode\":\"spawn\"");
+    jbuf_append(&b, ",\"candidate_lanes\":");
+    jbuf_append_int(&b, lane_count);
     jbuf_append(&b, ",\"agents_spawned\":");
     jbuf_append_int(&b, spawned);
     jbuf_append(&b, ",");
@@ -20809,16 +21206,35 @@ static memory_store_t g_memory;          /* wings: cognitive memory */
 static talons_engine_t g_talons;         /* talons: competitive execution */
 static bool g_wt_initialized = false;
 
+/* Organization runtimes bind each process to the role-specific identity
+ * compiled into their EntityCapsule. Local, unbound sessions retain the
+ * historical "dsco" principal. */
+static const char *tool_governance_agent_id(void) {
+    const char *agent_id = getenv("DSCO_AGENT_ID");
+    return (agent_id && agent_id[0]) ? agent_id : "dsco";
+}
+
+static double tool_governance_agent_budget_gsu(void) {
+    const char *raw = getenv("DSCO_AGENT_BUDGET_GSU");
+    if (!raw || !raw[0]) return 10000.0;
+    char *end = NULL;
+    errno = 0;
+    double budget = strtod(raw, &end);
+    while (end && isspace((unsigned char)*end)) end++;
+    if (errno != 0 || !end || *end || !isfinite(budget) || budget <= 0.0 || budget > 1e12)
+        return 10000.0;
+    return budget;
+}
+
 static void ensure_wt_init(void) {
     if (!g_wt_initialized) {
         governance_init(&g_governance);
         memory_store_init(&g_memory);
         talons_init(&g_talons);
         /* Register self as agent */
-        const char *self_id = getenv("DSCO_AGENT_ID");
-        if (!self_id)
-            self_id = "root";
-        governance_register_agent(&g_governance, self_id, PRINCIPAL_TIER_2, 10000);
+        const char *self_id = tool_governance_agent_id();
+        governance_register_agent(&g_governance, self_id, PRINCIPAL_TIER_2,
+                                  tool_governance_agent_budget_gsu());
         if (strcmp(self_id, "dsco") != 0)
             governance_register_agent(&g_governance, "dsco", PRINCIPAL_TIER_2, 10000);
         g_wt_initialized = true;
@@ -23054,43 +23470,59 @@ static bool tool_scratchpad(const char *input, char *result, size_t rlen) {
 extern bool conv_compact_recent_tool_turn(conversation_t *c, int max_chars, int protect_tail);
 extern void conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars);
 
-/* We need access to the active conversation — set by agent loop */
+/* Live context owners — set by the agent loop before governed tool execution. */
 static conversation_t *g_active_conv = NULL;
+static session_state_t *g_active_session = NULL;
 
 void tools_set_active_conversation(void *c) {
     g_active_conv = (conversation_t *)c;
+}
+
+void tools_set_active_session(void *s) {
+    g_active_session = (session_state_t *)s;
 }
 
 void tools_playbook_advance_turn(void) {
     g_playbook.current_turn++;
 }
 
-/* ── conversation_context: agent-visible live transcript mutation ────────
+/* ── context_control: agent-visible live context management ──────────────
  *
- * The agent loop owns g_active_conv and sets it before tool execution.  This
- * deliberately keeps transcript construction in the same governed tool plane
- * as every other agent effect rather than hiding it behind a slash command.
- * Tool-use protocol messages are immutable here: removing or replacing one
- * would leave unmatched tool calls/results and corrupt the next provider turn.
+ * The agent loop owns the active conversation/session pointers and sets them
+ * before tool execution. This keeps context changes in the same governed,
+ * auditable tool plane as every other effect instead of hiding them behind a
+ * slash command. Transcript tool-protocol messages remain immutable: removing
+ * or replacing one would leave unmatched calls/results and corrupt the next
+ * provider turn. System overlays are session-local and intentionally cannot
+ * alter platform/developer authority or persist themselves across sessions.
  */
 static bool conversation_text_message(const message_t *m) {
     return m && m->content_count == 1 && m->content && m->content[0].type &&
            strcmp(m->content[0].type, "text") == 0;
 }
 
-static bool tool_conversation_context(const char *input, char *result, size_t rlen) {
+static bool tool_context_control(const char *input, char *result, size_t rlen) {
     char *action = json_get_str(input, "action");
     char *role = json_get_str(input, "role");
     char *content = json_get_str(input, "content");
     bool ok = false;
 
-    if (!g_active_conv) {
+    if (!action || !action[0]) {
         snprintf(result, rlen,
-                 "{\"error\":\"no active conversation — conversation_context only works during agent loop\"}");
+                 "{\"error\":\"missing action: inspect|append|replace_last|remove_last|set_directive|clear_directives\"}");
         goto done;
     }
-    if (!action || !action[0]) {
-        snprintf(result, rlen, "{\"error\":\"missing action: inspect|append|replace_last|remove_last\"}");
+
+    bool directive_action = strcmp(action, "set_directive") == 0 ||
+                            strcmp(action, "clear_directives") == 0;
+    if (directive_action && !g_active_session) {
+        snprintf(result, rlen,
+                 "{\"error\":\"no active session — directive mutation only works during agent loop\"}");
+        goto done;
+    }
+    if (!directive_action && !g_active_conv) {
+        snprintf(result, rlen,
+                 "{\"error\":\"no active conversation — transcript mutation only works during agent loop\"}");
         goto done;
     }
 
@@ -23098,6 +23530,12 @@ static bool tool_conversation_context(const char *input, char *result, size_t rl
         jbuf_t out;
         jbuf_init(&out, 256);
         jbuf_appendf(&out, "{\"messages\":%d", g_active_conv->count);
+        jbuf_appendf(&out, ",\"directive_chars\":%zu",
+                     g_active_session ? strlen(g_active_session->runtime_directives) : 0U);
+        if (g_active_session && g_active_session->runtime_directives[0]) {
+            jbuf_append(&out, ",\"directives\":");
+            jbuf_append_json_str(&out, g_active_session->runtime_directives);
+        }
         if (g_active_conv->count > 0) {
             const message_t *last = &g_active_conv->msgs[g_active_conv->count - 1];
             jbuf_append(&out, ",\"last_role\":");
@@ -23112,6 +23550,25 @@ static bool tool_conversation_context(const char *input, char *result, size_t rl
         jbuf_append(&out, "}");
         snprintf(result, rlen, "%s", out.data ? out.data : "{}");
         jbuf_free(&out);
+        ok = true;
+    } else if (strcmp(action, "set_directive") == 0) {
+        if (!content || !content[0]) {
+            snprintf(result, rlen, "{\"error\":\"set_directive requires non-empty content\"}");
+            goto done;
+        }
+        size_t n = strlen(content);
+        if (n >= sizeof(g_active_session->runtime_directives)) {
+            snprintf(result, rlen, "{\"error\":\"directive exceeds %zu-byte session limit\"}",
+                     sizeof(g_active_session->runtime_directives) - 1);
+            goto done;
+        }
+        memcpy(g_active_session->runtime_directives, content, n + 1);
+        snprintf(result, rlen,
+                 "{\"status\":\"directive_set\",\"chars\":%zu,\"scope\":\"session\"}", n);
+        ok = true;
+    } else if (strcmp(action, "clear_directives") == 0) {
+        g_active_session->runtime_directives[0] = '\0';
+        snprintf(result, rlen, "{\"status\":\"directives_cleared\",\"scope\":\"session\"}");
         ok = true;
     } else if (strcmp(action, "append") == 0) {
         if (!content) {
@@ -27632,7 +28089,11 @@ static double tool_contract_query_score(const char *name, const char *desc, cons
     int total = 0;
     for (const char *p = query;; p++) {
         unsigned char c = (unsigned char)*p;
-        if (isalnum(c) || c == '_' || c == '-') {
+        /* Keep underscores because they are part of canonical tool names, but
+         * split hyphens: operators commonly search an MCP service by a slug
+         * ("cloudmail-mcp") while its configured description is prose
+         * ("Cloudmail MCP"). */
+        if (isalnum(c) || c == '_') {
             if (tlen < (int)sizeof(token) - 1)
                 token[tlen++] = (char)c;
             continue;
@@ -27742,6 +28203,22 @@ static void discover_append_tool_detail(jbuf_t *b, const char *name, const char 
         jbuf_append(b, "}");
     }
     jbuf_append(b, "}");
+}
+
+typedef struct {
+    double score;
+    int idx;
+    bool external;
+} discover_cand_t;
+
+static int discover_cand_cmp_desc(const void *a, const void *b) {
+    const discover_cand_t *x = (const discover_cand_t *)a;
+    const discover_cand_t *y = (const discover_cand_t *)b;
+    if (x->score > y->score)
+        return -1;
+    if (x->score < y->score)
+        return 1;
+    return 0;
 }
 
 static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
@@ -27855,14 +28332,77 @@ static bool tool_discover_tools(const char *input, char *result, size_t rlen) {
             }
         }
 
+        bool fuzzy = false;
+        if (matched == 0) {
+            /* Strict AND-of-all-tokens found nothing.  Natural-language queries
+             * ("current weather forecast by city") must never dead-end: rescore
+             * relaxed (partial token overlap allowed) and emit the closest tools
+             * ranked by score, flagged fuzzy so the caller knows. */
+            fuzzy = true;
+            int ncand = g_external_tool_count + total;
+            discover_cand_t *cands =
+                ncand > 0 ? malloc((size_t)ncand * sizeof(*cands)) : NULL;
+            int nc = 0;
+            if (cands) {
+                for (int i = 0; i < g_external_tool_count; i++) {
+                    external_tool_t *t = &g_external_tools[i];
+                    jbuf_t meta;
+                    jbuf_init(&meta, 256);
+                    append_external_contract_metadata(&meta, t);
+                    double s = tool_contract_query_score(
+                        t->name, t->description, t->input_schema_json,
+                        tools_output_schema_for_external(t), meta.data, query, false);
+                    jbuf_free(&meta);
+                    if (s > 0.0)
+                        cands[nc++] = (discover_cand_t){.score = s, .idx = i, .external = true};
+                }
+                for (int i = 0; i < total; i++) {
+                    double s = tool_contract_query_score(
+                        tools[i].name, tools[i].description, tools[i].input_schema_json,
+                        tools_output_schema_for_def(&tools[i]), NULL, query, false);
+                    if (s > 0.0)
+                        cands[nc++] = (discover_cand_t){.score = s, .idx = i, .external = false};
+                }
+                qsort(cands, (size_t)nc, sizeof(*cands), discover_cand_cmp_desc);
+                matched = nc;
+                for (int i = 0; i < nc; i++) {
+                    if (skipped < offset) {
+                        skipped++;
+                        continue;
+                    }
+                    if (emitted >= limit)
+                        break;
+                    if (!first)
+                        jbuf_append(&b, ",");
+                    first = false;
+                    if (cands[i].external) {
+                        external_tool_t *t = &g_external_tools[cands[i].idx];
+                        discover_append_tool_detail(&b, t->name, t->description,
+                                                    t->input_schema_json,
+                                                    tools_output_schema_for_external(t), "mcp");
+                    } else {
+                        const tool_def_t *t = &tools[cands[i].idx];
+                        discover_append_tool_detail(&b, t->name, t->description,
+                                                    t->input_schema_json,
+                                                    tools_output_schema_for_def(t), "builtin");
+                    }
+                    emitted++;
+                }
+                free(cands);
+            }
+        }
+
         jbuf_appendf(&b,
                      "],\"matched\":%d,\"offset\":%d,\"limit\":%d,\"showing\":%d,"
-                     "\"has_more\":%s,\"truncated\":%s,"
-                     "\"note\":\"Full input_schema and output_schema returned for matches. Use "
-                     "load_tools with exact "
-                     "names to pin MCP tools into the active tool set.\"}",
+                     "\"has_more\":%s,\"truncated\":%s,\"fuzzy\":%s,"
+                     "\"note\":\"%s\"}",
                      matched, offset, limit, emitted, matched > offset + emitted ? "true" : "false",
-                     matched > offset + emitted ? "true" : "false");
+                     matched > offset + emitted ? "true" : "false", fuzzy ? "true" : "false",
+                     fuzzy ? "No exact matches; showing closest tools by relaxed relevance. "
+                             "Refine the query or use load_tools with exact names."
+                           : "Full input_schema and output_schema returned for matches. Use "
+                             "load_tools with exact names to pin MCP tools into the active tool "
+                             "set.");
         snprintf(result, rlen, "%s", b.data ? b.data : "{}");
         jbuf_free(&b);
         free(query);
@@ -32296,6 +32836,265 @@ static bool tool_hostname(const char *input, char *result, size_t rlen) {
     "\"type\":\"string\"},\"description\":{\"type\":\"string\"},\"input_schema\":{\"type\":\"object\"}," \
     "\"output_schema\":{\"type\":[\"object\",\"string\",\"array\",\"number\",\"boolean\",\"null\"]}}}}}}"
 
+/* ── Context Fabric tools (ctx_put / ctx_get / ctx_search / ctx_scope) ──────
+ * The model-facing surface of the unified content-addressable context store.
+ * See include/context_fabric.h. These let an agent stash content and receive a
+ * stable ctxkey, retrieve (a slice of) content by key, search all stored
+ * context semantically, and bundle keys into a scope for delegation. */
+
+static ctx_kind_t ctx_kind_parse_name(const char *s) {
+    if (!s)
+        return CTX_KIND_BLOB;
+    for (int i = 0; i < CTX_KIND_COUNT; i++)
+        if (strcmp(s, ctx_kind_name((ctx_kind_t)i)) == 0)
+            return (ctx_kind_t)i;
+    return CTX_KIND_BLOB;
+}
+
+static bool tool_ctx_put(const char *input, char *result, size_t rlen) {
+    char *content = json_get_str(input, "content");
+    if (!content) {
+        snprintf(result, rlen, "error: content required");
+        return false;
+    }
+    char *kind_s = json_get_str(input, "kind");
+    char *source = json_get_str(input, "source");
+    char *tags = json_get_str(input, "tags");
+    double importance = json_get_double(input, "importance", 0.5);
+
+    ctx_broker_t *b = ctx_broker_default();
+    if (!b) {
+        free(content);
+        free(kind_s);
+        free(source);
+        free(tags);
+        snprintf(result, rlen, "error: context store unavailable");
+        return false;
+    }
+
+    ctx_put_opts_t opts = {0};
+    opts.kind = ctx_kind_parse_name(kind_s);
+    opts.source = source;
+    opts.tags = tags;
+    opts.importance = importance;
+    opts.embed = -1;
+
+    ctxkey_t key;
+    bool deduped = false;
+    size_t sz = strlen(content);
+    bool ok = ctx_put(b, content, sz, &opts, &key, &deduped);
+    free(content);
+    free(kind_s);
+    free(source);
+    free(tags);
+    if (!ok) {
+        snprintf(result, rlen, "error: context put failed");
+        return false;
+    }
+
+    char ks[CTX_KEY_STR_MAX];
+    ctxkey_format(&key, ks, sizeof(ks));
+    jbuf_t out;
+    jbuf_init(&out, 256);
+    jbuf_append(&out, "{\"key\":");
+    jbuf_append_json_str(&out, ks);
+    jbuf_append(&out, ",\"cid\":");
+    jbuf_append_json_str(&out, key.id);
+    jbuf_appendf(&out, ",\"deduped\":%s,\"size\":%zu}", deduped ? "true" : "false", sz);
+    snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+    jbuf_free(&out);
+    return true;
+}
+
+static bool tool_ctx_get(const char *input, char *result, size_t rlen) {
+    char *keystr = json_get_str(input, "key");
+    if (!keystr) {
+        snprintf(result, rlen, "error: key required");
+        return false;
+    }
+    ctxkey_t key;
+    if (!ctxkey_parse(keystr, &key)) {
+        free(keystr);
+        snprintf(result, rlen, "error: invalid ctxkey (expected ck:kind:id[#slice])");
+        return false;
+    }
+    free(keystr);
+
+    char *slice = json_get_str(input, "slice");
+    if (slice) {
+        char kc = 0;
+        long a = 0, b = -1;
+        if (sscanf(slice, "%c:%ld-%ld", &kc, &a, &b) >= 2) {
+            key.slice_kind = (kc == 'l') ? CTX_SLICE_LINES : CTX_SLICE_BYTES;
+            key.slice_start = a;
+            key.slice_end = b;
+        }
+        free(slice);
+    }
+
+    ctx_broker_t *br = ctx_broker_default();
+    if (!br) {
+        snprintf(result, rlen, "error: context store unavailable");
+        return false;
+    }
+    size_t len = 0;
+    char *content = ctx_get(br, &key, &len);
+    if (!content) {
+        snprintf(result, rlen, "error: not found (nothing stored at that key)");
+        return false;
+    }
+    if (len + 128 >= rlen) {
+        size_t keep = rlen > 200 ? rlen - 160 : 0;
+        if (keep > len)
+            keep = len;
+        memcpy(result, content, keep);
+        snprintf(result + keep, rlen - keep,
+                 "\n…[truncated %zu of %zu bytes — re-request with slice \"b:%zu-%zu\"]", len - keep,
+                 len, keep, len);
+    } else {
+        memcpy(result, content, len);
+        result[len] = '\0';
+    }
+    free(content);
+    return true;
+}
+
+static bool tool_ctx_search(const char *input, char *result, size_t rlen) {
+    char *query = json_get_str(input, "query");
+    if (!query) {
+        snprintf(result, rlen, "error: query required");
+        return false;
+    }
+    char *kind_s = json_get_str(input, "kind");
+    int kind_filter = kind_s ? (int)ctx_kind_parse_name(kind_s) : -1;
+    int max = json_get_int(input, "max", 8);
+    if (max < 1)
+        max = 1;
+    if (max > 32)
+        max = 32;
+    free(kind_s);
+
+    ctx_broker_t *b = ctx_broker_default();
+    if (!b) {
+        free(query);
+        snprintf(result, rlen, "error: context store unavailable");
+        return false;
+    }
+    ctx_search_hit_t hits[32];
+    int n = ctx_search(b, query, kind_filter, max, hits);
+    free(query);
+
+    jbuf_t out;
+    jbuf_init(&out, 512);
+    jbuf_appendf(&out, "{\"count\":%d,\"hits\":[", n);
+    for (int i = 0; i < n; i++) {
+        char ks[CTX_KEY_STR_MAX];
+        ctxkey_format(&hits[i].key, ks, sizeof(ks));
+        if (i)
+            jbuf_append(&out, ",");
+        jbuf_append(&out, "{\"key\":");
+        jbuf_append_json_str(&out, ks);
+        jbuf_appendf(&out, ",\"score\":%.3f,\"size\":%zu,\"source\":", (double)hits[i].score,
+                     hits[i].size);
+        jbuf_append_json_str(&out, hits[i].source);
+        jbuf_append(&out, ",\"preview\":");
+        jbuf_append_json_str(&out, hits[i].preview);
+        jbuf_append(&out, "}");
+    }
+    jbuf_append(&out, "]}");
+    snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+    jbuf_free(&out);
+    return true;
+}
+
+static bool tool_ctx_scope(const char *input, char *result, size_t rlen) {
+    char *action = json_get_str(input, "action");
+    ctx_broker_t *b = ctx_broker_default();
+    if (!b) {
+        free(action);
+        snprintf(result, rlen, "error: context store unavailable");
+        return false;
+    }
+
+    if (action && strcmp(action, "resolve") == 0) {
+        char *scopestr = json_get_str(input, "scope");
+        ctxkey_t scope;
+        if (!scopestr || !ctxkey_parse(scopestr, &scope)) {
+            free(action);
+            free(scopestr);
+            snprintf(result, rlen, "error: valid scope key required (ck:scope:...)");
+            return false;
+        }
+        free(scopestr);
+        ctxkey_t members[64];
+        int n = ctx_scope_resolve(b, &scope, members, 64);
+        jbuf_t out;
+        jbuf_init(&out, 256);
+        jbuf_appendf(&out, "{\"count\":%d,\"keys\":[", n);
+        for (int i = 0; i < n; i++) {
+            char ks[CTX_KEY_STR_MAX];
+            ctxkey_format(&members[i], ks, sizeof(ks));
+            if (i)
+                jbuf_append(&out, ",");
+            jbuf_append_json_str(&out, ks);
+        }
+        jbuf_append(&out, "]}");
+        snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+        jbuf_free(&out);
+        free(action);
+        return true;
+    }
+
+    /* default action: create */
+    char *keys_raw = json_get_raw(input, "keys");
+    if (!keys_raw) {
+        free(action);
+        snprintf(result, rlen, "error: keys array required for create");
+        return false;
+    }
+    ctxkey_t keys[64];
+    int n = 0;
+    const char *p = keys_raw;
+    while (n < 64 && (p = strchr(p, '"')) != NULL) {
+        p++;
+        const char *end = strchr(p, '"');
+        if (!end)
+            break;
+        char ks[CTX_KEY_STR_MAX];
+        size_t kl = (size_t)(end - p);
+        if (kl < sizeof(ks)) {
+            memcpy(ks, p, kl);
+            ks[kl] = '\0';
+            if (ctxkey_parse(ks, &keys[n]))
+                n++;
+        }
+        p = end + 1;
+    }
+    free(keys_raw);
+    if (n == 0) {
+        free(action);
+        snprintf(result, rlen, "error: no valid ctxkeys parsed from keys array");
+        return false;
+    }
+    ctxkey_t scope;
+    bool ok = ctx_scope_create(b, keys, n, &scope);
+    free(action);
+    if (!ok) {
+        snprintf(result, rlen, "error: scope create failed");
+        return false;
+    }
+    char ks[CTX_KEY_STR_MAX];
+    ctxkey_format(&scope, ks, sizeof(ks));
+    jbuf_t out;
+    jbuf_init(&out, 128);
+    jbuf_append(&out, "{\"scope\":");
+    jbuf_append_json_str(&out, ks);
+    jbuf_appendf(&out, ",\"members\":%d}", n);
+    snprintf(result, rlen, "%s", out.data ? out.data : "{}");
+    jbuf_free(&out);
+    return true;
+}
+
 static const tool_def_t s_tools[] = {
     /* ══════════════════════════════════════════════════════════════════════
      *  CLAUDE CODE COMPATIBILITY ALIASES
@@ -32656,7 +33455,13 @@ static const tool_def_t s_tools[] = {
      .output_schema_json = OUT_TEXT,
      .execute = tool_bash,
      .core = true},
-    {.name = "python",
+    /* Canonical name is "dsco-python-3x": some OpenAI-family models (o-series and
+     * gpt-5.6-*) reserve the bare function name "python" for a built-in code
+     * interpreter and reject any user tool that uses it (HTTP 400). The wire name
+     * is namespaced so it is accepted by every provider; the legacy aliases
+     * "python" and "python_exec" are still resolved back to this tool at dispatch
+     * (see tools_execute_for_tier) for backward compatibility. */
+    {.name = "dsco-python-3x",
      .description = "Run Python code or a Python file.",
      .input_schema_json = "{\"type\":\"object\",\"properties\":{\"code\":{\"type\":\"string\"},"
                           "\"file\":{\"type\":\"string\"},\"args\":{\"type\":\"string\"}}}",
@@ -32695,16 +33500,65 @@ static const tool_def_t s_tools[] = {
          "{\"type\":\"object\",\"properties\":{\"aggressive\":{\"type\":\"boolean\"}}}",
      .execute = tool_context_compact,
      .core = true},
-    {.name = "conversation_context",
-     .description = "Inspect or make bounded live-transcript edits during an agent turn. "
-                    "action=inspect|append|replace_last|remove_last. append/replace require content; "
-                    "role=user|assistant. Tool-use protocol messages cannot be altered.",
+    {.name = "context_control",
+     .description = "Inspect and manage live session context. Mutate plain-text transcript messages "
+                    "or set/clear a session-local system directive overlay; tool protocol messages "
+                    "and higher-authority instructions are protected.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\","
-         "\"enum\":[\"inspect\",\"append\",\"replace_last\",\"remove_last\"]},"
-         "\"role\":{\"type\":\"string\",\"enum\":[\"user\",\"assistant\"]},"
-         "\"content\":{\"type\":\"string\"}},\"required\":[\"action\"]}",
-     .execute = tool_conversation_context,
+         "\"enum\":[\"inspect\",\"append\",\"replace_last\",\"remove_last\","
+         "\"set_directive\",\"clear_directives\"]},\"role\":{\"type\":\"string\","
+         "\"enum\":[\"user\",\"assistant\"]},\"content\":{\"type\":\"string\","
+         "\"maxLength\":4095}},\"required\":[\"action\"]}",
+     .execute = tool_context_control,
+     .core = true},
+    {.name = "ctx_put",
+     .description = "Store content in the Context Fabric and get back a stable content-addressed "
+                    "ctxkey (ck:blob:...). Idempotent: identical content dedupes to one entry. "
+                    "Textual content is indexed for semantic search. Use to stash large results, "
+                    "files, or notes you want to reference later by key instead of re-pasting.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"content\":{\"type\":\"string\",\"description\":"
+         "\"bytes/text to store\"},\"kind\":{\"type\":\"string\",\"description\":"
+         "\"blob|file|msg|tool|mem|plan|run (default blob)\"},\"source\":{\"type\":\"string\","
+         "\"description\":\"provenance: file path, tool name, session id\"},\"tags\":{\"type\":"
+         "\"string\"},\"importance\":{\"type\":\"number\"}},\"required\":[\"content\"]}",
+     .execute = tool_ctx_put,
+     .core = true,
+     .is_concurrent = true},
+    {.name = "ctx_get",
+     .description = "Retrieve (a slice of) content from the Context Fabric by ctxkey. Slices let "
+                    "you fault-in a span without loading the whole object: pass slice \"b:0-2048\" "
+                    "(bytes) or \"l:120-160\" (1-based lines), or embed #b:/#l: in the key itself.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\",\"description\":"
+         "\"ck:kind:id[#slice]\"},\"slice\":{\"type\":\"string\",\"description\":"
+         "\"optional b:START-END or l:START-END override\"}},\"required\":[\"key\"]}",
+     .execute = tool_ctx_get,
+     .core = true,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "ctx_search",
+     .description = "Search all stored context semantically (embeddings, with a lexical fallback) "
+                    "and get back ranked ctxkeys with previews. This is how you discover what "
+                    "context exists and load it dynamically by key rather than holding it in-window.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"kind\":{\"type\":"
+         "\"string\",\"description\":\"optional kind filter\"},\"max\":{\"type\":\"integer\","
+         "\"description\":\"max hits (default 8, cap 32)\"}},\"required\":[\"query\"]}",
+     .execute = tool_ctx_search,
+     .core = true,
+     .is_read_only = true,
+     .is_concurrent = true},
+    {.name = "ctx_scope",
+     .description = "Bundle ctxkeys into a delegation scope (ck:scope:...) so an orchestrator can "
+                    "hand a sub-agent one handle instead of inlined content; action=create|resolve.",
+     .input_schema_json =
+         "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"enum\":[\"create\","
+         "\"resolve\"]},\"keys\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":"
+         "\"ctxkeys to bundle (create)\"},\"scope\":{\"type\":\"string\",\"description\":"
+         "\"scope key to expand (resolve)\"}},\"required\":[\"action\"]}",
+     .execute = tool_ctx_scope,
      .core = true},
     {.name = "plot",
      .description = "Render data as a Unicode chart (returns ANSI/Unicode art). Types: line, bar, "
@@ -34412,7 +35266,12 @@ static const tool_def_t s_tools[] = {
          "(USD) partitioned across workers for "
          "create|map_reduce\"},\"budget_usd\":{\"type\":\"number\",\"description\":\"Budget for "
          "action=budget\"},\"timeout\":{\"type\":\"integer\",\"description\":\"Seconds per phase "
-         "for collect|map_reduce|provider_fabric\"},\"mode\":{\"type\":\"string\","
+         "for collect|map_reduce|provider_fabric\"},\"max_worker_turns\":{\"type\":\"integer\","
+         "\"description\":\"map_reduce hard turn ceiling per map worker (default 12)\"},"
+         "\"max_coordinator_turns\":{\"type\":\"integer\",\"description\":\"map_reduce hard "
+         "turn ceiling for the tool-disabled reducer (default 3)\"},\"preserve_on_timeout\":{"
+         "\"type\":\"boolean\",\"description\":\"map_reduce opt-in resumability; default false "
+         "terminates workers at the phase deadline\"},\"mode\":{\"type\":\"string\","
          "\"description\":\"provider_fabric execution mode: race/first/fastest "
          "(default: speculative race, return first successful lane and kill slower lanes), spawn "
          "(return group immediately), or collect/all (wait for all lane "
@@ -35405,20 +36264,30 @@ void tools_init_profile(tools_init_profile_t profile) {
         return;
     }
 
-    plugin_init(&g_plugins);
+    /* A cloud runtime begins from its signed RuntimeSpec rather than from
+     * state discovered beneath the host user's HOME. Explicit cloud plugin
+     * preflight remains available for a future signed plugin surface. */
+    if (!dsco_cloud_runtime_active() && !getenv("DSCO_CLOUD_SKIP_PLUGIN_INIT"))
+        plugin_init(&g_plugins);
+    else
+        memset(&g_plugins, 0, sizeof(g_plugins));
     ctx_store_reset();
-    browser_profiles_load();
-    if (!g_browser_hosts_atexit_registered) {
+    if (!dsco_cloud_runtime_active() && !getenv("DSCO_CLOUD_SKIP_BROWSER_PROFILES"))
+        browser_profiles_load();
+    if (!dsco_cloud_runtime_active() && !getenv("DSCO_CLOUD_SKIP_BROWSER_PROFILES") &&
+        !g_browser_hosts_atexit_registered) {
         atexit(browser_profiles_atexit_flush);
         g_browser_hosts_atexit_registered = true;
     }
 
     /* Initialize IPC early so DSCO_IPC_DB is set before any child spawns */
-    ipc_init(NULL, NULL);
-    const char *depth_s = getenv("DSCO_SWARM_DEPTH");
-    const char *parent = getenv("DSCO_PARENT_INSTANCE_ID");
-    int depth = depth_s ? atoi(depth_s) : 0;
-    ipc_register(parent, depth, getenv("DSCO_SUBAGENT") ? "worker" : "root", "*");
+    if (!dsco_cloud_runtime_active() && !getenv("DSCO_CLOUD_SKIP_IPC_INIT")) {
+        ipc_init(NULL, NULL);
+        const char *depth_s = getenv("DSCO_SWARM_DEPTH");
+        const char *parent = getenv("DSCO_PARENT_INSTANCE_ID");
+        int depth = depth_s ? atoi(depth_s) : 0;
+        ipc_register(parent, depth, getenv("DSCO_SUBAGENT") ? "worker" : "root", "*");
+    }
 
     /* Build hash map for O(1) tool lookup */
     tool_map_rebuild();
@@ -35707,6 +36576,117 @@ static void ensure_embeddings_loaded(void) {
     }
 }
 
+/* Embedding model. Defaults to jina-embeddings-v3 — the fast text-retrieval
+ * model (~3s/call) rather than v4, the heavy multimodal model (~34s/call that
+ * makes ctx_put/ctx_search unusably slow). Override with DSCO_EMBED_MODEL. */
+static const char *embed_model(void) {
+    const char *m = getenv("DSCO_EMBED_MODEL");
+    return (m && *m) ? m : "jina-embeddings-v3";
+}
+
+/* Parse a JSON float array ("[f, f, ...]" — possibly with leading junk before
+ * '[') into vec[dim]. Returns the number of floats parsed (0 on no array). */
+static int emb_parse_float_array(const char *raw, float *vec, int dim) {
+    if (!raw)
+        return 0;
+    const char *p = raw;
+    while (*p && *p != '[')
+        p++;
+    if (*p != '[')
+        return 0;
+    p++;
+    int i = 0;
+    for (; i < dim && *p; i++) {
+        while (*p && (*p == ' ' || *p == ',' || *p == '\n'))
+            p++;
+        if (*p == ']' || !*p)
+            break;
+        vec[i] = (float)strtod(p, (char **)&p);
+    }
+    return i;
+}
+
+/* Embed via the tools.distributed.systems gateway (distributed-search-mcp
+ * `embed`, Jina under the hood) so embedding rides the one authenticated
+ * broker instead of a per-env JINA_API_KEY. Returns malloc'd float[g_emb_dim]
+ * or NULL (no token / HTTP error / parse failure) — caller falls back to the
+ * direct Jina path. A short-circuit backoff avoids paying a dead round-trip
+ * per embed while the gateway is down or gated (e.g. 401/402). */
+static float *embed_query_gateway(const char *text) {
+    static _Atomic int s_gw_fails = 0;
+    static _Atomic long s_gw_retry_after = 0; /* epoch seconds */
+
+    if (!toolmgmt_token())
+        return NULL; /* unauthenticated → don't even try */
+    long now = (long)time(NULL);
+    if (atomic_load(&s_gw_retry_after) > now)
+        return NULL; /* backing off after repeated failures */
+
+    jbuf_t args;
+    jbuf_init(&args, 512);
+    jbuf_appendf(&args,
+                 "{\"model\":\"%s\",\"task\":\"retrieval.query\","
+                 "\"dimensions\":%d,\"embedding_type\":\"float\",\"text\":",
+                 embed_model(), g_emb_dim);
+    jbuf_append_json_str(&args, text);
+    jbuf_append(&args, "}");
+
+    char *resp = args.data ? toolmgmt_execute("embed", args.data, 8000) : NULL;
+    jbuf_free(&args);
+    if (!resp) {
+        if (atomic_fetch_add(&s_gw_fails, 1) + 1 >= 3)
+            atomic_store(&s_gw_retry_after, now + 300); /* 5 min cool-off */
+        return NULL;
+    }
+    atomic_store(&s_gw_fails, 0);
+
+    /* Parse the registry's MCP envelope (verified live 2026-08-06 against
+     * /api/v1/tools/embed/execute):
+     *   {"status":"success","output":{"content":[{"type":"text",
+     *    "text":"{\"embedding\": [f, f, ...], ...}"}]}}
+     * The payload is a JSON-escaped string in output.content[0].text, so
+     * unwrap → unescape → extract. Bare shapes kept as fallbacks since the
+     * backend publishes no output schema (see
+     * .workspace/notes/backend-gateway-errors.md). */
+    float *vec = safe_malloc((size_t)g_emb_dim * sizeof(float));
+    memset(vec, 0, (size_t)g_emb_dim * sizeof(float));
+    int parsed = 0;
+    char *output = json_get_raw(resp, "output");
+    if (output) {
+        char *content = json_get_raw(output, "content");
+        const char *first_obj = content ? strchr(content, '{') : NULL;
+        char *inner = first_obj ? json_get_str(first_obj, "text") : NULL;
+        if (inner) {
+            char *emb = json_get_raw(inner, "embedding");
+            parsed = emb_parse_float_array(emb, vec, g_emb_dim);
+            free(emb);
+            free(inner);
+        }
+        free(content);
+        free(output);
+    }
+    if (!parsed) { /* fallback: bare Jina envelope {"data":[{"embedding":[...]}]} */
+        char *data_arr = json_get_raw(resp, "data");
+        if (data_arr) {
+            char *emb = json_get_raw(data_arr, "embedding");
+            parsed = emb_parse_float_array(emb, vec, g_emb_dim);
+            free(emb);
+            free(data_arr);
+        }
+    }
+    if (!parsed) { /* fallback: flattened {"embedding":[...]} */
+        char *emb = json_get_raw(resp, "embedding");
+        parsed = emb_parse_float_array(emb, vec, g_emb_dim);
+        free(emb);
+    }
+    free(resp);
+    if (!parsed) {
+        free(vec);
+        return NULL;
+    }
+    return vec;
+}
+
 /* Embed a query via Jina v4. Returns malloc'd float[g_emb_dim] or NULL. */
 static float *embed_query_jina(const char *text) {
     const char *api_key = getenv("JINA_API_KEY");
@@ -35721,9 +36701,9 @@ static float *embed_query_jina(const char *text) {
     jbuf_t req;
     jbuf_init(&req, 512);
     jbuf_appendf(&req,
-                 "{\"model\":\"jina-embeddings-v4\",\"task\":\"retrieval.query\","
+                 "{\"model\":\"%s\",\"task\":\"retrieval.query\","
                  "\"dimensions\":%d,\"embedding_type\":\"float\",\"input\":[",
-                 g_emb_dim);
+                 embed_model(), g_emb_dim);
     jbuf_append_json_str(&req, text);
     jbuf_append(&req, "]}");
 
@@ -35811,6 +36791,13 @@ float *tools_embed_text(const char *text, int *out_dim) {
     ensure_embeddings_loaded();
     if (out_dim)
         *out_dim = g_emb_dim > 0 ? g_emb_dim : 1024;
+    /* Single embedding spine: the tools.distributed.systems gateway first
+     * (brokered Jina; one auth surface), direct Jina as fallback. Both emit
+     * the same model/task/dimensions, so vectors are interchangeable in every
+     * vecstore collection regardless of which path served a given call. */
+    float *vec = embed_query_gateway(text);
+    if (vec)
+        return vec;
     return embed_query_jina(text);
 }
 
@@ -35914,7 +36901,11 @@ static void tools_unmark_hot(int tool_idx) {
  * can shrink the warm bank under cost pressure. */
 
 static const char *CORE_ALWAYS[] = {
-    "bash", "python", "discover_tools", "load_tools", "invoke_tool", "evict_tools",
+    "bash", "dsco-python-3x", "discover_tools", "load_tools", "invoke_tool", "evict_tools",
+    /* Conversation control is a native agent capability, not an optional
+     * integration. Keep the compact context namespace available even when
+     * progressive disclosure evicts every other tool. */
+    "context_status", "context_compact", "context_control", "context_recall",
     "StartOfLoopConstruct", "EndOfLoopConstruct",
     NULL /* minimal core: execution + dynamic loading + loop control.
           * NOTE: must stay <= TOOL_REG_ALWAYS (config.h) entries or the
@@ -37028,7 +38019,7 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools, float bud
     if (total == 0 || max_tools <= 0)
         return r;
 
-    /* Hard cap: register file is 64 slots max, period. */
+    /* Hard cap: bounded wide register file, period. */
     if (max_tools > TOOL_REGISTER_CAP)
         max_tools = TOOL_REGISTER_CAP;
 
@@ -37060,16 +38051,16 @@ tool_page_result_t tools_get_paged(const char *context, int max_tools, float bud
     }
 
     /* Register-file slot allocation:
-     * ALWAYS:   bash, python, discover/load, exit, loop constructs
-     * WARM:     file I/O, evictable under budget pressure
-     * WORKING:  quorum-scored / hint-pinned, turn-volatile
-     * DISCOVERY: progressive schema, ephemeral
+     * ALWAYS:    execution, disclosure and context controls
+     * WARM:      file I/O and durable operator primitives
+     * WORKING:   quorum-scored / hint-pinned, turn-volatile
+     * DISCOVERY: compact progressive schemas, ephemeral
      *
-     * Budget-adaptive shrinking (uses effective_ratio = cost + context pressure):
-     *   Full   (>0.4):    7 + 11 + 10 + 4 = 32
-     *   Mid  (0.15-0.4):  7 +  8 +  8 + 3 = 26
-     *   Low  (0.05-0.15): 7 +  4 +  4 + 0 = 15 (~17 with hint-pins)
-     *   Critical (<0.05): 7 +  0 +  0 + 0 =  7 */
+     * Budget-adaptive shrinking (effective_ratio = cost + context pressure):
+     *   Full   (>0.4):    12 + 12 + 18 + 6 = 48
+     *   Mid  (0.15-0.4): 12 + 10 +  6 + 3 = 31
+     *   Low  (0.05-0.15):12 +  4 +  4 + 0 = 20
+     *   Critical (<0.05):12 +  0 +  0 + 0 = 12 */
     int always_budget = TOOL_REG_ALWAYS;
     int warm_budget, working_budget, discovery_budget;
 
@@ -37699,6 +38690,15 @@ void tools_registry_map_free(void) {
 
 static int tool_map_lookup_with_mcp_alias_unlocked(const char *name, char *resolved_name,
                                                    size_t resolved_len) {
+    /* Canonical-alias: the Python execution tool is registered as
+     * "dsco-python-3x" (namespaced so OpenAI-family models that reserve the
+     * bare "python" function name accept it). Resolve the legacy aliases
+     * "python"/"python_exec" here — the single lookup choke point — so schema
+     * lookup, input normalization, validation, and dispatch all see the
+     * canonical tool regardless of which alias a caller used. */
+    if (name && (strcmp(name, "python") == 0 || strcmp(name, "python_exec") == 0))
+        name = "dsco-python-3x";
+
     if (resolved_name && resolved_len > 0)
         snprintf(resolved_name, resolved_len, "%s", name ? name : "");
 
@@ -38079,7 +39079,7 @@ static void sandbox_policy_for_tier(const char *tier, bool *network, const char 
 static bool tool_is_untrusted_sandbox_routed(const char *name) {
     return name && (strcmp(name, "bash") == 0 || strcmp(name, "Bash") == 0 ||
                     strcmp(name, "run_command") == 0 || strcmp(name, "python") == 0 ||
-                    strcmp(name, "node") == 0);
+                    strcmp(name, "dsco-python-3x") == 0 || strcmp(name, "node") == 0);
 }
 
 static bool json_has_key_raw(const char *json, const char *key) {
@@ -38200,7 +39200,7 @@ static char *build_untrusted_routed_sandbox_input(const char *tool_name, const c
         command = safe_strdup(cmd);
         image = safe_strdup("alpine:3.20");
         free(cmd);
-    } else if (strcmp(tool_name, "python") == 0) {
+    } else if (strcmp(tool_name, "python") == 0 || strcmp(tool_name, "dsco-python-3x") == 0) {
         char *file = json_get_str(json, "file");
         char *code = json_get_str(json, "code");
         if (file && *file) {
@@ -38623,6 +39623,31 @@ static bool tool_is_governance_exempt(const char *n) {
            strcmp(n, "pheromone") == 0 || strcmp(n, "avian") == 0 ||
            strcmp(n, "wings_talons_status") == 0;
 }
+
+/* G-gate hardening: the name-level exemption above must not cover MUTATING
+ * control-plane actions (e.g. killswitch trigger). Read-only introspection
+ * stays exempt; anything else fails closed through the normal gate. */
+static bool tool_gov_action_readonly(const char *n, const char *input_json) {
+    char *action = input_json ? json_get_str(input_json, "action") : NULL;
+    char *op = input_json ? json_get_str(input_json, "op") : NULL;
+    bool ro = false;
+    if (!action && !op)
+        ro = true; /* pure introspection tools take no verb args */
+    else if (strcmp(n, "killswitch") == 0 || strcmp(n, "ooda") == 0)
+        ro = action && strcmp(action, "status") == 0;
+    else if (strcmp(n, "governance") == 0)
+        ro = action && (strcmp(action, "status") == 0 || strcmp(action, "audit") == 0);
+    else if (strcmp(n, "pheromone") == 0)
+        ro = action && (strcmp(action, "sense") == 0 || strcmp(action, "status") == 0);
+    else if (strcmp(n, "avian") == 0)
+        ro = op && strcmp(op, "get") == 0;
+    free(action);
+    free(op);
+    return ro;
+}
+
+#define TOOL_GOV_EXEMPT_RO(name_, input_) \
+    (tool_is_governance_exempt(name_) && tool_gov_action_readonly(name_, input_))
 
 /* ── G5: Tool-class GSU cost table ───────────────────────────────────── */
 
@@ -39223,7 +40248,7 @@ static bool tool_request_approval(const char *name, const char *input_json, tool
         snprintf(deny_reason, sizeof(deny_reason), "blocked_by_trust_tier risk=%s reason=%s",
                  tool_risk_name(a.level), a.reason[0] ? a.reason : "blocked_by_trust_tier");
         tool_gov_deny(result, result_len, name, "approval", deny_reason,
-                      g_governance.initialized ? governance_remaining_gsu(&g_governance, "dsco")
+                      g_governance.initialized ? governance_remaining_gsu(&g_governance, tool_governance_agent_id())
                                                : 0.0);
         return false;
     }
@@ -39233,7 +40258,7 @@ static bool tool_request_approval(const char *name, const char *input_json, tool
             snprintf(deny_reason, sizeof(deny_reason), "approval_required_no_tty risk=%s reason=%s",
                      tool_risk_name(a.level), a.reason[0] ? a.reason : "approval_required");
             tool_gov_deny(result, result_len, name, "approval", deny_reason,
-                          g_governance.initialized ? governance_remaining_gsu(&g_governance, "dsco")
+                          g_governance.initialized ? governance_remaining_gsu(&g_governance, tool_governance_agent_id())
                                                    : 0.0);
             return false;
         }
@@ -39261,7 +40286,7 @@ static bool tool_request_approval(const char *name, const char *input_json, tool
 
     tool_gov_deny(result, result_len, name, "approval",
                   choice == TUI_PERM_CANCEL ? "cancelled_by_user" : "denied_by_user",
-                  g_governance.initialized ? governance_remaining_gsu(&g_governance, "dsco") : 0.0);
+                  g_governance.initialized ? governance_remaining_gsu(&g_governance, tool_governance_agent_id()) : 0.0);
     baseline_log("security", "tool_approval_denied", name, a.reason);
     return false;
 }
@@ -39404,16 +40429,30 @@ void tools_governance_experiment_stats(unsigned long *gate_calls,
 bool tools_execute_for_tier(const char *name, const char *input_json, const char *tier,
                             char *result, size_t result_len) {
 
-    /* Wire-alias: o-series reserves "python"; provider.c renames it to
-     * "python_exec" on the wire. Resolve the alias back to the canonical
-     * tool BEFORE the governance gate so capability classification applies
-     * to the real tool, not the alias. */
-    if (name && strcmp(name, "python_exec") == 0)
-        name = "python";
+
+    /* Alias resolution: the canonical tool is "dsco-python-3x" (namespaced so
+     * OpenAI-family models that reserve the bare "python" function name accept
+     * it). Resolve the legacy aliases "python" and "python_exec" back to the
+     * canonical name BEFORE the governance gate so capability classification
+     * applies to the real tool, not the alias. */
+    if (name && (strcmp(name, "python_exec") == 0 || strcmp(name, "python") == 0))
+        name = "dsco-python-3x";
+
+    /* Start the native operation before governance so blocked/denied calls are
+     * visible too. Every return below resolves this same retained row. */
+    double _pixel_t0 = now_ms();
+    uint64_t _pixel_operation_id =
+        pixel_tui_session_tool_begin(stderr, name, input_json);
+#define PIXEL_TOOL_RETURN(value) do { \
+        bool _pixel_ok = (value); \
+        pixel_tui_session_tool_end(stderr, _pixel_operation_id, name, _pixel_ok, \
+                                   now_ms() - _pixel_t0, result); \
+        return _pixel_ok; \
+    } while (0)
 
     if (name && !tool_is_governance_exempt(name) &&
         !tool_capability_floor(name, input_json, tier, result, result_len))
-        return false;
+        PIXEL_TOOL_RETURN(false);
 
     /* ── Governance-model dispatch ─────────────────────────────────────────
        MODEL=none is the ungoverned control arm: skip the entire gate so the
@@ -39426,8 +40465,9 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
 
     double _gate_t0 = now_ms();
 
-    /* ── Exempt check ──────────────────────────────────────────────────── */
-    if (!name || tool_is_governance_exempt(name)) {
+    /* ── Exempt check (read-only actions only; mutating control-plane
+     * verbs fall through to the gate and its env grants) ──────────────── */
+    if (!name || TOOL_GOV_EXEMPT_RO(name, input_json)) {
         gov_stage_record(GOV_STAGE_EXEMPT, now_ms() - _gate_t0, false, false);
         goto _skip_gate;
     }
@@ -39438,11 +40478,12 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
         ensure_wt_init();
     if (!g_governance.initialized) {
         tool_gov_deny(result, result_len, name, "init", "governance_unavailable", 0.0);
-        return false;
+        PIXEL_TOOL_RETURN(false);
     }
     tool_governance_ensure_dsco_agent();
 
     {
+        const char *_gov_agent_id = tool_governance_agent_id();
         /* Resolve immutable tool metadata through the registry hash map rather
          * than linearly scanning the full catalog on every governed call. */
         bool is_ro = false;
@@ -39464,27 +40505,49 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
         }
         tool_class_t cls = tool_classify(name, is_ro);
         double gsu = tool_gsu_cost(cls);
-        double remaining = governance_remaining_gsu(&g_governance, "dsco");
+        double remaining = governance_remaining_gsu(&g_governance, _gov_agent_id);
         char phero_region[PHEROMONE_MAX_REGION_LEN];
         tool_phero_region(name, phero_region, sizeof(phero_region));
+
+        /* ── Capability gate (wired 2026-08-25): the documented Deno-style
+         * grant model + lethal-trifecta guard. Previously this module was
+         * unit-tested but never invoked from the production path — the
+         * live binary allowed CAP_CONTROL/NET/etc. regardless of env grants.
+         * Read-only governance introspection already returned via the exempt
+         * stage above, so EVERY call here faces the full capability check.
+         * APPROVE defers to the approval stage below rather than double-
+         * prompting here. */
+        {
+            char _cap_reason[192];
+            dsco_cap_decision_t _cd = dsco_capability_gate(
+                name, input_json, tier ? tier : "standard", _cap_reason, sizeof(_cap_reason));
+            if (_cd == CAP_DECISION_DENY) {
+                tool_gov_deny(result, result_len, name, "capability", _cap_reason[0] ? _cap_reason
+                                                                                    : "cap_denied",
+                              remaining);
+                pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.9, phero_region,
+                                  "immune", "{\"reason\":\"capability_denied\"}");
+                PIXEL_TOOL_RETURN(false);
+            }
+        }
 
         /* ── Immune veto: killswitch + circuit breakers ───────────────────── */
         if (killswitch_system_halted(&g_governance.killswitches)) {
             pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 1.0, phero_region, "immune",
                               "{\"reason\":\"system_halted\"}");
             tool_gov_deny(result, result_len, name, "killswitch", "system_halted", remaining);
-            return false;
+            PIXEL_TOOL_RETURN(false);
         }
-        if (killswitch_is_killed(&g_governance.killswitches, "dsco")) {
+        if (killswitch_is_killed(&g_governance.killswitches, _gov_agent_id)) {
             tool_gov_deny(result, result_len, name, "killswitch", "agent_killed", remaining);
-            return false;
+            PIXEL_TOOL_RETURN(false);
         }
-        if (!governance_check_breakers(&g_governance, "dsco")) {
+        if (!governance_check_breakers(&g_governance, _gov_agent_id)) {
             pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region, "immune",
                               "{\"reason\":\"circuit_breaker\"}");
             tool_gov_deny(result, result_len, name, "circuit_breaker", "active_breaker",
                           remaining);
-            return false;
+            PIXEL_TOOL_RETURN(false);
         }
 
         /* ── Human approval for risky/blocked tools ────────────────────────
@@ -39496,7 +40559,7 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.8, phero_region, "immune",
                               "{\"reason\":\"approval_denied\"}");
             self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
-            return false;
+            PIXEL_TOOL_RETURN(false);
         }
 
         /* ── Runtime self-preservation preflight ─────────────────────────── */
@@ -39511,7 +40574,7 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
                               preserve_reason[0] ? preserve_reason : "runtime_self_preservation",
                               remaining);
                 self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
-                return false;
+                PIXEL_TOOL_RETURN(false);
             }
         }
 
@@ -39531,11 +40594,11 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
            in minimal we skip it entirely. */
         if (gov_stage_active(_gov_model, GOV_STAGE_CHECKPOINT)) {
             double _cp_t0 = now_ms();
-            bool passed = governance_checkpoint(&g_governance, "dsco", name, gsu, tier);
+            bool passed = governance_checkpoint(&g_governance, _gov_agent_id, name, gsu, tier);
             bool enforces = gov_stage_enforces(_gov_model, GOV_STAGE_CHECKPOINT);
             gov_stage_record(GOV_STAGE_CHECKPOINT, now_ms() - _cp_t0, !passed, enforces && !passed);
             if (!passed && enforces) {
-                remaining = governance_remaining_gsu(&g_governance, "dsco");
+                remaining = governance_remaining_gsu(&g_governance, _gov_agent_id);
                 const char *reason =
                     remaining <= 0.0 ? "budget_exhausted" : "hardcoded_rule_violation";
                 char meta[128];
@@ -39544,7 +40607,7 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
                                   "immune", meta);
                 tool_gov_deny(result, result_len, name, "checkpoint", reason, remaining);
                 self_improve_record_tool(&g_self_improve, name, false, 0.0, 0);
-                return false;
+                PIXEL_TOOL_RETURN(false);
             }
         }
 
@@ -39555,7 +40618,7 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
             double _sh_t0 = now_ms();
             shadow_check_result_t shadow = {0};
             const char *ctx = input_json ? input_json : name;
-            governance_shadow_check(&g_governance, "dsco", ctx, &shadow);
+            governance_shadow_check(&g_governance, _gov_agent_id, ctx, &shadow);
             bool violated = shadow.self_reward_detected || shadow.reward_hacking ||
                             shadow.circular_optimization;
             gov_stage_record(GOV_STAGE_SHADOW, now_ms() - _sh_t0, violated,
@@ -39592,7 +40655,7 @@ _skip_gate:;
         if (!owned_input) {
             snprintf(result, result_len, "%s",
                      route_reason[0] ? route_reason : "error: command required");
-            return false;
+            PIXEL_TOOL_RETURN(false);
         }
         dispatch_input = owned_input;
     } else if (tier && strcasecmp(tier, "untrusted") == 0 &&
@@ -39602,7 +40665,7 @@ _skip_gate:;
         if (!owned_input) {
             snprintf(result, result_len, "%s",
                      route_reason[0] ? route_reason : "sandbox routing failed");
-            return false;
+            PIXEL_TOOL_RETURN(false);
         }
         dispatch_name = "sandbox_run";
         dispatch_input = owned_input;
@@ -39613,9 +40676,7 @@ _skip_gate:;
     if (normalized_input)
         dispatch_input = normalized_input;
 
-    uint64_t pixel_operation_id = pixel_tui_session_tool_begin(stderr, name, input_json);
     bool ok = tools_execute_internal(dispatch_name, dispatch_input, result, result_len);
-    pixel_tui_session_tool_end(stderr, pixel_operation_id, name, ok, now_ms() - _t0);
 
     free(normalized_input);
     free(owned_input);
@@ -39637,12 +40698,14 @@ _skip_gate:;
         if (ok) {
             char smeta[64];
             snprintf(smeta, sizeof(smeta), "{\"elapsed_ms\":%.1f}", _elapsed);
-            pheromone_deposit(&g_governance.pheromones, PHERO_SUCCESS, 0.4, _pr, "dsco", smeta);
+            pheromone_deposit(&g_governance.pheromones, PHERO_SUCCESS, 0.4, _pr,
+                              tool_governance_agent_id(), smeta);
         } else {
             char fmeta[128];
             snprintf(fmeta, sizeof(fmeta), "{\"elapsed_ms\":%.1f,\"reason\":\"exec_failed\"}",
                      _elapsed);
-            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.35, _pr, "dsco", fmeta);
+            pheromone_deposit(&g_governance.pheromones, PHERO_WARNING, 0.35, _pr,
+                              tool_governance_agent_id(), fmeta);
             if (g_self_improve.initialized && g_self_improve.total_tool_calls > 0) {
                 double err_rate =
                     (double)g_self_improve.total_failures / (double)g_self_improve.total_tool_calls;
@@ -39651,6 +40714,9 @@ _skip_gate:;
         }
     }
 
+    pixel_tui_session_tool_end(stderr, _pixel_operation_id, name, ok,
+                               now_ms() - _pixel_t0, result);
+#undef PIXEL_TOOL_RETURN
     return ok;
 }
 
@@ -39778,10 +40844,17 @@ static void *watchdog_thread(void *arg) {
                     wd->tool_name, wd->timeout_s);
         }
         if (now >= wd->grace_end && wd->timed_out) {
-            /* Grace period exhausted. Set g_interrupted as last resort
-               to break subprocess poll loops. The agent loop will check
-               wd->timed_out and clear g_interrupted to continue. */
-            g_interrupted = 1;
+            /* Grace period exhausted. Long-running orchestration tools are
+               durable and must never kill their own workers when the outer
+               tool watchdog fires. They return a partial snapshot and remain
+               collectible by group_id. Ordinary tools retain the interrupt
+               fallback so blocked subprocesses can be unwound. */
+            if (strcmp(wd->tool_name, "swarm") != 0 &&
+                strcmp(wd->tool_name, "swarm_collect") != 0 &&
+                strcmp(wd->tool_name, "map_reduce") != 0 &&
+                strcmp(wd->tool_name, "provider_fabric") != 0) {
+                g_interrupted = 1;
+            }
             break;
         }
     }
@@ -39883,12 +40956,24 @@ static const tool_timeout_cfg_t s_timeout_overrides[] = {
     {"bash", 120},
     {"run_command", 120},
     {"sandbox_run", 120},
-    {"python", 120},
+    {"dsco-python-3x", 120},
     {"node", 120},
     {"compile", 60},
     {"spawn_agent", 300},
-    {"agent_wait", 3660},
-    {"agent_race", 300},
+    {"agent_wait", 21600},   /* up to 6h: long-blocking agent joins */
+    {"agent_race", 3660},
+    /* Read-only local search/inspection tools previously inherited the 30s
+     * default and were killed on large trees/corpora ("grep_files exceeded
+     * 30s"). They are I/O-bound and cooperatively cancellable, so give them a
+     * generous ceiling. Override per-tool via DSCO_TOOL_TIMEOUT_<NAME>. */
+    {"grep_files", 600},
+    {"Grep", 600},
+    {"find_files", 600},
+    {"read_file", 300},
+    {"list_directory", 300},
+    {"ast_search", 900},
+    {"ast_index", 3600},
+    {"ast_insights", 900},
     /* The consolidated `swarm` tool dispatches long-blocking actions (create,
      * map_reduce, collect, provider_fabric, topology_run/solve) that run whole
      * model instances to completion. Without an entry it inherited the 30s
@@ -39896,12 +40981,12 @@ static const tool_timeout_cfg_t s_timeout_overrides[] = {
      * ceiling as swarm_collect/agent_wait; fast sub-actions (status/inspect/
      * budget) return early, and Esc/Ctrl-C + swarm budget still bound runaways.
      * Runtime override: DSCO_TOOL_TIMEOUT_SWARM. */
-    {"swarm", 3660},
+    {"swarm", 21600},
     /* Direct native HTTP batch work must not inherit the generic 30s tool
      * deadline; it is bounded by per-request curl timeouts and concurrency. */
     {"weather_batch", 300},
     {"create_swarm", 300},
-    {"swarm_collect", 3660},
+    {"swarm_collect", 21600},
     {"spawn_executor", 300},
     {"spawn_provider", 300},
     {"create_executor_swarm", 300},
@@ -39923,7 +41008,7 @@ int tool_timeout_for(const char *name) {
     snprintf(env_key, sizeof(env_key), "DSCO_TOOL_TIMEOUT_%s", name);
     for (char *p = env_key + 19; *p; p++)
         *p = (*p >= 'a' && *p <= 'z') ? *p - 32 : *p;
-    int env_timeout = dsco_env_int(env_key, -1, 1, 7200);
+    int env_timeout = dsco_env_int(env_key, -1, 1, TOOL_TIMEOUT_MAX_S);
     if (env_timeout > 0)
         return env_timeout;
     /* 2. Static table */
@@ -40062,6 +41147,50 @@ static const char *tools_json_parse_string(const char *p, char **out) {
     else
         jbuf_free(&b);
     return p + 1;
+}
+
+/* Re-encode a decoded string as a strict RFC 8259 JSON string literal (with
+ * surrounding quotes). Used to repair tool-call arguments where a model
+ * emitted an otherwise-lenient-parseable string (e.g. containing a raw,
+ * unescaped control character such as a literal newline in a long file-content
+ * argument) that the strict validator in json_validate_schema() would reject. */
+static void tools_jbuf_append_json_string(jbuf_t *out, const char *s) {
+    jbuf_append_char(out, '"');
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        switch (*p) {
+            case '"':
+                jbuf_append(out, "\\\"");
+                break;
+            case '\\':
+                jbuf_append(out, "\\\\");
+                break;
+            case '\b':
+                jbuf_append(out, "\\b");
+                break;
+            case '\f':
+                jbuf_append(out, "\\f");
+                break;
+            case '\n':
+                jbuf_append(out, "\\n");
+                break;
+            case '\r':
+                jbuf_append(out, "\\r");
+                break;
+            case '\t':
+                jbuf_append(out, "\\t");
+                break;
+            default:
+                if (*p < 0x20) {
+                    char esc[8];
+                    snprintf(esc, sizeof(esc), "\\u%04x", *p);
+                    jbuf_append(out, esc);
+                } else {
+                    jbuf_append_char(out, (char)*p);
+                }
+                break;
+        }
+    }
+    jbuf_append_char(out, '"');
 }
 
 typedef enum {
@@ -40249,7 +41378,8 @@ static const char *tools_single_string_field_for_name(const char *name) {
         strcmp(name, "run_command") == 0 || strcmp(name, "compile") == 0 ||
         strcmp(name, "sandbox_run") == 0)
         return "command";
-    if (strcmp(name, "python") == 0 || strcmp(name, "node") == 0)
+    if (strcmp(name, "python") == 0 || strcmp(name, "dsco-python-3x") == 0 ||
+        strcmp(name, "node") == 0)
         return "code";
     if (strcmp(name, "eval") == 0)
         return "expression";
@@ -40442,6 +41572,27 @@ char *tools_normalize_input(const char *name, const char *input_json) {
                         emitted = true;
                     }
                 }
+
+                if (!emitted) {
+                    /* Value is a plain string field. tools_json_parse_string()
+                     * is lenient (accepts raw control bytes), so a
+                     * successfully-decoded value here may still be an
+                     * strict-JSON-invalid literal in the original input (e.g.
+                     * a literal newline inside a long file-content string).
+                     * Re-encode it strictly and only substitute if that
+                     * differs from the original bytes. */
+                    size_t raw_len = (size_t)(value_end - value_start);
+                    jbuf_t reescaped;
+                    jbuf_init(&reescaped, raw_len + 16);
+                    tools_jbuf_append_json_string(&reescaped, decoded);
+                    if (reescaped.len != raw_len ||
+                        memcmp(reescaped.data, value_start, raw_len) != 0) {
+                        jbuf_append(&out, reescaped.data);
+                        changed = true;
+                        emitted = true;
+                    }
+                    jbuf_free(&reescaped);
+                }
             }
             free(decoded);
         }
@@ -40484,7 +41635,8 @@ no_change:
 }
 
 static bool tools_code_or_file_tool(const char *name) {
-    return name && (strcmp(name, "python") == 0 || strcmp(name, "node") == 0);
+    return name && (strcmp(name, "python") == 0 || strcmp(name, "dsco-python-3x") == 0 ||
+                    strcmp(name, "node") == 0);
 }
 
 static bool tools_input_has_nonempty_string(const char *input_json, const char *key) {

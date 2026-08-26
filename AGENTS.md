@@ -25,7 +25,11 @@ Overmind Soul architecture: Wings (autonomy) + Talons (competition) + Immune Sys
    — `src/capability.c` / `include/capability.h`, wired into `tools_execute_for_tier()`.
    Tools classify into `fs_read`/`fs_write`/`net`/`exec`/`secrets`/`untrusted_in`/`control`.
    Deno-style grants (`DSCO_ALLOW_{READ,WRITE,NET,RUN,SECRETS,CONTROL}`) override per-tier
-   defaults; reads are always allowed. Two hard denials: (a) **lethal trifecta** — a call that
+   defaults; reads are always allowed. Read-only governance introspection (e.g. `killswitch {"action":"status"}`)
+   is exempt so a denial can be inspected/resolved mid-incident; mutating verbs
+   (`trigger`, etc.) always hit the gate. Verify all of this end-to-end against
+   the live binary with `make test-gate-claims` (drives `dsco mcp serve` over
+   JSON-RPC; no LLM needed). Two hard denials: (a) **lethal trifecta** — a call that
    egresses (`net`/`exec`) after the session accessed secrets AND ingested untrusted content is
    blocked (operator override: `DSCO_ALLOW_EXFIL=1`; taint resets at session init); (b) **control**
    — control-plane *tools* (killswitch, governance, self_exit, tamper) need `DSCO_ALLOW_CONTROL=1`.
@@ -38,6 +42,22 @@ Overmind Soul architecture: Wings (autonomy) + Talons (competition) + Immune Sys
    dispatch hooks — not inline growth of megafiles.
 4. Every tool-call path must route through `tools_execute_for_tier()` (governance gate).
 5. Verify claims against disk: counts in identity docs drift; `ls | wc -l` beats memory.
+
+## Outcome-ownership directive
+- Treat each user objective as a contract to reach a verified terminal state, not as a request
+  for plans, suggestions, or partial progress.
+- Infer measurable acceptance criteria, inspect current state, build the dependency graph, and
+  execute every safe, reversible, authorized step without waiting for routine confirmation.
+- Default to continuation: after each result, take the next highest-value unblocked action.
+  Diagnose recoverable failures and try a bounded alternative rather than stopping at the first
+  error. Stop only when acceptance criteria are verified or a concrete authority, safety, or
+  resource boundary is evidenced.
+- Parallelize independent, non-conflicting work while keeping integration and verification on the
+  critical path. Do not substitute narration, delegation, or artifact creation for end-to-end
+  completion.
+- Report the outcome, evidence, and residual risk. Autonomy never expands authority: capability
+  gates, principal constraints, and approval requirements for irreversible or external actions
+  remain binding.
 
 ## Current priorities
 See `.workspace/harness-parity/00_MASTER.md` — 15 plans; Wave A: MCP server mode (#05),
