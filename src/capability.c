@@ -7,7 +7,12 @@
 #include <strings.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <limits.h>
 #include "json_util.h"
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
 
 /* From tools.c (forward-declared to avoid the heavy tools.h include chain):
  * a builtin tool's declared read-only flag; *found means it is registered. */
@@ -87,12 +92,31 @@ static const char *const k_secret_tools[] = {
     "openai_image_generate", "kitty_remote",
     NULL};
 
-/* Tools whose input can name credentials/secret material. */
+/* Tools whose input can name credentials/secret material.
+ *
+ * The private-data leg of the lethal trifecta must latch on READING secret
+ * material, not on a command merely mentioning the word "token"/"secret". The
+ * generic English words fire constantly on legitimate work — redaction
+ * patterns (sed 's/token//'), env-var names (EMAIL_MCP_TOKEN), grep filters,
+ * and source that discusses auth — and once latched they are sticky and global,
+ * blocking every later exec/net call including pure compute. That is a
+ * false-positive exfil block, exactly the "routine inspection completes the
+ * leg" failure the header warns against.
+ *
+ * Fix: match only credential-bearing FILE/PATH markers (strong evidence a
+ * secret value is being read from disk/keychain), not free-floating words.
+ * A command that actually reads a secret store (cat ~/.aws/credentials,
+ * ~/.ssh/id_rsa, .netrc, keychain) still latches; a command that redacts or
+ * names a token does not. */
 static bool input_touches_secrets(const char *input) {
-    static const char *const marks[] = {".env",        "id_rsa",     ".ssh/",   "credentials",
-                                        ".aws",        "keychain",   "secret",  "api_key",
-                                        "apikey",      "token",      "password", "private_key",
-                                        ".netrc",      "id_ed25519", NULL};
+    static const char *const marks[] = {
+        /* Credential files / stores — path-shaped, high signal. */
+        ".env",        ".ssh/",      ".aws/",     ".gnupg/",
+        "id_rsa",      "id_ed25519", "id_ecdsa",  "id_dsa",
+        ".netrc",      "keychain",   "private_key",
+        "/credentials", "credentials.json", "credentials", "service_account",
+        ".pem",        ".p12",       ".pfx",      ".kdbx",
+        NULL};
     for (int i = 0; marks[i]; i++)
         if (contains_ci(input, marks[i]))
             return true;
@@ -143,7 +167,8 @@ unsigned dsco_caps_for_tool(const char *name, const char *input_json) {
 
     /* MCP / external tools (prefixed) reach out to third-party systems: both an
      * egress and an untrusted-content ingress. */
-    if (strncmp(name, "mcp_", 4) == 0 || strncmp(name, "mcp__", 5) == 0)
+    if (strncmp(name, "mcp_", 4) == 0 || strncmp(name, "mcp__", 5) == 0 ||
+        strncmp(name, "tm__", 4) == 0)
         caps |= CAP_NET | CAP_UNTRUSTED_IN;
 
     /* Hosted third-party task/research families (audit 2026-07-12): every
@@ -335,9 +360,49 @@ static void cap_path_abs(const char *in, char *out, size_t outlen) {
         snprintf(out, outlen, "/");
 }
 
+/* Resolve symlinks on the longest existing prefix of `in` so a scoped
+ * read/write cannot be redirected through a symlink pointing outside the
+ * declared scope (the G05 symlink-escape residual). Falls back to the lexical
+ * absolute path when nothing resolves. */
+static void cap_path_resolve(const char *in, char *out, size_t outlen) {
+    char abspath[4096];
+    cap_path_abs(in, abspath, sizeof(abspath));
+    char real[PATH_MAX];
+    if (realpath(abspath, real)) {
+        snprintf(out, outlen, "%s", real);
+        return;
+    }
+    /* Path (or leaf) may not exist yet: resolve the deepest existing ancestor
+     * and re-append the trailing components, defeating symlinked directories. */
+    char work[4096];
+    snprintf(work, sizeof(work), "%s", abspath);
+    char tail[4096];
+    tail[0] = '\0';
+    for (;;) {
+        char *slash = strrchr(work, '/');
+        if (!slash || slash == work)
+            break;
+        char leaf[2048];
+        snprintf(leaf, sizeof(leaf), "%s", slash + 1);
+        *slash = '\0';
+        char merged[4096];
+        if (tail[0])
+            snprintf(merged, sizeof(merged), "%s/%s", leaf, tail);
+        else
+            snprintf(merged, sizeof(merged), "%s", leaf);
+        snprintf(tail, sizeof(tail), "%s", merged);
+        char realanc[PATH_MAX];
+        if (realpath(work, realanc)) {
+            snprintf(out, outlen, "%s/%s", realanc, tail);
+            return;
+        }
+    }
+    snprintf(out, outlen, "%s", abspath);
+}
+
 static bool cap_path_in_scope(const char *path, const char *scopelist) {
     char abspath[4096];
-    cap_path_abs(path, abspath, sizeof(abspath));
+    cap_path_resolve(path, abspath, sizeof(abspath));
     char list[2048];
     snprintf(list, sizeof(list), "%s", scopelist);
     char *save = NULL;
@@ -347,7 +412,7 @@ static bool cap_path_in_scope(const char *path, const char *scopelist) {
         if (!*root)
             continue;
         char absroot[4096];
-        cap_path_abs(root, absroot, sizeof(absroot));
+        cap_path_resolve(root, absroot, sizeof(absroot));
         size_t rl = strlen(absroot);
         if (rl == 0)
             continue;
@@ -452,6 +517,44 @@ dsco_cap_decision_t dsco_capability_gate(const char *name, const char *input_jso
                        hardening[i].env, name);
             return CAP_DECISION_DENY;
         }
+    }
+
+    /* 3b. VCS control-plane writes. Writing under .git/hooks or .git/config lets a
+     *     repo persist executable hooks and rewrite remotes — a sandbox-escape
+     *     / persistence vector (Cursor GHSA-8pcm class). Treat these as
+     *     control-plane writes: require DSCO_ALLOW_CONTROL=1 even though the
+     *     tool is ordinary fs_write. Bypass with the explicit control grant. */
+    if ((caps & CAP_FS_WRITE) && input_json && !dsco_cap_granted(CAP_CONTROL, tier)) {
+        char *pth = json_get_str(input_json, "file_path");
+        if (!pth)
+            pth = json_get_str(input_json, "path");
+        if (!pth)
+            pth = json_get_str(input_json, "output_path");
+        if (!pth)
+            pth = json_get_str(input_json, "output");
+        if (pth && pth[0]) {
+            char absp[4096];
+            cap_path_abs(pth, absp, sizeof(absp));
+            const char *g = strstr(absp, "/.git/");
+            bool control_write =
+                g && (strncmp(g, "/.git/hooks/", 12) == 0 ||
+                      strncmp(g, "/.git/config", 12) == 0 ||
+                      strstr(g, "/.git/config") == g + 0 || strstr(absp, "/.git/hooks/") != NULL);
+            /* Also catch a path that ends exactly at .git/config */
+            size_t al = strlen(absp);
+            const char *cfg = "/.git/config";
+            size_t cl = strlen(cfg);
+            if (al >= cl && strcmp(absp + al - cl, cfg) == 0)
+                control_write = true;
+            if (control_write) {
+                CAP_REASON("VCS control-plane write denied: '%.80s' targets .git hooks/config "
+                           "(persistence/exfil vector); set DSCO_ALLOW_CONTROL=1 to authorize",
+                           absp);
+                free(pth);
+                return CAP_DECISION_DENY;
+            }
+        }
+        free(pth);
     }
 
     /* 4. Resource scoping: when a grant env holds a path/host list (not a bool),

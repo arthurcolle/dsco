@@ -81,4 +81,22 @@ void dsco_maybe_exec_shell_to_keep_terminal(void);
  * Defined in main.c; declared here so the supervised child path can share it. */
 void main_install_crash_handlers(void);
 
+
+/* ── Heatgraph export ─────────────────────────────────────────────────────
+ *
+ * Export in-memory metrics for visualization and analysis.
+ */
+
+typedef enum {
+    METRICS_FORMAT_JSON,
+    METRICS_FORMAT_CSV,
+    METRICS_FORMAT_HEATGRAPH,
+} metrics_format_t;
+
+/* Export metrics from the ring buffer. Returns 0 on success. */
+int supervisor_metrics_dump(metrics_format_t format, const char *output_path);
+
+/* Get current ring buffer statistics */
+size_t supervisor_metrics_count(void);
+
 #endif /* DSCO_SUPERVISOR_H */

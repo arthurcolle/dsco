@@ -29,13 +29,51 @@ DSCO_FABRIC_SUBLANES="openai-codex:gpt-5.6-sol@xhigh,openai-codex:gpt-5.6-sol@lo
 
 | provider | model | auth |
 |---|---|---|
-| sakana | fugu (base; ultra is opt-in — cost) | FUGU/SAKANA key |
-| anthropic | claude-sonnet-5 | Claude Code OAuth / API key |
-| openai-codex | gpt-5.6-sol, gpt-5.6-terra, gpt-5.5 | ChatGPT OAuth |
-| zai | glm-5.2 | GLM key |
+| sakana | fugu (base; ultra is opt-in — cost) | FUGU/SAKANA subscription allocation key |
+| anthropic | claude-sonnet-5 | Claude Code OAuth |
+| openai-codex | gpt-5.6-luna (issued default), gpt-5.6-sol, gpt-5.6-terra, gpt-5.5 | ChatGPT OAuth |
+| kimi-code | kimi-code/k3 | Kimi Code OAuth |
+| zai | glm-5.2 | Z.AI Coding Plan key |
 
-`gpt-5.6-luna` 404s on the ChatGPT subscription backend (2026-07-12) but works
-on metered `openai:` — env-inject it if needed.
+Direct OpenAI and Anthropic API keys, Sakana PAYG keys, and OpenRouter keys are
+metered lanes. They are never promoted to subscription lanes merely because a
+credential exists.
+
+`gpt-5.6-luna` was live-verified on the native ChatGPT subscription backend on
+2026-07-16. An earlier 2026-07-12 lane sweep returned 404; that result is stale.
+
+## Native tier-1 inventory and benchmark
+
+The subscription probe bypasses executor CLIs and worker processes. Each ready
+lane is built and streamed through its in-process HTTP transport:
+
+```sh
+# Credential class, endpoint, model, and readiness; JSON goes to stdout.
+./dsco --subscription-lanes | jq .
+
+# Three simultaneous cross-provider waves with enough output to measure decode.
+./dsco --subscription-bench \
+  --subscription-bench-rounds 3 \
+  --subscription-bench-concurrency 1 \
+  --subscription-bench-max-tokens 128 \
+  -p 'Write one compact paragraph of about 80 tokens.' | jq .
+```
+
+The report includes per-lane TTFT, total latency, subscription queue time,
+provider-service latency, HTTP outcome, reasoning/decode token counts, and
+decode throughput plus aggregate fanout throughput. This separates ChatGPT's
+cross-process anti-429 gate from upstream service time. Decode throughput is
+`null` when a provider returns a single buffered chunk, omits token usage, or
+leaves too short a decode interval; estimated token counts are labeled
+separately. A missing credential leaves that lane `ready:false` rather than
+silently using a metered key or external executor.
+
+Kimi Code access tokens are refreshed natively before expiry. A 401 causes one
+refresh-and-retry, coordinated by a cross-process lock; the rotated OAuth cache
+is written atomically with mode 0600. The Kimi CLI is not spawned. The ChatGPT
+subscription backend does not accept a per-request `max_output_tokens` field,
+so `--subscription-bench-max-tokens` is provider-managed for that lane while
+remaining a hard request parameter for providers that expose one.
 
 ## Verified lane inventory (sweep evidence, 2026-07-12)
 

@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "--layers") == 0) {
@@ -57,7 +58,24 @@ int main(int argc, char **argv) {
         }
         return 0;
     }
-    if (kitty_banner_available(stdout) && kitty_banner_render(stdout))
+    if (argc >= 2 && strcmp(argv[1], "--dissolve") == 0) {
+        /* Render, hold, then laser-wipe — the same sequence the chat REPL
+         * plays on the first user message, isolated for visual verification. */
+        double hold = argc >= 3 ? atof(argv[2]) : 3.0;
+        if (kitty_banner_render_auto(stdout) <= 0) {
+            fprintf(stderr, "dsco-banner: render failed (not a tty?)\n");
+            return 1;
+        }
+        /* usleep rejects >=1s on macOS (EINVAL) — hold in whole seconds. */
+        if (hold >= 1.0) sleep((unsigned)hold);
+        usleep((useconds_t)((hold - (unsigned)hold) * 1e6));
+        if (!kitty_banner_dissolve(stdout)) {
+            fprintf(stderr, "dsco-banner: nothing resident to dissolve\n");
+            return 1;
+        }
+        return 0;
+    }
+    if (kitty_banner_render_auto(stdout) > 0)
         return 0;
     if (dsco_banner_render_cells(stdout, 3) > 0)
         return 0;

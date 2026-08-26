@@ -1,0 +1,2 @@
+EXPECT_TAINTED|parallel_ai_task_result|{"run_id":"x"}
+EXPECT_TAINTED|mcp_fetch|{"url":"http://mcp.internal/tool"}

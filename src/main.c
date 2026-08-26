@@ -9,6 +9,9 @@
 #include "harden.h"
 #include "tui.h"
 #include "pixel_tui.h"
+#include "compositor_parity.h"
+#include "compositor_stream_bench.h"
+#include "kitty_banner.h"
 #include "llm.h"
 #include "tools.h"
 #include "pets.h"
@@ -24,13 +27,16 @@
 #include "provider.h"
 #include "provider_pool.h"
 #include "provider_profiles.h"
+#include "subscription_bench.h"
 #include "realtime.h"
 #include "openrouter_cache.h"
+#include "model_pricing.h"
 #include "codex_cache.h"
 #include "topology.h"
 #include "workspace.h"
 #include "durable_agents.h"
 #include "autoresearch.h"
+#include "swarm_daemon.h"
 #include "trace.h"
 #include "output_guard.h"
 #include "router.h"
@@ -41,6 +47,9 @@
 #include "vfs.h"
 #include "semantic.h"
 #include "mcp_server.h"
+#include "acp_server.h"
+#include "mcp.h"
+#include "context_fabric.h"
 #include "memory_tier.h"
 #include "vecstore.h"
 #include "pheromone.h"
@@ -51,6 +60,7 @@
 #include "tamper.h"
 #include "sealed_store.h"
 #include "se_store.h"
+#include "cloud_runtime.h"
 #include "audit_log.h"
 #include "watchdog.h"
 #include "env_guard.h"
@@ -403,6 +413,10 @@ void main_install_crash_handlers(void) {
 }
 
 static void main_atexit_handler(void) {
+    /* The splash banner hands its animation loop to the terminal, which
+     * would keep playing it after exit — delete the images on the way out. */
+    kitty_banner_clear(stderr);
+
     if (heartbeat_running()) {
         audit_log("runtime", "clean exit");
         heartbeat_stop();
@@ -522,6 +536,10 @@ static void init_vos_subsystems(void) {
         semantic_set_vfs(g_vfs);
         /* §8→talons: persist strategy win rates and tournament results */
         talons_set_vfs(g_vfs);
+        /* §8→context fabric: unify all context stores on the one shared db
+         * (buckets ctx_blob/ctx_meta/ctx_pin/ctx_scope + vec collection
+         * ctx_index) instead of a private ~/.dsco/context/fabric.db */
+        ctx_broker_set_shared_vfs(g_vfs);
     }
 
     /* §6→IPC: non-blocking heartbeat via event loop timer */
@@ -703,6 +721,7 @@ static void main_restore_sealed_env_for_exec(void) {
 
 static dsco_profile_t main_runtime_profile(int argc, char **argv) {
     dsco_profile_t profile = DSCO_PROFILE_FULL;
+    bool profile_explicit = false;
 
     const char *base = argv && argv[0] ? strrchr(argv[0], '/') : NULL;
     base = base ? base + 1 : (argv && argv[0] ? argv[0] : "");
@@ -711,14 +730,29 @@ static dsco_profile_t main_runtime_profile(int argc, char **argv) {
 
     dsco_profile_t parsed;
     const char *env_profile = getenv("DSCO_PROFILE");
-    if (dsco_profile_parse(env_profile, &parsed))
+    if (dsco_profile_parse(env_profile, &parsed)) {
         profile = parsed;
+        profile_explicit = true;
+    }
 
     const char *cli_profile = NULL;
     if (main_argv_has_value(argc, argv, "--profile", &cli_profile) &&
         dsco_profile_parse(cli_profile, &parsed)) {
         profile = parsed;
+        profile_explicit = true;
     }
+
+    /* Native subscription inventory/benchmarks need provider transports, not
+     * the full mesh, HTTP control plane, accelerators, or TUI. Keep startup
+     * overhead and side effects out of latency experiments unless the operator
+     * explicitly requests another profile. */
+    if (!profile_explicit &&
+        (main_argv_has(argc, argv, "--subscription-lanes") ||
+         main_argv_has(argc, argv, "--subscription-bench") ||
+         main_argv_has(argc, argv, "--subscription-bench-rounds") ||
+         main_argv_has(argc, argv, "--subscription-bench-concurrency") ||
+         main_argv_has(argc, argv, "--subscription-bench-max-tokens")))
+        profile = DSCO_PROFILE_LITE;
 
     if (getenv("DSCO_WORKER") ||
         main_argv_has(argc, argv, "--worker") ||
@@ -828,6 +862,9 @@ static dsco_caps_t main_plan_startup_caps(int argc, char **argv,
              strcmp(argv[i], "--approval-mode") == 0 ||
              strcmp(argv[i], "--trust-tier") == 0 ||
              strcmp(argv[i], "--effort") == 0 ||
+             strcmp(argv[i], "--subscription-bench-rounds") == 0 ||
+             strcmp(argv[i], "--subscription-bench-concurrency") == 0 ||
+             strcmp(argv[i], "--subscription-bench-max-tokens") == 0 ||
              strcmp(argv[i], "--timeline-port") == 0 ||
              strcmp(argv[i], "--timeline-instance") == 0 ||
              strcmp(argv[i], "--topology") == 0) && i + 1 < argc) {
@@ -838,15 +875,21 @@ static dsco_caps_t main_plan_startup_caps(int argc, char **argv,
     if (has_prompt ||
         main_argv_has(argc, argv, "-i") ||
         main_argv_has(argc, argv, "--interactive") ||
+        main_argv_has(argc, argv, "--tui") ||
+        main_argv_has(argc, argv, "--native") ||
         main_argv_has(argc, argv, "-e") ||
         main_argv_has(argc, argv, "--exec") ||
         main_argv_has(argc, argv, "--provider") ||
+        main_argv_has(argc, argv, "--subscription-lanes") ||
+        main_argv_has(argc, argv, "--subscription-bench") ||
         local_mode) {
         caps |= DSCO_CAP_PROVIDER | DSCO_CAP_TOOLS;
     }
 
     if (main_argv_has(argc, argv, "-i") ||
         main_argv_has(argc, argv, "--interactive") ||
+        main_argv_has(argc, argv, "--tui") ||
+        main_argv_has(argc, argv, "--native") ||
         (local_mode && !has_prompt) ||
         main_argv_has(argc, argv, "--ui") ||
         main_argv_has(argc, argv, "-ui")) {
@@ -1101,6 +1144,9 @@ typedef struct {
 static const exec_reg_t EXEC_REGISTRY[] = {
     { "claude", "claude", NULL,   "--model", "-p",   "Claude Code (Anthropic)" },
     { "codex",  "codex",  "exec", "-m",      NULL,   "Codex CLI (OpenAI)"      },
+    /* Kimi Code owns subscription OAuth and quota accounting.  Invoke the
+     * official CLI rather than exporting its credential into another client. */
+    { "kimi",   "kimi",   NULL,    "--model", "--prompt", "Kimi Code (subscription)" },
     { NULL, NULL, NULL, NULL, NULL, NULL }
 };
 
@@ -1166,6 +1212,8 @@ static const native_provider_t NATIVE_PROVIDERS[] = {
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_JSON, 3 },
     { "moonshot",   "Moonshot Kimi API",         "KIMI_API_KEY",        "kimi-k2.7-code-highspeed",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON, 4 },
+    { "kimi-code",  "Kimi membership (native)",  "KIMI_CODE_OAUTH_TOKEN", KIMI_CODE_DEFAULT_MODEL,
+      CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_THINKING|CAP_JSON|CAP_CACHE, 4 },
     { "alibaba",    "Alibaba DashScope",         "DASHSCOPE_API_KEY",   "qwen3-coder-plus",
       CAP_TOOLS|CAP_MULTITURN|CAP_STREAMING|CAP_VISION|CAP_JSON, 3 },
     { "alibaba-coding-plan", "Alibaba Coding Plan", "ALIBABA_CODING_PLAN_API_KEY", "qwen3-coder-plus",
@@ -1265,6 +1313,15 @@ static const char *native_default_model_for_setting(const native_provider_t *np,
 }
 
 static bool exec_bin_available(const char *bin) {
+    if (!bin || !bin[0]) return false;
+    if (strcmp(bin, "kimi") == 0) {
+        const char *home = getenv("HOME");
+        char bundled[1024];
+        if (home && home[0]) {
+            snprintf(bundled, sizeof(bundled), "%s/.kimi-code/bin/kimi", home);
+            if (access(bundled, X_OK) == 0) return true;
+        }
+    }
     char cmd[256];
     snprintf(cmd, sizeof(cmd), "command -v %s >/dev/null 2>&1", bin);
     return system(cmd) == 0;
@@ -1435,6 +1492,8 @@ static bool model_supports_executor(const char *model, const char *executor_name
         return strcmp(family, "anthropic") == 0;
     if (strcmp(executor_name, "codex") == 0)
         return strcmp(family, "openai") == 0;
+    if (strcmp(executor_name, "kimi") == 0)
+        return strcmp(family, "kimi-code") == 0 || strcmp(family, "moonshot") == 0;
     return false;
 }
 
@@ -1493,6 +1552,7 @@ static const char *default_model_for_executor(const exec_reg_t *e) {
     if (!e) return NULL;
     if (strcmp(e->name, "claude") == 0) return "claude-sonnet-5";
     if (strcmp(e->name, "codex") == 0) return codex_cache_default_model();
+    if (strcmp(e->name, "kimi") == 0) return KIMI_CODE_DEFAULT_MODEL;
     return NULL;
 }
 
@@ -1516,6 +1576,16 @@ static const char *normalize_model_for_executor(const exec_reg_t *e, const char 
     if (strcmp(e->name, "codex") == 0 &&
         strncmp(resolved, "openai/", 7) == 0) {
         snprintf(normalized, sizeof(normalized), "%s", resolved + 7);
+        return normalized;
+    }
+
+    if (strcmp(e->name, "kimi") == 0) {
+        if (strncmp(resolved, "kimi-code/", 10) == 0)
+            snprintf(normalized, sizeof(normalized), "%s", resolved);
+        else if (strstr(resolved, "k3"))
+            snprintf(normalized, sizeof(normalized), "%s", KIMI_CODE_DEFAULT_MODEL);
+        else
+            snprintf(normalized, sizeof(normalized), "kimi-code/kimi-for-coding");
         return normalized;
     }
 
@@ -2138,8 +2208,18 @@ static void exec_dispatch(const exec_reg_t *e, const char *prompt,
     else if (!prompt && e->oneshot_cmd)
         { /* interactive codex — no subcmd */ }
 
-    if (prompt && e->print_flag)
+    /* Kimi's --prompt takes its text immediately after the flag, so it is
+     * appended below after all model/output options. Claude's -p has no such
+     * ordering constraint. */
+    if (prompt && e->print_flag && strcmp(e->name, "kimi") != 0)
         av[ac++] = e->print_flag;
+
+    /* Kimi's subscription CLI supports structured one-shot output, unlike
+     * Claude/Codex's executor contracts. Keep the normal user-facing path
+     * plain text while preserving machine-readable output for callers that
+     * explicitly pass their own flags after `--`. */
+    if (prompt && strcmp(e->name, "kimi") == 0)
+        av[ac++] = "--output-format", av[ac++] = "text";
 
     if (model_override && e->model_flag) {
         av[ac++] = e->model_flag;
@@ -2150,11 +2230,26 @@ static void exec_dispatch(const exec_reg_t *e, const char *prompt,
     for (int i = 0; i < nextra && ac < 60; i++)
         av[ac++] = extra[i];
 
-    if (prompt)
+    if (prompt) {
+        if (strcmp(e->name, "kimi") == 0) av[ac++] = e->print_flag;
         av[ac++] = prompt;
+    }
 
     av[ac] = NULL;
     exec_prepare_env(e, fallback_api_key);
+    if (strcmp(e->name, "kimi") == 0) {
+        const char *home = getenv("HOME");
+        if (home && home[0]) {
+            char bundled_dir[1024], merged_path[4096];
+            snprintf(bundled_dir, sizeof(bundled_dir), "%s/.kimi-code/bin", home);
+            if (access(bundled_dir, X_OK) == 0) {
+                const char *path = getenv("PATH");
+                snprintf(merged_path, sizeof(merged_path), "%s:%s", bundled_dir,
+                         path ? path : "");
+                setenv("PATH", merged_path, 1);
+            }
+        }
+    }
     execvp(e->bin, (char *const *)av);
     /* only reached on failure */
     perror(e->bin);
@@ -2162,6 +2257,38 @@ static void exec_dispatch(const exec_reg_t *e, const char *prompt,
 
 /* Global provider override — set by -e <native_provider> */
 static const char *g_provider_override = NULL;
+
+/* A hosting-provider lane is distinct from a native provider.  The syntax
+ * `openrouter:<slug>` keeps OpenRouter as the authenticated transport while
+ * pinning the actual inference host through OpenRouter's provider object.
+ * Accept endpoint variants such as google-vertex/us-east5, but never a CSV:
+ * one CLI lane is one auditable upstream authority. */
+static const char *main_openrouter_lane_slug(const char *value) {
+    if (!value)
+        return NULL;
+    const char *slug = NULL;
+    if (strncmp(value, "openrouter:", 11) == 0)
+        slug = value + 11;
+    else if (strncmp(value, "or:", 3) == 0)
+        slug = value + 3;
+    if (!slug || !slug[0])
+        return NULL;
+    for (const unsigned char *p = (const unsigned char *)slug; *p; p++) {
+        if (!(isalnum(*p) || *p == '-' || *p == '_' || *p == '.' || *p == '/'))
+            return NULL;
+    }
+    return slug;
+}
+
+static bool main_apply_openrouter_lane(const char *value) {
+    const char *slug = main_openrouter_lane_slug(value);
+    if (!slug)
+        return false;
+    setenv("DSCO_OR_PROVIDER_ONLY", slug, 1);
+    setenv("DSCO_OR_PROVIDER_ORDER", slug, 1);
+    setenv("DSCO_OR_ALLOW_FALLBACKS", "0", 1);
+    return true;
+}
 
 /* ── Account info helpers ──────────────────────────────────────────── */
 
@@ -2315,7 +2442,7 @@ static int run_login_flow(void) {
             "Claude Code  (Anthropic)", "claude-sonnet-5",
             claude_status_col, claude_status);
     fprintf(stderr, "  \033[1m[2]\033[0m %-33s %-22s %s%s\033[0m\n",
-            "ChatGPT Codex  (OpenAI)", "auto (gpt-5.5)",
+            "ChatGPT Codex  (OpenAI)", DEFAULT_MODEL " (" DEFAULT_EFFORT ")",
             codex_status_col, codex_status);
 
     fprintf(stderr, "\n  \033[2m[q] quit\033[0m\n\n> ");
@@ -2450,9 +2577,7 @@ save_active:
         }
     } else if (provider_has_usable_key("openai-codex", NULL)) {
         pname = "openai-codex";
-        pmodel = provider_primary_model_for("openai", true);
-        if (!pmodel || !pmodel[0])
-            pmodel = "gpt-5.5";
+        pmodel = DEFAULT_MODEL;
         fprintf(stderr, "  \033[32m● Native ChatGPT subscription route ready\033[0m\n");
     }
 
@@ -2593,13 +2718,15 @@ static void usage(const char *prog) {
         "       %s config [show|init|validate|ingest|explain|metadata]  DSCO Config Registry\n"
         "       %s command <begin|get|get-key|complete|fail> ...  Durable command plane\n"
         "       %s agents <create|list|status|tui|watch|send|inbox|sent|bus|db> ...  Durable agent mailboxes\n"
+        "       %s swarmd <start|status|collect|abort> ...         Detached durable swarm supervisor\n"
         "       %s bus <pub|recv|tail> ...  Durable topic bus\n"
         "       %s autoresearch <start|status|stop> ...  Bounded background experiment loops\n"
+        "       %s acp serve                         Agent Client Protocol stdio adapter\n"
         "\n"
         "Options:\n"
         "  -m, --model MODEL      Model name (default: %s)\n"
         "  -p, --prompt PROMPT    One-shot prompt; use for text that starts with '-'\n"
-        "  --effort LEVEL         Reasoning effort: auto|none|minimal|low|medium|high|xhigh|max\n"
+        "  --effort LEVEL         Reasoning effort: auto|none|minimal|low|medium|high|xhigh|max (default: " DEFAULT_EFFORT ")\n"
         "  -k KEY      API key, or ENV=KEY / ENV KEY (default: provider env for selected model)\n"
         "  --profile full|lite|worker  Runtime startup profile (default: full)\n"
         "  --env-file PATH       Load this DSCO env file before provider/MCP setup\n"
@@ -2616,6 +2743,11 @@ static void usage(const char *prog) {
         "  -O, --orchestrate      Orchestrator mode: Haiku routes to specialist workers\n"
         "  -M, --worker-model M   Worker model for orchestrate mode (default: kimi-k2.7-code-highspeed)\n"
         "  --provider-fabric      Run prompt through native cross-provider worker fabric (default mode: race)\n"
+        "  --subscription-lanes   List configured tier-1 native subscription transports as JSON\n"
+        "  --subscription-bench   Benchmark subscription TTFT/latency/throughput in-process as JSON\n"
+        "  --subscription-bench-rounds N       Repeated benchmark waves (default: 1, max: 20)\n"
+        "  --subscription-bench-concurrency N  Concurrent requests per lane/wave (default: 1, max: 16)\n"
+        "  --subscription-bench-max-tokens N   Requested output cap where supported (default: 64)\n"
         "  --fabric-mode MODE     provider_fabric mode: race|spawn|collect\n"
         "  --fabric-max-agents N  Cap provider_fabric worker processes\n"
         "  --fabric-replicas N    Replicas per non-Fugu provider lane\n"
@@ -2628,6 +2760,10 @@ static void usage(const char *prog) {
         "  --topology-list        List available topologies\n"
         "  --ui [PORT]            Launch web UI (default port: 3141)\n"
         "  -i, --interactive      Start an interactive REPL (no prompt required) [baked-in default in a TTY]\n"
+        "  --native               Use the native pixel compositor (experimental); requires a Kitty-compatible terminal\n"
+        "  --tui                  Force the established terminal TUI (this is also the default)\n"
+        "  --compositor-parity [DIR]  Emit deterministic ANSI/native parity artifacts and density metrics\n"
+        "  --compositor-stream-bench [CHUNKS]  Run a deterministic live native streaming benchmark\n"
         "  --autonomous           No routine approval prompts; trusted tier; critical gates still fail closed [baked-in default]\n"
         "  --sandboxed            Untrusted tier: route exec tools through sandbox_run, block writes/network/control-plane\n"
         "  --systems-agent        UNGOVERNED control arm (gov model=none) + native networking hooks: mesh P2P/DHT/TLS up, fleet fanout enabled\n"
@@ -2639,8 +2775,9 @@ static void usage(const char *prog) {
         "  --local                Use LM Studio locally (default model: liquid/lfm2.5-1.2b)\n"
         "  --ollama               Use local Ollama (default model: llama3.2)\n"
         "  --pull-and-use MODEL   Pull an Ollama model, then use it locally\n"
-        "  -e, --exec BACKEND    Execute via CLI/provider (claude, codex, auto, smart, list, bench, bench-tools, smoke, smoke-full, <provider>)\n"
-        "  --provider NAME       Force a native provider (anthropic, openai, openrouter, ollama, ollama-cloud, fugu/sakana, xai, ...)\n"
+        "  -e, --exec BACKEND    Execute via CLI/provider (claude, codex, kimi, auto, smart, list, bench, bench-tools, smoke, smoke-full, <provider>)\n"
+        "  --provider NAME       Force a native provider (default: " DEFAULT_PROVIDER "; also anthropic, openai, openrouter, ...)\n"
+        "                        Use openrouter:<host-slug> for a provider-pinned OpenRouter lane with fallbacks disabled\n"
         "  --route-explain [MODEL]  Explain provider/model routing without streaming\n"
         "  --structured-schema-json  Print strict structured-process response schema\n"
         "  --structured-plan-json PROMPT  Synthesize a bounded process JSON locally\n"
@@ -2662,13 +2799,16 @@ static void usage(const char *prog) {
         "  DSCO_PROFILE        Runtime startup profile when full/lite/worker\n"
         "  DSCO_ENV_FILE       Override setup env file path\n"
         "  DSCO_BASELINE_DB    Override sqlite baseline path\n"
-        "  DSCO_EXEC           Default executor/provider (claude, codex, auto, zai, moonshot, fugu, sakana)\n"
-        "  DSCO_EFFORT         Reasoning effort default (auto, none, minimal, low, medium, high, xhigh, max)\n"
+        "  DSCO_EXEC           Default executor/provider override (runtime default: " DEFAULT_PROVIDER ")\n"
+        "  DSCO_EFFORT         Reasoning effort override (default: " DEFAULT_EFFORT "; auto restores provider default)\n"
+        "  DSCO_PIXEL_TUI      Set to 1 to opt into the native pixel compositor; 0 forces the established TUI (default: established TUI)\n"
+        "  DSCO_PIXEL_TUI_PERF Native frame/queue percentile telemetry (1 or an absolute JSONL path)\n"
+        "  DSCO_COMPOSITOR_BENCH_INTERVAL_US  Token interval for --compositor-stream-bench (default: 2000)\n"
         "  DSCO_OPENAI_PARAMS  JSON object of compatible Chat Completions request parameters\n"
         "  DSCO_PARALLEL_TOOL_CALLS  Hosted OpenAI-compatible parallel tool calls (default on; 0 disables)\n"
         "  DSCO_BUDGET         Session cost budget in dollars (0=unlimited)\n"
         "  DSCO_DAILY_BUDGET   Daily cost budget in dollars (0=unlimited)\n",
-        DSCO_VERSION, prog, prog, prog, prog, prog, prog, prog, prog, DEFAULT_MODEL, prog, prog, prog);
+        DSCO_VERSION, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, DEFAULT_MODEL, prog, prog, prog);
 }
 
 static void print_topology_list(void) {
@@ -2984,6 +3124,27 @@ static void print_tools_json_fast(dsco_profile_t profile) {
         tools_init_profile(TOOLS_CORE);
     else
         tools_init_local_only();
+
+    /* Keep the default introspection path fast, but honor an explicit MCP
+     * selector.  Previously `--mcp-server NAME --tools-json` returned only
+     * built-ins because this fast path exited before agent.c initialized MCP.
+     * Explicit selection is an operator request for live discovery, so load
+     * the saved environment and merge that server's tools into the JSON. */
+    mcp_registry_t *mcp_reg = NULL;
+    const char *mcp_selector = getenv("DSCO_MCP_SERVER");
+    if (!mcp_selector || !mcp_selector[0])
+        mcp_selector = getenv("DSCO_MCP_SERVERS");
+    if (mcp_selector && mcp_selector[0]) {
+        dsco_setup_load_saved_env();
+        mcp_reg = calloc(1, sizeof(*mcp_reg));
+        if (mcp_reg) {
+            mcp_cancel_reset();
+            mcp_set_silent(getenv("DSCO_MCP_DEBUG") == NULL);
+            (void)mcp_init(mcp_reg);
+            mcp_set_silent(false);
+        }
+    }
+
     int count = 0;
     const tool_def_t *tools = tools_get_all(&count);
     printf("[");
@@ -2999,6 +3160,26 @@ static void print_tools_json_fast(dsco_profile_t profile) {
                (t->input_schema_json && t->input_schema_json[0])
                    ? t->input_schema_json
                    : "{\"type\":\"object\",\"properties\":{}}");
+    }
+
+    if (mcp_reg) {
+        int mcp_count = 0;
+        const mcp_tool_t *mcp_tools = mcp_get_tools(mcp_reg, &mcp_count);
+        for (int j = 0; j < mcp_count; j++) {
+            const mcp_tool_t *t = &mcp_tools[j];
+            if (!t->name[0]) continue;
+            if (emitted++ > 0) printf(",");
+            printf("{\"name\":\"");
+            json_print_escaped(stdout, t->name);
+            printf("\",\"description\":\"");
+            json_print_escaped(stdout, t->description);
+            printf("\",\"input_schema\":%s}",
+                   t->input_schema[0]
+                       ? t->input_schema
+                       : "{\"type\":\"object\",\"properties\":{}}");
+        }
+        mcp_shutdown(mcp_reg);
+        free(mcp_reg);
     }
     printf("]\n");
 }
@@ -3065,9 +3246,52 @@ static void main_print_tool_exec_json(bool ok, const char *result) {
     printf("\"}\n");
 }
 
+static int run_selected_mcp_tool_exec(const char *name, const char *input_json,
+                                      bool raw, bool *handled) {
+    if (handled) *handled = false;
+    const char *selector = getenv("DSCO_MCP_SERVER");
+    if (!selector || !selector[0])
+        selector = getenv("DSCO_MCP_SERVERS");
+    if (!name || strncmp(name, "mcp__", 5) != 0 || !selector || !selector[0])
+        return 0;
+
+    if (handled) *handled = true;
+    dsco_setup_load_saved_env();
+    mcp_registry_t *reg = calloc(1, sizeof(*reg));
+    if (!reg) {
+        if (!raw) main_print_tool_exec_json(false, "could not allocate MCP registry");
+        return 1;
+    }
+
+    mcp_cancel_reset();
+    mcp_set_silent(getenv("DSCO_MCP_DEBUG") == NULL);
+    (void)mcp_init(reg);
+    mcp_set_silent(false);
+    char *result = mcp_call_tool(reg, name, input_json ? input_json : "{}");
+    bool ok = result != NULL;
+    if (raw) {
+        const char *text = result ? result : "MCP tool unavailable";
+        (void)write(STDOUT_FILENO, text, strlen(text));
+        size_t len = strlen(text);
+        if (len == 0 || text[len - 1] != '\n')
+            (void)write(STDOUT_FILENO, "\n", 1);
+    } else {
+        main_print_tool_exec_json(ok, result ? result : "MCP tool unavailable");
+    }
+    free(result);
+    mcp_shutdown(reg);
+    free(reg);
+    return ok ? 0 : 1;
+}
+
 static int run_tool_exec_fast(dsco_profile_t profile,
                               const char *name,
                               const char *input_json) {
+    bool mcp_handled = false;
+    int mcp_rc = run_selected_mcp_tool_exec(name, input_json, false, &mcp_handled);
+    if (mcp_handled)
+        return mcp_rc;
+
     if ((profile == DSCO_PROFILE_LITE || profile == DSCO_PROFILE_WORKER) &&
         name && strcmp(name, "cwd") == 0 &&
         (!input_json || !strstr(input_json, "path"))) {
@@ -3192,12 +3416,35 @@ static const char *main_route_explain_cli_key(int argc, char **argv) {
 
 static const char *main_route_explain_override(int argc, char **argv) {
     const char *provider = NULL;
-    if (main_argv_has_value(argc, argv, "--provider", &provider))
+    if (main_argv_has_value(argc, argv, "--provider", &provider)) {
+        if (main_apply_openrouter_lane(provider))
+            return "openrouter";
         return provider;
+    }
 
     const char *exec_backend = NULL;
     if (!main_argv_has_value(argc, argv, "--exec", &exec_backend) &&
         !main_argv_has_value(argc, argv, "-e", &exec_backend)) {
+        /* An explicit subscription model must not be shadowed by a persisted
+         * DSCO_EXEC provider default such as openai-codex. */
+        const char *requested_model = NULL;
+        bool has_model = main_argv_has_value(argc, argv, "--model", &requested_model) ||
+                         main_argv_has_value(argc, argv, "-m", &requested_model);
+        if (!has_model)
+            has_model = main_route_explain_requested(argc, argv, &requested_model);
+        const char *resolved_model = has_model ? model_resolve_alias(requested_model) : NULL;
+        if (resolved_model && strncmp(resolved_model, "kimi-code/", 10) == 0)
+            return NULL;
+        const char *env_exec = getenv("DSCO_EXEC");
+        const native_provider_t *env_np =
+            (env_exec && env_exec[0]) ? native_find(env_exec) : NULL;
+        if (env_np)
+            return env_np->name;
+        const provider_profile_t *env_profile =
+            (env_exec && env_exec[0]) ? provider_profile_find(env_exec) : NULL;
+        if (env_profile && provider_profile_transport_supported(env_profile) &&
+            strcmp(env_exec, env_profile->name) == 0)
+            return env_profile->name;
         return NULL;
     }
     if (native_find(exec_backend) || provider_has_custom_api_base(exec_backend))
@@ -3227,8 +3474,8 @@ static int run_route_explain_fast(int argc, char **argv) {
     const char *detected = provider_detect(route_model, api_key);
     const char *routed = provider_route_for_model(route_model, api_key, override);
     const char *executor_route = NULL;
-    if (!override && model_supports_executor(route_model, "claude") && main_claude_exec_ready() &&
-        !provider_has_usable_key("anthropic", api_key)) {
+    if (!override && model_supports_executor(route_model, "claude") &&
+               main_claude_exec_ready() && !provider_has_usable_key("anthropic", api_key)) {
         executor_route = "claude";
     }
     const char *request_key = provider_resolve_request_api_key(routed, api_key);
@@ -3240,24 +3487,47 @@ static int run_route_explain_fast(int argc, char **argv) {
     bool local_endpoint = main_route_api_url_is_loopback(api_url);
     bool executor_primary = executor_route != NULL;
 
+    const char *configured_effort = getenv("DSCO_EFFORT");
+    const char *route_effort = DEFAULT_EFFORT;
+    if (configured_effort)
+        route_effort = dsco_effort_is_valid(configured_effort)
+                           ? dsco_effort_display(configured_effort)
+                           : EFFORT_AUTO;
+
+    printf("default_provider: %s\n", DEFAULT_PROVIDER);
+    printf("default_model: %s\n", DEFAULT_MODEL);
+    printf("reasoning_effort: %s\n", route_effort);
     printf("model: %s\n", model);
     printf("alias_resolved_model: %s\n", alias_resolved ? alias_resolved : model);
     printf("model_family: %s\n", family ? family : "(unknown)");
     printf("detected_provider: %s\n", detected ? detected : "(unknown)");
-    printf("route_provider: %s\n", executor_primary ? "claude-code" :
-           (routed ? routed : "(unknown)"));
+    printf("route_provider: %s\n", executor_primary
+           ? (strcmp(executor_route, "kimi") == 0 ? "kimi-code" : "claude-code")
+           : (routed ? routed : "(unknown)"));
     printf("route_executor: %s\n", executor_route ? executor_route : "(none)");
     if (executor_route) {
-        printf("executor_auth_source: %s\n", main_claude_exec_auth_source());
+        printf("executor_auth_source: %s\n",
+               strcmp(executor_route, "kimi") == 0 ? "kimi-code-oauth"
+                                                  : main_claude_exec_auth_source());
         printf("native_fallback_provider: %s\n", routed ? routed : "(unknown)");
     }
     printf("provider_override: %s\n", override ? override : "(none)");
+    const char *requested_provider = NULL;
+    const char *openrouter_lane =
+        main_argv_has_value(argc, argv, "--provider", &requested_provider)
+            ? main_openrouter_lane_slug(requested_provider)
+            : NULL;
+    printf("openrouter_lane: %s\n", openrouter_lane ? openrouter_lane : "(none)");
+    printf("openrouter_fallbacks: %s\n", openrouter_lane ? "disabled" : "default");
     printf("fallback_active: %s\n",
-           (!executor_primary && detected && routed && strcmp(detected, routed) != 0) ? "yes" : "no");
+           (!override && !executor_primary && detected && routed &&
+            strcmp(detected, routed) != 0) ? "yes" : "no");
     printf("endpoint_class: %s\n", executor_primary ? "executor" :
            (local_endpoint ? "local" : "remote"));
-    printf("auth_mode: %s\n", executor_primary ? "claude-code-subscription" :
-           (local_endpoint ? "local" : (auth_mode ? auth_mode : "none")));
+    printf("auth_mode: %s\n", executor_primary
+           ? (strcmp(executor_route, "kimi") == 0 ? "kimi-code-subscription"
+                                                   : "claude-code-subscription")
+           : (local_endpoint ? "local" : (auth_mode ? auth_mode : "none")));
     printf("credential_present: %s\n",
            executor_primary ? "yes" : ((!local_endpoint && request_key && request_key[0]) ? "yes" : "no"));
     printf("credential_usable: %s\n", executor_primary ? "yes" : (key_usable ? "yes" : "no"));
@@ -3570,8 +3840,10 @@ static bool main_is_dispatch_subcommand(const char *arg) {
             strcmp(arg, "bus") == 0 ||
             strcmp(arg, "skills") == 0 ||
             strcmp(arg, "autoresearch") == 0 ||
+            strcmp(arg, "swarmd") == 0 ||
             strcmp(arg, "runtime") == 0 ||
             strcmp(arg, "mcp") == 0 ||
+            strcmp(arg, "acp") == 0 ||
             strcmp(arg, "pets") == 0 ||
             strcmp(arg, "config") == 0 ||
             strcmp(arg, "connect") == 0 ||
@@ -3625,6 +3897,9 @@ static int main_leading_global_flag_values(int argc, char **argv, int i) {
         strcmp(arg, "--fugu-replicas") == 0 ||
         strcmp(arg, "--fabric-timeout") == 0 ||
         strcmp(arg, "--fabric-fugu-model") == 0 ||
+        strcmp(arg, "--subscription-bench-rounds") == 0 ||
+        strcmp(arg, "--subscription-bench-concurrency") == 0 ||
+        strcmp(arg, "--subscription-bench-max-tokens") == 0 ||
         strcmp(arg, "--pull-and-use") == 0) {
         return (i + 1 < argc) ? 1 : -1;
     }
@@ -3636,6 +3911,12 @@ static int main_leading_global_flag_values(int argc, char **argv, int i) {
         strcmp(arg, "--systems-agent") == 0 ||
         strcmp(arg, "--resume") == 0 ||
         strcmp(arg, "--resume-last") == 0 ||
+        strcmp(arg, "--cloud-runtime") == 0 ||
+        strcmp(arg, "--byok-cloud") == 0 ||
+        strcmp(arg, "--subscription-lanes") == 0 ||
+        strcmp(arg, "--subscription-bench") == 0 ||
+        strcmp(arg, "--tui") == 0 ||
+        strcmp(arg, "--native") == 0 ||
         strcmp(arg, "--cheap") == 0 ||
         strcmp(arg, "-C") == 0) {
         return 0;
@@ -3695,6 +3976,8 @@ static int main_dispatch_subcommand_normalized(int argc, char **argv,
         rc = dsco_skills_cli(nargc, nargv);
     else if (strcmp(sub, "autoresearch") == 0)
         rc = autoresearch_cli(nargc, nargv);
+    else if (strcmp(sub, "swarmd") == 0)
+        rc = swarm_daemon_cli(nargc, nargv);
     else if (strcmp(sub, "runtime") == 0)
         rc = runtime_cli(nargc, nargv);
     else if (strcmp(sub, "mcp") == 0 && nargc >= 3 && strcmp(nargv[2], "serve") == 0) {
@@ -3704,6 +3987,8 @@ static int main_dispatch_subcommand_normalized(int argc, char **argv,
             else if (strcmp(nargv[i], "--tier") == 0) tier = nargv[++i];
         }
         rc = mcp_server_run(ts, tier);
+    } else if (strcmp(sub, "acp") == 0 && nargc >= 3 && strcmp(nargv[2], "serve") == 0) {
+        rc = acp_server_run(argv[0]);
     } else if (strcmp(sub, "pets") == 0) {
         const char *action = nargc >= 3 ? nargv[2] : "gallery";
         if (strcmp(action, "watch") == 0) {
@@ -3752,6 +4037,31 @@ static int maybe_run_early_fast_path(int argc, char **argv,
             print_models_json();
             perf_finish("fast exit");
             return 0;
+        }
+        if (strcmp(argv[i], "--compositor-parity") == 0) {
+            const char *directory = i + 1 < argc && argv[i + 1][0] != '-'
+                                        ? argv[i + 1]
+                                        : "/tmp/dsco-compositor-parity";
+            int rc = compositor_parity_write(directory, stdout);
+            perf_finish(rc == 0 ? "fast exit" : "fast error");
+            return rc;
+        }
+        if (strcmp(argv[i], "--compositor-stream-bench") == 0) {
+            compositor_stream_bench_config_t config;
+            compositor_stream_bench_config_default(&config);
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                char *end = NULL;
+                long chunks = strtol(argv[i + 1], &end, 10);
+                if (end == argv[i + 1] || *end != '\0' || chunks < 1) {
+                    fprintf(stderr,
+                            "error: --compositor-stream-bench CHUNKS must be a positive integer\n");
+                    return 1;
+                }
+                config.chunks = chunks > INT_MAX ? INT_MAX : (int)chunks;
+            }
+            int rc = compositor_stream_bench_run(stdout, &config);
+            perf_finish(rc == 0 ? "fast exit" : "fast error");
+            return rc;
         }
         if (strcmp(argv[i], "--tools-json") == 0) {
             perf_mark("fast tools-json begin");
@@ -4153,11 +4463,20 @@ int main(int argc, char **argv) {
     dsco_harden_init();
     main_apply_compile_time_defaults(argc, argv);
     main_apply_early_config_flags(argc, argv);
+    char cloud_runtime_err[256] = {0};
+    if (!dsco_cloud_runtime_init(argc, argv, cloud_runtime_err, sizeof(cloud_runtime_err))) {
+        fprintf(stderr, "dsco: cloud runtime refused to start: %s\n", cloud_runtime_err);
+        return DSCO_EXIT_CONFIG;
+    }
 
     /* Detect interactive mode immediately for fast-path optimizations */
     bool is_interactive_session =
-        (argc > 1 && (strcmp(argv[1], "-i") == 0 || strcmp(argv[1], "--interactive") == 0)) ||
-        (argc > 1 && (strcmp(argv[1], "--ui") == 0 || strcmp(argv[1], "-ui") == 0));
+        main_argv_has(argc, argv, "-i") ||
+        main_argv_has(argc, argv, "--interactive") ||
+        main_argv_has(argc, argv, "--tui") ||
+        main_argv_has(argc, argv, "--native") ||
+        main_argv_has(argc, argv, "--ui") ||
+        main_argv_has(argc, argv, "-ui");
 
     if (is_interactive_session) {
         setenv("DSCO_INTERACTIVE", "1", 1);
@@ -4323,7 +4642,8 @@ int main(int argc, char **argv) {
         bool _local_flag = false;
         bool _local_has_prompt = false;
         for (int _k = 1; _k < argc && !_is_interactive; _k++) {
-            if (strcmp(argv[_k], "-i") == 0 || strcmp(argv[_k], "--interactive") == 0)
+            if (strcmp(argv[_k], "-i") == 0 || strcmp(argv[_k], "--interactive") == 0 ||
+                strcmp(argv[_k], "--tui") == 0 || strcmp(argv[_k], "--native") == 0)
                 _is_interactive = true;
             else if (strcmp(argv[_k], "--local") == 0)
                 _local_flag = true;
@@ -4445,6 +4765,11 @@ int main(int argc, char **argv) {
             strcmp(argv[i], "--setup-report") == 0 ||
             strcmp(argv[i], "--status") == 0 ||
             strcmp(argv[i], "--route-explain") == 0 ||
+            strcmp(argv[i], "--subscription-lanes") == 0 ||
+            strcmp(argv[i], "--subscription-bench") == 0 ||
+            strcmp(argv[i], "--subscription-bench-rounds") == 0 ||
+            strcmp(argv[i], "--subscription-bench-concurrency") == 0 ||
+            strcmp(argv[i], "--subscription-bench-max-tokens") == 0 ||
             strcmp(argv[i], "--topology-list") == 0 ||
             strcmp(argv[i], "--topology-show") == 0 ||
             strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "--exec") == 0) {
@@ -4461,6 +4786,7 @@ int main(int argc, char **argv) {
     /* Detect `login` / `status` subcommands early (before bootstrap) */
     bool arg_login  = false;
     bool arg_status = false;
+    bool arg_metrics = false;
     if (arg_skip_bootstrap) {
         setenv("DSCO_SETUP_NO_AUTO_BOOTSTRAP", "1", 0);
         setenv("DSCO_CREDENTIAL_DISCOVERY_NO_PROMPT", "1", 0);
@@ -4468,6 +4794,7 @@ int main(int argc, char **argv) {
     }
     if (argc >= 2 && strcmp(argv[1], "login") == 0)  arg_login  = true;
     if (argc >= 2 && strcmp(argv[1], "status") == 0) arg_status = true;
+    if (argc >= 2 && strcmp(argv[1], "metrics") == 0) arg_metrics = true;
     for (int i = 1; i < argc && !arg_login && !arg_status; i++) {
         if (strcmp(argv[i], "--login") == 0)  { arg_login  = true; break; }
         if (strcmp(argv[i], "--status") == 0) { arg_status = true; break; }
@@ -4490,6 +4817,22 @@ int main(int argc, char **argv) {
 
     if (arg_login)  return run_login_flow();
     if (arg_status) return run_status_flow();
+
+    if (arg_metrics) {
+        metrics_format_t fmt = METRICS_FORMAT_JSON;
+        const char *out_path = NULL;
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--format") == 0 && i + 1 < argc) {
+                i++;
+                if (strcmp(argv[i], "csv") == 0) fmt = METRICS_FORMAT_CSV;
+                else if (strcmp(argv[i], "heatgraph") == 0) fmt = METRICS_FORMAT_HEATGRAPH;
+                else fmt = METRICS_FORMAT_JSON;
+            } else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
+                out_path = argv[++i];
+            }
+        }
+        return supervisor_metrics_dump(fmt, out_path);
+    }
 
     const char *api_key = NULL;
     const char *env_model = getenv("DSCO_MODEL");
@@ -4536,6 +4879,11 @@ int main(int argc, char **argv) {
     int ui_port = 3141;
     bool orchestrate_mode = false;
     bool provider_fabric_mode = false;
+    bool subscription_lanes_mode = false;
+    bool subscription_bench_mode = false;
+    int subscription_bench_rounds = 1;
+    int subscription_bench_concurrency = 1;
+    int subscription_bench_max_tokens = 64;
     const char *provider_fabric_run_mode = NULL;
     int provider_fabric_max_agents = -1;
     int provider_fabric_replicas = -1;
@@ -4647,6 +4995,12 @@ int main(int argc, char **argv) {
              * `--tool-exec`'s JSON escaping renders newlines as literal "\n". */
             const char *tname = argv[++i];
             const char *tjson = argv[++i];
+            bool mcp_handled = false;
+            int mcp_rc = run_selected_mcp_tool_exec(tname, tjson, true, &mcp_handled);
+            if (mcp_handled) {
+                free(oneshot_prompt);
+                return mcp_rc;
+            }
             main_tools_init_for_runtime(runtime_profile);
             /* Raw dump is for humans (plot/avatar art) — never apply the agent
              * loop's context-economy truncation, or the render gets cut off. */
@@ -4664,6 +5018,12 @@ int main(int argc, char **argv) {
             /* --tool-exec <name> <json>  — execute a single tool and print result */
             const char *tname  = argv[++i];
             const char *tjson  = argv[++i];
+            bool mcp_handled = false;
+            int mcp_rc = run_selected_mcp_tool_exec(tname, tjson, false, &mcp_handled);
+            if (mcp_handled) {
+                free(oneshot_prompt);
+                return mcp_rc;
+            }
             main_tools_init_for_runtime(runtime_profile);
             char result[256 * 1024] = {0};
             bool ok = tools_execute(tname, tjson, result, sizeof(result));
@@ -4805,6 +5165,8 @@ int main(int argc, char **argv) {
                    strcmp(argv[i], "--dev") == 0 ||
                    strcmp(argv[i], "--sandbox-mode") == 0 ||
                    strcmp(argv[i], "--systems-agent") == 0 ||
+                   strcmp(argv[i], "--cloud-runtime") == 0 ||
+                   strcmp(argv[i], "--byok-cloud") == 0 ||
                    strcmp(argv[i], "--resume") == 0 ||
                    strcmp(argv[i], "--resume-last") == 0) {
             /* Applied by main_apply_runtime_mode_flags() before startup and
@@ -4818,6 +5180,40 @@ int main(int argc, char **argv) {
             i++;
         } else if (strcmp(argv[i], "--orchestrate") == 0 || strcmp(argv[i], "-O") == 0) {
             orchestrate_mode = true;
+        } else if (strcmp(argv[i], "--subscription-lanes") == 0) {
+            subscription_lanes_mode = true;
+        } else if (strcmp(argv[i], "--subscription-bench") == 0) {
+            subscription_bench_mode = true;
+        } else if (strcmp(argv[i], "--subscription-bench-rounds") == 0) {
+            char *end = NULL;
+            long value = i + 1 < argc ? strtol(argv[++i], &end, 10) : 0;
+            if (!end || *end || value < 1 || value > 20) {
+                fprintf(stderr, "error: --subscription-bench-rounds requires 1..20\n");
+                free(oneshot_prompt);
+                return 1;
+            }
+            subscription_bench_mode = true;
+            subscription_bench_rounds = (int)value;
+        } else if (strcmp(argv[i], "--subscription-bench-concurrency") == 0) {
+            char *end = NULL;
+            long value = i + 1 < argc ? strtol(argv[++i], &end, 10) : 0;
+            if (!end || *end || value < 1 || value > 16) {
+                fprintf(stderr, "error: --subscription-bench-concurrency requires 1..16\n");
+                free(oneshot_prompt);
+                return 1;
+            }
+            subscription_bench_mode = true;
+            subscription_bench_concurrency = (int)value;
+        } else if (strcmp(argv[i], "--subscription-bench-max-tokens") == 0) {
+            char *end = NULL;
+            long value = i + 1 < argc ? strtol(argv[++i], &end, 10) : 0;
+            if (!end || *end || value < 16 || value > 4096) {
+                fprintf(stderr, "error: --subscription-bench-max-tokens requires 16..4096\n");
+                free(oneshot_prompt);
+                return 1;
+            }
+            subscription_bench_mode = true;
+            subscription_bench_max_tokens = (int)value;
         } else if (strcmp(argv[i], "--provider-fabric") == 0 ||
                    strcmp(argv[i], "--fabric") == 0) {
             provider_fabric_mode = true;
@@ -4869,6 +5265,18 @@ int main(int argc, char **argv) {
             interactive_mode = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') i++;
         } else if (strcmp(argv[i], "--interactive") == 0 || strcmp(argv[i], "-i") == 0) {
+            interactive_mode = true;
+        } else if (strcmp(argv[i], "--tui") == 0) {
+            /* The pixel compositor is additive while it matures. Keep the
+             * established ANSI/cell TUI directly selectable even in terminals
+             * where pixel mode auto-detects. */
+            setenv("DSCO_PIXEL_TUI", "0", 1);
+            interactive_mode = true;
+        } else if (strcmp(argv[i], "--native") == 0) {
+            /* The pixel compositor is opt-in while it matures. --native is
+             * the explicit activation; without it (or DSCO_PIXEL_TUI=1) the
+             * established ANSI/cell TUI runs even in Kitty-capable terminals. */
+            setenv("DSCO_PIXEL_TUI", "1", 1);
             interactive_mode = true;
         } else if ((strcmp(argv[i], "-M") == 0 || strcmp(argv[i], "--worker-model") == 0) && i + 1 < argc) {
             worker_model = argv[++i];
@@ -4930,16 +5338,17 @@ int main(int argc, char **argv) {
         native_provider_model_selected = true;
     }
 
-    /* The baked no-argument runtime defaults to the native OpenAI lane. Keep
+    /* The baked no-argument runtime defaults to the native OpenAI Codex lane. Keep
      * explicit model/provider/key/DSCO_EXEC choices layerable, but do not let
      * ambient credential discovery silently replace the issued default. */
     if (!local_mode && !exec_backend && !api_key && !user_set_model && !model_from_env) {
         model = DEFAULT_MODEL;
-        g_provider_override = "openai";
+        g_provider_override = DEFAULT_PROVIDER;
         native_provider_model_selected = true;
     }
 
-    if (!provider_fabric_mode && oneshot_prompt && !user_set_model && !exec_backend &&
+    if (!subscription_lanes_mode && !subscription_bench_mode && !provider_fabric_mode &&
+        oneshot_prompt && !user_set_model && !exec_backend &&
         !interactive_mode && !local_mode && !orchestrate_mode && !topology_name &&
         !topology_auto && !topology_list_mode && !topology_show_mode && !setup_mode &&
         !setup_report_mode && !workspace_bootstrap_mode && !workspace_status_mode &&
@@ -4979,16 +5388,31 @@ int main(int argc, char **argv) {
 
     if (!exec_backend && !local_mode) {
         const char *env_exec = getenv("DSCO_EXEC");
+        /* `kimi` names the subscription CLI when selected through DSCO_EXEC;
+         * keep Moonshot's metered API available explicitly as `moonshot`. */
         const native_provider_t *env_np =
-            (env_exec && env_exec[0]) ? native_find(env_exec) : NULL;
-        if (env_np) {
+            (env_exec && env_exec[0] && strcmp(env_exec, "kimi") != 0) ? native_find(env_exec) : NULL;
+        const provider_profile_t *env_profile =
+            (env_exec && env_exec[0]) ? provider_profile_find(env_exec) : NULL;
+        bool env_profile_pin =
+            env_profile && provider_profile_transport_supported(env_profile) &&
+            strcmp(env_exec, env_profile->name) == 0;
+        const char *env_provider =
+            env_np ? env_np->name : (env_profile_pin ? env_profile->name : NULL);
+        if (env_provider) {
             const char *model_provider =
                 user_set_model ? provider_detect(model, api_key) : NULL;
+            bool codex_openai_model =
+                model_provider && strcmp(env_provider, "openai-codex") == 0 &&
+                strcmp(model_provider, "openai") == 0;
             bool explicit_other_provider =
-                model_provider && strcmp(model_provider, env_np->name) != 0;
+                model_provider && strcmp(model_provider, env_provider) != 0 &&
+                !codex_openai_model;
             if (!explicit_other_provider) {
-                g_provider_override = env_np->name;
-                const char *env_model_default = native_default_model_for_setting(env_np, env_exec);
+                g_provider_override = env_provider;
+                const char *env_model_default = env_np
+                    ? native_default_model_for_setting(env_np, env_exec)
+                    : env_profile->default_model;
                 if (!user_set_model && !model_from_env && env_model_default) {
                     model = env_model_default;
                     native_provider_model_selected = true;
@@ -5018,7 +5442,8 @@ int main(int argc, char **argv) {
     if (!exec_backend && !provider_fabric_mode && !interactive_mode && !local_mode &&
         !native_provider_signal) {
         const char *env_exec = getenv("DSCO_EXEC");
-        if (env_exec && env_exec[0] && !native_find(env_exec)) {
+        if (env_exec && env_exec[0] &&
+            (strcmp(env_exec, "kimi") == 0 || !native_find(env_exec))) {
             exec_backend = env_exec;
             exec_backend_from_env = true;
         }
@@ -5063,7 +5488,8 @@ int main(int argc, char **argv) {
         setup_mode || setup_report_mode ||
         workspace_bootstrap_mode || workspace_status_mode ||
         timeline_server_mode || topology_list_mode || topology_show_mode ||
-        ui_mode || (exec_backend && exec_backend[0]);
+        ui_mode || subscription_lanes_mode || subscription_bench_mode ||
+        (exec_backend && exec_backend[0]);
     if (!oneshot_prompt && !allows_no_prompt) {
         usage(argv[0]);
         fprintf(stderr, "\nerror: prompt required\n");
@@ -5228,12 +5654,32 @@ int main(int argc, char **argv) {
         return rc == 0 ? 0 : 1;
     }
 
-    curl_global_init(CURL_GLOBAL_DEFAULT);
+    dsco_http_global_init();
 
     /* Kick off background model catalog refreshes. Each cache publishes any
      * on-disk copy first, then refreshes its source when stale. */
     openrouter_cache_init();
+    model_pricing_init();
     codex_cache_init();
+
+    if (subscription_lanes_mode) {
+        int rc = dsco_subscription_lanes_print_json(stdout, api_key);
+        free(oneshot_prompt);
+        return rc;
+    }
+
+    if (subscription_bench_mode) {
+        dsco_subscription_bench_options_t options = {
+            .prompt = oneshot_prompt,
+            .fallback_api_key = api_key,
+            .rounds = subscription_bench_rounds,
+            .concurrency_per_lane = subscription_bench_concurrency,
+            .max_tokens = subscription_bench_max_tokens,
+        };
+        int rc = dsco_subscription_bench_run(stdout, &options);
+        free(oneshot_prompt);
+        return rc;
+    }
 
     if (provider_fabric_mode) {
         const char *fabric_mode = provider_fabric_run_mode ? provider_fabric_run_mode : "race";
@@ -5545,10 +5991,20 @@ int main(int argc, char **argv) {
         }
 
         if (exec_backend_is_provider_pin) {
-            const char *canonical = provider_profile_canonical_name(exec_backend);
+            const char *openrouter_lane = main_openrouter_lane_slug(exec_backend);
+            const char *canonical = openrouter_lane
+                                        ? "openrouter"
+                                        : provider_profile_canonical_name(exec_backend);
             const provider_profile_t *profile = provider_profile_find(canonical);
             const native_provider_t *np = native_find(canonical);
             bool custom_base = provider_has_custom_api_base(canonical);
+
+            if (openrouter_lane) {
+                main_apply_openrouter_lane(exec_backend);
+                fprintf(stderr,
+                        "  \033[2mopenrouter → host %s (fallbacks disabled)\033[0m\n",
+                        openrouter_lane);
+            }
 
             if (!np && !profile && !custom_base) {
                 fprintf(stderr, "error: unknown provider '%s'\n", exec_backend);
@@ -5570,7 +6026,7 @@ int main(int argc, char **argv) {
             if (!user_set_model) {
                 const char *pin_model = NULL;
                 if (strcmp(canonical, "openai-codex") == 0) {
-                    pin_model = "gpt-5.5";
+                    pin_model = DEFAULT_MODEL;
                 } else {
                     pin_model =
                         provider_primary_model_for(canonical, prompt_looks_code_task(oneshot_prompt));
@@ -5588,9 +6044,23 @@ int main(int argc, char **argv) {
             goto native_path;
         }
 
+        /* Kimi membership is a core provider. Preserve the historical
+         * `--exec kimi` spelling, but route it through dsco's in-process
+         * transport rather than launching the Kimi Code executable. */
+        if (strcmp(exec_backend, "kimi") == 0 || strcmp(exec_backend, "kimi-code") == 0) {
+            g_provider_override = "kimi-code";
+            if (!user_set_model && !model_from_env)
+                model = KIMI_CODE_DEFAULT_MODEL;
+            fprintf(stderr, "  \033[2mkimi-code → native %s\033[0m\n", model);
+            goto native_path;
+        }
+
         /* Check if it's a native provider name */
         const native_provider_t *np = native_find(exec_backend);
-        if (np) {
+        /* `kimi` is both a historical Moonshot alias and the official Kimi
+         * Code CLI name.  Under -e it unambiguously means the subscription
+         * executor; `--provider moonshot` remains the metered API path. */
+        if (np && !exec_find(exec_backend)) {
             /* Force this provider — let native_path resolve the best credential
                so Claude Code OAuth discovery still works for Anthropic. */
             g_provider_override = np->name;
@@ -5671,7 +6141,8 @@ int main(int argc, char **argv) {
             return 1;
         }
         exec_dispatch(ereg, oneshot_prompt,
-                      (user_set_model || model_from_env) ? normalize_model_for_executor(ereg, model) : NULL,
+                      (user_set_model || model_from_env) ? normalize_model_for_executor(ereg, model)
+                                                          : default_model_for_executor(ereg),
                       exec_extra, exec_nextra, api_key);
         /* only reached on exec failure */
         free(oneshot_prompt);
@@ -6260,8 +6731,9 @@ native_path:
         user_exit_requested = agent_run(api_key, model, topology_name, topology_auto, g_provider_override);
     }
 
+    model_pricing_shutdown();
     dsco_http_pool_cleanup();
-    curl_global_cleanup();
+    dsco_http_global_cleanup();
     chronicle_stop();
     baseline_stop();
     if (user_exit_requested && getenv("DSCO_SUPERVISED"))

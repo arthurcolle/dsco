@@ -110,7 +110,7 @@ static const char *RT_PREFERRED_TOOLS[] = {
 
 static const char *RT_CONTEXTUAL_OPERATOR_TOOLS[] = {
     "bash",
-    "python",
+    "dsco-python-3x",
     "run_command",
     "make_build",
     "test_run",

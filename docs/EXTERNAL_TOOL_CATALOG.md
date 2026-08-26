@@ -7,8 +7,8 @@ This catalog is a map of cached external app/integration entries, not a guarante
 ## Summary
 
 - Source: `/Users/arthurcolle/.codex/cache/codex_app_directory/b67e8e30db68d257be758cbc32e2f78b8830d2d2.json`
-- Cached app-directory entries: 2236
-- Enabled catalog entries: 2236
+- Cached app-directory entries: 2294
+- Enabled catalog entries: 2294
 - Accessible catalog entries: 0
 - Curated plugin app manifests: 156
 
@@ -16,26 +16,26 @@ This catalog is a map of cached external app/integration entries, not a guarante
 
 | Label | Entries |
 |---|---:|
-| `interactive` | 1392 |
-| `consequential` | 1043 |
-| `retrievable` | 78 |
-| `sync` | 22 |
+| `interactive` | 1408 |
+| `consequential` | 1076 |
+| `retrievable` | 79 |
+| `sync` | 21 |
 
 ## Top Categories
 
 | Category | Entries |
 |---|---:|
-| `PRODUCTIVITY` | 450 |
-| `BUSINESS` | 444 |
+| `PRODUCTIVITY` | 449 |
+| `BUSINESS` | 445 |
 | `LIFESTYLE` | 259 |
-| `FINANCE` | 245 |
-| `TRAVEL` | 238 |
-| `SHOPPING` | 176 |
+| `FINANCE` | 240 |
+| `TRAVEL` | 239 |
+| `SHOPPING` | 177 |
 | `EDUCATION` | 93 |
-| `ENTERTAINMENT` | 86 |
-| `DEVELOPER_TOOLS` | 81 |
-| `FOOD` | 43 |
-| `DESIGN` | 31 |
+| `ENTERTAINMENT` | 87 |
+| `DEVELOPER_TOOLS` | 80 |
+| `FOOD` | 42 |
+| `DESIGN` | 30 |
 | `COLLABORATION` | 16 |
 | `NEWS` | 8 |
 
@@ -55,7 +55,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | 1800Flowers | `asdk_app_698b4187970c81918252468254461cda` | SHOPPING | consequential, interactive | yes |  | UNSET |
 | 1to1 Mate | `asdk_app_69fa6610711c8191bffd677557adee04` | PRODUCTIVITY |  | yes |  | UNSET |
 | 2+2 Calculator | `asdk_app_6952983fa5948191b986f6b93c9e80bd` | PRODUCTIVITY | interactive | yes |  | UNSET |
-| 20Tabs | `asdk_app_6a188532dd6081919de7700c94a74be2` | PRODUCTIVITY | consequential | yes |  | UNSET |
+| 20Tabs | `asdk_app_6a188532dd6081919de7700c94a74be2` |  | consequential | yes |  | UNSET |
 | 3-2-1 Go Stopwatch | `asdk_app_6963ccfca5008191a5190d17f0cce5a4` | LIFESTYLE | interactive | yes |  | UNSET |
 | 30 Minute Timer | `asdk_app_6a2420b57e388191a16f2f65fe21191c` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
 | 3byggetilbud.dk | `asdk_app_6a31181dfff0819196a718a6558e5904` | BUSINESS | consequential | yes |  | UNSET |
@@ -128,9 +128,11 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Agree Zone | `asdk_app_69b0b3d19240819199df11e97559d1d6` | FINANCE | interactive | yes |  | UNSET |
 | Aha! | `connector_251970f16cb647d4b76fc445753f9276` | PRODUCTIVITY | retrievable, sync | yes |  | UNSET |
 | Ahrefs | `asdk_app_6966958473488191b775fdb667c52eab` | BUSINESS |  | yes |  | UNSET |
+| AI Attorney | `asdk_app_6a3a264ac530819183680874eede08f1` | PRODUCTIVITY |  | yes |  | UNSET |
 | AI Booker | `asdk_app_6a29f89d37548191a00243a691bb3f8a` | FOOD | consequential | yes |  | UNSET |
 | AI Business Plan by PrometAI | `asdk_app_6a01e3c3e164819195d356a107ec4c12` | FINANCE | consequential, interactive | yes |  | UNSET |
 | AI Clarity Method | `asdk_app_69b86982c9c0819181286ab3eefaa1f9` | BUSINESS | consequential, interactive | yes |  | UNSET |
+| AI Color Picker - Design Tool | `asdk_app_695d100ea2e881918c922c735a9784c8` |  | interactive | yes |  | UNSET |
 | AI Endurance | `asdk_app_69456fbb59d081918bcb148a12380f92` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
 | AI Proposal Maker | `asdk_app_6a2ea4d58190819195f5e8b78735ba97` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | AI Vibe Prospecting | `asdk_app_6947c583d8308191844af6213ceabe16` | BUSINESS | consequential, interactive | yes |  | UNSET |
@@ -159,13 +161,13 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Alhena AI | `asdk_app_69f3c4ef2ac48191bfe9d5b287ac5bd8` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | ALL Accor | `asdk_app_6964b9f1c11c81919eefdc73903ad657` | TRAVEL | interactive | yes |  | UNSET |
 | All My Affirmations | `asdk_app_69986d07e1ac81918bde49ce8f369bc4` | LIFESTYLE | interactive | yes |  | UNSET |
-| All The Colors | `asdk_app_695d100ea2e881918c922c735a9784c8` | PRODUCTIVITY | interactive | yes |  | UNSET |
 | All Tide Times | `asdk_app_69b02284edac8191a7122bb688e234e6` | LIFESTYLE | interactive | yes |  | UNSET |
 | All your Horoscopes | `asdk_app_6985e37c6b5881919f369288a930e9c7` | LIFESTYLE | interactive | yes |  | UNSET |
 | Allegro | `asdk_app_69e0bea0da3081919085747b53f5f2e9` | SHOPPING | interactive | yes |  | UNSET |
 | Allianz | `asdk_app_69e225440be08191bfb149a35cfa82eb` | FINANCE | consequential, interactive | yes |  | UNSET |
 | Allianz Direct España | `asdk_app_69987578d8a48191b241aa0eb1ba1a03` | FINANCE | consequential | yes |  | UNSET |
 | AlloCiné | `asdk_app_6a316650dc1481918ce1a8d07cf54cd0` | ENTERTAINMENT | interactive | yes |  | UNSET |
+| Allowance | `asdk_app_6a56632eb5ac8191b9edcea57e3494e9` |  | consequential | yes |  | UNSET |
 | AllTrails | `connector_68f1afc5a6008191a701eaaab428816c` | LIFESTYLE | interactive | yes |  | UNSET |
 | Almanac by PassBy | `asdk_app_696a80064378819184c212f6244021ec` | BUSINESS | interactive | yes |  | UNSET |
 | Almosafer.com | `asdk_app_69844bec10008191a229927d3b721d9d` | TRAVEL | interactive | yes |  | UNSET |
@@ -186,7 +188,8 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | AmbitionBox | `asdk_app_698c7b3350e881919af205c1652a4503` | BUSINESS | interactive | yes |  | UNSET |
 | Amplemarket | `asdk_app_699d70a4f4588191822e8eb29f9900b3` | BUSINESS | consequential | yes |  | UNSET |
 | Amplifyr | `asdk_app_69a6ce9775ac8191a7d4b9ea0cfa5e36` | BUSINESS |  | yes |  | UNSET |
-| Amplitude | `connector_690e2dabf430819196f8b3701ec838ec` | BUSINESS | consequential | yes |  | UNSET |
+| Amplitude | `connector_690e2dabf430819196f8b3701ec838ec` |  | consequential | yes |  | UNSET |
+| Amplitude EU | `asdk_app_6a32f6911e788191a7826866848ba5c0` |  | consequential | yes |  | UNSET |
 | Angi | `asdk_app_695c0908e3108191919e95c3488e5426` | LIFESTYLE | interactive | yes |  | UNSET |
 | Angler Adventures: Lure Guide | `asdk_app_69ae143489d8819194ccdba7a8368a13` | LIFESTYLE | interactive | yes |  | UNSET |
 | Annstracts | `asdk_app_6a055464f89c81919bc3c97a16ae7ff1` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
@@ -210,7 +213,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Apilio | `asdk_app_69b0786ff14081918e976447c90edeac` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Apixel | `asdk_app_6945133e20cc8191be09a0b3692ed5f3` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
 | Apna Jobs | `asdk_app_6a0301b3c8d8819188729793fddb0366` | BUSINESS | interactive | yes |  | UNSET |
-| Apollo.io | `asdk_app_69bd664f2a908191a3a0a47eca8559d1` | BUSINESS | consequential | yes |  | UNSET |
+| Apollo.io | `asdk_app_69bd664f2a908191a3a0a47eca8559d1` |  | consequential | yes |  | UNSET |
 | AppDeploy | `asdk_app_6956e6ff740481919946ceae8e5d6304` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
 | AppealBase™ | `asdk_app_6973559909908191b607b661c0d9c6a5` | BUSINESS | consequential | yes |  | UNSET |
 | Apple Health | `connector_2b0a9009c9c64bf9933a3dae3f2b1254` | LIFESTYLE |  | yes |  | UNSET |
@@ -231,6 +234,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Asana (synced) | `connector_4886707321be47efb8b9369ebb877881` | PRODUCTIVITY | retrievable, sync | yes |  | UNSET |
 | Asanify | `asdk_app_69788e70bfd48191a516b4bc2f0a104b` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | Asbie | `asdk_app_6a328e39e59081919fb819551d72b9ff` | BUSINESS |  | yes |  | UNSET |
+| Ashby | `asdk_app_6a33192d4f9481919b05403bdae08b95` |  | consequential | yes |  | UNSET |
 | Ask My Whispr Voice Notes | `asdk_app_6a3db83ca7788191879e09d0faf50604` |  | retrievable | yes |  | UNSET |
 | Ask Tarot Cards | `asdk_app_69fde861d3988191a7157df33544f855` | LIFESTYLE | interactive | yes |  | UNSET |
 | ASOS Stylist | `asdk_app_69c680ce7c2c81918b534f8496cd910a` | SHOPPING | interactive | yes |  | UNSET |
@@ -246,6 +250,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Asva AI | `asdk_app_69e61e570bbc81919560929ba8c13ba8` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Asystent Noclegowo | `asdk_app_6a2d30b9b3d08191bd937d866330e6df` | TRAVEL |  | yes |  | UNSET |
 | AT&T | `asdk_app_69cd81e0f90c8191812ac45be244d9ab` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
+| AthenaHQ | `asdk_app_6a4da6c4bcfc81919397faceada2af69` |  | consequential | yes |  | UNSET |
 | atHome | `asdk_app_69a5a869812c81919fcd84ec360ba767` | LIFESTYLE | interactive | yes |  | UNSET |
 | Atlan | `asdk_app_6a204b2923fc8191bcbd87ec6dc9d382` | DEVELOPER_TOOLS | consequential, interactive | yes |  | UNSET |
 | Atlas | `asdk_app_69fc453d9f388191b28b287ff7624643` | FOOD | consequential | yes |  | UNSET |
@@ -324,12 +329,12 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Bill Splitter | `asdk_app_69a6edb714988191b6394fb3d7d54d86` | PRODUCTIVITY | interactive | yes |  | UNSET |
 | Billabex | `asdk_app_69958093d50c81919718be4f7ebdf606` | FINANCE | consequential | yes |  | UNSET |
 | billiger-mietwagen.de | `asdk_app_69fa018bf85c8191b81a11aa33734c84` | TRAVEL | consequential, interactive | yes |  | UNSET |
-| Binance | `asdk_app_6965faefe2b081919a998e14aa25f738` | FINANCE | interactive | yes |  | UNSET |
+| Binance | `asdk_app_6965faefe2b081919a998e14aa25f738` |  | interactive | yes |  | UNSET |
 | BioRender | `connector_691e3de0d2708191a6476a7b36e38779` | DESIGN |  | yes |  | UNSET |
 | Birdie | `asdk_app_69c1a1df6f6481918f7c67e9731532c3` | DEVELOPER_TOOLS |  | yes |  | UNSET |
 | Bitdefender | `asdk_app_69ae8d10d5b48191bd9eadb52dfcc22d` | PRODUCTIVITY | interactive | yes |  | UNSET |
 | Bites | `asdk_app_694594d4aeb08191983e929a995994b3` | FOOD | interactive | yes |  | UNSET |
-| Bitmovin | `asdk_app_69ea134ec95081919ca504910c93915e` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
+| Bitmovin | `asdk_app_69ea134ec95081919ca504910c93915e` |  | consequential, interactive | yes |  | UNSET |
 | BizCover AU | `asdk_app_69956675f2848191b08e0400f2695572` | FINANCE | interactive | yes |  | UNSET |
 | Bizgo | `asdk_app_694380d61f6c8191bb3fd213f599993e` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | BlaBlaCar | `asdk_app_69bd4591e60481918ca979be11d16471` | TRAVEL | interactive | yes |  | UNSET |
@@ -337,6 +342,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Blinq | `asdk_app_6a34c29a32948191809c0946ca1fe7ad` | BUSINESS |  | yes |  | UNSET |
 | BlitzReels | `asdk_app_6952ccb1c6a48191a9d2d07eedb46ad1` | DESIGN | consequential, interactive | yes |  | UNSET |
 | Blockscout Blockchain Data | `asdk_app_69a880b0d024819182db60f36cb48420` | FINANCE |  | yes |  | UNSET |
+| Bloom Profit Analytics | `asdk_app_6a55de20f190819190ec84f7337a262f` |  |  | yes |  | UNSET |
 | Blossom | `asdk_app_6947ba7a05108191bfc8005e75e87d3a` | EDUCATION | interactive | yes |  | UNSET |
 | BlueConic Solutions Finder | `asdk_app_69bbbede4e3c81919e2c93c541533463` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | BlueSuite | `asdk_app_69bc6ec1082881919e4ecd80a79de3bd` | BUSINESS | consequential | yes |  | UNSET |
@@ -359,7 +365,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Botala by dyskute | `asdk_app_698cf354d26081918bfe2e4171c53b66` | SHOPPING | consequential, interactive | yes |  | UNSET |
 | Botpress | `asdk_app_698641f6925c81918cbc124d87370d06` | DEVELOPER_TOOLS | consequential, interactive | yes |  | UNSET |
 | Boulanger - Achat en ligne | `asdk_app_6a2ff4164ec4819191f77cc281cbc5a2` | SHOPPING | interactive | yes |  | UNSET |
-| Box | `asdk_app_695bfc98071c8191bac7bc479aa27de7` | BUSINESS | consequential, interactive, retrievable, sync | yes |  | UNSET |
+| Box | `asdk_app_695bfc98071c8191bac7bc479aa27de7` | BUSINESS | consequential, interactive, retrievable | yes |  | UNSET |
 | Boxoffice | `asdk_app_699c7fc6aa708191aa707ceac669fe6f` | ENTERTAINMENT | interactive | yes |  | UNSET |
 | Braai BBQ Planner | `asdk_app_698aa930ce5081919ec9014030ea4dba` | FOOD | consequential, interactive | yes |  | UNSET |
 | BraindAI | `asdk_app_6a0583a1a78081918c51a575b2641a91` | BUSINESS | consequential, interactive | yes |  | UNSET |
@@ -402,6 +408,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Calorie Tracker Guide | `asdk_app_69d5b483b1648191b898e649c63120d5` | LIFESTYLE | interactive | yes |  | UNSET |
 | CalorieCam | `asdk_app_69c320d803048191bc2682ea9ff3e5fa` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
 | Calories Club | `asdk_app_696ccd5e83948191a9f85f135cd84746` | FOOD | consequential, interactive | yes |  | UNSET |
+| Cambiante: Content Manager | `asdk_app_6a476c754fb88191b0f53b1764d0b032` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Camby | `asdk_app_69ce7c1ec7c88191b6a1caaa00563074` | FINANCE | consequential, interactive | yes |  | UNSET |
 | Campaign Requirement Extractor | `asdk_app_6a265d1e6ce0819188839b54a0f63d88` | PRODUCTIVITY |  | yes |  | UNSET |
 | Campiri | `asdk_app_6a1edd377bd48191b0cb8d7f358c2e22` | TRAVEL | interactive | yes |  | UNSET |
@@ -431,7 +438,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | CARS24 | `asdk_app_6960ed8bd9508191bcc2297e0210d3ec` | SHOPPING | interactive | yes |  | UNSET |
 | carsales | `asdk_app_695f1ffefa188191b502c679c3f7d570` | LIFESTYLE | interactive | yes |  | UNSET |
 | CarsGuide | `asdk_app_69b886e9c3d88191b695c9af5ab3d769` | LIFESTYLE | interactive | yes |  | UNSET |
-| Carta CRM | `asdk_app_69d6804c5c2481919b2674401922ebba` | FINANCE |  | yes |  | UNSET |
+| Carta CRM | `asdk_app_69d6804c5c2481919b2674401922ebba` |  | consequential | yes |  | UNSET |
 | Cartomante FC | `asdk_app_6a2cea6b99b481919b02383ba56f7074` | ENTERTAINMENT | consequential | yes |  | UNSET |
 | CarWale | `asdk_app_69a804be51c081918b68832b1ae53c77` | SHOPPING | interactive | yes |  | UNSET |
 | Casa Rosas Autlan | `asdk_app_6a05611b55008191862773001a2bfb34` | BUSINESS | consequential, interactive | yes |  | UNSET |
@@ -452,7 +459,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Change.org: Start a Petition | `asdk_app_6a20a8fd8acc819193b3864e24f7793d` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
 | Channel99 | `asdk_app_696fbc1ac7bc8191a38ee4adad1bcc24` | BUSINESS |  | yes |  | UNSET |
 | Charge Atlas | `asdk_app_69e8b07d4a1c8191ad57151bfd826840` | TRAVEL | interactive | yes |  | UNSET |
-| ChartMogul | `asdk_app_6a31190204b481919633d8e2f3dc18a6` | BUSINESS |  | yes |  | UNSET |
+| ChartMogul | `asdk_app_6a31190204b481919633d8e2f3dc18a6` |  |  | yes |  | UNSET |
 | Chat Jurídico | `asdk_app_69defdb2eca08191aad5bdec0aec73a5` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | ChatData Sync | `asdk_app_6a260ccbce68819189d814e03106a38a` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | ChatGPT Ads Manager | `connector_openai_ads_manager` | BUSINESS | consequential, interactive | yes |  | UNSET |
@@ -467,6 +474,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Chess Position Analyzer | `asdk_app_69d81d9770808191805a9e4dcf4cc3c8` | ENTERTAINMENT | interactive | yes |  | UNSET |
 | Chessvia Openings | `asdk_app_694f251e7cf081918d5c87bc784f943e` | ENTERTAINMENT | interactive | yes |  | UNSET |
 | Chessy | `asdk_app_69a0e374670c819190761772d2092135` | ENTERTAINMENT | consequential, interactive | yes |  | UNSET |
+| CHINTAI | `asdk_app_69f5716603e88191bc0df45acaa8d224` | LIFESTYLE | interactive | yes |  | UNSET |
 | Chotot | `asdk_app_69782e67a3c0819198e29e2f3b319be1` | SHOPPING | interactive | yes |  | UNSET |
 | Christchurch Gold | `asdk_app_6a1b76d26714819183234ac2d60bcea5` | FINANCE |  | yes |  | UNSET |
 | ChristianaCare Careers | `asdk_app_69e8978a7ff4819191a26ed3606dc6df` | BUSINESS | interactive | yes |  | UNSET |
@@ -481,7 +489,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | CJ온스타일 | `asdk_app_69e0a46f020081919928a3369e7d8b41` | SHOPPING | interactive | yes |  | UNSET |
 | Clarify | `asdk_app_69a558e4555c81919e5072d2be32ba34` | BUSINESS | consequential | yes |  | UNSET |
 | Clarity AI | `asdk_app_6a3268a565708191a510772ab46b09f4` | FINANCE | interactive | yes |  | UNSET |
-| Clay | `asdk_app_69377d07cd9c8191a988f06f15b8c674` | BUSINESS | consequential, interactive | yes |  | UNSET |
+| Clay | `asdk_app_69377d07cd9c8191a988f06f15b8c674` |  | consequential, interactive | yes |  | UNSET |
 | ClearCash | `asdk_app_69fb41d2f5a0819193f9525570ef9617` | FINANCE |  | yes |  | UNSET |
 | ClearPolicy | `asdk_app_69eee2d237b881918747780ab313427d` | BUSINESS | consequential | yes |  | UNSET |
 | ClearScore | `asdk_app_69a552caf550819194237fca0931dcfc` | FINANCE | interactive | yes |  | UNSET |
@@ -511,7 +519,9 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Cogedim | `asdk_app_69932f92ae308191aafa6f070db882dc` | LIFESTYLE | interactive | yes |  | UNSET |
 | Cognito Forms | `asdk_app_69ef9cc43ab08191b57469d92a92fb27` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | CoinGecko | `asdk_app_6a4f02d735388191959c8328877e0bbd` |  | interactive | yes |  | UNSET |
+| CoinMarketCap | `asdk_app_6a172fe86f5481919f73cbc3bc3ad5bb` |  |  | yes |  | UNSET |
 | COLA Cloud | `asdk_app_6a1a5221c3c8819193bf4a7a9041ea14` | BUSINESS |  | yes |  | UNSET |
+| Collecte MTL | `asdk_app_6a541c656f148191a4504fe6c8ea1a20` |  |  | yes |  | UNSET |
 | College Nation | `asdk_app_699d729ff57081918f21c7999dfa9eb7` | SHOPPING | interactive | yes |  | UNSET |
 | College Vidya | `asdk_app_6a215e2f7fa481918c335bd517e4ca01` | EDUCATION | interactive | yes |  | UNSET |
 | Color Designer - Palette Maker | `asdk_app_696e890a45388191b24c4a36d2177201` | DESIGN | interactive | yes |  | UNSET |
@@ -526,7 +536,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Connectlinx | `asdk_app_6a2a234c688881919bcd51bc7754be2c` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Connhex | `asdk_app_6a215c73b5e881918cc8b3df6920ca1c` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Consensus | `asdk_app_6943e6f4a928819195962de16fb9ffe4` | PRODUCTIVITY | interactive, retrievable | yes |  | UNSET |
-| Constant Contact | `asdk_app_69dff98d3f78819180890780108a737d` | BUSINESS | consequential, interactive | yes |  | UNSET |
+| Constant Contact | `asdk_app_69dff98d3f78819180890780108a737d` |  | consequential, interactive | yes |  | UNSET |
 | Constructable | `asdk_app_6a10b761b5c081919958e281f32ff7e9` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Consultant.dev | `asdk_app_69ea56e748ac819192dd2f40d48eb23a` | BUSINESS | interactive | yes |  | UNSET |
 | Contact Center AI Association | `asdk_app_6a038587d00481918c689d63105c58a7` | EDUCATION | consequential | yes |  | UNSET |
@@ -542,6 +552,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Cookiedeal | `asdk_app_6a3f166baef08191b076c723e8dd5de8` | BUSINESS | consequential | yes |  | UNSET |
 | Cooperly | `asdk_app_6a2b0e8207ec81918363c2eb43362e44` | BUSINESS | interactive | yes |  | UNSET |
 | COR | `asdk_app_69d3e09a334c81918adbbe5a97c15df4` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
+| Coralogix | `asdk_app_6a215f72b5d48191b40df3f6a8b97cba` |  | consequential | yes |  | UNSET |
 | CoreStepPrep | `asdk_app_6a1501c985a08191b98745ae356e2db4` | EDUCATION | consequential, interactive | yes |  | UNSET |
 | COROS | `asdk_app_6a0694cbb2608191bbefb74ba810ab68` | LIFESTYLE |  | yes |  | UNSET |
 | Corporate Weather | `asdk_app_6a203f40f5148191abe930f995f56b3f` | BUSINESS | interactive | yes |  | UNSET |
@@ -556,6 +567,8 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Courtroom5 | `asdk_app_6a30d2fd05c88191adc78db28e24442b` | PRODUCTIVITY |  | yes |  | UNSET |
 | Coveo | `asdk_app_693251083bf48191a69098fd0ba36f17` | BUSINESS | retrievable | yes |  | UNSET |
 | Cowboy Model Finder | `asdk_app_69e091c072c0819180eaf0b4c28819d5` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
+| Cox Careers | `asdk_app_6a57f338c2848191a85397a6dc769c11` |  | consequential, interactive | yes |  | UNSET |
+| CraftNote | `asdk_app_6a1858220eb8819198dde9492c794b2f` |  |  | yes |  | UNSET |
 | Craime | `asdk_app_69566ff97a508191bff1adc91d6d4ccf` | EDUCATION |  | yes |  | UNSET |
 | Crayon | `asdk_app_69d57096313881918d69103a741af5c1` | BUSINESS | interactive | yes |  | UNSET |
 | Crbonfree | `asdk_app_69a88c3025b48191839163b38f7b2f9a` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
@@ -572,6 +585,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Cycleplan | `asdk_app_69eb7d7240548191801dcb13520e5ad4` | FINANCE | consequential, interactive | yes |  | UNSET |
 | D&B Finance Analytics | `asdk_app_6a19c12f33e48191bbf02b9d58c49421` | BUSINESS | consequential | yes |  | UNSET |
 | D&B Risk Analytics | `asdk_app_6a340850cfb88191af4a91da1f19e32a` | FINANCE | consequential | yes |  | UNSET |
+| D-Tools Cloud | `asdk_app_6a4d49b423d881918f06d8525dc0c5c8` |  |  | yes |  | UNSET |
 | Daft.ie | `asdk_app_6995ca8f0dcc8191a57296a352c22ed2` | LIFESTYLE | interactive | yes |  | UNSET |
 | DailyHero | `asdk_app_6a40dcfefd3c8191a2692b60bedada82` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Dakota Marketplace | `asdk_app_69f455c8331881918fc3ad7922042082` | FINANCE | interactive | yes |  | UNSET |
@@ -584,10 +598,10 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Data247 | `asdk_app_6a39af10a3a08191a83911e49bcab40c` | BUSINESS | consequential | yes |  | UNSET |
 | DataAssist-IO | `asdk_app_6a26ec50353c8191b5774172b9a972cb` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | DataCamp | `asdk_app_694554ff18b881919f022f6dc96dc038` | EDUCATION | interactive | yes |  | UNSET |
-| Datadog (Preview) | `asdk_app_69e8c7f174a08191a28b6da96c8062c4` | DEVELOPER_TOOLS | consequential, interactive | yes |  | UNSET |
+| Datadog (Preview) | `asdk_app_69e8c7f174a08191a28b6da96c8062c4` |  | consequential, interactive | yes |  | UNSET |
 | DataForB2B | `asdk_app_69beb572b93081918c8dbd97c7f6ae7e` | BUSINESS |  | yes |  | UNSET |
 | DataGlass | `asdk_app_6a3038eec05081919256a864b5c1e904` | BUSINESS | retrievable | yes |  | UNSET |
-| Datarails FinanceOS | `asdk_app_69a68ed9c74c8191945c08fc0d9ace1f` | BUSINESS |  | yes |  | UNSET |
+| Datarails FinanceOS | `asdk_app_69a68ed9c74c8191945c08fc0d9ace1f` |  | consequential | yes |  | UNSET |
 | Datasite | `asdk_app_69eba17551ac81918231c83822b703b6` | FINANCE | consequential | yes |  | UNSET |
 | Date Range Validator | `asdk_app_6a0eb3329f848191a23e3f4063f3f1c2` | DEVELOPER_TOOLS |  | yes |  | UNSET |
 | Dayuse Hotels | `asdk_app_69d7bea546dc81919b2bb363c94479e7` |  | interactive | yes |  | UNSET |
@@ -646,6 +660,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | doola | `asdk_app_6a01b63be1288191990be7ceb5e001a9` | BUSINESS | consequential | yes |  | UNSET |
 | DoorDash | `asdk_app_6943126354348191867f3efffccf94f1` | FOOD | consequential, interactive | yes |  | UNSET |
 | Dospay | `asdk_app_6a05a265b0388191ba4b99597b2faa84` | FINANCE | consequential, interactive | yes |  | UNSET |
+| DotSpark | `asdk_app_6a3baa683dc4819189b77175a073cd98` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Double | `asdk_app_69d5272920808191b932805b78a68f3e` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Dover | `asdk_app_6a4d629a6d208191ae050b699e821285` |  | consequential | yes |  | UNSET |
 | Dovetail | `asdk_app_6993d29ac7b48191974c461b8c59fbb6` | BUSINESS |  | yes |  | UNSET |
@@ -693,6 +708,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Endurance Planner | `asdk_app_6a0ea9f85eb48191b42f492cedcfbb2c` | LIFESTYLE | consequential | yes |  | UNSET |
 | enercity | `asdk_app_69aabde2ca288191831b72d800b89da6` | BUSINESS |  | yes |  | UNSET |
 | Energy-Data.io Degree Days | `asdk_app_6a34c510354c8191b8a065fa13230bb6` | BUSINESS | consequential | yes |  | UNSET |
+| Engel & Völkers | `asdk_app_6a29247dd3fc8191aa56c8363bdfa2d4` |  | interactive | yes |  | UNSET |
 | Engram | `asdk_app_6a438975e2488191923ab04c4fea893d` | DEVELOPER_TOOLS | consequential | yes |  | UNSET |
 | Enhancv | `asdk_app_69b9670d4e9881919c1a3f1d2a3cc5d5` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
 | Enterpret | `asdk_app_6a0b6f15203881919f5b90e74321fb24` | BUSINESS |  | yes |  | UNSET |
@@ -717,7 +733,9 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Every AI | `asdk_app_69cc46b541008191b4bbe9dfe091afe5` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | EVT Hotels & Resorts | `asdk_app_6a2a5e2838a0819194e0cf9f0db34fcc` | TRAVEL | interactive | yes |  | UNSET |
 | Exa | `asdk_app_69ea4ed2cf7c8191b742ef3622479ddd` | PRODUCTIVITY |  | yes |  | UNSET |
+| Examen Civique | `asdk_app_6a58af0930e48191a46d4a082bbcc845` |  | interactive | yes |  | UNSET |
 | Expedia | `connector_68e004f14af881919eb50893d3d9f523` | TRAVEL | interactive | yes |  | UNSET |
+| Experian Credit Cards | `asdk_app_6a3ec13d21888191b63cb20a00b0dc8d` |  | interactive | yes |  | UNSET |
 | Experian Insurance | `asdk_app_6977a7936efc8191b6eb76cd29332d86` | SHOPPING | interactive | yes |  | UNSET |
 | Experian Loans | `asdk_app_69fcd1770c5c819187a9520b31444a17` | SHOPPING | interactive | yes |  | UNSET |
 | Experian UK | `asdk_app_69a999df625481918e187ad69ad9214d` | FINANCE | interactive | yes |  | UNSET |
@@ -774,6 +792,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Fintual | `asdk_app_694bdee3a7b88191aba405db7a2be6d2` | FINANCE | interactive | yes |  | UNSET |
 | Fireflies | `connector_6912075cb358819187346bcafb601db8` | COLLABORATION | consequential | yes |  | UNSET |
 | Firehouse Subs | `asdk_app_6945bd12ee14819184ce491e3b104da6` | FOOD | interactive | yes |  | UNSET |
+| Firmable | `asdk_app_6a472e17233c8191a0674e5aab41b4a4` | BUSINESS | consequential | yes |  | UNSET |
 | Fiscal.ai | `asdk_app_69bd60b8ee4c81919b3167218ca26225` | FINANCE | consequential | yes |  | UNSET |
 | FitAI Pro | `asdk_app_6a014275060c81919efb76bf2c381fbc` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
 | Fitbod | `asdk_app_695c64b1d0f08191a1b440a5329b8b95` | LIFESTYLE | interactive | yes |  | UNSET |
@@ -790,6 +809,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Flipsnack | `asdk_app_6a04224b8cec81919f0c397fd7664c57` | BUSINESS | consequential | yes |  | UNSET |
 | FlixBus | `asdk_app_69bbc3ff60d88191b03352464918e00f` | TRAVEL | interactive | yes |  | UNSET |
 | Flixor | `asdk_app_694515af58088191a8b0a0f5f0b6d767` | ENTERTAINMENT | interactive | yes |  | UNSET |
+| FLO | `asdk_app_69522ba3c5088191a150df9ae8e801c8` | ENTERTAINMENT | interactive | yes |  | UNSET |
 | Flow State | `asdk_app_69fba9b0478081919b350556a92f0f77` | LIFESTYLE | consequential | yes |  | UNSET |
 | Flowlity Co-planner | `asdk_app_69de79ad66fc8191b9ada28b0dbbe2be` | BUSINESS |  | yes |  | UNSET |
 | Flygresor.se | `asdk_app_696606411be08191a1757fc8597b8c3d` | TRAVEL | interactive | yes |  | UNSET |
@@ -843,7 +863,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Geekbot | `asdk_app_69d36228525881918696e45540ca153b` | COLLABORATION | consequential | yes |  | UNSET |
 | Gemba | `asdk_app_6a2ab57980b48191aaae2de40f06dcba` | BUSINESS |  | yes |  | UNSET |
 | Genspark AI Slides | `asdk_app_694d313cc67c8191804aee33eeb7dfec` | BUSINESS | consequential, interactive | yes |  | UNSET |
-| Get My eSIM | `asdk_app_6949c2fbf3ec8191aec510e433880031` | TRAVEL | interactive | yes |  | UNSET |
+| Get My eSIM | `asdk_app_6949c2fbf3ec8191aec510e433880031` |  | interactive | yes |  | UNSET |
 | GetAgent | `asdk_app_699489ac46948191b43f65f1f8dff064` | LIFESTYLE | interactive | yes |  | UNSET |
 | Getepik | `asdk_app_6a14854d64e08191ad53123ae40ce9ad` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | Getir | `asdk_app_6a1173f02cd081919f2912a4f2b5964e` | SHOPPING | consequential, interactive | yes |  | UNSET |
@@ -853,6 +873,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | GigHQ.ai | `asdk_app_69f4f32f6c90819189c4e591859d3ab8` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Git Diff Patcher Bridge | `asdk_app_6a11f8d088cc8191b6b6abf3eea51778` | DEVELOPER_TOOLS | consequential, interactive | yes |  | UNSET |
 | GitHub | `connector_76869538009648d5b282a4bb21c3d157` | DEVELOPER_TOOLS | consequential, retrievable, sync | yes |  | UNSET |
+| Givebutter | `asdk_app_698d3d89f25c8191b5fc0737e2b61408` |  |  | yes |  | UNSET |
 | Glinded for Birthday Videos | `asdk_app_69fd9641d8f481919205e2a41e8bc658` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
 | Glinded for Memorial Videos | `asdk_app_69a937558b8081918b8b5d01ae1572c1` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
 | Glossarize | `asdk_app_69a6d6057f70819194f507ebf4f7c0ca` | PRODUCTIVITY | interactive | yes |  | UNSET |
@@ -864,7 +885,6 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | GoFloaters | `asdk_app_6a33867ef8fc8191af9fd662d6e41d33` | PRODUCTIVITY | interactive | yes |  | UNSET |
 | GoLinks | `asdk_app_6a2c9f4e240c8191b5ae7c28b0dde153` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Gondola | `asdk_app_6a42b085385c81919aa4244be59d5887` | TRAVEL | consequential | yes |  | UNSET |
-| Gong | `asdk_app_6a4fab766ee081919b67013452f5acab` |  |  | yes |  | UNSET |
 | Goodnotes | `asdk_app_6948e9c87b448191b3cb7d8c0851e0b7` | PRODUCTIVITY | interactive | yes |  | UNSET |
 | Google Calendar | `connector_947e0d954944416db111db556030eea6` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Google Contacts | `connector_c0f748249d6a42aea4b00fd375570ded` | PRODUCTIVITY |  | yes |  | UNSET |
@@ -918,13 +938,14 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Hebbia | `asdk_app_6a1ddc1ed8c48191920c125a768988de` | FINANCE | consequential | yes |  | UNSET |
 | Heepsy Influencer Search | `asdk_app_6952b88e296c81918d9b956c88ae19d2` | BUSINESS |  | yes |  | UNSET |
 | Helium 10 | `asdk_app_69b9f38bfa248191877ad584f5608b92` | PRODUCTIVITY | interactive | yes |  | UNSET |
+| HelloFresh | `asdk_app_6a3ae6a8dcb88191a1fcb538772cfbea` |  | interactive | yes |  | UNSET |
 | HelloSafe Travel Insurance | `asdk_app_69f076da6cb881918619a90d11852785` | TRAVEL | interactive | yes |  | UNSET |
 | Hellowork | `asdk_app_6a01ab92a89881919b46e570b5fa48ac` | BUSINESS | interactive | yes |  | UNSET |
 | Help Scout | `connector_b969d12728c04baeb585eb9299be3b6d` | COLLABORATION | retrievable, sync | yes |  | UNSET |
 | HelpYouSponsor | `asdk_app_6a157e10a9a48191be370607e8a94987` | BUSINESS | interactive | yes |  | UNSET |
 | HemmaBo | `asdk_app_69fccc58e3088191a22cffe6fd5ad075` | TRAVEL | consequential, interactive | yes |  | UNSET |
 | Hemnet | `asdk_app_696e2396183c81918a8221a0051e9e30` | LIFESTYLE | interactive | yes |  | UNSET |
-| hepsiemlak | `asdk_app_6981e59048848191be52e8fa2c36ca60` | LIFESTYLE | interactive | yes |  | UNSET |
+| hepsiemlak | `asdk_app_6981e59048848191be52e8fa2c36ca60` |  | interactive | yes |  | UNSET |
 | Hera Digital | `asdk_app_699c2fee19048191baa12dcf6393d4ed` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | Hercules | `asdk_app_6a10e1e330788191b7a6af850f2cc827` | DEVELOPER_TOOLS | consequential, interactive | yes |  | UNSET |
 | Here Comes The Guide | `asdk_app_69bdb40ef5688191ab84b669476f3572` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
@@ -1039,6 +1060,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | italki language learning | `asdk_app_6948af96247c81919904f9478c34334f` | EDUCATION | interactive | yes |  | UNSET |
 | Itcons.app Work Reports | `asdk_app_69e608274ea4819184d0815dbfd3e657` | BUSINESS |  | yes |  | UNSET |
 | ixigo | `asdk_app_69cbdba270288191b7815a464959de9f` | TRAVEL | interactive | yes |  | UNSET |
+| iZap | `asdk_app_6a259d81ab048191b479aaddf47d0276` | BUSINESS | consequential | yes |  | UNSET |
 | Jade Note | `asdk_app_6a2a7f2cbb948191a603f3b9dea8e0f0` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Jalan | `asdk_app_69ce2a4cb4c48191a582f65029334936` | TRAVEL | interactive | yes |  | UNSET |
 | Jam | `connector_6923e677f37c8191845e4e0b658dd718` | DEVELOPER_TOOLS | retrievable | yes |  | UNSET |
@@ -1060,7 +1082,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | JobPhoning | `asdk_app_6a14183a803c8191be1e856c6d568894` | BUSINESS |  | yes |  | UNSET |
 | Jobs by Wizehire | `asdk_app_69a8a8b1c028819193148d22e23fa56c` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | Johns Hopkins Careers | `asdk_app_69eb62b6d5d08191b07759e1d987c92c` | BUSINESS | interactive | yes |  | UNSET |
-| Joinways | `asdk_app_6a03408fb03c8191a640fa3e87276e5f` | PRODUCTIVITY | consequential | yes |  | UNSET |
+| Joinways | `asdk_app_6a03408fb03c8191a640fa3e87276e5f` |  | consequential | yes |  | UNSET |
 | Jooble | `asdk_app_694a7a6bdf1881918a8f015f21f376ce` | BUSINESS | interactive | yes |  | UNSET |
 | Jora | `asdk_app_69a77ce30208819180f7697f611a8c11` | BUSINESS | interactive | yes |  | UNSET |
 | Jordi Spoki | `asdk_app_6a291e83d9408191aae8e303c3ebe9c8` | PRODUCTIVITY | consequential | yes |  | UNSET |
@@ -1071,6 +1093,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Journaling with Medome | `asdk_app_6a3316f2001881919b8525d622428229` | LIFESTYLE | consequential | yes |  | UNSET |
 | JourneyBay | `asdk_app_69cf72ca79288191be4f0ae99359ff67` | TRAVEL | consequential | yes |  | UNSET |
 | Jumpseat | `asdk_app_69d6b47031808191927687c981a80340` | TRAVEL | consequential | yes |  | UNSET |
+| Juridata | `asdk_app_6a3ba5ef1c448191a4c89868b2688b7e` | PRODUCTIVITY |  | yes |  | UNSET |
 | Juspay Genius | `asdk_app_69cfabcbfe288191a30ae2015ab31ef3` | FINANCE | interactive | yes |  | UNSET |
 | JustFix | `asdk_app_699dd848a73481919f954d132c4e6df6` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
 | Justlife | `asdk_app_69940f7bc6548191bd21b75a722df9dd` | LIFESTYLE | consequential | yes |  | UNSET |
@@ -1088,16 +1111,19 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Keypup | `asdk_app_6a33b63268508191a1f39c64c26a7973` | PRODUCTIVITY |  | yes |  | UNSET |
 | Keyword.com | `asdk_app_6a0733f6c6b08191a7b2a5bf2d930999` | BUSINESS | consequential | yes |  | UNSET |
 | Khan Academy | `connector_69127e3e55288191a8b5c2b401fb732d` | EDUCATION | interactive | yes |  | UNSET |
+| Kick | `asdk_app_6a3c003dd068819180296a55ee4b576f` |  | consequential | yes |  | UNSET |
 | Kickresume | `asdk_app_694469d564bc819188f93aa7b728bb94` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
 | Kifli | `asdk_app_6a1dd0f98d34819180e345b532f60630` | SHOPPING | consequential, interactive | yes |  | UNSET |
 | Kindred | `asdk_app_6a134fec78b0819187459a0ffc6b7e03` | TRAVEL | interactive | yes |  | UNSET |
 | Kinevo | `asdk_app_6a0e2379604c819198f14c6787ca5e2b` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Kingpin Market | `asdk_app_6a340984b04881918ead6c664abb18a6` | SHOPPING | consequential | yes |  | UNSET |
 | KinicMemory | `asdk_app_69e7230364048191a098c91724d350b3` | PRODUCTIVITY |  | yes |  | UNSET |
+| Kismet | `asdk_app_6a2ae7cbada08191a52942161653e43a` |  | consequential, interactive | yes |  | UNSET |
 | Kitchen Os | `asdk_app_698e0482bf2c8191b80671c5c226be5d` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | Kiuwo | `asdk_app_69fc8c4824e08191818deb670b641c61` | EDUCATION | consequential, interactive | yes |  | UNSET |
 | Klarity | `asdk_app_6a514b319f388191901ba03e56c3cc69` |  | retrievable | yes |  | UNSET |
 | Klarna Shopping Search | `asdk_app_69b416e01ee88191b2d87932be742bf4` | SHOPPING | interactive | yes |  | UNSET |
+| Klasswagen.com | `asdk_app_69ce6ddda2a48191b59fe94a46b31174` | TRAVEL |  | yes |  | UNSET |
 | Klaviyo | `asdk_app_694421e60cc88191a1e5bb4aa79950e4` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
 | Klaxoon | `asdk_app_6a0ef77980ec8191bddba4b5c76c5436` | COLLABORATION | consequential | yes |  | UNSET |
 | Kleinanzeigen | `asdk_app_694a63a053f081918b9a3738bd3640c9` | SHOPPING | interactive | yes |  | UNSET |
@@ -1122,9 +1148,9 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Kris+ by Singapore Airlines | `asdk_app_6a1e7fb9caac8191a360945c1d2be3cb` | LIFESTYLE | interactive | yes |  | UNSET |
 | Krisp | `asdk_app_69a82336989c8191b4635a75dfa1456e` | COLLABORATION |  | yes |  | UNSET |
 | KrystalView | `asdk_app_6a2534eb69588191a6e1a9d3dbff642d` | BUSINESS |  | yes |  | UNSET |
-| Krónan | `asdk_app_69a8373499d48191b79dbf6bd6c0cfaa` | FOOD | interactive | yes |  | UNSET |
+| Krónan | `asdk_app_69a8373499d48191b79dbf6bd6c0cfaa` |  | interactive | yes |  | UNSET |
 | Kubera | `asdk_app_699835ec8b9c8191b2c6cda1f78076ee` | FINANCE | consequential | yes |  | UNSET |
-| Kuliko AI | `asdk_app_6a2ccf5160588191b094b25f952ed9e8` | EDUCATION | consequential, interactive | yes |  | UNSET |
+| Kuliko AI | `asdk_app_6a2ccf5160588191b094b25f952ed9e8` |  | consequential, interactive | yes |  | UNSET |
 | Kumbukum | `asdk_app_6a1f2ae9c4588191ab18953c2c5420f8` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | KwikStore | `asdk_app_6a2bb1e159e88191b0721ceddd9e04ca` | SHOPPING | consequential, interactive | yes |  | UNSET |
 | Kyiv Gallery | `asdk_app_699b9ba447e48191beebce60e922e40a` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
@@ -1152,6 +1178,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | leboncoin | `asdk_app_697b2a38d9bc8191b3dfc5ef0abc557c` | SHOPPING | interactive | yes |  | UNSET |
 | Ledgy | `asdk_app_6a037e4f480081919938b01d5943dec4` | FINANCE | consequential | yes |  | UNSET |
 | Lee & Associates | `asdk_app_69c2ad52d5b48191b4a734d69a8065a1` | BUSINESS | consequential, interactive | yes |  | UNSET |
+| Legal Data Hunter | `asdk_app_6a09fca2104c8191b160df27196228dd` | BUSINESS | consequential | yes |  | UNSET |
 | LegalZoom | `asdk_app_6994f3546cec819184a464f0089ca8d6` | BUSINESS | interactive | yes |  | UNSET |
 | LegisRatio | `asdk_app_694970d3cbf4819197e9878f5ae7953a` | BUSINESS |  | yes |  | UNSET |
 | LeLynx.fr Énergie | `asdk_app_69bad091a4048191b68d387f898c562c` | SHOPPING | interactive | yes |  | UNSET |
@@ -1173,7 +1200,9 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Life Happens Outdoors | `asdk_app_6a3a6c07ca988191a1fb65d21bd1a2b3` | TRAVEL | consequential | yes |  | UNSET |
 | Lifestyle Helper | `asdk_app_69f34c257e348191837391add40db13f` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
 | LiftTrack | `asdk_app_6999ccabf45481919788bd190c6be537` | LIFESTYLE |  | yes |  | UNSET |
+| Lightbringer | `asdk_app_6a43e4284a708191b2b6b4540a53e1f9` |  | consequential | yes |  | UNSET |
 | Lightmeter | `asdk_app_6a22f26cef0c81919770a9717af3f9b2` | BUSINESS | consequential | yes |  | UNSET |
+| Lily Apple Ads | `asdk_app_6a5495cc8ca48191b45381939794838d` |  | consequential, interactive | yes |  | UNSET |
 | LINE MAN | `asdk_app_6968687029348191a19d7d945063658d` | FOOD | interactive | yes |  | UNSET |
 | Linear | `asdk_app_69a089a326dc8191b32a3f2553f5be2c` | PRODUCTIVITY | consequential, retrievable, sync | yes |  | UNSET |
 | Lingard | `asdk_app_6a33f7756a80819197fdf7782d69f8b8` | EDUCATION | consequential | yes |  | UNSET |
@@ -1251,6 +1280,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Meeting Notes Organizer | `asdk_app_69fff10c07b081918ed3c17dc796e9fb` | PRODUCTIVITY |  | yes |  | UNSET |
 | Meetup | `asdk_app_6943e63ae0b4819185d8d108167e98cd` | LIFESTYLE | interactive | yes |  | UNSET |
 | Meilleurtaux | `asdk_app_69f1b3f799cc81919bcbd985a83dff49` | FINANCE | interactive | yes |  | UNSET |
+| Meltwater | `asdk_app_6a39cd00e5b48191b07ae39cca3b4dd9` | BUSINESS | consequential | yes |  | UNSET |
 | Mem | `asdk_app_699f3c9f85788191874d8a0a43d5bca3` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | memoket | `asdk_app_6a41d583489c8191829686cddaf53172` | PRODUCTIVITY |  | yes |  | UNSET |
 | memorystore.in | `asdk_app_69e5d4869c148191aa5cf405cdbd0fc6` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
@@ -1258,6 +1288,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Mental Health Tools | `asdk_app_695d45a38c2081918167924b897f7e13` | LIFESTYLE | interactive, retrievable | yes |  | UNSET |
 | Mentionlytics | `asdk_app_6a314bdb9f708191b77d80151d681a12` | BUSINESS |  | yes |  | UNSET |
 | Mentirosa | `asdk_app_6945f33e17288191b08db7e11e6cc763` | ENTERTAINMENT | interactive | yes |  | UNSET |
+| Meow Map | `asdk_app_6a2872ba07708191bff1c8c7fdfa820d` | TRAVEL |  | yes |  | UNSET |
 | MeranO | `asdk_app_69a9503763a0819193b0d6e1544863cf` | TRAVEL |  | yes |  | UNSET |
 | Mermaid Chart | `asdk_app_696609ce0304819185fafa6a660e0f1e` | DEVELOPER_TOOLS | consequential, interactive | yes |  | UNSET |
 | Meshed Cover | `asdk_app_698ce69e6d6c8191bcfac9ad18f59a27` | FINANCE | consequential, interactive | yes |  | UNSET |
@@ -1284,9 +1315,10 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | MiMove | `asdk_app_6a073e0e5f0481918b9d8fafbb47337c` | LIFESTYLE | consequential | yes |  | UNSET |
 | MindMap | `asdk_app_69e1ea6c505c81918d6c8f0258a64906` | PRODUCTIVITY | interactive | yes |  | UNSET |
 | MiniUp | `asdk_app_69f34601480881919e50c661b9f70084` | DEVELOPER_TOOLS | consequential, interactive | yes |  | UNSET |
+| Minter.io | `asdk_app_6a2d50ea97c88191b602860a847f8603` | BUSINESS |  | yes |  | UNSET |
 | Minty | `asdk_app_697370f80b8081919f024b93e49a8ab2` | SHOPPING | interactive | yes |  | UNSET |
 | Miracle Of Mind | `asdk_app_69ccfda778f8819191c92dcb0c1dd879` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
-| Miro | `asdk_app_6996d3b062cc81919ee6ff3f2e7a7838` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
+| Miro | `asdk_app_6a392799cb58819185f82dc01ac13dad` |  | consequential, interactive | yes |  | UNSET |
 | Mixmax | `asdk_app_69cd5af478a88191bc20af347bac19b2` | BUSINESS |  | yes |  | UNSET |
 | Mixpanel | `asdk_app_69b2e9aed45c8191b254b207dfcc2bb4` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | Miyo | `asdk_app_6a1cc0f90fac81919d384d26eb706fad` | PRODUCTIVITY | consequential | yes |  | UNSET |
@@ -1309,12 +1341,13 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Moody’s | `asdk_app_695ff9b981ec8191a843d4da6903e3d8` | FINANCE |  | yes |  | UNSET |
 | MoonPay | `asdk_app_6a07aa9c220c8191bbdefade1b2629fc` | BUSINESS |  | yes |  | UNSET |
 | MopMob | `asdk_app_6a0e4cb3ce8c81919f11e6274839aaf3` | BUSINESS | consequential, interactive | yes |  | UNSET |
-| Morningstar | `asdk_app_69248819fa4c81918047c4b42b1f8823` | FINANCE | consequential | yes |  | UNSET |
+| Morningstar | `asdk_app_69248819fa4c81918047c4b42b1f8823` |  | consequential | yes |  | UNSET |
 | Mortgage IQ | `asdk_app_69a1be0ee430819188038dc11b5ba4b1` | FINANCE | interactive | yes |  | UNSET |
 | Mosaiq Labs | `asdk_app_69f89797a8c48191b83a290ba4ca1120` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Mosquito Hunters St. Aug | `asdk_app_6a205589969c81918dbd06153c07ff33` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | Mosquito Hunters-Southlake | `asdk_app_6a1eeda2c5a08191b69bfd1749db8515` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | Motel 6 | `asdk_app_69e1e8b721f48191805a28f7d9802668` | TRAVEL | interactive | yes |  | UNSET |
+| Motel One | `asdk_app_6a27ded46d78819196420bdd82b71aea` |  | interactive | yes |  | UNSET |
 | MotherDuck | `asdk_app_696a54f1c91c81919002b9153ce0e336` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
 | MotionHub | `asdk_app_69ce7b449dcc8191a8ef19126603c239` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | motos.net | `asdk_app_69e20acaf7c48191a19ae9baeec8f38f` | SHOPPING | interactive | yes |  | UNSET |
@@ -1427,6 +1460,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | OnePageCRM | `asdk_app_6a0311e2fa788191a2f4ed717d855663` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | OneSignal | `asdk_app_6a3d93b924488191bdb7eb40fc4219e6` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Onplana | `asdk_app_6a27130db8348191a67935d531be4d2d` | PRODUCTIVITY | consequential, retrievable | yes |  | UNSET |
+| Onsellr Marketplace | `asdk_app_6a56f4323d9c8191bb35f36dd8b4db81` |  | consequential | yes |  | UNSET |
 | onX Offroad | `asdk_app_69d7fc1e77988191aec4891b19d96da2` |  | consequential, interactive | yes |  | UNSET |
 | Oojo | `asdk_app_6a2bb8d25b7c81919668bc1c92d83289` | TRAVEL | interactive | yes |  | UNSET |
 | OpenAI Certified | `asdk_app_693022c8c0088191a7c7572aee832a0c` |  | interactive | yes |  | UNSET |
@@ -1444,6 +1478,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Otter.ai | `asdk_app_695d84e2f06c8191861b9bac9b3fd53b` | PRODUCTIVITY | retrievable | yes |  | UNSET |
 | Otto Travel | `asdk_app_6a2f175866808191a86932c78e6cc8b3` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Ouigo France | `asdk_app_69c271c5d3a08191af9526629563664b` | TRAVEL | interactive | yes |  | UNSET |
+| Outfit Lens | `asdk_app_69a0eba51b5c81918c4a9f8973869153` | SHOPPING | interactive | yes |  | UNSET |
 | Outliner | `asdk_app_6944b58290148191ae970160f3078cf4` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
 | Outlook Calendar | `connector_e6a7394682e24467ac68c60696f275a4` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Outlook Email | `connector_4aaab2856305417b993eca9a216aaf6e` | PRODUCTIVITY | consequential, retrievable, sync | yes |  | UNSET |
@@ -1451,9 +1486,10 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | OutReserve | `asdk_app_69e45ac95a488191a97fe25f2f0dc612` | TRAVEL | interactive | yes |  | UNSET |
 | Overstappen.nl | `asdk_app_69733166f2b48191ab35fc55ccafa0a3` | FINANCE | interactive | yes |  | UNSET |
 | Ovios Home | `asdk_app_69c59dc87d808191b78cda59c973dffa` | SHOPPING | consequential, interactive | yes |  | UNSET |
-| OWOX Data Marts | `asdk_app_6a3e81be8f8481918e1e2cd1d7ea09c4` | PRODUCTIVITY |  | yes |  | UNSET |
+| OWOX Data Marts | `asdk_app_6a3e81be8f8481918e1e2cd1d7ea09c4` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Paardplaats Horse Finder | `asdk_app_699b23e7fe9481919fda5e9bdc6d50ab` | SHOPPING | interactive | yes |  | UNSET |
 | Pacing: Run Coach & Tracker | `asdk_app_6a1c40469b288191949dd4cbd593062f` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
+| Padel Analyst | `asdk_app_6970b8cdeb548191ae0bf1a90bf4a5f5` |  |  | yes |  | UNSET |
 | PagePulse | `asdk_app_69ef657024848191b86f94341d6b2570` | BUSINESS |  | yes |  | UNSET |
 | PageShare | `asdk_app_6a13a2500194819184429920c9b66c41` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | pagesjaunes | `asdk_app_69de04cf0cbc81918df1789d76a8752e` | LIFESTYLE | interactive | yes |  | UNSET |
@@ -1503,6 +1539,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Photo9 | `asdk_app_69a9672828108191921bcc98f29ba3db` | SHOPPING | interactive | yes |  | UNSET |
 | Photon Commerce | `asdk_app_696685b735588191b9f25f976cfda7b2` | DEVELOPER_TOOLS | consequential, interactive | yes |  | UNSET |
 | Piano 1024 | `asdk_app_6a37593da1d481918460edebfdc1a756` | ENTERTAINMENT | interactive | yes |  | UNSET |
+| Pick your match | `asdk_app_69610ef30e448191aed57cd6074249a3` |  | interactive | yes |  | UNSET |
 | PicPay | `asdk_app_69fe28c7b668819198e19fbac2783d2f` | FINANCE |  | yes |  | UNSET |
 | Picsart | `asdk_app_6a18d4c190a0819186e6b129a09e931e` | DESIGN | consequential, interactive | yes |  | UNSET |
 | Pier Seguradora | `asdk_app_69cee55f90cc8191aa7b543fa45eb900` | BUSINESS | interactive | yes |  | UNSET |
@@ -1519,14 +1556,17 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Planning Center | `asdk_app_6a31848e72408191abad3ee216d63940` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Plate | `asdk_app_6a25adb4ed6881919eb1f9f08ce9e53f` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Plaud | `asdk_app_69f3c30d68288191bbd428a394a78407` | PRODUCTIVITY |  | yes |  | UNSET |
+| PlaybookUX | `asdk_app_6a5696cd39f88191bcc3822e110f292e` |  | consequential | yes |  | UNSET |
 | Plugin Management | `connector_openai_plugin_management` |  | consequential | yes |  | UNSET |
 | Pocket AI | `asdk_app_6a3d93e966b8819198c93780c2577383` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Pocket FM | `asdk_app_69a5a77581c881918f398b27591d685d` | ENTERTAINMENT | interactive | yes |  | UNSET |
 | Pocket Ledger Expense Tracker | `asdk_app_6a16b3665ba481919032ba787b5f3644` | FINANCE | consequential, interactive | yes |  | UNSET |
 | PocketMind: Texas Hold'em | `asdk_app_694822e687d08191aedd182b866f5ab2` | ENTERTAINMENT | consequential, interactive | yes |  | UNSET |
 | Podcast App | `asdk_app_69ea8fff9b048191961dc39a99d1cf06` | ENTERTAINMENT | interactive | yes |  | UNSET |
+| PokeBot.ai Career Coach | `asdk_app_6a55920ce320819182ee40634e3a169d` |  | consequential, interactive | yes |  | UNSET |
 | Polar Analytics | `asdk_app_69ecca09a4f88191804893914eb08f1a` | BUSINESS | consequential | yes |  | UNSET |
 | PolicyNote | `asdk_app_69a87595e18c81919121d76e18c959bd` | BUSINESS |  | yes |  | UNSET |
+| Polypo | `asdk_app_6a54afe1cb808191b0c364147321755c` |  |  | yes |  | UNSET |
 | Popeyes | `asdk_app_69447b888f5481918715870fb1a3cc16` | FOOD | interactive | yes |  | UNSET |
 | Porter Metrics | `asdk_app_6a10afd73e7c81919bf3abc516520edc` | BUSINESS | consequential | yes |  | UNSET |
 | PortfolioIQ | `asdk_app_694ec894206c8191a619d67d2c3935b8` | FINANCE | interactive | yes |  | UNSET |
@@ -1534,6 +1574,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Post Metadata Extractor | `asdk_app_6a2778c220848191856aa589f026800f` | PRODUCTIVITY |  | yes |  | UNSET |
 | Postbeam | `asdk_app_6a288e8ae66881919a04a60709232317` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | PostHog | `asdk_app_699caef2d680819188727b0ddbb349dd` | DEVELOPER_TOOLS | consequential, interactive | yes |  | UNSET |
+| Powerly | `asdk_app_6948546f43f081918ccc4c9ef63e3ce1` | PRODUCTIVITY |  | yes |  | UNSET |
 | Powers Index | `asdk_app_6976d78ed2888191beaaf2524e0046fb` | EDUCATION | consequential, interactive | yes |  | UNSET |
 | Powerset Research | `asdk_app_6a14890167bc8191b77dea0507fb2af6` | DEVELOPER_TOOLS |  | yes |  | UNSET |
 | Powly.de | `asdk_app_69abf7c33bc88191b2c8033ab41c2bb0` | TRAVEL |  | yes |  | UNSET |
@@ -1548,7 +1589,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Pretto | `asdk_app_69c55432c3a48191acee2eeb805103d5` | FINANCE | consequential, interactive | yes |  | UNSET |
 | Priceline | `asdk_app_694c08abbb5481918f814ea25c49a9d6` | TRAVEL | interactive | yes |  | UNSET |
 | Pricey- monitor+history+alerts | `asdk_app_6978cefe33448191ac463fdda027ba08` | SHOPPING | consequential, interactive | yes |  | UNSET |
-| Primary | `asdk_app_69ca0ccd449c8191b0c839836a75b5f0` | FINANCE |  | yes |  | UNSET |
+| Primary | `asdk_app_69ca0ccd449c8191b0c839836a75b5f0` |  |  | yes |  | UNSET |
 | Primitive | `asdk_app_6a25e1d409008191a30d80366aaad5e5` | DEVELOPER_TOOLS | consequential, interactive | yes |  | UNSET |
 | Print Beam | `asdk_app_6a04ddf20e248191bf8826e2769d9d34` | SHOPPING | consequential, interactive | yes |  | UNSET |
 | PrintA | `asdk_app_694338ba59d48191910c5b35fc604501` | SHOPPING | consequential, interactive | yes |  | UNSET |
@@ -1561,6 +1602,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Process Documentation AI | `asdk_app_6a02832083a48191929828b6c48d4ee9` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
 | Product Hunt | `asdk_app_69b7bed23a9481919d2378ab225cddeb` | PRODUCTIVITY | interactive | yes |  | UNSET |
 | Product Link Expander | `asdk_app_6a414f68d4e481918cffd0137b8bb619` | SHOPPING |  | yes |  | UNSET |
+| Product Listing Validator | `asdk_app_6a51a55fdda48191a825ee818aa7ec61` |  |  | yes |  | UNSET |
 | Productive | `asdk_app_69f8aba82de0819193c016bb8a5611bc` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | ProEigentum Immobilien | `asdk_app_6a16c49819348191a9f8924ee41a66bb` | LIFESTYLE | interactive | yes |  | UNSET |
 | Profit.co | `asdk_app_69ba714e376481918b8bc66c1d986871` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
@@ -1628,7 +1670,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | RealOpen | `asdk_app_69dd38561eb08191b83bfe2f40bbcdfd` | FINANCE | consequential, interactive | yes |  | UNSET |
 | Realtor.com | `asdk_app_694564c08f748191bae28af902356838` | PRODUCTIVITY | interactive | yes |  | UNSET |
 | Rebound Scam Assistant | `asdk_app_69862663ae0081919c2db759f75c14d4` | PRODUCTIVITY |  | yes |  | UNSET |
-| Reclaim.ai | `asdk_app_69b4620162f48191a05cc9fcc172e5f1` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
+| Reclaim.ai | `asdk_app_69b4620162f48191a05cc9fcc172e5f1` |  | consequential, interactive | yes |  | UNSET |
 | ReCommerce | `asdk_app_6943b26226c4819189e6b19249055265` | SHOPPING | interactive | yes |  | UNSET |
 | Recommerce Trade-in | `asdk_app_69c5423d7e408191bec964b57cce719e` | SHOPPING | interactive | yes |  | UNSET |
 | Recooty | `asdk_app_69a6a66ebefc8191821c07cd372b4e46` | BUSINESS | consequential | yes |  | UNSET |
@@ -1647,13 +1689,14 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | RemAI | `asdk_app_69f3733aea5c8191972146733a985d2d` | FOOD | interactive | yes |  | UNSET |
 | Remedy Legal | `asdk_app_696cfe921f98819195e54b7c46666164` | PRODUCTIVITY | interactive | yes |  | UNSET |
 | RemindMeIQ | `asdk_app_69c991514d148191b4d47d358450eac0` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
-| Remitly | `asdk_app_698b5e8ebac88191aff086391ee7cacc` | FINANCE | interactive | yes |  | UNSET |
+| Remitly | `asdk_app_698b5e8ebac88191aff086391ee7cacc` |  | interactive | yes |  | UNSET |
 | Remode | `asdk_app_6a2e99a87be081918c1d67804a006b51` | SHOPPING | interactive | yes |  | UNSET |
 | Remote Desktop Commander | `asdk_app_6a057d268ebc81919918d37eec718425` | DEVELOPER_TOOLS | consequential | yes |  | UNSET |
 | Rentals.ca Rental Search | `asdk_app_695d14a01a7081919eb38ffc60d1706b` | LIFESTYLE | interactive | yes |  | UNSET |
 | RentalSource | `asdk_app_6a277034f06881918675b46b5749842f` | LIFESTYLE | interactive | yes |  | UNSET |
 | RentCafe | `asdk_app_69bbcee644ec819184f2fa9217211861` | LIFESTYLE | interactive | yes |  | UNSET |
 | Replay.io | `asdk_app_69f2257291c881919607448f14509d37` | DEVELOPER_TOOLS |  | yes |  | UNSET |
+| Replio | `asdk_app_6a53d8f876808191ab508c8262a1d318` |  | consequential | yes |  | UNSET |
 | Replit | `asdk_app_6934801c799081918131791660f02890` | DEVELOPER_TOOLS | consequential, interactive | yes |  | UNSET |
 | REPSLog | `asdk_app_6a21e73e0710819187cded8a61360db9` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
 | Required Fields Validator | `asdk_app_6a02b5ff759c8191b2634f44554a3a5b` | PRODUCTIVITY |  | yes |  | UNSET |
@@ -1714,6 +1757,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Sara Assicurazioni | `asdk_app_6a1435f6f314819185ffe3fd7ae1937b` | FINANCE | consequential, interactive | yes |  | UNSET |
 | Savecraft | `asdk_app_69bf076444388191b92e9c482184b44c` | ENTERTAINMENT | consequential, interactive | yes |  | UNSET |
 | SaveHealth | `asdk_app_6965800c6e4c8191bdd03530926713cb` | LIFESTYLE | interactive | yes |  | UNSET |
+| ScanGym | `asdk_app_698bb846d32c819195ef99eb55fc7ec8` |  | consequential | yes |  | UNSET |
 | Scholar Gateway | `asdk_app_697376c845f08191a7a95a5f26924060` | EDUCATION |  | yes |  | UNSET |
 | Scholar Sidekick | `asdk_app_6a1cfe08d3a081919ed00f619418c457` | EDUCATION | interactive | yes |  | UNSET |
 | ScholarshipOwl | `asdk_app_6967b2a6062c819198a9020e96e78281` | EDUCATION | consequential, interactive | yes |  | UNSET |
@@ -1733,9 +1777,10 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Seeki | `asdk_app_697fab63e0108191a25e4c9ed4d2141a` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
 | SeekOut | `asdk_app_69f8dfd382048191829f4025e39c853e` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | Seel | `asdk_app_6a3e593a7a88819193ace7ea4a418067` | SHOPPING | consequential, interactive | yes |  | UNSET |
-| Seguro Match | `asdk_app_6a01e9707b0c81918daa8496ea2f1308` | FINANCE | consequential, interactive | yes |  | UNSET |
+| Seguro Match | `asdk_app_6a01e9707b0c81918daa8496ea2f1308` |  | consequential, interactive | yes |  | UNSET |
 | Seismic | `asdk_app_69dd1d0f73b48191ac4fadf206ad9aed` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Selah - Bible stories | `asdk_app_694e2f3a73d08191bdbb12dcd8e6c3e3` | LIFESTYLE | interactive | yes |  | UNSET |
+| SeldonFrame | `asdk_app_6a3bc9df52f88191ab3a89189e00be7d` | BUSINESS | consequential | yes |  | UNSET |
 | Self Plagiarism Checker | `asdk_app_6a043aa4adcc81919cdeeb4f9c02244a` | EDUCATION | interactive | yes |  | UNSET |
 | Sem Parar | `asdk_app_69e0d82405e081918f3c465092989877` | TRAVEL | interactive | yes |  | UNSET |
 | Semrush | `connector_691fa57b709c8191b61c48b1f78dce21` | PRODUCTIVITY |  | yes |  | UNSET |
@@ -1783,11 +1828,14 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Similarweb | `asdk_app_695cdd7e863c819192b88beffc2033b6` | BUSINESS | consequential | yes |  | UNSET |
 | Simple SoapCalc | `asdk_app_695ab324dd4c8191b76be9a4a233d3c8` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
 | Simple World Clock | `asdk_app_6959382125588191a2e193f66ee58035` | PRODUCTIVITY | interactive | yes |  | UNSET |
+| SimpleFeed News & Video MCP | `asdk_app_6a42a8b1e4a0819199cdca5d881c423e` | NEWS |  | yes |  | UNSET |
 | Simpliciter AI | `asdk_app_6a4284a796448191888965e9d0e7c6de` | PRODUCTIVITY |  | yes |  | UNSET |
 | Simply Business | `asdk_app_696e4b35d354819199e87f105ca545a5` | FINANCE | interactive | yes |  | UNSET |
 | Simply Family Budget | `asdk_app_69dec38a167c81918dfcd4a2c1d1bbcf` | FINANCE |  | yes |  | UNSET |
 | Simply-Wedding | `asdk_app_69e3524ce59081918fa3a92641e453ca` | LIFESTYLE | consequential | yes |  | UNSET |
+| SimplySefer | `asdk_app_6a468861ebb8819193e39ed7f6c441f4` | SHOPPING |  | yes |  | UNSET |
 | Simsurf | `asdk_app_69774b4c8e888191b409567d00e2152a` | TRAVEL | interactive | yes |  | UNSET |
+| SiteGuru | `asdk_app_6a463643f0ac8191828c01f481e1d3ea` | BUSINESS |  | yes |  | UNSET |
 | Sitemate | `asdk_app_696f2f3f51a08191a78ce6b15ddfa118` | PRODUCTIVITY |  | yes |  | UNSET |
 | Sites | `connector_20205bf7d4e99a89d7154bb849718324` |  | consequential, interactive | yes |  | UNSET |
 | SIXT | `asdk_app_69455b41a68c8191b0735d27366ac254` | TRAVEL | consequential, interactive | yes |  | UNSET |
@@ -1883,6 +1931,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | SueldoNeto | `asdk_app_696238e10be08191b61d9082de15d151` | FINANCE | interactive | yes |  | UNSET |
 | Sumble | `asdk_app_69d6aed609708191a384fb6b59438690` | BUSINESS | consequential | yes |  | UNSET |
 | Sumsub | `asdk_app_6a2a81a02bb88191b90bbecdf780591e` | BUSINESS | consequential | yes |  | UNSET |
+| Sundays UK Bike Insurance | `asdk_app_699ec587b2208191a21d8dfcb89a3555` | FINANCE | consequential, interactive | yes |  | UNSET |
 | Sunwise | `asdk_app_69441f80bdd48191893e52c604c60bd7` | BUSINESS | consequential | yes |  | UNSET |
 | Supabase | `asdk_app_69d3e5ee6a708191baa733f7b8931995` | DEVELOPER_TOOLS | consequential | yes |  | UNSET |
 | Super Carl | `asdk_app_6a26e97eb2fc8191b15ee022314a29f3` | PRODUCTIVITY | consequential | yes |  | UNSET |
@@ -1899,6 +1948,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Sweet Analytics | `asdk_app_6a0d6c1e67588191b68c0492dfbfe1da` | BUSINESS |  | yes |  | UNSET |
 | Sweetspot | `asdk_app_6944d8892db481918e8cf6f87d389d71` | BUSINESS | interactive | yes |  | UNSET |
 | Swiftli | `asdk_app_6a02fd747c8c81918fff025641b7c514` | SHOPPING | interactive | yes |  | UNSET |
+| Swiggy Food | `asdk_app_6a3de8146ae4819186b6799a5d907074` |  | consequential, interactive | yes |  | UNSET |
 | Swyft Filings | `asdk_app_69a99b73e60c819182e6d598073646db` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | Sykes Cottages | `asdk_app_6a0581bf792c81919ba69570ee2381b1` | TRAVEL | interactive | yes |  | UNSET |
 | Symbol | `asdk_app_69ccd4e364008191a3904dc4e762fef7` | PRODUCTIVITY | consequential | yes |  | UNSET |
@@ -1942,8 +1992,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Texas Electricity Plans | `asdk_app_6947056e2a8c8191a1e0b1a46b9c692c` | SHOPPING | interactive | yes |  | UNSET |
 | the brand id | `asdk_app_69f7bbf8df888191bcdbb1369675484b` | PRODUCTIVITY |  | yes |  | UNSET |
 | The Career Spot | `asdk_app_6a1db12e36448191ab2d802648d52b82` | BUSINESS | consequential, interactive | yes |  | UNSET |
-| The Derma Co | `asdk_app_69fdac5d0f54819192c7b375626c5ba3` | SHOPPING | consequential, interactive | yes |  | UNSET |
-| The Economist - Graphs | `asdk_app_69e83a987e188191841250d8b1e3cd0b` | NEWS | consequential, interactive | yes |  | UNSET |
+| The Economist - Graphs | `asdk_app_69e83a987e188191841250d8b1e3cd0b` |  | interactive | yes |  | UNSET |
 | The Grand Hotel Collection | `asdk_app_69f3c652752081919a7cb5f23dd5ecad` | TRAVEL | interactive | yes |  | UNSET |
 | The Herdsman Market | `asdk_app_6a07552d89ac8191986fb0de28363a7b` | FOOD | consequential, interactive | yes |  | UNSET |
 | The Houstonian | `asdk_app_69ab179b3bcc819198d3041c504e206c` | TRAVEL | interactive | yes |  | UNSET |
@@ -1995,11 +2044,13 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | ToursByLocals | `asdk_app_69d529e949a081919959e2d6a1f34abe` | TRAVEL | interactive | yes |  | UNSET |
 | Toutou Vert | `asdk_app_6a05697353d08191b1bf56be23a9423c` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | Tracer Franchising | `asdk_app_6a054ec6554481919bfe2f6b797302ff` | BUSINESS | consequential, interactive | yes |  | UNSET |
+| TrackTogether | `asdk_app_6a5247f0cf6c8191849dd2e3fe0f5e2b` |  | consequential, interactive | yes |  | UNSET |
 | Trackunit IrisX | `asdk_app_69e1dfe13f3c8191aedf1ddb8d60f186` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | TracX Logis | `asdk_app_69f17238be6881918aba65470bb66854` | PRODUCTIVITY | interactive | yes |  | UNSET |
 | Trade Me Property | `asdk_app_6943668049ac8191b12fc7de4ac1a7dc` | LIFESTYLE | interactive | yes |  | UNSET |
 | Trademark Dashboard | `asdk_app_6a22d678e12481918c0813ef7387d279` | BUSINESS | interactive | yes |  | UNSET |
 | Trademark Engine | `asdk_app_69de2da6d11c81918b8d2dd6bfe64d98` | BUSINESS | consequential, interactive | yes |  | UNSET |
+| TradingCursor | `asdk_app_6a0d835ff1dc8191972eeabd14967446` |  | consequential | yes |  | UNSET |
 | TrailVerse | `asdk_app_69e9c67943c08191a37c464b803ebdbe` | TRAVEL |  | yes |  | UNSET |
 | Trainerrr | `asdk_app_6a356725f034819186580eaee90be08d` | LIFESTYLE | consequential | yes |  | UNSET |
 | Trainline | `asdk_app_69b16ad2c988819182d82a4649ed0449` | TRAVEL | interactive | yes |  | UNSET |
@@ -2065,6 +2116,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | UK Property Valuation | `asdk_app_6a0c1d6b65d48191ae6458f5b78aca1c` | FINANCE | interactive | yes |  | UNSET |
 | UkraineBorder | `asdk_app_6a3d800bfea0819183aec5942057fe61` | TRAVEL | retrievable | yes |  | UNSET |
 | Umamy | `asdk_app_6a0211bf00a08191ad24dfa899949d4b` | BUSINESS | consequential | yes |  | UNSET |
+| UMT-CAR Assistent | `asdk_app_6a57cac4f4808191a9108ee8f0664e94` |  | consequential | yes |  | UNSET |
 | United Rentals | `asdk_app_69ba9e565bd48191b6ed6c024cda5f85` | BUSINESS |  | yes |  | UNSET |
 | Unni | `asdk_app_6a222b08034c8191971de848048156c5` | LIFESTYLE | interactive | yes |  | UNSET |
 | Unpack AI | `asdk_app_6954a5c3344c81918a3ea41182018d3a` | PRODUCTIVITY | interactive | yes |  | UNSET |
@@ -2102,7 +2154,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | VibeSEO | `asdk_app_6a1606dfad8c819190800c65ba5b56c4` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Video Maker | `asdk_app_6a1f42809af88191ae3055304a69523a` | ENTERTAINMENT | consequential, interactive | yes |  | UNSET |
 | VideoZero | `asdk_app_69764b4dee2081919eec8a58395a9c30` | EDUCATION | consequential, interactive | yes |  | UNSET |
-| vidIQ | `asdk_app_69dd11f3e50c8191b1ca48d03cf7e2ad` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
+| vidIQ | `asdk_app_69dd11f3e50c8191b1ca48d03cf7e2ad` |  | consequential, interactive | yes |  | UNSET |
 | Vio.com | `asdk_app_6943ea2205bc819197978fd17e22f5c1` | TRAVEL | interactive | yes |  | UNSET |
 | Virgin Atlantic | `asdk_app_69c1338cff18819180f063482095ef31` | TRAVEL | interactive | yes |  | UNSET |
 | Virgin Australia | `asdk_app_69eb20e509b881919bf4123f9be74e8c` | TRAVEL | consequential, interactive | yes |  | UNSET |
@@ -2117,9 +2169,9 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Vocci | `asdk_app_6a397893291481918adcefadf6d9ae1c` | PRODUCTIVITY | retrievable | yes |  | UNSET |
 | Voder | `asdk_app_6a1e356769c08191b9fcfa76e35ef142` | FINANCE | consequential | yes |  | UNSET |
 | VoiceBit | `asdk_app_6a07e9977c448191aca6c3a395d65bd1` | FOOD | consequential, interactive | yes |  | UNSET |
-| Voicenotes | `asdk_app_6a06dbad4000819193c82d0a81cc1e65` | PRODUCTIVITY | consequential | yes |  | UNSET |
+| Voicenotes | `asdk_app_6a06dbad4000819193c82d0a81cc1e65` |  | consequential | yes |  | UNSET |
 | VON POLL IMMOBILIEN | `asdk_app_698f00654b98819194a4897cc32428dc` | LIFESTYLE | interactive | yes |  | UNSET |
-| Voyage Privé | `asdk_app_6943c73f6c8481919dc2b9ac42af0064` | TRAVEL | interactive | yes |  | UNSET |
+| Voyage Privé | `asdk_app_6943c73f6c8481919dc2b9ac42af0064` | TRAVEL | consequential, interactive | yes |  | UNSET |
 | VroomVroomVroom - Car Hire | `asdk_app_69448fd0d4ac8191870b8110a6bdac47` | TRAVEL | interactive | yes |  | UNSET |
 | VSI AI Automation | `asdk_app_6a0613ac10588191a487c5ad35a83b4c` | BUSINESS |  | yes |  | UNSET |
 | VUHL VA Loan Calculator | `asdk_app_6952ead1831481918360e2c2cdb2971b` | FINANCE | interactive | yes |  | UNSET |
@@ -2127,6 +2179,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | VW Sign & Drive | `asdk_app_69d78f6a21e48191aae6d14090bc7194` | LIFESTYLE | interactive | yes |  | UNSET |
 | Wagon | `asdk_app_69a4658dad8c8191b5cea9e75ea63c93` | TRAVEL | interactive | yes |  | UNSET |
 | Waldo | `asdk_app_69a22803c8c481919da6f9b41bd93725` | BUSINESS | consequential | yes |  | UNSET |
+| WalkMyPlan — Floor Plan to 3D | `asdk_app_6a5563300db881918aa0eff31d9a6679` |  | consequential | yes |  | UNSET |
 | Wallector | `asdk_app_696405d078bc8191ab68d378bae9b4bb` | SHOPPING | interactive | yes |  | UNSET |
 | Wallet Whistle | `asdk_app_69c2d8d31b6c81919c96a76cf641704b` | SHOPPING | interactive, retrievable | yes |  | UNSET |
 | Walmart | `asdk_app_69b0921773588191a651c86809c15ed7` | SHOPPING | consequential, interactive | yes |  | UNSET |
@@ -2146,6 +2199,7 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Website Launches | `asdk_app_6a35d326640c81918988edaf8b3d0b34` | PRODUCTIVITY |  | yes |  | UNSET |
 | WebsitePublisher | `asdk_app_69cf85d94d588191a19d7f1411ccc2ac` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Wednesday.app | `asdk_app_694964a4157c819182d54ad82353d717` | PRODUCTIVITY | interactive | yes |  | UNSET |
+| Weft | `asdk_app_6a03afdf3120819195026f6a6a355a3a` | PRODUCTIVITY | consequential, retrievable | yes |  | UNSET |
 | Wego | `asdk_app_699d77ab2460819190ca206f109541ca` | TRAVEL | interactive | yes |  | UNSET |
 | WeightWatchers | `asdk_app_6949ba630ea48191921842354bcf9b97` | FOOD | consequential, interactive | yes |  | UNSET |
 | WeightWise | `asdk_app_694c425bfd788191ad1cc96bc6dc6dc6` | LIFESTYLE | interactive | yes |  | UNSET |
@@ -2162,7 +2216,9 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | Whiteboard by Athena AI | `asdk_app_6948cdcd2ad8819196c54ca89bab6cf9` | DESIGN | consequential, interactive | yes |  | UNSET |
 | Who What Wear | `asdk_app_6a0c3f3f51e88191851fe3637e324990` | LIFESTYLE | consequential, interactive | yes |  | UNSET |
 | Whoovia | `asdk_app_69fd83a393388191a0df056248d0b546` | BUSINESS | consequential, interactive | yes |  | UNSET |
+| Whoscall Lens | `asdk_app_69a7b8bdb3f4819180ed8d5289b04aaf` | PRODUCTIVITY | consequential, interactive | yes |  | UNSET |
 | Wialon | `asdk_app_6a22c7a4ffe08191a19866c3f76fb0c7` | BUSINESS | interactive | yes |  | UNSET |
+| Wialon Platform | `asdk_app_6a50d0e816488191ae1f3f8ea4c47ad5` |  |  | yes |  | UNSET |
 | Wikiloc | `asdk_app_69c1784c29208191a35b4ddef3c7e6d5` | LIFESTYLE | interactive | yes |  | UNSET |
 | Windsock | `asdk_app_6a2824334d588191b362051e122252dc` | PRODUCTIVITY | consequential | yes |  | UNSET |
 | Windsor.ai | `asdk_app_694a52cfaa3c819192bea84eaa254968` | BUSINESS |  | yes |  | UNSET |
@@ -2201,10 +2257,10 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | YepCode | `asdk_app_69a720e1c9608191b2f10597547b6710` | DEVELOPER_TOOLS | consequential | yes |  | UNSET |
 | Yepy | `asdk_app_69d3a8a02238819182d504fcc71709c8` | SHOPPING | interactive | yes |  | UNSET |
 | YNAB: Get Good At Money | `asdk_app_69ea7a42a898819188d2e85a83afa7da` | FINANCE | interactive | yes |  | UNSET |
+| Yolando | `asdk_app_6a4fd30f370c8191b16dde784049a1f3` |  | consequential | yes |  | UNSET |
 | Yoshi | `asdk_app_69b99bd669a481919598a5495d38a0f7` | FINANCE | consequential, interactive | yes |  | UNSET |
 | Youanai Social | `asdk_app_6a0578dc37b481919548cc6813b87d33` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | YouCam (beta) | `asdk_app_6a4778774ff88191b1c87186d5269a99` | DESIGN | consequential, interactive | yes |  | UNSET |
-| YouCam AI Agent (beta) | `asdk_app_6a21536b796c81919c0f0cc8c00565cc` | DESIGN | consequential, interactive | yes |  | UNSET |
 | YouEx.ai | `asdk_app_69e14f539b588191867451cd665419d9` | BUSINESS | consequential, interactive | yes |  | UNSET |
 | Younited | `asdk_app_6a2fc580faa881919482a507e9a4b288` | FINANCE | interactive | yes |  | UNSET |
 | Youtrust | `asdk_app_6a1d59e6cb5c8191b74e77c5de224837` | BUSINESS | consequential | yes |  | UNSET |
@@ -2242,10 +2298,12 @@ This catalog is a map of cached external app/integration entries, not a guarante
 | ギフトコンシェルジュ by 八代目儀兵衛 | `asdk_app_69eede3e8cb08191bf0ac6c56b29b4a3` | SHOPPING | interactive | yes |  | UNSET |
 | ココナラ | `asdk_app_6948ecfdffac81918335d685fda49cd9` | SHOPPING | interactive | yes |  | UNSET |
 | メルカリ | `asdk_app_695b52f1c2708191b664847c4a2ecf9a` | SHOPPING | consequential, interactive | yes |  | UNSET |
+| 受験王 | `asdk_app_6a09b4723c048191855d2080026dbc75` | EDUCATION | consequential | yes |  | UNSET |
 | 神戸レタス | `asdk_app_69d5e35e1edc8191a2df471169a0164f` | LIFESTYLE |  | yes |  | UNSET |
 | 대홍기획 | `asdk_app_69cdf86f177881919a361646bf895645` | BUSINESS | interactive | yes |  | UNSET |
 | 도시의푸른농장 | `asdk_app_6969e20dbd7c8191b8bf148156e1caab` | FOOD | interactive | yes |  | UNSET |
 | 롯데ON | `asdk_app_697c7692c2a4819195fe66d9be9666c4` | SHOPPING | interactive | yes |  | UNSET |
+| 롯데면세점 | `asdk_app_6a2765493a408191af7106b5bcf1cb25` |  | interactive | yes |  | UNSET |
 | 롯데백화점 | `asdk_app_697afa0b0bd48191ab981a6d24c05f4b` | SHOPPING | interactive | yes |  | UNSET |
 | 롯데시네마 | `asdk_app_698049383f548191850dba1355352838` | ENTERTAINMENT | interactive | yes |  | UNSET |
 | 롯데에너지머티리얼즈 | `asdk_app_6981530c895881919167c50a5e4bf3ab` | BUSINESS | interactive | yes |  | UNSET |

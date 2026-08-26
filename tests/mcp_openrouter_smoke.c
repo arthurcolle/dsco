@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Lives in BSS, not the stack: mcp_registry_t is ~40MB (64 servers + 2048
+/* Lives in BSS, not the stack: mcp_registry_t is large (64 servers + 4096
  * tools). dsco keeps this as the global g_mcp; mirror that here. */
 static mcp_registry_t reg;
 

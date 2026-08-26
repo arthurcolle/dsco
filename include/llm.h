@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <time.h>
+#include <curl/curl.h>
 #include "json_util.h"
 
 typedef enum { ROLE_USER, ROLE_ASSISTANT } msg_role_t;
@@ -58,6 +59,7 @@ typedef struct {
     double tls_ms;
     double ttfb_ms;
     double total_ms;
+    long   new_connections;  /* cURL connections created for this transfer */
 } llm_latency_breakdown_t;
 
 typedef struct {
@@ -197,6 +199,7 @@ typedef struct {
     int    max_output_recovery_count; /* recovery attempts after escalation */
     /* Memory context injection (Phase 3: Claude Code methodology) */
     char   memory_context[4096];     /* recalled memories, injected into system prompt */
+    char   runtime_directives[4096]; /* session-local agent-authored system overlay */
     /* Workspace slot */
     char   slot_name[64];            /* active named slot, empty = default */
     /* Session goal: persisted objective and state for goal-directed runs. */
@@ -416,6 +419,15 @@ stream_result_t llm_stream(const char *api_key, const char *request_json,
                            stream_tool_arg_delta_cb tool_delta_cb,
                            stream_thinking_cb thinking_cb,
                            void *cb_ctx);
+/* Anthropic provider path with a caller-owned reusable easy handle. The
+ * handle must not be used concurrently and remains owned by the caller. */
+stream_result_t llm_stream_reuse(CURL *curl, const char *api_key,
+                                 const char *request_json,
+                                 stream_text_cb text_cb,
+                                 stream_tool_start_cb tool_cb,
+                                 stream_tool_arg_delta_cb tool_delta_cb,
+                                 stream_thinking_cb thinking_cb,
+                                 void *cb_ctx);
 void dsco_strip_terminal_controls_inplace(char *s);
 
 /* ── Per-tool metrics ──────────────────────────────────────────────────── */

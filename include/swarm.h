@@ -49,16 +49,24 @@ typedef enum {
     EXECUTOR_DSCO   = 0,  /* default: fork dsco binary                  */
     EXECUTOR_CLAUDE = 1,  /* Claude Code CLI: claude -p --output-format json */
     EXECUTOR_CODEX  = 2,  /* OpenAI Codex CLI: codex exec --json        */
+    EXECUTOR_GROK   = 3,  /* xAI Grok subscription CLI                  */
+    EXECUTOR_KIMI   = 4,  /* Moonshot Kimi Code subscription CLI        */
 } executor_type_t;
 
 /* Executor availability (detected at init) */
 typedef struct {
     bool     claude_available;   /* claude CLI found and authenticated     */
     bool     codex_available;    /* codex CLI found and authenticated      */
+    bool     grok_available;     /* Grok CLI found and authenticated       */
+    bool     kimi_available;     /* Kimi Code CLI found and authenticated  */
     char     claude_path[512];   /* resolved path to claude binary         */
     char     codex_path[512];    /* resolved path to codex binary          */
+    char     grok_path[512];     /* resolved path to grok binary           */
+    char     kimi_path[512];     /* resolved path to kimi binary           */
     char     claude_model[128];  /* default claude model (from --version)  */
     char     codex_model[128];   /* default codex model (from config)      */
+    char     grok_model[128];    /* default Grok CLI model                  */
+    char     kimi_model[128];    /* default Kimi Code model                 */
 } executor_registry_t;
 
 typedef void (*swarm_stream_cb)(int child_id, const char *data, size_t len, void *ctx);
@@ -81,6 +89,10 @@ typedef struct {
     /* Streaming */
     char          *stream_buf;     /* partial line buffer */
     size_t         stream_buf_len;
+
+    /* UI emission is rate-limited independently of lossless pipe draining. */
+    size_t         ui_bytes_emitted;
+    double         ui_last_emit_time;
 
     /* Timing */
     double         start_time;
@@ -200,13 +212,19 @@ int  swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char
  * consumed (cleared) by the next spawn — set it immediately before spawning. */
 void swarm_set_next_instance(const char *effort, double temperature,
                              double top_p, int top_k, int thinking_budget,
-                             const char *tool_choice, const char *system_prompt);
+                             const char *tool_choice, const char *system_prompt,
+                             int max_agent_turns);
 
 /* Spawn a sub-dsco forced to a specific native provider (e.g. "openai", "groq").
  * The child process gets --exec <provider> -m <model> so it routes through
  * that provider's API directly, completely decoupled from the parent's provider. */
 int  swarm_spawn_provider(swarm_t *s, int group_id, const char *task,
                            const char *model, const char *provider);
+/* Credential-class specialization for providers exposing independent billing
+ * pools through one endpoint (currently Sakana subscription vs PAYG). */
+int swarm_spawn_provider_auth_lane(swarm_t *s, int group_id, const char *task,
+                                   const char *model, const char *provider,
+                                   const char *auth_class);
 /* OpenRouter specialization: pins a concrete upstream provider/quantization
  * for one model lane. Empty upstream preserves normal OpenRouter routing. */
 int swarm_spawn_openrouter_lane(swarm_t *s, int group_id, const char *task,
@@ -309,7 +327,8 @@ int  swarm_group_status_json(swarm_t *s, int group_id, char *buf, size_t len);
  * Returns 0 on success, -1 on validation/IO failure. */
 int  swarm_group_persist_run(swarm_t *s, int group_id, const char *run_id,
                              const char *topology, const char *user_prompt,
-                             const char *coordinator_output,
+                             const char *coordinator_output, bool run_complete,
+                             const char *reason,
                              char *out_dir, size_t out_dir_len);
 
 /* Render a compact live-observability frame for a group into buf. */

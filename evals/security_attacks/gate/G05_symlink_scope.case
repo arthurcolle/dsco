@@ -1,0 +1,1 @@
+CALL|read_file|{"path":"/tmp/ssh_link/id_rsa"}

@@ -6,13 +6,14 @@ The script is intentionally conservative:
 - copies it again into a public artifact;
 - strips the public artifact when a compatible strip tool can do so;
 - audits symbols before and after using scripts/elf_symbol_graph_audit.py;
-- emits a signed-by-hash manifest and HTML evidence bundle.
+- emits an issuer-signed manifest and HTML evidence bundle.
 
 It does not mutate the source binary.
 """
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import hashlib
 import html
@@ -23,6 +24,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -103,13 +105,39 @@ def strip_public_artifact(path: pathlib.Path) -> dict[str, Any]:
     return {"ok": False, "tool": tool, "reason": "all strip attempts failed", "attempts": results}
 
 
-def write_manifest(out_dir: pathlib.Path, manifest: dict[str, Any]) -> pathlib.Path:
+def canonical_manifest_bytes(manifest: dict[str, Any]) -> bytes:
+    """The exact payload verified by release consumers."""
+    return json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+
+
+def issuer_sign_manifest(payload: bytes, signing_key: pathlib.Path, public_key: pathlib.Path) -> dict[str, str]:
+    """Sign with an offline Ed25519 issuer key; OpenSSL is used only as a
+    deterministic crypto backend, never as an unauthenticated shell command."""
+    if not signing_key.is_file() or not public_key.is_file():
+        raise RuntimeError("issuer signing key and public key must be regular files")
+    with tempfile.TemporaryDirectory(prefix="dsco-release-sign-") as td:
+        payload_path = pathlib.Path(td) / "manifest.payload"
+        sig_path = pathlib.Path(td) / "manifest.sig"
+        payload_path.write_bytes(payload)
+        run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(signing_key),
+             "-in", str(payload_path), "-out", str(sig_path)], timeout=30)
+        check = run(["openssl", "pkeyutl", "-verify", "-rawin", "-pubin", "-inkey", str(public_key),
+                     "-in", str(payload_path), "-sigfile", str(sig_path)], timeout=30)
+        if check["returncode"] != 0:
+            raise RuntimeError("issuer signature self-verification failed")
+        return {
+            "algorithm": "ed25519",
+            "key_sha256": hashlib.sha256(public_key.read_bytes()).hexdigest(),
+            "signature_base64": base64.b64encode(sig_path.read_bytes()).decode("ascii"),
+        }
+
+
+def write_manifest(out_dir: pathlib.Path, manifest: dict[str, Any], signing_key: pathlib.Path,
+                   public_key: pathlib.Path) -> pathlib.Path:
     p = out_dir / "release_manifest.json"
-    # The manifest signature is a self-contained hash over all fields except manifest_sha256.
-    body = dict(manifest)
-    body.pop("manifest_sha256", None)
-    digest = hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    manifest["manifest_sha256"] = digest
+    payload = canonical_manifest_bytes(manifest)
+    manifest["issuer_signature"] = issuer_sign_manifest(payload, signing_key, public_key)
+    manifest["signed_payload_sha256"] = hashlib.sha256(payload).hexdigest()
     p.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return p
 
@@ -136,7 +164,7 @@ main{{max-width:1180px;margin:0 auto;padding:34px 22px 80px}} .card{{background:
 h1{{font-size:42px;letter-spacing:-.05em;margin:0 0 10px}} .muted{{color:var(--muted)}} code{{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}} table{{width:100%;border-collapse:collapse;background:#020617;border-radius:14px;overflow:hidden}} th,td{{padding:11px;border-bottom:1px solid var(--line);text-align:left}} th{{background:#111827}} .good{{color:var(--green)}} .bad{{color:var(--red)}} .grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}} .stat{{background:#020617;border:1px solid var(--line);border-radius:14px;padding:13px}} .k{{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}} .v{{font-size:22px;font-weight:900;margin-top:4px}} a{{color:var(--cyan)}}
 </style></head><body><main>
 <h1>DSCO Hardened Release Evidence</h1><p class='muted'>A release artifact with private debug retention, public stripping attempt, symbol audit before/after, and hash provenance.</p>
-<div class='card'><div class='grid'><div class='stat'><div class='k'>Input</div><div class='v'>{esc(pathlib.Path(manifest['input']['path']).name)}</div></div><div class='stat'><div class='k'>Strip</div><div class='v {'good' if strip.get('effective') else 'bad'}'>{'EFFECTIVE' if strip.get('effective') else ('NO CHANGE' if strip.get('ok') else 'FAILED/SKIPPED')}</div></div><div class='stat'><div class='k'>Manifest SHA</div><div class='v'><code>{esc(manifest.get('manifest_sha256','')[:16])}…</code></div></div></div>{f"<p class='bad'>{esc(strip.get('warning'))}</p>" if strip.get('warning') else ''}</div>
+<div class='card'><div class='grid'><div class='stat'><div class='k'>Input</div><div class='v'>{esc(pathlib.Path(manifest['input']['path']).name)}</div></div><div class='stat'><div class='k'>Strip</div><div class='v {'good' if strip.get('effective') else 'bad'}'>{'EFFECTIVE' if strip.get('effective') else ('NO CHANGE' if strip.get('ok') else 'FAILED/SKIPPED')}</div></div><div class='stat'><div class='k'>Issuer signature</div><div class='v'><code>{esc(manifest.get('issuer_signature',{}).get('key_sha256','')[:16])}…</code></div></div></div>{f"<p class='bad'>{esc(strip.get('warning'))}</p>" if strip.get('warning') else ''}</div>
 <div class='card'><h2>Before / after</h2><table><tr><th>Metric</th><th>Before</th><th>After</th><th>Delta</th></tr>{''.join(f'<tr><td>{esc(k)}</td><td>{esc(v1)}</td><td>{esc(v2)}</td><td>{esc(d)}</td></tr>' for k,v1,v2,d in rows)}</table></div>
 <div class='card'><h2>Artifacts</h2><ul><li>Public artifact: <code>{esc(manifest['public']['path'])}</code></li><li>Private debug artifact: <code>{esc(manifest['debug']['path'])}</code></li><li>Manifest: <code>release_manifest.json</code></li><li>Before audit: <a href='audit_before.html'>audit_before.html</a></li><li>After audit: <a href='audit_after.html'>audit_after.html</a></li></ul></div>
 <div class='card'><h2>Post-hardening diagnosis</h2><ul>{diag}</ul></div>
@@ -150,7 +178,17 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--out-root", default=str(DEFAULT_OUT_ROOT))
     ap.add_argument("--name", default=None, help="public artifact basename")
     ap.add_argument("--no-strip", action="store_true", help="copy/audit only; do not strip public artifact")
+    ap.add_argument("--signing-key", default=os.environ.get("DSCO_RELEASE_SIGNING_KEY"),
+                    help="offline Ed25519 issuer private key (or DSCO_RELEASE_SIGNING_KEY)")
+    ap.add_argument("--public-key", default=os.environ.get("DSCO_RELEASE_PUBLIC_KEY"),
+                    help="issuer public key used for mandatory self-verification")
+    ap.add_argument("--runtime-spec-digest", default=None,
+                    help="optional 64-character RuntimeSpec SHA-256 bound into the signed manifest")
     args = ap.parse_args(argv)
+    if not args.signing_key or not args.public_key:
+        raise SystemExit("issuer signing is required: provide --signing-key and --public-key")
+    if args.runtime_spec_digest and not __import__("re").fullmatch(r"[0-9a-fA-F]{64}", args.runtime_spec_digest):
+        raise SystemExit("--runtime-spec-digest must be a 64-character SHA-256 hex digest")
 
     src = pathlib.Path(args.binary).resolve()
     if not src.exists():
@@ -195,7 +233,10 @@ def main(argv: list[str]) -> int:
         "audit_before": {"html": "audit_before.html", "json": "audit_before.json", "symbol_count": before_symbols, "debug_symbol_count": before_debug_symbols},
         "audit_after": {"html": "audit_after.html", "json": "audit_after.json", "symbol_count": after_symbols, "debug_symbol_count": after_debug_symbols},
     }
-    manifest_path = write_manifest(out_dir, manifest)
+    if args.runtime_spec_digest:
+        manifest["runtime_spec"] = {"sha256": args.runtime_spec_digest.lower()}
+    manifest_path = write_manifest(out_dir, manifest, pathlib.Path(args.signing_key),
+                                   pathlib.Path(args.public_key))
     (out_dir / "REPORT.html").write_text(render_report(manifest, before, after))
     latest = pathlib.Path(args.out_root) / "latest"
     if latest.exists() or latest.is_symlink():

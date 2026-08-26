@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
@@ -113,6 +114,21 @@ bool agent_event_emit(const agent_event_ctx_t *ctx,
     jbuf_append_json_str(&b, ctx && ctx->principal_tier ? ctx->principal_tier : "agent");
     jbuf_append(&b, ",\"subject\":");
     jbuf_append_json_str(&b, ctx && ctx->principal_subject ? ctx->principal_subject : "local");
+    jbuf_append(&b, "}");
+
+    /* EntityCapsule identity is process-immutable admission context. Keep it
+     * on every canonical event so Router, GraphSub, Chronicle, and dsco-ops
+     * can reconcile the same organization/deployment/policy lineage. */
+    jbuf_append(&b, ",\"organization\":{\"organization_id\":");
+    jbuf_append_json_str(&b, nz(getenv("DSCO_ORGANIZATION_ID")));
+    jbuf_append(&b, ",\"deployment_id\":");
+    jbuf_append_json_str(&b, nz(getenv("DSCO_DEPLOYMENT_ID")));
+    jbuf_append(&b, ",\"policy_sha256\":");
+    jbuf_append_json_str(&b, nz(getenv("DSCO_POLICY_SHA256")));
+    jbuf_append(&b, ",\"role_id\":");
+    jbuf_append_json_str(&b, nz(getenv("DSCO_ROLE_ID")));
+    jbuf_append(&b, ",\"agent_id\":");
+    jbuf_append_json_str(&b, nz(getenv("DSCO_AGENT_ID")));
     jbuf_append(&b, "}");
 
     jbuf_append(&b, ",\"agent\":{\"provider\":");

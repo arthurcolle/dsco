@@ -243,18 +243,44 @@ debug files can contain prompts, documents, tool results, and provider payloads.
 
 | Env var | Guideline |
 |---|---|
-| `DSCO_EXEC` | Default executor/provider. Use `claude`, `codex`, `auto`, `smart`, `fugu`, `sakana`, or another native provider name. Only persist a provider value when the matching credential is available; otherwise bare `./dsco` will fail with a configuration error. |
+| `DSCO_EXEC` | Executor/provider override. The issued runtime defaults to native `openai-codex`; use `claude`, `codex`, `auto`, `smart`, `fugu`, `sakana`, or another provider name to override it. Only persist a provider value when the matching credential is available. |
 | `DSCO_MODEL` | Default model override. Persist only when you want every run to use that model family. Clear it when switching providers if routing looks surprising. |
 | `DSCO_PROFILE` | Startup profile: `full`, `lite`, or `worker`. Use `lite` for fast local utility invocations. `worker` is normally set by dsco for child processes. |
 | `DSCO_CHEAP` | Enables cheap mode when truthy: minimal core tools plus dynamic discovery. Use for low-cost smoke tests and quick prompts. |
 | `DSCO_MAX_TOKENS` | Max output token reserve. Raise for long-form generation; lower for tight budget runs. |
 | `DSCO_MAX_AGENT_TURNS` | Checkpoint cadence for long agent loops, not the primary stop condition. Lower it for more frequent progress surfacing. |
 | `DSCO_HARD_TURN_CEILING` | Emergency runaway backstop. Leave at default outside stress testing. |
-| `DSCO_EFFORT` | Reasoning effort default. Common values are `auto`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or provider-specific equivalents. |
+| `DSCO_EFFORT` | Reasoning effort override. The issued default is `xhigh`; `auto` restores the provider/model default. Other values are `none`, `minimal`, `low`, `medium`, `high`, and `max` (`max` normalizes where required). |
 | `DSCO_TEMPERATURE`, `DSCO_TOP_P`, `DSCO_TOP_K` | Sampling controls. Prefer unset for provider defaults; set only for repeatable experiments or creative generation. |
 | `DSCO_THINKING_BUDGET` | Provider reasoning-token budget. Use only with providers/models that support it. |
 | `DSCO_TOOL_CHOICE` | Default tool-choice policy. Use sparingly; interactive `/force` is safer for ad hoc control. |
 | `DSCO_SYSTEM_PROMPT` | Overrides the system prompt. Use for isolated experiments; prefer `~/.dsco/system_prompt.txt` for durable local customization. |
+
+#### Native subscription lane diagnostics
+
+Use the dedicated tier-1 surface when comparing paid allocations. It accepts
+only recognized subscription credential classes and in-process HTTP
+transports; executor subprocesses and metered keys do not qualify.
+
+```bash
+./dsco --subscription-lanes | jq .
+./dsco --subscription-bench --subscription-bench-rounds 3 \
+  --subscription-bench-concurrency 1 \
+  --subscription-bench-max-tokens 128 \
+  -p 'Write one compact paragraph of about 80 tokens.' | jq .
+```
+
+Run at least three rounds with a nontrivial output for throughput comparisons.
+TTFT and total latency remain available for short responses, but decode TPS is
+reported as `null` unless token usage and streaming cadence make it defensible.
+`queue_ms_*` exposes account-local scheduling (including the shared ChatGPT
+anti-429 gate); `provider_service_*` subtracts that wait. The benchmark runs all
+ready providers concurrently in the current process, so its wall time measures
+cross-provider fanout rather than serial completion.
+
+`--subscription-bench-max-tokens` is a requested cap. The native ChatGPT
+subscription backend rejects `max_output_tokens`, so that lane remains
+provider-managed; the other tier-1 request builders emit their supported cap.
 
 ### Provider Credentials and Auth
 
@@ -270,9 +296,18 @@ debug files can contain prompts, documents, tool results, and provider payloads.
 | `DSCO_CHATGPT_OAUTH_TOKEN`, `CHATGPT_OAUTH_TOKEN`, `DSCO_CHATGPT_ACCOUNT_ID` | ChatGPT/Codex subscription auth overrides. Treat as secrets; prefer `dsco login`/Codex auth discovery. |
 | `DSCO_DISABLE_CODEX_OAUTH_DISCOVERY`, `DSCO_DISABLE_CHATGPT_NATIVE` | Truthy disables subscription/native ChatGPT routes. Use to force direct OpenAI API-key routing. |
 | `DSCO_CHATGPT_STREAM_IDLE_TIMEOUT_S` | ChatGPT/Codex native streaming idle timeout. Default is `300`; raise for long silent reasoning/tool phases, lower only for fast-fail debugging. |
+| `DSCO_CHATGPT_GLOBAL_GATE` | Cross-process ChatGPT subscription gate. Enabled by default so interactive sessions, fabric workers, and swarm children share one in-flight account request and one server cooldown. Set to `0` only for isolated transport testing. |
+| `DSCO_CHATGPT_MIN_INTERVAL_MS` | Minimum account-wide spacing after a native Codex request completes. Default is `1000`. |
+| `DSCO_CHATGPT_MAX_RETRIES`, `DSCO_CHATGPT_MAX_RETRY_DELAY_MS` | Transient Codex retry count and maximum server-directed delay. Defaults are `3` and `900000` ms; quota-exhaustion responses are not retried. |
+| `DSCO_CHATGPT_GATE_MAX_WAIT_MS` | Safety ceiling for a shared persisted cooldown or stale gate state. Default is `900000` ms. |
+| `DSCO_KIMI_CODE_OAUTH_TOKEN`, `KIMI_CODE_OAUTH_TOKEN` | Kimi Code subscription OAuth overrides. Overrides cannot be refreshed; prefer the mode-0600 cache written by `kimi login` at `~/.kimi-code/credentials/kimi-code.json`. DSCO refreshes and atomically rotates that cache in-process, and refreshes once on HTTP 401 before retrying. |
+| `KIMI_CODE_OAUTH_HOST`, `KIMI_OAUTH_HOST` | Kimi managed OAuth host override. Leave unset for `https://auth.kimi.com`; intended for compatible staging/test services. |
+| `DSCO_KIMI_CODE_OAUTH_TOKEN_URL`, `DSCO_KIMI_CODE_OAUTH_CLIENT_ID` | Low-level native Kimi refresh test overrides. Do not set in normal operation. |
+| `GLM_API_KEY`, `ZAI_API_KEY`, `Z_AI_API_KEY`, `ZAI_CODING_PLAN_API_KEY`, `Z_AI_CODING_PLAN_API_KEY` | Z.AI Coding Plan credentials for the native coding endpoint. These are classified separately from metered OpenRouter GLM routes. |
 | `OPENROUTER_API_KEY` | OpenRouter fallback/routing credential. Use for namespaced `org/model` IDs and cross-provider fallbacks. |
-| `FUGU_API_KEY` | Canonical Sakana/Fugu credential. Required for `DSCO_EXEC=fugu`, `DSCO_EXEC=sakana`, `-e fugu`, or `--provider sakana`. |
+| `FUGU_API_KEY` | Canonical Sakana/Fugu subscription-allocation credential. Required for the tier-1 Sakana lane. |
 | `SAKANA_API_KEY`, `FISH_API_KEY`, `SAKANA_TOKEN` | Accepted aliases for `FUGU_API_KEY`. Prefer migrating durable config to `FUGU_API_KEY`. |
+| `FUGU_PAYG_API_KEY`, `SAKANA_PAYG_API_KEY`, `FISH_PAYG_API_KEY`, `SAKANA_PAYG_TOKEN` | Separate metered Sakana allocation. It can be used as fallback but never qualifies for `--subscription-lanes`. |
 | `FUGU_BASE_URL`, `FUGU_API_BASE`, `SAKANA_API_BASE`, `SAKANA_BASE_URL` | Sakana endpoint override. Leave unset for production; set only for staging, proxy, or compatibility tests. |
 | Other `*_API_KEY`, `*_TOKEN`, `*_SECRET` | Setup can auto-detect many provider/tool credentials. Use canonical provider names where known; generic names work for custom providers when paired with a base URL. |
 | `<LOCAL_SERVER>_API_BASE`, `<LOCAL_SERVER>_BASE_URL`, `<LOCAL_SERVER>_HOST` | Local model endpoint override, for example `OLLAMA_API_BASE=http://matrix:11434/v1`. Supported server names include `OLLAMA`, `LMSTUDIO`, `MLX`, `VLLM`, `LLAMACPP`, `JAN`, `GPT4ALL`, `KOBOLDCPP`, `TEXTGEN`, `TGI`, and `SGLANG`. |
@@ -376,6 +411,13 @@ debug files can contain prompts, documents, tool results, and provider payloads.
 | `DSCO_NO_AUTO_INTERACTIVE` | Truthy makes bare `dsco` fail instead of entering interactive mode. Good for scripts. |
 | `DSCO_NO_CLEAR` | Disables initial terminal clear. Use when embedding or logging. |
 | `DSCO_NO_PANE` | Disables the interactive side pane. Use for plain logs or terminals with layout issues. |
+| `DSCO_PIXEL_TUI` | Set to `1` (or use `dsco --native`) to opt into the native compositor; `0` or `dsco --tui` keeps the established ANSI/cell TUI. |
+| `DSCO_PIXEL_TUI_PERF` | Native frame telemetry with producer/queue/frame P50/P95/P99. `1` emits one JSON record on session exit; an absolute path appends JSONL there. |
+| `DSCO_PIXEL_TUI_PATCH` | Set to `0` to disable in-place Kitty damage patches and force authoritative full-frame uploads. |
+| `DSCO_PIXEL_TUI_DAMAGE_COVERAGE` | Patch/full crossover from `0.10` to `0.95`; measured default is `0.70`. Use only for transport A/B tests. |
+| `DSCO_PIXEL_TUI_FPS` | Native compositor scheduling rate, clamped to 2–60 FPS; default is 30. |
+| `DSCO_PIXEL_TUI_TOOLS` | Native tool-history density: `results` (default: call + first result line + hidden-line count), `calls` (call/status/size only), or `full` (bounded 10-line/2 KiB preview). Full results remain in model context and durable traces. |
+| `DSCO_COMPOSITOR_BENCH_INTERVAL_US` | Token arrival interval for `dsco --compositor-stream-bench [CHUNKS]`; default is 2000 µs. |
 | `DSCO_TUI_DSR` | Opts into terminal cursor-position DSR queries (`ESC[6n`). Leave unset unless debugging prompt placement on a known-good terminal. |
 | `DSCO_SPLASH` | Splash control. Disable in scripts and screenshots. |
 | `DSCO_GLYPH` | Glyph tier override, such as `ascii`, `unicode`, or `full`. Use for terminal compatibility. |

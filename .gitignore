@@ -1,6 +1,8 @@
 # Build artifacts
 *.o
 build/
+/libdsco.a
+/crates/dsco-core/target/
 /dsco
 /dsco.distributed.systems
 /dsco.distributed.systems.com.dbg
@@ -191,3 +193,20 @@ dsco-kitty-lab
 /dsco-zig
 /raag.lock
 /examples/dspy_model_enrichment_dossier.html
+
+# release-cut hygiene (v1.1.0, 2026-08-26): local data/venvs/build artifacts never ship
+/environments/
+/experiments/
+/data/cap_classifier/
+/crates/dsco-core/target/
+/dsco-agent-ui-gallery
+/dsco-kitty-tastes
+/bench/ai_writing_tells_swarm_raw.txt
+/openai_roles.txt
+__pycache__/
+*.orig
+
+# personal artifacts (never publish)
+reports/THE_OPEN_HAND_HORIZON_30_PAGE_REPORT.pdf
+reports/1111_34TH_STREET_CYBER_AI_LAB_DUE_DILIGENCE.md
+rana-hajdini-evidence-report.html

@@ -275,8 +275,15 @@ extern volatile int g_tool_timed_out;
 #define TOOL_DEFAULT_TIMEOUT_S 30
 #define TOOL_GRACE_PERIOD_S 5
 
+/* Upper bound for any configurable tool timeout. Raised from 7200 (2h) to
+ * 86400 (24h) so long-running research/search/agent/swarm work can be granted
+ * multi-hour deadlines via DSCO_TOOL_TIMEOUT_* / DSCO_TOOL_DEFAULT_TIMEOUT
+ * without being clamped. Watchdog + Esc/Ctrl-C + swarm budgets still bound
+ * genuine runaways. */
+#define TOOL_TIMEOUT_MAX_S 86400
 static inline int dsco_tool_default_timeout_s(void) {
-    return dsco_env_int("DSCO_TOOL_DEFAULT_TIMEOUT", TOOL_DEFAULT_TIMEOUT_S, 1, 7200);
+    return dsco_env_int("DSCO_TOOL_DEFAULT_TIMEOUT", TOOL_DEFAULT_TIMEOUT_S, 1,
+                        TOOL_TIMEOUT_MAX_S);
 }
 static inline int dsco_tool_grace_period_s(void) {
     return dsco_env_int("DSCO_TOOL_GRACE_PERIOD_S", TOOL_GRACE_PERIOD_S, 0, 300);
@@ -445,6 +452,7 @@ bool tool_is_progressive_schema(const tool_def_t *t, const tool_page_result_t *r
 
 /* Wire the active conversation for context_compact (takes void* to avoid llm.h dep) */
 void tools_set_active_conversation(void *conv);
+void tools_set_active_session(void *session);
 
 /* Advance the playbook turn counter (call once per agent turn) */
 void tools_playbook_advance_turn(void);

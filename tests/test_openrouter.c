@@ -281,7 +281,7 @@ static char *fetch_url(const char *url, const char *api_key) {
     char auth[512];
     snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key);
     hdrs = curl_slist_append(hdrs, auth);
-    hdrs = curl_slist_append(hdrs, "HTTP-Referer: https://github.com/dsco-cli");
+    hdrs = curl_slist_append(hdrs, "HTTP-Referer: https://openrouter.ai/apps/url/https%3A%2F%2Fgithub.com%2Farthurcolle%2Fdsco");
     hdrs = curl_slist_append(hdrs, "X-Title: dsco-cli-eval");
 
     curl_easy_setopt(curl, CURLOPT_URL, url);
@@ -471,7 +471,7 @@ static eval_result_t run_eval(const char *model_id, const char *api_key, int tie
     char auth[512];
     snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key);
     hdrs = curl_slist_append(hdrs, auth);
-    hdrs = curl_slist_append(hdrs, "HTTP-Referer: https://github.com/dsco-cli");
+    hdrs = curl_slist_append(hdrs, "HTTP-Referer: https://openrouter.ai/apps/url/https%3A%2F%2Fgithub.com%2Farthurcolle%2Fdsco");
     hdrs = curl_slist_append(hdrs, "X-Title: dsco-cli-eval");
 
     curl_easy_setopt(curl, CURLOPT_URL, OR_CHAT_URL);

@@ -190,10 +190,15 @@ spend_plan_t spend_governor_plan(const spend_signals_t *sig) {
             p.trim_max_chars = 384;
             p.strip_binaries = true;
             p.suggest_model_downshift = true;
-            snprintf(p.reason, sizeof(p.reason),
-                     "orange: %.0f%% of budget (runway %.0f turns); effort≤medium, "
-                     "output halved",
-                     pressure * 100.0, p.runway_turns);
+            if (p.runway_turns >= 0)
+                snprintf(p.reason, sizeof(p.reason),
+                         "orange: %.0f%% of budget (runway %.0f turns); effort≤medium, "
+                         "output halved",
+                         pressure * 100.0, p.runway_turns);
+            else
+                snprintf(p.reason, sizeof(p.reason),
+                         "orange: %.0f%% of budget; effort≤medium, output halved",
+                         pressure * 100.0);
             break;
         case SPEND_RED:
             p.tool_budget_ratio = 0.25f;
@@ -204,10 +209,16 @@ spend_plan_t spend_governor_plan(const spend_signals_t *sig) {
             p.trim_max_chars = 256;
             p.strip_binaries = true;
             p.suggest_model_downshift = true;
-            snprintf(p.reason, sizeof(p.reason),
-                     "red: %.0f%% of budget (runway %.0f turns); effort≤low, "
-                     "output quartered, downshift leaf work",
-                     pressure * 100.0, p.runway_turns);
+            if (p.runway_turns >= 0)
+                snprintf(p.reason, sizeof(p.reason),
+                         "red: %.0f%% of budget (runway %.0f turns); effort≤low, "
+                         "output quartered, downshift leaf work",
+                         pressure * 100.0, p.runway_turns);
+            else
+                snprintf(p.reason, sizeof(p.reason),
+                         "red: %.0f%% of budget; effort≤low, output quartered, "
+                         "downshift leaf work",
+                         pressure * 100.0);
             break;
         case SPEND_EXHAUSTED:
             p.block_turn = true;
@@ -232,10 +243,15 @@ spend_plan_t spend_governor_plan(const spend_signals_t *sig) {
             p.trim_keep_recent = 6;
         if (p.trim_max_chars < 384)
             p.trim_max_chars = 384;
-        snprintf(p.reason, sizeof(p.reason),
-                 "%s: %.0f%% of budget (runway %.0f turns); "
-                 "quality-critical checkpoint required",
-                 spend_phase_label(phase), pressure * 100.0, p.runway_turns);
+        if (p.runway_turns >= 0)
+            snprintf(p.reason, sizeof(p.reason),
+                     "%s: %.0f%% of budget (runway %.0f turns); "
+                     "quality-critical checkpoint required",
+                     spend_phase_label(phase), pressure * 100.0, p.runway_turns);
+        else
+            snprintf(p.reason, sizeof(p.reason),
+                     "%s: %.0f%% of budget; quality-critical checkpoint required",
+                     spend_phase_label(phase), pressure * 100.0);
     }
 
     /* Floor the per-turn output cap so a graduated phase never breaks tool

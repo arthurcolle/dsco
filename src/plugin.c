@@ -1,16 +1,30 @@
 #include "plugin.h"
 #include "json_util.h"
+#include "crypto.h"
+#include "cloud_runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <dlfcn.h>
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <Security/Security.h>
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
 
 /* Global plugin registry */
 plugin_registry_t g_plugins = {0};
+
+/* For example: anchor apple generic and identifier "com.example.dsco.plugin"
+ * and certificate leaf[subject.OU] = "TEAMID".  Cloud mode never trusts an
+ * arbitrary locally-signed library. */
+#ifndef DSCO_PLUGIN_SIGNING_REQUIREMENT_B64
+#define DSCO_PLUGIN_SIGNING_REQUIREMENT_B64 ""
+#endif
 
 /* ── Plugin API function types ───────────────────────────────────────── */
 
@@ -269,6 +283,106 @@ static void plugin_metadata_default_path(const char *file_name, char *out, size_
     snprintf(out, out_len, "%s/%s/%s", home, PLUGIN_DIR_NAME, file_name);
 }
 
+static bool plugin_file_sha256(const char *path, char out[65]) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    sha256_ctx_t ctx; sha256_init(&ctx);
+    uint8_t buf[8192]; size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) != 0) sha256_update(&ctx, buf, n);
+    bool ok = !ferror(f); fclose(f);
+    if (!ok) return false;
+    uint8_t hash[32]; sha256_final(&ctx, hash); hex_encode(hash, sizeof(hash), out);
+    return true;
+}
+
+static bool plugin_cloud_code_signature_valid(const char *path) {
+#if defined(__APPLE__)
+    uint8_t requirement_bytes[1024];
+    size_t requirement_len = base64url_decode(DSCO_PLUGIN_SIGNING_REQUIREMENT_B64,
+                                              strlen(DSCO_PLUGIN_SIGNING_REQUIREMENT_B64),
+                                              requirement_bytes, sizeof(requirement_bytes) - 1);
+    if (!requirement_len || requirement_len >= sizeof(requirement_bytes)) return false;
+    requirement_bytes[requirement_len] = '\0';
+    CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path,
+                                                            (CFIndex)strlen(path), false);
+    SecStaticCodeRef code = NULL;
+    OSStatus st = url ? SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code) : errSecParam;
+    if (url) CFRelease(url);
+    if (st != errSecSuccess || !code) return false;
+    CFStringRef requirement_text = CFStringCreateWithCString(NULL, (const char *)requirement_bytes,
+                                                               kCFStringEncodingUTF8);
+    SecRequirementRef requirement = NULL;
+    st = requirement_text ? SecRequirementCreateWithString(requirement_text, kSecCSDefaultFlags,
+                                                             &requirement) : errSecParam;
+    if (requirement_text) CFRelease(requirement_text);
+    if (st == errSecSuccess && requirement)
+        st = SecStaticCodeCheckValidity(code, kSecCSStrictValidate, requirement);
+    if (requirement) CFRelease(requirement);
+    CFRelease(code);
+    return st == errSecSuccess;
+#else
+    (void)path;
+    return false; /* cloud mode is fail-closed where no platform verifier exists */
+#endif
+}
+
+typedef struct { bool ok; const char *allow; } plugin_cap_allow_t;
+static bool plugin_csv_has(const char *csv, const char *value) {
+    if (!csv || !*csv || !value || !*value) return false;
+    for (const char *p = csv; *p;) {
+        while (*p == ',' || isspace((unsigned char)*p)) p++;
+        const char *e = p; while (*e && *e != ',') e++;
+        while (e > p && isspace((unsigned char)e[-1])) e--;
+        if ((size_t)(e - p) == strlen(value) && !strncasecmp(p, value, (size_t)(e - p))) return true;
+        p = *e ? e + 1 : e;
+    }
+    return false;
+}
+static void plugin_cap_allow_cb(const char *el, void *ctx) {
+    plugin_cap_allow_t *it = ctx;
+    const char *p = el; while (*p && isspace((unsigned char)*p)) p++;
+    if (*p++ != '"') { it->ok = false; return; }
+    char cap[128]; size_t n = 0;
+    while (*p && *p != '"' && n + 1 < sizeof(cap)) cap[n++] = *p++;
+    cap[n] = '\0';
+    if (*p != '"' || !plugin_csv_has(it->allow, cap)) it->ok = false;
+}
+
+static bool plugin_cloud_preflight(const char *path, char *err, size_t err_len) {
+    char dir[1024], manifest_path[1200], lock_path[1200];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (!slash) { snprintf(err, err_len, "plugin path has no parent directory"); return false; }
+    *slash = '\0';
+    snprintf(manifest_path, sizeof(manifest_path), "%s/%s", dir, PLUGIN_MANIFEST_FILE);
+    snprintf(lock_path, sizeof(lock_path), "%s/%s", dir, PLUGINS_LOCK_FILE);
+    char report[512];
+    if (!plugin_validate_manifest_and_lock(manifest_path, lock_path, report, sizeof(report))) {
+        snprintf(err, err_len, "%s", report); return false;
+    }
+    char *json = NULL;
+    if (!read_text_file(manifest_path, &json, err, err_len)) return false;
+    plugin_manifest_info_t manifest;
+    bool parsed = parse_manifest_json(json, &manifest, err, err_len);
+    if (!parsed) { free(json); return false; }
+    char digest[65];
+    if (!plugin_file_sha256(path, digest) || strcasecmp(digest, manifest.hash)) {
+        free(json); snprintf(err, err_len, "plugin digest does not match manifest"); return false;
+    }
+    plugin_cap_allow_t caps = {.ok = true, .allow = getenv("DSCO_CLOUD_PLUGIN_CAPABILITIES")};
+    int n = json_array_foreach(json, "capabilities", plugin_cap_allow_cb, &caps);
+    free(json);
+    if (n <= 0 || !caps.ok) {
+        snprintf(err, err_len, "plugin capabilities are not allowed by DSCO_CLOUD_PLUGIN_CAPABILITIES");
+        return false;
+    }
+    if (!plugin_cloud_code_signature_valid(path)) {
+        snprintf(err, err_len, "plugin platform code signature is invalid or untrusted");
+        return false;
+    }
+    return true;
+}
+
 /* ── Load a single plugin ────────────────────────────────────────────── */
 
 bool plugin_load(plugin_registry_t *reg, const char *path) {
@@ -281,6 +395,14 @@ bool plugin_load(plugin_registry_t *reg, const char *path) {
     if (strstr(path, "..") != NULL) {
         fprintf(stderr, "  plugin: rejecting path with '..': %s\n", path);
         return false;
+    }
+
+    if (dsco_cloud_runtime_active()) {
+        char preflight_err[512];
+        if (!plugin_cloud_preflight(path, preflight_err, sizeof(preflight_err))) {
+            fprintf(stderr, "  plugin: cloud preflight rejected %s: %s\n", path, preflight_err);
+            return false;
+        }
     }
 
     void *handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);

@@ -571,16 +571,17 @@ void tui_status_bar_render(tui_status_bar_t *sb);
 bool tui_motion_enabled(void);
 const char *tui_motion_activity_frame(int frame, bool unicode);
 
-/* ── Input Panel (ephemeral bottom panel) ─────────────────────────────── */
-/* The bottom panel is 3 rows, painted only when reading user input:
- *   row N-2 : top horizontal rule with model badge ─[ model ]──────
- *   row N-1 : "❯ " + current input
- *   row N   : powerline status bar (drawn by tui_status_bar_render)
+/* ── Input Panel (persistent bottom command deck) ─────────────────────── */
+/* The composer stays mounted at the bottom of the terminal:
+ *   row N-3 : top rule ("input" / "live")
+ *   row N-2 : "› " + current input
+ *   row N-1 : bottom rule
+ *   row N   : hint footer
  *
- * When the user submits, the panel is erased and the input is echoed into
- * scrollback, so the agent's response streams freely through the terminal.
- * The panel re-renders before the next read. No DECSTBM scroll region:
- * text rendering uses the whole terminal during streaming.
+ * Submit clears the typed bytes but leaves the pane in place. DECSTBM
+ * clamps the transcript above it so labeled USER/assistant rows cannot
+ * overwrite the input deck. A follow-up reader keeps the pane live while
+ * the agent is working. User cancellation / raw-stdin tools may unmount it.
  */
 #define TUI_COMPOSER_PANEL_ROWS   3
 #define TUI_COMPOSER_BUF_CAP      16384
@@ -616,6 +617,13 @@ void tui_bottom_panel_refresh(tui_status_bar_t *sb, const char *prompt_hint);
 bool tui_prepare_external_output(void);
 /* Same operation with no internal locking; caller must hold tui_term_lock(). */
 bool tui_prepare_external_output_locked(void);
+/* Clamp DECSTBM to the transcript above a mounted composer. Does not move
+ * the cursor — used between live token chunks so the viewframe keeps filling. */
+void tui_transcript_ensure_region(void);
+/* While live, composer repaints restore the stream cursor instead of the
+ * input caret so tokens keep landing in the viewframe. */
+void tui_transcript_stream_set_live(bool live);
+bool tui_transcript_stream_is_live(void);
 
 /* Push cursor down with newlines until it sits just above the input panel
  * area (row `rows - 3`). No-op if cursor already at/past that row. By default
@@ -649,6 +657,10 @@ void tui_composer_set_escape_hook(tui_composer_escape_hook_t hook, void *ctx);
  * and 2 when an interrupt was already pending. */
 int tui_composer_signal_interrupt(void);
 bool tui_composer_is_reading(void);
+/* True while the ANSI command deck is tracked at the bottom of the screen. */
+bool tui_composer_is_mounted(void);
+/* Last transcript row above a mounted command deck (1-based), or 0. */
+int tui_composer_transcript_row(void);
 /* Keep the native command deck mounted when an internal reader handoff
  * interrupts the composer. User cancellation and raw-stdin tools leave this
  * disabled so their terminal ownership remains unambiguous. */

@@ -44,6 +44,10 @@ struct provider {
 
     /* Provider-specific data */
     void *data;
+
+    /* Reusable transport owned by providers whose wire implementation is not
+     * backed by openai_data_t (currently the native ChatGPT Responses lane). */
+    CURL *transport_curl;
 };
 
 /* Create a provider by name. Returns NULL if unknown. */
@@ -52,9 +56,10 @@ provider_t *provider_create(const char *name);
 /* Free a provider */
 void provider_free(provider_t *p);
 
-/* Prepare reusable provider transport state. OpenAI-compatible providers keep
- * a persistent CURL easy handle so DNS/TCP/TLS/HTTP2 state can be reused across
- * turns. Providers without native reuse support return true as a no-op. */
+/* Prepare reusable provider transport state. OpenAI-compatible and native
+ * ChatGPT providers keep a persistent CURL easy handle so the connection
+ * established by the first request can be reused across turns. Providers
+ * without native reuse support return true as a no-op. */
 bool provider_prepare(provider_t *p);
 
 /* Stream using prepared transport state when available. Falls back to the
@@ -112,9 +117,12 @@ void provider_export_child_process_credentials(const char *model,
 /* Auth-mode debugging helpers */
 bool provider_debug_auth_enabled(void);
 const char *provider_auth_mode(const char *provider_name, const char *resolved_key);
-/* True when the request is covered by the user's ChatGPT/Codex subscription
- * rather than billed as Platform API usage. */
+/* True when the resolved auth class is covered by a subscription/coding plan
+ * rather than billed as ordinary metered API usage. */
 bool provider_usage_is_included(const char *provider_name, const char *resolved_key);
+/* Account-local scheduler wait observed by the most recent stream on this
+ * thread (currently the cross-process ChatGPT subscription gate). */
+long provider_last_subscription_queue_ms(void);
 void provider_debug_log_request(const char *provider_name, const char *model,
                                 const char *resolved_key);
 const char *provider_claude_code_oauth_source(void);
@@ -216,6 +224,9 @@ typedef struct {
     char *tool_arg_delta_stream;
     bool done;
     bool terminal_success;
+    usage_t usage;
+    int reasoning_tokens;
+    int cached_tokens;
 } provider_test_openai_sse_result_t;
 
 /* Feed raw OpenAI-compatible SSE bytes through the production line parser.
@@ -228,6 +239,7 @@ bool provider_test_parse_openai_sse_for_model(const char *bytes, size_t len,
                                               const char *request_model,
                                               provider_test_openai_sse_result_t *out);
 void provider_test_free_openai_sse_result(provider_test_openai_sse_result_t *result);
+long provider_test_chatgpt_retry_after_ms(const char *text);
 #endif
 
 #endif

@@ -10,22 +10,34 @@
 
 #include "kitty_banner_mask.h"
 #include "kitty_graphics.h"
+#include "px_theme.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <math.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/ioctl.h>
+#include <termios.h>
 #include <time.h>
 #include <unistd.h>
 
+/* Artwork units: the legacy 718×108 wordmark footprint every effect constant
+ * (margins, grid spacing, trail lengths, sweep width) was tuned against. The
+ * coverage mask ships at a higher resolution (BANNER_MASK_W×BANNER_MASK_H)
+ * and is resampled from artwork space, so mask fidelity can grow without
+ * retuning the scene. */
+#define BANNER_ART_W 718
+#define BANNER_ART_H 108
 #define BANNER_MARGIN_X 20
 #define BANNER_MARGIN_Y 12
-#define BANNER_W (BANNER_MASK_W + 2 * BANNER_MARGIN_X)
-#define BANNER_H (BANNER_MASK_H + 2 * BANNER_MARGIN_Y)
-#define BANNER_FRAMES 24
-#define BANNER_FRAME_GAP_MS 70
+#define BANNER_W (BANNER_ART_W + 2 * BANNER_MARGIN_X)
+#define BANNER_H (BANNER_ART_H + 2 * BANNER_MARGIN_Y)
+#define BANNER_FRAMES 36
+#define BANNER_FRAME_GAP_MS 90
 #define BANNER_MAX_ROWS 10
 #define BANNER_PARTICLES 18
 
@@ -52,6 +64,33 @@ static uint8_t *banner_mask_decode(void) {
         return NULL;
     }
     return mask;
+}
+
+/* ── Theme tint ──────────────────────────────────────────────────────────
+ *
+ * Every scene color derives from the active px_theme's brand color, so the
+ * wordmark follows /theme (matrix renders phosphor green, amber-crt renders
+ * amber, …). The default quiet-console brand reproduces the classic
+ * Distributed crimson exactly. */
+
+typedef struct {
+    float r, g, b;
+} banner_tint_t;
+
+static banner_tint_t banner_brand(void) {
+    const px_theme_t *theme = px_theme_active();
+    return (banner_tint_t){(float)theme->brand.r, (float)theme->brand.g,
+                           (float)theme->brand.b};
+}
+
+static banner_tint_t banner_tint_scale(banner_tint_t c, float k) {
+    return (banner_tint_t){c.r * k, c.g * k, c.b * k};
+}
+
+static banner_tint_t banner_tint_lift(banner_tint_t c, float k) {
+    return (banner_tint_t){c.r + (255.0f - c.r) * k,
+                           c.g + (255.0f - c.g) * k,
+                           c.b + (255.0f - c.b) * k};
 }
 
 /* ── Deterministic per-pixel noise ───────────────────────────────────── */
@@ -109,13 +148,20 @@ static void banner_scene_init(banner_scene_t *sc, const uint8_t *mask, int w,
     sc->oy = ((float)h - sc->scale * (float)BANNER_H) * 0.5f;
 }
 
-/* Bilinear coverage sample at a canvas pixel centre. Degenerates to the
- * exact mask fetch on the identity scene. */
+/* Bilinear coverage sample at a canvas pixel centre. Canvas → artwork units,
+ * then artwork → mask texels, so the high-resolution mask is tapped directly
+ * whenever the canvas outresolves the legacy artwork raster. */
 static float banner_scene_cov(const banner_scene_t *sc, int x, int y) {
-    float ax = ((float)x + 0.5f - sc->ox) / sc->scale -
-               (float)BANNER_MARGIN_X - 0.5f;
-    float ay = ((float)y + 0.5f - sc->oy) / sc->scale -
-               (float)BANNER_MARGIN_Y - 0.5f;
+    const float mx_scale = (float)BANNER_MASK_W / (float)BANNER_ART_W;
+    const float my_scale = (float)BANNER_MASK_H / (float)BANNER_ART_H;
+    float ax = (((float)x + 0.5f - sc->ox) / sc->scale -
+                (float)BANNER_MARGIN_X) *
+                   mx_scale -
+               0.5f;
+    float ay = (((float)y + 0.5f - sc->oy) / sc->scale -
+                (float)BANNER_MARGIN_Y) *
+                   my_scale -
+               0.5f;
     if (ax <= -1.0f || ay <= -1.0f || ax >= (float)BANNER_MASK_W ||
         ay >= (float)BANNER_MASK_H)
         return 0.0f;
@@ -181,15 +227,18 @@ static void banner_scene_particles(banner_px_t *px, const banner_scene_t *sc,
 
 static void banner_scene_streams(banner_px_t *px, const banner_scene_t *sc,
                                  float frac, float phase) {
-    static const banner_particle_cfg_t cfg = {
+    banner_tint_t brand = banner_brand();
+    banner_tint_t body = banner_tint_scale(brand, 0.86f);
+    banner_tint_t head = banner_tint_lift(brand, 0.58f);
+    banner_particle_cfg_t cfg = {
         .count = BANNER_PARTICLES,
         .salt = 0xD15Cu,
         .laps_min = 1,
         .laps_extra = 1,
         .trail = 34,
         .alpha = 0.30f,
-        .body = {200.0f, 30.0f, 34.0f},
-        .head = {255.0f, 160.0f, 144.0f},
+        .body = {body.r, body.g, body.b},
+        .head = {head.r, head.g, head.b},
     };
     banner_scene_particles(px, sc, frac, phase, &cfg);
 }
@@ -203,25 +252,31 @@ static void banner_scene_grid(banner_px_t *px, const banner_scene_t *sc,
     int thick = (int)lroundf(sc->scale * 0.75f);
     if (thick < 1) thick = 1;
     float wave = 0.045f / sc->scale;
+    banner_tint_t grid = banner_tint_scale(banner_brand(), 0.82f);
     for (int y = 0; y < sc->h; y++)
         for (int x = 0; x < sc->w; x++) {
             bool line = (x % spacing) < thick || (y % spacing) < thick;
             if (!line) continue;
             float a = 0.5f *
                       (0.045f + 0.030f * sinf(phase + (float)(x + y) * wave));
-            banner_blend_over(&px[(size_t)y * sc->w + x], 190, 40, 46, a);
+            banner_blend_over(&px[(size_t)y * sc->w + x], grid.r, grid.g,
+                              grid.b, a);
         }
 }
 
-/* Sweep centre for a loop fraction: travels the full diagonal span once per
- * loop, exiting right as it re-enters left so the wrap frame is continuous. */
-#define BANNER_SWEEP_HW 64.0f /* artwork px */
+/* Sweep centre for a loop fraction: an eased out-and-back pass — left edge
+ * to right edge over the first half of the loop, back again over the second.
+ * The cosine easing parks the beam briefly at each edge and slows it into
+ * the turnarounds, so the eye can track the light instead of catching an
+ * unreadable flash. cos is 2π-periodic in frac, so the wrap stays seamless. */
+#define BANNER_SWEEP_HW 110.0f /* artwork px */
 
 static inline float banner_scene_sweep_center(const banner_scene_t *sc,
                                               float frac) {
     const float hw = BANNER_SWEEP_HW * sc->scale;
     const float span = (float)sc->w + 0.45f * (float)sc->h + 2.0f * hw;
-    return frac * span - hw;
+    float p = 0.5f - 0.5f * cosf(2.0f * (float)M_PI * frac);
+    return p * span - hw;
 }
 
 /* Wordmark body. Pass a finite sweep_c to bake the specular sweep into the
@@ -238,18 +293,20 @@ static void banner_scene_wordmark(banner_px_t *px, const banner_scene_t *sc,
     /* Canvas bounding box of the wordmark, one pixel of slack for bilinear. */
     int x0 = (int)floorf(sc->ox + ((float)BANNER_MARGIN_X - 1.0f) * sc->scale);
     int x1 = (int)ceilf(sc->ox +
-                        ((float)(BANNER_MARGIN_X + BANNER_MASK_W) + 1.0f) *
+                        ((float)(BANNER_MARGIN_X + BANNER_ART_W) + 1.0f) *
                             sc->scale);
     int y0 = (int)floorf(sc->oy + ((float)BANNER_MARGIN_Y - 1.0f) * sc->scale);
     int y1 = (int)ceilf(sc->oy +
-                        ((float)(BANNER_MARGIN_Y + BANNER_MASK_H) + 1.0f) *
+                        ((float)(BANNER_MARGIN_Y + BANNER_ART_H) + 1.0f) *
                             sc->scale);
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     if (x1 > sc->w) x1 = sc->w;
     if (y1 > sc->h) y1 = sc->h;
     const float mask_top = sc->oy + (float)BANNER_MARGIN_Y * sc->scale;
-    const float mask_hpx = (float)BANNER_MASK_H * sc->scale;
+    const float mask_hpx = (float)BANNER_ART_H * sc->scale;
+    const banner_tint_t base = banner_brand();
+    const banner_tint_t spark = banner_tint_lift(base, 0.76f);
 
     for (int y = y0; y < y1; y++) {
         /* Slight top-lit vertical gradient across the lockup. */
@@ -267,9 +324,9 @@ static void banner_scene_wordmark(banner_px_t *px, const banner_scene_t *sc,
              * Hashed on canvas pixels, so the grain is device-pixel fine. */
             float flicker = 0.84f + 0.16f * sinf(2.0f * phase + n * 6.28318f);
 
-            float r = 232.0f * flicker * shade;
-            float g = 30.0f * flicker * shade;
-            float b = 36.0f * flicker * shade;
+            float r = base.r * flicker * shade;
+            float g = base.g * flicker * shade;
+            float b = base.b * flicker * shade;
 
             float d = (float)x + 0.45f * (float)(sc->h - y);
             float t = 1.0f - fabsf(d - sweep_c) / sweep_hw;
@@ -285,9 +342,9 @@ static void banner_scene_wordmark(banner_px_t *px, const banner_scene_t *sc,
                 float sp = sinf(3.0f * phase + n * 25.0f);
                 if (sp > 0.55f) {
                     float k = (sp - 0.55f) / 0.45f * 0.55f;
-                    r += (255.0f - r) * k;
-                    g += (200.0f - g) * k;
-                    b += (190.0f - b) * k;
+                    r += (spark.r - r) * k;
+                    g += (spark.g - g) * k;
+                    b += (spark.b - b) * k;
                 }
             }
 
@@ -342,15 +399,19 @@ typedef struct {
 /* Farthest depth: slow, dim, long-trailed embers. */
 static void banner_layer_deep(banner_px_t *px, const banner_scene_t *sc,
                               float frac, float phase) {
-    static const banner_particle_cfg_t cfg = {
+    banner_tint_t brand = banner_brand();
+    banner_tint_t body = banner_tint_scale(brand, 0.52f);
+    banner_tint_t head = banner_tint_scale(banner_tint_lift(brand, 0.12f),
+                                           0.65f);
+    banner_particle_cfg_t cfg = {
         .count = 12,
         .salt = 0xDEE9u,
         .laps_min = 1,
         .laps_extra = 0,
         .trail = 52,
         .alpha = 0.12f,
-        .body = {120.0f, 22.0f, 28.0f},
-        .head = {150.0f, 46.0f, 50.0f},
+        .body = {body.r, body.g, body.b},
+        .head = {head.r, head.g, head.b},
     };
     banner_scene_particles(px, sc, frac, phase, &cfg);
 }
@@ -409,7 +470,7 @@ static const banner_layer_t k_banner_layers[] = {
     {"grid", 24, 150, -2, banner_layer_grid},
     {"streams", 30, 90, -1, banner_layer_streams},
     {"wordmark", 24, 120, 0, banner_layer_wordmark},
-    {"gloss", 48, 70, 1, banner_layer_gloss},
+    {"gloss", 48, 90, 1, banner_layer_gloss},
 };
 #define BANNER_LAYER_COUNT \
     (sizeof(k_banner_layers) / sizeof(k_banner_layers[0]))
@@ -417,6 +478,17 @@ static const banner_layer_t k_banner_layers[] = {
 static inline uint32_t banner_layer_image_id(size_t layer) {
     return (0x4C00u | (uint32_t)layer) << 16 | ((uint32_t)getpid() & 0xFFFFu);
 }
+
+/* Which renderer left images resident in the terminal, so exit teardown
+ * (kitty_banner_clear) deletes exactly the ids this process transmitted and
+ * stays silent on terminals that never received graphics. The canvas
+ * geometry is kept alongside so kitty_banner_dissolve can synthesize
+ * wipe-out frames at the resident image's exact pixel size. */
+static bool g_banner_root_resident;
+static bool g_banner_cells_resident;
+static bool g_banner_layers_resident;
+static int g_banner_res_w;
+static int g_banner_res_h;
 
 /* ── Kitty transport ─────────────────────────────────────────────────── */
 
@@ -457,6 +529,63 @@ typedef enum {
     BANNER_CELLS_SEXTANT,
     BANNER_CELLS_HALF,
 } banner_cells_mode_t;
+
+/* Sextant glyphs live in the Symbols for Legacy Computing block
+ * (U+1FB00–U+1FB7F, Unicode 13/16). A terminal only rasterizes them when its
+ * active font (or a configured fallback) carries that block. kitty/ghostty/
+ * wezterm bundle or synthesize these glyphs; iTerm2, Apple Terminal, and
+ * generic VTE/mono-font terminals fall back to a missing-glyph box, which is
+ * exactly the garbled wordmark reported when dsco runs outside kitty. Rather
+ * than emit undisplayable codepoints, downgrade AUTO to the half-block mosaic
+ * (▀/▄, U+2580/U+2584 — universally covered by the Block Elements block,
+ * present since the original VT terminal fonts) on terminals without known
+ * legacy-computing coverage. An explicit DSCO_BANNER_CELLS=sextant always
+ * wins — the operator may have a Nerd Font patched in. */
+static bool banner_str_contains_ci(const char *haystack, const char *needle) {
+    if (!haystack || !needle || !*needle) return false;
+    size_t nl = strlen(needle);
+    for (const char *p = haystack; *p; p++)
+        if (strncasecmp(p, needle, nl) == 0) return true;
+    return false;
+}
+
+static bool banner_env_true(const char *name) {
+    const char *v = getenv(name);
+    return v && (!strcmp(v, "1") || !strcasecmp(v, "true") ||
+                 !strcasecmp(v, "yes") || !strcasecmp(v, "on") ||
+                 !strcasecmp(v, "force"));
+}
+
+static bool banner_sextant_capable(void) {
+    const char *v = getenv("DSCO_BANNER_CELLS");
+    if (v && *v) return true; /* operator pinned a mode; trust it */
+    if (banner_env_false("DSCO_BANNER_SEXTANT")) return false;
+    const char *term = getenv("TERM");
+    const char *program = getenv("TERM_PROGRAM");
+    /* iTerm2 is the observed failure: no legacy-computing fallback font. */
+    if (program && banner_str_contains_ci(program, "iterm")) return false;
+    if (term && banner_str_contains_ci(term, "iterm")) return false;
+    /* Apple Terminal likewise lacks the block. */
+    if (program && banner_str_contains_ci(program, "apple_terminal"))
+        return false;
+    if (term && banner_str_contains_ci(term, "apple")) return false;
+    /* kitty, ghostty, wezterm, foot, contour and konsole render the block. */
+    if (getenv("KITTY_WINDOW_ID")) return true;
+    if (term && (banner_str_contains_ci(term, "kitty") ||
+                 banner_str_contains_ci(term, "ghostty") ||
+                 banner_str_contains_ci(term, "wezterm") ||
+                 banner_str_contains_ci(term, "foot") ||
+                 banner_str_contains_ci(term, "contour") ||
+                 banner_str_contains_ci(term, "konsole")))
+        return true;
+    if (program && (banner_str_contains_ci(program, "kitty") ||
+                    banner_str_contains_ci(program, "ghostty") ||
+                    banner_str_contains_ci(program, "wezterm")))
+        return true;
+    /* Conservative default: unknown terminals get the safe half-block mosaic
+     * unless the operator explicitly opts into sextants. */
+    return banner_env_true("DSCO_BANNER_SEXTANT");
+}
 
 static banner_cells_mode_t banner_cells_mode(void) {
     const char *v = getenv("DSCO_BANNER_CELLS");
@@ -771,6 +900,9 @@ static int banner_render_cells_pixel(FILE *out, int loops) {
     free(mask);
     if (!ok) return 0;
     fflush(out);
+    g_banner_cells_resident = true;
+    g_banner_res_w = cw;
+    g_banner_res_h = ch;
 
     if (loops < 1) loops = 1;
     int total = loops * BANNER_FRAMES;
@@ -798,6 +930,12 @@ int dsco_banner_render_cells(FILE *out, int loops) {
         if (rendered > 0) return rendered;
         mode = mode == BANNER_CELLS_PIXEL ? BANNER_CELLS_SEXTANT : mode;
     }
+    /* AUTO resolves here: pick the highest-fidelity mosaic this terminal can
+     * actually rasterize. Sextants on a terminal without legacy-computing
+     * font coverage render as missing-glyph boxes, so fall to half-block. */
+    if (mode == BANNER_CELLS_AUTO)
+        mode = banner_sextant_capable() ? BANNER_CELLS_SEXTANT
+                                        : BANNER_CELLS_HALF;
     const int tile_w = mode == BANNER_CELLS_HALF ? 1 : 2;
     const int tile_h = mode == BANNER_CELLS_HALF ? 2 : 3;
 
@@ -855,9 +993,275 @@ int dsco_banner_render_cells(FILE *out, int loops) {
 
 /* ── Public API ──────────────────────────────────────────────────────── */
 
+void kitty_banner_clear(FILE *out) {
+    if (!out) return;
+    if (g_banner_root_resident) {
+        fprintf(out, "\033_Ga=d,d=I,i=%u,q=2\033\\",
+                0x4453u << 16 | ((uint32_t)getpid() & 0xFFFFu));
+        g_banner_root_resident = false;
+    }
+    if (g_banner_cells_resident) {
+        fprintf(out, "\033_Ga=d,d=I,i=%u,q=2\033\\",
+                0x4350u << 16 | ((uint32_t)getpid() & 0xFFFFu));
+        g_banner_cells_resident = false;
+    }
+    if (g_banner_layers_resident) {
+        for (size_t l = 0; l < BANNER_LAYER_COUNT; l++)
+            fprintf(out, "\033_Ga=d,d=I,i=%u,q=2\033\\",
+                    banner_layer_image_id(l));
+        g_banner_layers_resident = false;
+    }
+    fflush(out);
+}
+
 bool kitty_banner_available(FILE *out) {
     if (!out || banner_env_false("DSCO_KITTY_BANNER")) return false;
     return kitty_graphics_available(out);
+}
+
+void kitty_banner_settle(FILE *out) {
+    if (!out) return;
+    if (g_banner_root_resident) {
+        /* Stop the loop and pin the root frame; the placement stays visible
+         * in the scrollback as a static image. */
+        fprintf(out, "\033_Ga=a,i=%u,s=1,c=1,q=2\033\\",
+                0x4453u << 16 | ((uint32_t)getpid() & 0xFFFFu));
+        fflush(out);
+    }
+}
+
+/* ── Laser dissolve ──────────────────────────────────────────────────── */
+
+#define BANNER_DISSOLVE_FRAMES 14
+#define BANNER_DISSOLVE_GAP_MS 60
+
+/* Wipe state at progress t ∈ (0,1]: a white-hot vertical beam sweeps
+ * left→right across the canvas; pixels it just crossed flash into embers
+ * and burn away, pixels further behind are already gone. By t=1 the trail
+ * has cleared the right edge and the canvas is fully transparent. */
+static void banner_laser_wipe(banner_px_t *px, int w, int h, float t) {
+    float core = (float)w / 320.0f + 2.0f;  /* beam width, device px */
+    float trail = (float)w / 30.0f + 12.0f; /* ember falloff behind it */
+    float front = t * ((float)w + core + trail);
+    uint32_t tick = (uint32_t)(t * 63.0f);
+    for (int y = 0; y < h; y++) {
+        banner_px_t *row = px + (size_t)y * (size_t)w;
+        for (int x = 0; x < w; x++) {
+            float d = front - (float)x;
+            if (d < 0.0f) continue; /* ahead of the beam: untouched */
+            banner_px_t *p = row + x;
+            if (d < core) {
+                /* Beam core spans the full canvas height, flickering per
+                 * row so it reads as energy rather than a ruled line. */
+                float flick =
+                    0.7f + 0.3f * banner_noise(banner_hash((uint32_t)y, tick));
+                banner_blend_over(p, 255.0f, 244.0f, 224.0f,
+                                  (1.0f - 0.6f * d / core) * flick);
+                continue;
+            }
+            float u = (d - core) / trail;
+            if (u < 1.0f) {
+                float fade = (1.0f - u) * (1.0f - u);
+                uint32_t hsh = banner_hash((uint32_t)x, (uint32_t)y);
+                if (p->a) {
+                    /* freshly lasered artwork glows hot and decays */
+                    p->r = 255;
+                    p->g = (uint8_t)(90.0f + 110.0f * banner_noise(hsh));
+                    p->b = 24;
+                    p->a = (uint8_t)((float)p->a * fade);
+                } else if (banner_noise(hsh ^ 0xA5A5u) < 0.02f) {
+                    /* sparse sparks drifting over empty ground */
+                    p->r = 255;
+                    p->g = 170;
+                    p->b = 60;
+                    p->a = (uint8_t)(210.0f * fade);
+                }
+                continue;
+            }
+            p->r = p->g = p->b = p->a = 0; /* burnt away */
+        }
+    }
+}
+
+/* Play the wipe on a resident animated image by editing the ROOT frame's
+ * pixels in place (a=f r=1) — everything addresses the image by id, so the
+ * effect plays wherever the placement has scrolled, with no knowledge of
+ * the cursor position. The image is deleted at the end; it is fully
+ * transparent by then, so nothing pops.
+ *
+ * Mechanism notes, all bisected with solid-color probes on kitty 0.47.4
+ * (this effect fails SILENTLY in several tempting ways):
+ *  - a stopped animation accepts a=a,c=N current-frame changes but never
+ *    redraws the placement — c-stepping through appended frames shows
+ *    nothing until the delete;
+ *  - appended frames whose a=f c= background references another APPENDED
+ *    frame are dropped outright (c=1, the root, composites correctly);
+ *  - appended frames DO play in loading mode (a=a,s=2), but the playhead
+ *    jumps to the newest stored frame, so any upload burst skips straight
+ *    to the end of the sweep;
+ *  - editing a frame's pixel data with a=f r=N repaints the placement
+ *    immediately when N is the displayed frame. That is the one primitive
+ *    that both repaints and lets the client own the clock, so the wipe
+ *    burns the root frame itself, one small band per tick.
+ * Park the placement on the root frame first: stop (s=1), pin (c=1 — only
+ * honored while stopped), then s=2 to force the one repaint onto frame 1.
+ * Each tick then edits just the band the beam crossed since the previous
+ * tick (old ember tail through new beam front, X=1 replace), so per-tick
+ * payload stays near the ember band's size at any canvas resolution and
+ * the pacing stays honest. */
+static bool banner_dissolve_frames(FILE *out, uint32_t image_id, int cw,
+                                   int ch) {
+    uint8_t *mask = banner_mask_decode();
+    if (!mask) return false;
+    banner_px_t *base = malloc((size_t)cw * ch * sizeof(*base));
+    banner_px_t *px = malloc((size_t)cw * ch * sizeof(*px));
+    banner_px_t *slab = malloc((size_t)cw * ch * sizeof(*slab));
+    if (!base || !px || !slab) {
+        free(base);
+        free(px);
+        free(slab);
+        free(mask);
+        return false;
+    }
+    banner_scene_t sc;
+    banner_scene_init(&sc, mask, cw, ch);
+    banner_scene_frame(base, &sc, 0, BANNER_FRAMES);
+
+    fprintf(out, "\033_Ga=a,i=%u,s=1,q=2\033\\", image_id);
+    fprintf(out, "\033_Ga=a,i=%u,c=1,q=2\033\\", image_id);
+    fprintf(out, "\033_Ga=a,i=%u,s=2,q=2\033\\", image_id);
+
+    /* Mirror banner_laser_wipe's sweep geometry so each edit band covers
+     * everything that changed since the previous tick: the old ember tail
+     * through the new beam front. */
+    const float core = (float)cw / 320.0f + 2.0f;
+    const float trail = (float)cw / 30.0f + 12.0f;
+    const float span = (float)cw + core + trail;
+
+    /* DSCO_BANNER_DEBUG=1: run the protocol loud (q=1) and log every step
+     * plus whatever the terminal answers on /dev/tty — kitty rejections are
+     * invisible at q=2 and this effect has silently broken before. */
+    bool debug = getenv("DSCO_BANNER_DEBUG") != NULL;
+    int tty_fd = -1;
+    if (debug) tty_fd = open("/dev/tty", O_RDONLY | O_NONBLOCK);
+
+    char control[192];
+    bool ok = true;
+    for (int k = 1; k <= BANNER_DISSOLVE_FRAMES && ok; k++) {
+        memcpy(px, base, (size_t)cw * ch * sizeof(*px));
+        banner_laser_wipe(px, cw, ch, (float)k / BANNER_DISSOLVE_FRAMES);
+        float front_prev = (float)(k - 1) / BANNER_DISSOLVE_FRAMES * span;
+        float front_now = (float)k / BANNER_DISSOLVE_FRAMES * span;
+        int x0 = (int)floorf(front_prev - core - trail) - 2;
+        int x1 = (int)ceilf(front_now) + 2;
+        if (x0 < 0) x0 = 0;
+        if (x1 > cw) x1 = cw;
+        if (x1 <= x0) continue;
+        int sw = x1 - x0;
+        for (int y = 0; y < ch; y++)
+            memcpy(slab + (size_t)y * sw, px + (size_t)y * cw + x0,
+                   (size_t)sw * sizeof(*slab));
+        snprintf(control, sizeof(control),
+                 "a=f,i=%u,r=1,f=32,o=z,x=%d,s=%d,v=%d,X=1,q=%d", image_id,
+                 x0, sw, ch, debug ? 1 : 2);
+        ok = banner_send(out, control, slab, (size_t)sw * ch);
+        fflush(out);
+        usleep(BANNER_DISSOLVE_GAP_MS * 1000);
+        if (debug) {
+            fprintf(stderr, "[dissolve] k=%d x0=%d sw=%d send_ok=%d\n", k, x0,
+                    sw, ok);
+            if (tty_fd >= 0) {
+                char reply[512];
+                ssize_t got;
+                while ((got = read(tty_fd, reply, sizeof(reply) - 1)) > 0) {
+                    reply[got] = '\0';
+                    fprintf(stderr, "[dissolve] tty: %s\n", reply);
+                }
+            }
+        }
+    }
+    if (tty_fd >= 0) close(tty_fd);
+    /* One beat on the final (fully transparent) state, then drop the image. */
+    usleep(2 * BANNER_DISSOLVE_GAP_MS * 1000);
+    fprintf(out, "\033_Ga=d,d=I,i=%u,q=2\033\\", image_id);
+    fflush(out);
+    free(base);
+    free(px);
+    free(slab);
+    free(mask);
+    return ok && !ferror(out);
+}
+
+int kitty_banner_dissolve(FILE *out) {
+    if (!out) return 0;
+    int played = 0;
+    if (g_banner_root_resident && g_banner_res_w > 0) {
+        if (banner_dissolve_frames(
+                out, 0x4453u << 16 | ((uint32_t)getpid() & 0xFFFFu),
+                g_banner_res_w, g_banner_res_h))
+            played = 1;
+        g_banner_root_resident = false;
+    }
+    if (g_banner_cells_resident && g_banner_res_w > 0) {
+        if (banner_dissolve_frames(
+                out, 0x4350u << 16 | ((uint32_t)getpid() & 0xFFFFu),
+                g_banner_res_w, g_banner_res_h))
+            played = 1;
+        g_banner_cells_resident = false;
+    }
+    if (g_banner_layers_resident) {
+        /* No animation extension to lean on here (that is why the layered
+         * renderer exists) — power the stack down instead: peel the planes
+         * off top-down with a beat between each. */
+        for (size_t l = BANNER_LAYER_COUNT; l-- > 0;) {
+            fprintf(out, "\033_Ga=d,d=I,i=%u,q=2\033\\",
+                    banner_layer_image_id(l));
+            fflush(out);
+            if (l) usleep(70 * 1000);
+        }
+        g_banner_layers_resident = false;
+        played = 1;
+    }
+    /* Mop up anything the branches above missed (e.g. a dissolve aborting
+     * mid-stream) so no image outlives the effect. */
+    kitty_banner_clear(out);
+    return played;
+}
+
+/* Loop budget for the server-side handoff, as the protocol's v key
+ * (v=1 loops forever, v=N loops N-1 times). An unbounded loop left resident
+ * for the whole session repaints frames at stale positions once the screen
+ * scrolls or reflows, and a resize while it runs can black out the OS window
+ * (kitty 0.47.4) — so the default is a long-but-finite idle flourish.
+ * DSCO_BANNER_LOOPS=N overrides; 0 restores the old infinite behavior. */
+static int banner_server_loop_key(void) {
+    const char *v = getenv("DSCO_BANNER_LOOPS");
+    if (v && *v) {
+        int n = atoi(v);
+        if (n <= 0) return 1;
+        return (n > 998 ? 998 : n) + 1;
+    }
+    return 31; /* 30 loops ≈ 90s */
+}
+
+/* The server-side animation loop (a=f frames + a=a,s=3) is only trusted on
+ * real kitty. Other terminals that render kitty images (iTerm2, ghostty,
+ * wezterm) ignore or quota-limit the animation extension, which strands the
+ * placement frozen on frame 1 — for those the client-driven layered renderer
+ * keeps the pixels moving over base graphics commands alone. */
+static bool banner_server_animation_hint(void) {
+    if (getenv("KITTY_WINDOW_ID")) return true;
+    const char *term = getenv("TERM");
+    return term && strstr(term, "kitty");
+}
+
+int kitty_banner_render_auto(FILE *out) {
+    if (!kitty_banner_available(out)) return 0;
+    if (banner_server_animation_hint()) {
+        int rows = kitty_banner_render(out);
+        if (rows > 0) return rows;
+    }
+    return kitty_banner_render_layers(out, 1);
 }
 
 /* Cell footprint for the placement: full width minus margins, aspect-scaled
@@ -866,8 +1270,179 @@ bool kitty_banner_available(FILE *out) {
  * canvas of exactly that size renders 1:1 — the terminal never resamples.
  * When the terminal does not report pixel sizes we assume 9×18 cells; the
  * canvas is then still ≥ the classic raster and only ever downscaled. */
-#define BANNER_CANVAS_MAX_W 4096
-#define BANNER_CANVAS_MAX_H 1024
+#define BANNER_CANVAS_MAX_W 8192
+#define BANNER_CANVAS_MAX_H 2048
+
+/* ── Device cell metrics ─────────────────────────────────────────────────
+ *
+ * The canvas must be sized in true device (framebuffer) pixels so the image
+ * maps 1:1 and the terminal never resamples — that is the whole difference
+ * between the crisp kitty render and the soft iTerm2/Terminal.app render.
+ * TIOCGWINSZ is unreliable for this: kitty reports device pixels, iTerm2
+ * commonly reports 0 (→ we'd fall back to a hardcoded 9×18 and under-render
+ * on Retina), and Apple Terminal reports points. So we ask the terminal
+ * directly with CSI 16 t (cell size in pixels; reply "ESC [ 6 ; h ; w t")
+ * and fall back to CSI 14 t (text-area pixels; reply "ESC [ 4 ; h ; w t"),
+ * then TIOCGWINSZ, then 9×18. iTerm2 (≥3.something), kitty, ghostty, wezterm
+ * and xterm all answer 16 t or 14 t with real device pixels.
+ *
+ * The result is cached for the process and re-queried after
+ * kitty_banner_invalidate_geometry() (wired to SIGWINCH), so a font-size or
+ * display-DPI change picks up the new cell size on the next render. */
+static int g_cell_valid;   /* 0 = unqueried/invalidated, 1 = cached */
+static int g_cell_w = 9, g_cell_h = 18;
+static bool g_cell_device; /* true when the size came from the tty in device px */
+
+void kitty_banner_invalidate_geometry(void) { g_cell_valid = 0; }
+
+/* Emit `seq` on the tty and read the terminal's report into `buf` (raw,
+ * no-echo, flushed on restore so a late reply can't leak). Returns bytes read,
+ * 0 on any failure. Only emits once no-echo mode is engaged. */
+static size_t banner_tty_report(FILE *out, const char *seq, char *buf,
+                                size_t bufsz) {
+    int wfd = fileno(out);
+    if (wfd < 0 || !isatty(wfd) || bufsz < 2) return 0;
+    int rfd = open("/dev/tty", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    bool close_rfd = rfd >= 0;
+    if (rfd < 0) {
+        if (!isatty(STDIN_FILENO)) return 0;
+        rfd = STDIN_FILENO;
+    }
+    struct termios saved, raw;
+    bool restore = tcgetattr(rfd, &saved) == 0;
+    if (!restore) {
+        if (close_rfd) close(rfd);
+        return 0; /* cannot suppress echo → a reply would smear the screen */
+    }
+    raw = saved;
+    raw.c_lflag &= (tcflag_t)~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 0;
+    raw.c_cc[VTIME] = 0;
+    if (tcsetattr(rfd, TCSANOW, &raw) != 0) {
+        if (close_rfd) close(rfd);
+        return 0;
+    }
+
+    size_t len = 0;
+    if (fputs(seq, out) >= 0 && fflush(out) == 0) {
+        int elapsed = 0;
+        const int timeout_ms = 120;
+        while (elapsed < timeout_ms && len < bufsz - 1) {
+            struct pollfd pfd = {.fd = rfd, .events = POLLIN};
+            int step = 25;
+            int rc = poll(&pfd, 1, step);
+            elapsed += step;
+            if (rc < 0 && errno != EINTR) break;
+            if (rc <= 0 || !(pfd.revents & POLLIN)) continue;
+            ssize_t n = read(rfd, buf + len, bufsz - 1 - len);
+            if (n <= 0) continue;
+            len += (size_t)n;
+            buf[len] = '\0';
+            /* CSI reports terminate with 't'. */
+            if (memchr(buf, 't', len)) break;
+        }
+    }
+    tcsetattr(rfd, TCSAFLUSH, &saved);
+    tcflush(rfd, TCIFLUSH);
+    if (close_rfd) close(rfd);
+    return len;
+}
+
+/* Parse "ESC [ <lead> ; <a> ; <b> t" out of `buf`. Returns true on match. */
+static bool banner_parse_tsize(const char *buf, int lead, int *a, int *b) {
+    for (const char *p = buf; (p = strchr(p, '\033')) != NULL; p++) {
+        int l = 0, x = 0, y = 0;
+        if (sscanf(p, "\033[%d;%d;%dt", &l, &x, &y) == 3 && l == lead) {
+            *a = x;
+            *b = y;
+            return true;
+        }
+    }
+    return false;
+}
+
+/* Resolve the device cell size (device px per cell). `cols`/`rows` are the
+ * live grid, needed to derive cell size from the CSI 14 t text-area report. */
+static void banner_cell_px(FILE *out, int cols, int rows, int *cw, int *ch,
+                           bool *device) {
+    if (g_cell_valid) {
+        *cw = g_cell_w;
+        *ch = g_cell_h;
+        *device = g_cell_device;
+        return;
+    }
+    int w = 0, h = 0;
+    bool dev = false;
+    /* kitty/ghostty/wezterm report true device pixels through TIOCGWINSZ, so on
+     * those hosts the CSI 16t/14t probe is pure redundant risk: kitty answers
+     * both, but if the echo-suppressed read races the reply it leaks to the
+     * screen as literal "^[[6;…t" *and* corrupts the graphics APC stream that
+     * follows, so the splash never paints. Trust the ioctl and skip the probe
+     * on exactly those terminals. */
+    if (kitty_graphics_environment_hint()) {
+        struct winsize ws;
+        memset(&ws, 0, sizeof(ws));
+        if (ioctl(fileno(out), TIOCGWINSZ, &ws) == 0 && ws.ws_col &&
+            ws.ws_row && ws.ws_xpixel && ws.ws_ypixel) {
+            int cwp = ws.ws_xpixel / ws.ws_col;
+            int chp = ws.ws_ypixel / ws.ws_row;
+            if (cwp >= 4 && chp >= 8) {
+                w = cwp;
+                h = chp;
+                dev = true;
+            }
+        }
+    }
+    if (!dev && !banner_env_false("DSCO_BANNER_TSIZE")) {
+        char buf[64];
+        int a = 0, b = 0;
+        if (banner_tty_report(out, "\033[16t", buf, sizeof(buf)) &&
+            banner_parse_tsize(buf, 6, &a, &b) && a >= 4 && b >= 2) {
+            h = a; /* CSI 16t: a = cell height, b = cell width (device px) */
+            w = b;
+            dev = true;
+        } else if (banner_tty_report(out, "\033[14t", buf, sizeof(buf)) &&
+                   banner_parse_tsize(buf, 4, &a, &b) && cols > 0 && rows > 0 &&
+                   a >= rows && b >= cols) {
+            h = a / rows; /* CSI 14t: a = text-area height, b = width (px) */
+            w = b / cols;
+            dev = true;
+        }
+    }
+    if (w < 4 || h < 8) {
+        /* Fall back to TIOCGWINSZ pixel fields (may be points), then 9×18. */
+        struct winsize ws;
+        memset(&ws, 0, sizeof(ws));
+        if (ioctl(fileno(out), TIOCGWINSZ, &ws) == 0 && ws.ws_col &&
+            ws.ws_row && ws.ws_xpixel && ws.ws_ypixel) {
+            w = ws.ws_xpixel / ws.ws_col;
+            h = ws.ws_ypixel / ws.ws_row;
+        }
+        if (w < 4) w = 9;
+        if (h < 8) h = 18;
+        dev = false;
+    }
+    g_cell_w = w;
+    g_cell_h = h;
+    g_cell_device = dev;
+    g_cell_valid = 1;
+    *cw = w;
+    *ch = h;
+    *device = dev;
+}
+
+/* Supersample factor. With a device-pixel cell size the canvas is already
+ * 1:1 with the framebuffer, so no supersample is needed. When we only have a
+ * point-based estimate (no CSI report, TIOCGWINSZ), render 2× so the terminal
+ * upscales from more than enough detail. DSCO_BANNER_SCALE pins 1..4. */
+static int banner_supersample(bool device_px) {
+    const char *v = getenv("DSCO_BANNER_SCALE");
+    if (v && *v) {
+        int s = atoi(v);
+        if (s >= 1 && s <= 4) return s;
+    }
+    return device_px ? 1 : 2;
+}
 
 static bool banner_placement_geometry(FILE *out, int *place_cols,
                                       int *place_rows, int *canvas_w,
@@ -877,10 +1452,10 @@ static bool banner_placement_geometry(FILE *out, int *place_cols,
     if (ioctl(fileno(out), TIOCGWINSZ, &ws) != 0 || ws.ws_col < 24 ||
         ws.ws_row < 8)
         return false;
-    int cell_w = ws.ws_col && ws.ws_xpixel ? ws.ws_xpixel / ws.ws_col : 9;
-    int cell_h = ws.ws_row && ws.ws_ypixel ? ws.ws_ypixel / ws.ws_row : 18;
-    if (cell_w < 4) cell_w = 9;
-    if (cell_h < 8) cell_h = 18;
+    int cell_w, cell_h;
+    bool device_px;
+    banner_cell_px(out, ws.ws_col, ws.ws_row, &cell_w, &cell_h, &device_px);
+    int ss = banner_supersample(device_px);
 
     int cols = ws.ws_col - 4;
     int rows = (int)lroundf((float)cols * (float)cell_w * (float)BANNER_H /
@@ -894,11 +1469,11 @@ static bool banner_placement_geometry(FILE *out, int *place_cols,
     *place_cols = cols;
     *place_rows = rows;
     if (canvas_w) {
-        int w = cols * cell_w;
+        int w = cols * cell_w * ss;
         *canvas_w = w > BANNER_CANVAS_MAX_W ? BANNER_CANVAS_MAX_W : w;
     }
     if (canvas_h) {
-        int h = rows * cell_h;
+        int h = rows * cell_h * ss;
         *canvas_h = h > BANNER_CANVAS_MAX_H ? BANNER_CANVAS_MAX_H : h;
     }
     return true;
@@ -951,12 +1526,17 @@ int kitty_banner_render(FILE *out) {
     free(mask);
     if (!ok) return 0;
 
-    /* Hand the loop to the terminal (s=3 = run looping, v=1 = loop forever).
-     * The animation survives this process exiting. */
-    fprintf(out, "\033_Ga=a,i=%u,s=3,v=1,r=1,z=%d,q=2\033\\", image_id,
-            BANNER_FRAME_GAP_MS);
+    /* Hand the loop to the terminal (s=3 = run looping; the v key bounds it
+     * — see banner_server_loop_key). The animation survives this process
+     * exiting, and kitty_banner_settle() freezes it early when chat starts. */
+    fprintf(out, "\033_Ga=a,i=%u,s=3,v=%d,r=1,z=%d,q=2\033\\", image_id,
+            banner_server_loop_key(), BANNER_FRAME_GAP_MS);
     fflush(out);
-    return ferror(out) ? 0 : place_rows;
+    if (ferror(out)) return 0;
+    g_banner_root_resident = true;
+    g_banner_res_w = cw;
+    g_banner_res_h = ch;
+    return place_rows;
 }
 
 static long banner_now_ms(void) {
@@ -1052,7 +1632,40 @@ int kitty_banner_render_layers(FILE *out, int loops) {
     fflush(out);
     free(px);
     free(mask);
+    /* Even a failed run may have landed some layer images; deleting an
+     * unknown id is a no-op (q=2), so always arm the exit teardown. */
+    g_banner_layers_resident = true;
     return ok && !ferror(out) ? place_rows : 0;
+}
+
+bool kitty_banner_render_rgba(unsigned char *rgba, int width, int height,
+                              size_t stride, int frame, int frames) {
+    if (!rgba || width < 1 || height < 1 || stride < (size_t)width * 4)
+        return false;
+    if (frames < 1) frames = BANNER_FRAMES;
+    uint8_t *mask = banner_mask_decode();
+    if (!mask) return false;
+    banner_px_t *px = malloc((size_t)width * (size_t)height * sizeof(*px));
+    if (!px) {
+        free(mask);
+        return false;
+    }
+    banner_scene_t sc;
+    banner_scene_init(&sc, mask, width, height);
+    banner_scene_frame(px, &sc, frame % frames, frames);
+    for (int y = 0; y < height; y++) {
+        unsigned char *dst = rgba + (size_t)y * stride;
+        const banner_px_t *src = px + (size_t)y * width;
+        for (int x = 0; x < width; x++) {
+            dst[x * 4 + 0] = src[x].r;
+            dst[x * 4 + 1] = src[x].g;
+            dst[x * 4 + 2] = src[x].b;
+            dst[x * 4 + 3] = src[x].a;
+        }
+    }
+    free(px);
+    free(mask);
+    return true;
 }
 
 /* ── PPM artifacts ───────────────────────────────────────────────────── */
