@@ -6,6 +6,8 @@
 
 typedef struct {
     int installed_skills;
+    int active_doctrines;
+    int agents_files;
     bool has_identity;
     bool has_user;
     bool has_soul;

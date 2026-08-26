@@ -73,6 +73,9 @@ typedef struct {
 typedef void (*stream_text_cb)(const char *text, void *ctx);
 /* Called when a tool_use block starts */
 typedef void (*stream_tool_start_cb)(const char *name, const char *id, void *ctx);
+/* Called with raw incremental tool argument JSON fragments as they arrive. */
+typedef void (*stream_tool_arg_delta_cb)(const char *name, const char *id,
+                                         const char *delta, void *ctx);
 /* Called with thinking text deltas (extended thinking / interleaved thinking) */
 typedef void (*stream_thinking_cb)(const char *text, void *ctx);
 
@@ -176,6 +179,11 @@ typedef struct {
     double total_ttft_ms;
     double total_stream_ms;
     int    telemetry_samples;
+    /* Tokens from only turns with a valid streaming timing sample.  Do not
+     * derive rates from session totals: failed/non-streaming turns otherwise
+     * corrupt the denominator. */
+    int    telemetry_input_tokens;
+    int    telemetry_output_tokens;
     bool   topology_auto;
     /* Tool paging: budget ratio for adaptive tool set sizing */
     float  tool_budget_ratio;  /* 0.0–1.0, 1.0 = full budget, updated each turn */
@@ -402,6 +410,7 @@ bool  llm_anthropic_uses_claude_code_auth(const char *credential);
 stream_result_t llm_stream(const char *api_key, const char *request_json,
                            stream_text_cb text_cb,
                            stream_tool_start_cb tool_cb,
+                           stream_tool_arg_delta_cb tool_delta_cb,
                            stream_thinking_cb thinking_cb,
                            void *cb_ctx);
 void dsco_strip_terminal_controls_inplace(char *s);

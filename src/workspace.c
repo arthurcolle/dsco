@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -16,6 +17,8 @@
 #endif
 
 #define WORKSPACE_FILE_LIMIT 32768
+#define WORKSPACE_PROMPT_LIMIT 131072
+#define WORKSPACE_MAX_AGENTS_FILES 32
 
 static char *s_workspace_prompt = NULL;
 static bool s_workspace_prompt_loaded = false;
@@ -262,6 +265,127 @@ static void markdown_summary_line(const char *text, char *out, size_t out_len) {
     free(copy);
 }
 
+static bool path_parent(char *path) {
+    if (!path || !*path)
+        return false;
+
+    size_t n = strlen(path);
+    while (n > 1 && path[n - 1] == '/')
+        path[--n] = '\0';
+    if (strcmp(path, "/") == 0)
+        return false;
+
+    char *slash = strrchr(path, '/');
+    if (!slash)
+        return false;
+    if (slash == path) {
+        path[1] = '\0';
+        return true;
+    }
+    *slash = '\0';
+    return true;
+}
+
+static bool path_has_dotgit(const char *dir) {
+    if (!dir || !*dir)
+        return false;
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/.git", dir);
+    return n > 0 && (size_t)n < sizeof(path) && access(path, F_OK) == 0;
+}
+
+static bool find_repo_root(const char *cwd, char *out, size_t out_len) {
+    if (!cwd || !*cwd || !out || out_len == 0)
+        return false;
+    char cur[PATH_MAX];
+    snprintf(cur, sizeof(cur), "%s", cwd);
+    for (;;) {
+        if (path_has_dotgit(cur)) {
+            snprintf(out, out_len, "%s", cur);
+            return true;
+        }
+        if (!path_parent(cur))
+            return false;
+    }
+}
+
+static int collect_project_agents_paths(char paths[][PATH_MAX], int max_paths) {
+    if (!paths || max_paths <= 0)
+        return 0;
+
+    char cwd[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd)))
+        return 0;
+
+    char repo_root[PATH_MAX];
+    bool have_repo = find_repo_root(cwd, repo_root, sizeof(repo_root));
+
+    char (*dirs)[PATH_MAX] =
+        safe_malloc((size_t)WORKSPACE_MAX_AGENTS_FILES * sizeof(*dirs));
+    int dir_count = 0;
+    char cur[PATH_MAX];
+    snprintf(cur, sizeof(cur), "%s", cwd);
+
+    for (;;) {
+        snprintf(dirs[dir_count++], sizeof(dirs[0]), "%s", cur);
+        if (!have_repo || strcmp(cur, repo_root) == 0 ||
+            dir_count >= WORKSPACE_MAX_AGENTS_FILES) {
+            break;
+        }
+        if (!path_parent(cur))
+            break;
+    }
+
+    int count = 0;
+    for (int i = dir_count - 1; i >= 0 && count < max_paths; i--) {
+        char path[PATH_MAX];
+        int n = snprintf(path, sizeof(path), "%s/AGENTS.md", dirs[i]);
+        if (n <= 0 || (size_t)n >= sizeof(path))
+            continue;
+        if (access(path, R_OK) != 0)
+            continue;
+        snprintf(paths[count++], PATH_MAX, "%s", path);
+    }
+    free(dirs);
+    return count;
+}
+
+static int count_project_agents_files(void) {
+    char (*paths)[PATH_MAX] =
+        safe_malloc((size_t)WORKSPACE_MAX_AGENTS_FILES * sizeof(*paths));
+    int count = collect_project_agents_paths(paths, WORKSPACE_MAX_AGENTS_FILES);
+    free(paths);
+    return count;
+}
+
+static int count_active_doctrines(void) {
+    char path[PATH_MAX];
+    workspace_path(path, sizeof(path), "doctrine");
+    DIR *dir = opendir(path);
+    if (!dir) {
+        workspace_path(path, sizeof(path), "doctrines");
+        dir = opendir(path);
+    }
+    if (!dir) {
+        return 0;
+    }
+    int count = 0;
+    struct dirent *ent;
+    while ((ent = readdir(dir))) {
+        if (ent->d_name[0] == '.') continue;
+        size_t n = strlen(ent->d_name);
+        if (n < 4 || strcmp(ent->d_name + n - 3, ".md") != 0) continue;
+        if (strcasecmp(ent->d_name, "README.md") == 0 ||
+            strcasecmp(ent->d_name, "INDEX.md") == 0 ||
+            strcasecmp(ent->d_name, "AUDIT_LOG.md") == 0) {
+            continue;
+        }
+        count++;
+    }
+    closedir(dir);
+    return count;
+}
+
 static int count_installed_skills(void) {
     char skills_dir[PATH_MAX];
     workspace_path(skills_dir, sizeof(skills_dir), "skills");
@@ -361,14 +485,16 @@ int dsco_workspace_status(dsco_workspace_status_t *status, char *summary, size_t
         st.has_legacy_prompt = access(path, R_OK) == 0;
     }
     st.installed_skills = count_installed_skills();
+    st.active_doctrines = count_active_doctrines();
+    st.agents_files = count_project_agents_files();
     if (status)
         *status = st;
     if (summary && summary_len > 0) {
         snprintf(summary, summary_len,
-                 "workspace=%s identity=%s user=%s soul=%s memory=%s skills=%d legacy_prompt=%s",
+                 "workspace=%s identity=%s user=%s soul=%s memory=%s skills=%d doctrines=%d agents_md=%d legacy_prompt=%s",
                  dsco_workspace_root(), st.has_identity ? "yes" : "no", st.has_user ? "yes" : "no",
                  st.has_soul ? "yes" : "no", st.has_memory ? "yes" : "no", st.installed_skills,
-                 st.has_legacy_prompt ? "yes" : "no");
+                 st.active_doctrines, st.agents_files, st.has_legacy_prompt ? "yes" : "no");
     }
     return 0;
 }
@@ -593,12 +719,39 @@ static void append_prompt_section(char *dst, size_t dst_len, size_t *pos, const 
     sbuf_append(dst, dst_len, pos, body);
 }
 
+static int append_project_agents_prompt(char *dst, size_t dst_len, size_t *pos) {
+    char (*paths)[PATH_MAX] =
+        safe_malloc((size_t)WORKSPACE_MAX_AGENTS_FILES * sizeof(*paths));
+    int count = collect_project_agents_paths(paths, WORKSPACE_MAX_AGENTS_FILES);
+    if (count <= 0) {
+        free(paths);
+        return 0;
+    }
+
+    sbuf_append(dst, dst_len, pos, "\n\n[Project AGENTS.md]\n");
+    sbuf_append(dst, dst_len, pos,
+                "Hierarchical project instructions follow in root-to-leaf order; "
+                "later scoped files override earlier parent guidance when they conflict.\n");
+    for (int i = 0; i < count; i++) {
+        char *text = NULL;
+        if (!read_file_limit(paths[i], WORKSPACE_FILE_LIMIT, &text))
+            continue;
+        sbuf_append(dst, dst_len, pos, "\n--- ");
+        sbuf_append(dst, dst_len, pos, paths[i]);
+        sbuf_append(dst, dst_len, pos, " ---\n");
+        sbuf_append(dst, dst_len, pos, text);
+        free(text);
+    }
+    free(paths);
+    return count;
+}
+
 const char *dsco_workspace_prompt(void) {
     if (s_workspace_prompt_loaded)
         return s_workspace_prompt;
     s_workspace_prompt_loaded = true;
 
-    char *buf = safe_malloc(131072);
+    char *buf = safe_malloc(WORKSPACE_PROMPT_LIMIT);
     size_t pos = 0;
     buf[0] = '\0';
 
@@ -608,10 +761,12 @@ const char *dsco_workspace_prompt(void) {
         snprintf(legacy, sizeof(legacy), "%s/.dsco/system_prompt.txt", home);
         char *text = NULL;
         if (read_file_limit(legacy, WORKSPACE_FILE_LIMIT, &text)) {
-            append_prompt_section(buf, 131072, &pos, "Legacy System Prompt", text);
+            append_prompt_section(buf, WORKSPACE_PROMPT_LIMIT, &pos, "Legacy System Prompt", text);
             free(text);
         }
     }
+
+    append_project_agents_prompt(buf, WORKSPACE_PROMPT_LIMIT, &pos);
 
     const char *docs[][2] = {
         {"Identity", "IDENTITY.md"},
@@ -624,15 +779,15 @@ const char *dsco_workspace_prompt(void) {
         workspace_path(path, sizeof(path), docs[i][1]);
         char *text = NULL;
         if (read_file_limit(path, WORKSPACE_FILE_LIMIT, &text)) {
-            append_prompt_section(buf, 131072, &pos, docs[i][0], text);
+            append_prompt_section(buf, WORKSPACE_PROMPT_LIMIT, &pos, docs[i][0], text);
             free(text);
         }
     }
 
     char skills[16384];
     if (dsco_workspace_list_skills(skills, sizeof(skills)) > 0) {
-        append_prompt_section(buf, 131072, &pos, "Installed Skills Catalog", skills);
-        sbuf_append(buf, 131072, &pos,
+        append_prompt_section(buf, WORKSPACE_PROMPT_LIMIT, &pos, "Installed Skills Catalog", skills);
+        sbuf_append(buf, WORKSPACE_PROMPT_LIMIT, &pos,
                     "\n\n[Skill Policy]\nInstalled skills live under "
                     "~/.dsco/workspace/skills/<name>/SKILL.md. "
                     "If the user names a skill explicitly, follow it. Otherwise use skills only "

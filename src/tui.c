@@ -69,6 +69,8 @@ static pthread_mutex_t g_term_mutex = PTHREAD_MUTEX_INITIALIZER;
 static volatile sig_atomic_t g_composer_reading = 0;
 static volatile sig_atomic_t g_composer_interrupt_requested = 0;
 static volatile sig_atomic_t g_composer_restore_active = 0;
+/* Remains true after submit while the idle composer owns bottom rows. */
+static volatile sig_atomic_t g_composer_mounted = 0;
 static volatile sig_atomic_t g_composer_restore_top = 0;
 static volatile sig_atomic_t g_composer_restore_bottom = 0;
 static volatile sig_atomic_t g_composer_external_redraw_requested = 0;
@@ -409,12 +411,14 @@ static void tui_composer_restore_track(int top, int bottom) {
     g_composer_restore_top = (sig_atomic_t)top;
     g_composer_restore_bottom = (sig_atomic_t)bottom;
     g_composer_restore_active = 1;
+    g_composer_mounted = 1;
     if (isatty(STDERR_FILENO) && top > 1)
         tui_write_scroll_region(STDERR_FILENO, top - 1);
 }
 
 static void tui_composer_restore_untrack(void) {
     g_composer_restore_active = 0;
+    g_composer_mounted = 0;
     g_composer_restore_top = 0;
     g_composer_restore_bottom = 0;
     if (isatty(STDERR_FILENO))
@@ -449,21 +453,17 @@ static void tui_clear_tracked_composer_area(int fd) {
 }
 
 static bool tui_clear_tracked_composer_area_for_output(int fd) {
-    if (!g_composer_reading || !g_composer_restore_active)
+    /* The bottom panel remains mounted after submit, so protection cannot be
+     * tied to raw-mode input. DECSTBM prevents transcript scrolling into the
+     * panel; clearing owned rows here created a race before repaint. */
+    if (!g_composer_mounted || !g_composer_restore_active)
         return false;
     int top = (int)g_composer_restore_top;
-    int bottom = (int)g_composer_restore_bottom;
-    if (top < 1 || bottom < top)
+    if (top < 2)
         return false;
-    if (bottom - top > 80)
-        bottom = top + 80;
-    for (int row = top; row <= bottom; row++)
-        tui_write_clear_row(fd, row);
-    int output_row = top > 1 ? top - 1 : 1;
+    int output_row = top - 1;
     tui_write_scroll_region(fd, output_row);
     tui_write_move_cursor(fd, output_row, 1);
-    tui_write_clear_row(fd, output_row);
-    g_composer_external_redraw_requested = 1;
     return true;
 }
 
@@ -984,14 +984,15 @@ static void fg_color_auto(tui_rgb_t c);
 /* ── Welcome banner ───────────────────────────────────────────────────── */
 
 void tui_welcome(const char *model, int core_count, int total_count, const char *version) {
-    /* DSCO_SPLASH=off  → silent (no banner at all)
+    /* DSCO_SPLASH=off     → silent (no banner at all)
        DSCO_SPLASH=compact → single status line, no animation
-       anything else   → full animated logo (default) */
+       DSCO_SPLASH=full    → full animated logo
+       default             → compact (stable across terminal fonts/resizes) */
     const char *splash_env = getenv("DSCO_SPLASH");
     if (splash_env && strcasecmp(splash_env, "off") == 0)
         return; /* silent startup */
 
-    if (splash_env && strcasecmp(splash_env, "compact") == 0) {
+    if (!splash_env || strcasecmp(splash_env, "compact") == 0) {
         /* One-line compact header: dsco version · model · N tools (M loadable) */
         const tui_glyphs_t *gl = tui_glyph();
         fprintf(stderr, "%s%s%s dsco %sv%s%s  %s·%s  %s%s%s  %s·%s  %s%d tools%s %s(%d loadable)%s\n",
@@ -1005,8 +1006,11 @@ void tui_welcome(const char *model, int core_count, int total_count, const char 
         return;
     }
 
-    /* Use animated gradient version when truecolor or 256-color is available */
-    if (tui_detect_color_level() >= TUI_COLOR_256) {
+    /* The animated banner is opt-in: wide-gradient ANSI art is fragile in
+     * iTerm when fonts, zoom, or window width differ from the assumptions
+     * used by the renderer. Keep startup compact and deterministic by default. */
+    if (splash_env && strcasecmp(splash_env, "full") == 0 &&
+        tui_detect_color_level() >= TUI_COLOR_256) {
         welcome_animated(model, core_count, total_count, version);
         return;
     }
@@ -4403,6 +4407,25 @@ static int slashmenu_rows(int count) {
     return count < TUI_SLASHMENU_MAX ? count : TUI_SLASHMENU_MAX;
 }
 
+/* Single source of truth for initial placement and every redraw. */
+static int composer_reserved_rows(const char *buf, size_t len,
+                                  int slash_count, int image_count) {
+    int image_rows = image_count < TUI_IMGPICK_MAX ? image_count : TUI_IMGPICK_MAX;
+    return inbox_total_rows(buf, len) + slashmenu_rows(slash_count) + image_rows;
+}
+
+/* Authoritative composer anchor: the box's last row is the terminal's last row,
+ * so r_top = term_rows - needed + 1, clamped to >= 1 when the composer is taller
+ * than the screen. Both the mount path and the redraw path MUST anchor through
+ * this — divergent r_top math is the composer/transcript overlap defect. Pure:
+ * no I/O, no globals, fully determined by (term_rows, needed). */
+static int composer_anchor_row(int term_rows, int needed) {
+    int r_top = term_rows - needed + 1;
+    if (r_top < 1)
+        r_top = 1;
+    return r_top;
+}
+
 /* Draw the dropdown starting at screen row r_first. Returns rows drawn.
  * `idx`/`count` come from composer_slash_match; `sel` is the highlighted row. */
 static int slashmenu_render(int r_first, const int *idx, int count, int sel,
@@ -4585,22 +4608,15 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
     /* Anchor the inline box at the current cursor row. If the box would
      * extend past the bottom of the terminal, scroll up first so it fits.
      * We track r_top across keystrokes so resize/growth can re-anchor. */
-    int needed = inbox_total_rows(buf, len);
-    /* Pin the composer to the bottom of the terminal. Open `needed` rows at the
-     * bottom by scrolling existing output up, then anchor the box so its last
-     * row sits on the final terminal row. This keeps the input field fixed at
-     * the bottom instead of floating wherever the previous turn left the
-     * cursor. */
-    int r_top = rows - needed + 1;
-    if (r_top < 1)
-        r_top = 1;
+    int needed = composer_reserved_rows(buf, len, sug_count, imgpick_count);
+    /* Pin the composer to the bottom of the terminal. The owned rows are
+     * cleared by composer_paint; do not scroll an unrestricted terminal to
+     * create room, because that lets transcript output contaminate chrome. */
+    int r_top = composer_anchor_row(rows, needed);
     tui_term_lock();
-    tui_cursor_move(rows, 1);
-    for (int i = 0; i < needed; i++)
-        fputc('\n', stderr);
-    fflush(stderr);
-    tui_term_unlock();
+    /* Establish the transcript margin before exposing the mounted composer. */
     tui_composer_restore_track(r_top, rows);
+    tui_term_unlock();
     int prev_height = 0;
     int prev_r_top = r_top;
 
@@ -5171,8 +5187,7 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
               if (imgpick_sel >= imgpick_count)
                   imgpick_sel = imgpick_count > 0 ? imgpick_count - 1 : 0;
               if (imgpick_sel < 0) imgpick_sel = 0; }
-            int need = inbox_total_rows(buf, len) + slashmenu_rows(sug_count)
-                       + (imgpick_count < TUI_IMGPICK_MAX ? imgpick_count : TUI_IMGPICK_MAX);
+            int need = composer_reserved_rows(buf, len, sug_count, imgpick_count);
             (void)g_composer_external_redraw_requested;
             g_composer_external_redraw_requested = 0;
             /* Always pin to the bottom: anchor the box so its last row is the
@@ -5183,26 +5198,14 @@ char *tui_composer_read(tui_status_bar_t *sb, const char *prompt, char *out, siz
             if (new_r_top < 1)
                 new_r_top = 1;
             int prev_bottom = prev_r_top + prev_height - 1;
-            if (new_r_top < prev_r_top || prev_height == 0) {
-                /* Need more rows than before (or first paint after re-anchor):
-                 * scroll the terminal up to make space at the bottom. */
-                int grow = (prev_height == 0) ? need : (prev_r_top - new_r_top);
-                if (grow > 0) {
-                    tui_term_lock();
-                    fprintf(stderr, "\033[?25l");
-                    tui_cursor_move(nrows, 1);
-                    for (int i = 0; i < grow; i++)
-                        fputc('\n', stderr);
-                    fflush(stderr);
-                    tui_term_unlock();
-                }
-            }
+            /* composer_paint clears its owned rows. Never scroll the unrestricted
+             * screen to create space: DECSTBM owns the boundary instead. */
             if (nrows != rows)
                 rows = nrows;
-            tui_composer_restore_track(new_r_top, rows);
 
             tui_term_lock();
             fprintf(stderr, "\033[?25l");
+            tui_composer_restore_track(new_r_top, rows);
             /* Erase the entire previous footprint when the box moved or shrank,
              * so no stale border rows linger above/below (the "shadow"). */
             if (prev_height > 0) {

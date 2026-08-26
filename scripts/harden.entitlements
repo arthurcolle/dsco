@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Allow linking against Homebrew/third-party dylibs (libsodium, libuv,
+         hiredis) that are not signed by our team. Without this, the hardened
+         runtime refuses to load them. We deliberately do NOT grant
+         get-task-allow, so debuggers still cannot attach. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <!-- Block DYLD_INSERT_LIBRARIES-style injection of environment dylibs. -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <false/>
+    <!-- No JIT / unsigned executable memory — nothing here needs it, and
+         denying it blocks a common code-injection primitive. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <false/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <false/>
+</dict>
+</plist>

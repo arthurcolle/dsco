@@ -6,23 +6,23 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 ## Summary
 
-- Total covered files: 650
+- Total covered files: 795
 
 | Category | Files |
 |---|---:|
-| Root project files | 25 |
-| Repository policy and CI | 15 |
-| Documentation | 47 |
-| Runtime source and headers | 260 |
-| Tests | 28 |
-| Scripts and tooling | 48 |
-| Generated data assets | 8 |
+| Root project files | 38 |
+| Repository policy and CI | 60 |
+| Documentation | 50 |
+| Runtime source and headers | 289 |
+| Tests | 33 |
+| Scripts and tooling | 50 |
+| Generated data assets | 9 |
 | Provider metadata | 17 |
 | Web surface | 11 |
 | Packaging and distribution | 12 |
 | Demos | 3 |
 | Vendored and compatibility code | 155 |
-| Other tracked files | 21 |
+| Other tracked files | 68 |
 
 ## Generated Coverage
 
@@ -47,10 +47,12 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `.markdownlint.jsonc`
 - `.mcp.json`
 - `.pre-commit-config.yaml`
+- `AGENTS.md`
 - `CHANGELOG.md`
 - `CODEOWNERS`
 - `CODE_OF_CONDUCT.md`
 - `CONTRIBUTING.md`
+- `FINDINGS.md`
 - `GLOSSARY.md`
 - `GOVERNANCE_HOLD.md`
 - `LICENSE`
@@ -58,8 +60,19 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `PRAXIS_ARCHITECTURE.md`
 - `README.md`
 - `SECURITY.md`
+- `add.c`
 - `dsc.c`
 - `face_capture.py`
+- `graphsub-domain-modal.py`
+- `graphsub-next-layout.tsx`
+- `graphsub-next-page.tsx`
+- `graphsub-phosphor-sota.html`
+- `logo_crop_local.png`
+- `mobius`
+- `mobius.c`
+- `quine`
+- `quine.c`
+- `quine_out.txt`
 
 ### Repository policy and CI
 
@@ -78,6 +91,51 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `.github/workflows/release.yml`
 - `.github/workflows/security.yml`
 - `.github/workflows/stale.yml`
+- `.swarm/runs/swarm_1783376212_g0_create_cross-provider-test/claims.json`
+- `.swarm/runs/swarm_1783376212_g0_create_cross-provider-test/coordinator.md`
+- `.swarm/runs/swarm_1783376212_g0_create_cross-provider-test/manifest.json`
+- `.swarm/runs/swarm_1783376212_g0_create_cross-provider-test/metrics.json`
+- `.swarm/runs/swarm_1783376212_g0_create_cross-provider-test/transcript.md`
+- `.swarm/runs/swarm_1783378199_g0_create_dsco-emergency-review/claims.json`
+- `.swarm/runs/swarm_1783378199_g0_create_dsco-emergency-review/coordinator.md`
+- `.swarm/runs/swarm_1783378199_g0_create_dsco-emergency-review/manifest.json`
+- `.swarm/runs/swarm_1783378199_g0_create_dsco-emergency-review/metrics.json`
+- `.swarm/runs/swarm_1783378199_g0_create_dsco-emergency-review/transcript.md`
+- `.swarm/runs/swarm_1783378260_g0_create_cross-provider-test/claims.json`
+- `.swarm/runs/swarm_1783378260_g0_create_cross-provider-test/coordinator.md`
+- `.swarm/runs/swarm_1783378260_g0_create_cross-provider-test/manifest.json`
+- `.swarm/runs/swarm_1783378260_g0_create_cross-provider-test/metrics.json`
+- `.swarm/runs/swarm_1783378260_g0_create_cross-provider-test/transcript.md`
+- `.swarm/runs/swarm_1783378342_g0_create_cross-provider-test/claims.json`
+- `.swarm/runs/swarm_1783378342_g0_create_cross-provider-test/coordinator.md`
+- `.swarm/runs/swarm_1783378342_g0_create_cross-provider-test/manifest.json`
+- `.swarm/runs/swarm_1783378342_g0_create_cross-provider-test/metrics.json`
+- `.swarm/runs/swarm_1783378342_g0_create_cross-provider-test/transcript.md`
+- `.swarm/runs/swarm_1783378386_g0_collect_dsco-emergency-review/claims.json`
+- `.swarm/runs/swarm_1783378386_g0_collect_dsco-emergency-review/coordinator.md`
+- `.swarm/runs/swarm_1783378386_g0_collect_dsco-emergency-review/manifest.json`
+- `.swarm/runs/swarm_1783378386_g0_collect_dsco-emergency-review/metrics.json`
+- `.swarm/runs/swarm_1783378386_g0_collect_dsco-emergency-review/transcript.md`
+- `.swarm/runs/swarm_1783378516_g0_create_cross-provider-test/claims.json`
+- `.swarm/runs/swarm_1783378516_g0_create_cross-provider-test/coordinator.md`
+- `.swarm/runs/swarm_1783378516_g0_create_cross-provider-test/manifest.json`
+- `.swarm/runs/swarm_1783378516_g0_create_cross-provider-test/metrics.json`
+- `.swarm/runs/swarm_1783378516_g0_create_cross-provider-test/transcript.md`
+- `.swarm/runs/swarm_1783378599_g0_create_cross-provider-test/claims.json`
+- `.swarm/runs/swarm_1783378599_g0_create_cross-provider-test/coordinator.md`
+- `.swarm/runs/swarm_1783378599_g0_create_cross-provider-test/manifest.json`
+- `.swarm/runs/swarm_1783378599_g0_create_cross-provider-test/metrics.json`
+- `.swarm/runs/swarm_1783378599_g0_create_cross-provider-test/transcript.md`
+- `.swarm/runs/swarm_1783381145_g1_create_deepnote-language-design/claims.json`
+- `.swarm/runs/swarm_1783381145_g1_create_deepnote-language-design/coordinator.md`
+- `.swarm/runs/swarm_1783381145_g1_create_deepnote-language-design/manifest.json`
+- `.swarm/runs/swarm_1783381145_g1_create_deepnote-language-design/metrics.json`
+- `.swarm/runs/swarm_1783381145_g1_create_deepnote-language-design/transcript.md`
+- `.swarm/runs/swarm_1783381502_g1_collect_deepnote-language-design/claims.json`
+- `.swarm/runs/swarm_1783381502_g1_collect_deepnote-language-design/coordinator.md`
+- `.swarm/runs/swarm_1783381502_g1_collect_deepnote-language-design/manifest.json`
+- `.swarm/runs/swarm_1783381502_g1_collect_deepnote-language-design/metrics.json`
+- `.swarm/runs/swarm_1783381502_g1_collect_deepnote-language-design/transcript.md`
 
 ### Documentation
 
@@ -119,6 +177,9 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `docs/consumer_profile_ontology/HYPER_PRIVATE_BOUNDARIES.md`
 - `docs/consumer_profile_ontology/POLICY.md`
 - `docs/consumer_profile_ontology/README.md`
+- `docs/fisher-ewc-spec.md`
+- `docs/harness.json`
+- `docs/llms.txt`
 - `docs/topologies/01_chains.md`
 - `docs/topologies/02_fanout.md`
 - `docs/topologies/03_hierarchy.md`
@@ -131,7 +192,9 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 ### Runtime source and headers
 
+- `include/activation_lease.h`
 - `include/agent.h`
+- `include/agent_event.h`
 - `include/agent_profile.h`
 - `include/anim.h`
 - `include/arena_alloc.h`
@@ -141,12 +204,17 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/avian.h`
 - `include/baseline.h`
 - `include/bg_learn.h`
+- `include/callbacks.h`
+- `include/capability.h`
 - `include/chronicle.h`
 - `include/cluster.h`
 - `include/codex_app_directory.h`
 - `include/codex_cache.h`
+- `include/command_plane.h`
+- `include/compute.h`
 - `include/config.h`
 - `include/connector.h`
+- `include/construct.h`
 - `include/control_flow.h`
 - `include/coroutine.h`
 - `include/cost_budget.h`
@@ -159,6 +227,8 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/dsco_dht.h`
 - `include/dsco_mlx.h`
 - `include/dsco_pool.h`
+- `include/dsco_swim.h`
+- `include/durable_agents.h`
 - `include/embedded_data_registry.h`
 - `include/env_config.h`
 - `include/env_guard.h`
@@ -176,6 +246,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/fingerprint.h`
 - `include/fractal.h`
 - `include/frontier.h`
+- `include/gov_experiment.h`
 - `include/governance.h`
 - `include/graphsub_client.h`
 - `include/heartbeat.h`
@@ -195,6 +266,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/math_fastpath.h`
 - `include/mcp.h`
 - `include/mcp_names.h`
+- `include/mcp_server.h`
 - `include/md.h`
 - `include/memory_tier.h`
 - `include/mesh.h`
@@ -217,6 +289,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/project.h`
 - `include/project_grid.h`
 - `include/project_mux.h`
+- `include/prompt_pool.h`
 - `include/provider.h`
 - `include/provider_pool.h`
 - `include/provider_profiles.h`
@@ -230,6 +303,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/sealed_store.h`
 - `include/self_improve.h`
 - `include/semantic.h`
+- `include/sequence_state.h`
 - `include/session_memory.h`
 - `include/setup.h`
 - `include/shadeexpr.h`
@@ -260,8 +334,11 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/waiter.h`
 - `include/wasm_core.h`
 - `include/watchdog.h`
+- `include/webhook_security.h`
 - `include/workspace.h`
+- `src/activation_lease.c`
 - `src/agent.c`
+- `src/agent_event.c`
 - `src/agent_profile.c`
 - `src/anim.c`
 - `src/arena_alloc.c`
@@ -271,11 +348,17 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/avian.c`
 - `src/baseline.c`
 - `src/bg_learn.c`
+- `src/bus_cli.c`
+- `src/callbacks.c`
+- `src/capability.c`
 - `src/chronicle.c`
 - `src/cluster.c`
 - `src/codex_app_directory.c`
 - `src/codex_cache.c`
+- `src/command_plane.c`
+- `src/compute.c`
 - `src/connector.c`
+- `src/construct.c`
 - `src/control_flow.c`
 - `src/cost_model.c`
 - `src/crypto.c`
@@ -285,6 +368,8 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/dsco_dht.c`
 - `src/dsco_mlx.c`
 - `src/dsco_pool.c`
+- `src/dsco_swim.c`
+- `src/durable_agents.c`
 - `src/env_config.c`
 - `src/env_guard.c`
 - `src/error.c`
@@ -302,6 +387,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/fingerprint.c`
 - `src/fractal.c`
 - `src/frontier.c`
+- `src/gov_experiment.c`
 - `src/governance.c`
 - `src/graphsub_client.c`
 - `src/graphsub_tools.c`
@@ -326,6 +412,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/math_fastpath.c`
 - `src/mcp.c`
 - `src/mcp_names.c`
+- `src/mcp_server.c`
 - `src/md.c`
 - `src/memory_tier.c`
 - `src/mesh.c`
@@ -349,6 +436,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/project.c`
 - `src/project_grid.c`
 - `src/project_mux.c`
+- `src/prompt_pool.c`
 - `src/provider.c`
 - `src/provider_pool.c`
 - `src/provider_profiles.c`
@@ -362,6 +450,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/sealed_store.c`
 - `src/self_improve.c`
 - `src/semantic.c`
+- `src/sequence_state.c`
 - `src/session_memory.c`
 - `src/setup.c`
 - `src/shadeexpr.c`
@@ -390,6 +479,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/waiter.c`
 - `src/wasm_core.c`
 - `src/watchdog.c`
+- `src/webhook_security.c`
 - `src/workspace.c`
 
 ### Tests
@@ -400,16 +490,21 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `tests/math_corpus.tsv`
 - `tests/mcp_openrouter_smoke.c`
 - `tests/scratchpad_test.c`
+- `tests/smoke_callbacks.py`
 - `tests/test.c`
 - `tests/test_17_layers.sh`
 - `tests/test_avian.c`
 - `tests/test_calibration.py`
+- `tests/test_capability_tiering.c`
+- `tests/test_command_plane.c`
 - `tests/test_control_flow.c`
+- `tests/test_gov_bypass.c`
 - `tests/test_hlc.c`
 - `tests/test_learned_cost.c`
 - `tests/test_math_corpus.c`
 - `tests/test_memory_classification.c`
 - `tests/test_memory_keep_score.c`
+- `tests/test_net_fanout.c`
 - `tests/test_nwp_pipeline.py`
 - `tests/test_openrouter.c`
 - `tests/test_plan_cache.c`
@@ -463,10 +558,12 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `scripts/index_constants_env.py`
 - `scripts/live_face_avatar.sh`
 - `scripts/mine_book_pages.py`
+- `scripts/model_resolution_sim.py`
 - `scripts/perf_diagram_suite.py`
 - `scripts/provider_metadata_audit.py`
 - `scripts/qualify_provisioned_dsco.sh`
 - `scripts/release_hardened.py`
+- `scripts/scenario_model.py`
 - `scripts/setup_homebrew_tap.sh`
 - `scripts/slot_inventory.py`
 - `scripts/test_modal_dsco_live.sh`
@@ -479,6 +576,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `data/constants_env_index.json`
 - `data/consumer_profile_ontology/example_user_profile.json`
 - `data/consumer_profile_ontology/prohibited_patterns.json`
+- `data/consumer_profile_ontology/prompt_analyzer.py`
 - `data/consumer_profile_ontology/summary.json`
 - `data/consumer_profile_ontology/summary_base_with_boundaries.json`
 - `data/consumer_profile_ontology/summary_extended_50k.json`
@@ -701,8 +799,10 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 ### Other tracked files
 
 - `bench/RESULTS.txt`
+- `bench/agentic_bench.sh`
 - `bench/bench_libs.c`
 - `bench/diff_json.c`
+- `design/agent_runtime_governed.md`
 - `doctrine/CLASSIFICATION.md`
 - `doctrine/MEMORY.md`
 - `doctrine/MEMORY_UPGRADE_2026-06-28.md`
@@ -711,9 +811,54 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `examples/max_swarm/README.md`
 - `examples/max_swarm/swarm.py`
 - `examples/max_swarm/test_swarm.py`
+- `levitate/expandify.py`
+- `levitate/levitate.py`
+- `patches/expandify-tools.patch`
+- `prompts/PRAECEPTUM_SYSTEMATIS_DSCO.md`
 - `proposals/LOOP-F1-F4/PATCHSET.md`
 - `proposals/PRAXIS-v1/GATE.md`
 - `proposals/PRAXIS-v1/PROPOSAL.md`
+- `proposals/activation_scheduler_leases_heartbeats.md`
+- `proposals/context_tools_test_plan.md`
+- `proposals/proof-substrate/README.md`
+- `proposals/proof-substrate/prop_harness`
+- `proposals/proof-substrate/prop_harness.c`
+- `proposals/proof-substrate/prop_registry.lean`
+- `proposals/proof-substrate/thx_analysis/NOVA_AGENT_LANGUAGE.md`
+- `proposals/proof-substrate/thx_analysis/deepnote_agent_sentence.wav`
+- `proposals/proof-substrate/thx_analysis/deepnote_lang_synth.py`
+- `proposals/proof-substrate/thx_analysis/extract_phonology.py`
+- `proposals/proof-substrate/thx_analysis/kord_spec.md`
+- `proposals/proof-substrate/thx_analysis/make_spectrogram.py`
+- `proposals/proof-substrate/thx_analysis/nova_sentence_spectrogram.png`
+- `proposals/proof-substrate/thx_analysis/thx.wav`
+- `proposals/proof-substrate/thx_analysis/thx_arc.npz`
+- `proposals/proof-substrate/thx_analysis/thx_peak_trace.csv`
+- `proposals/proof-substrate/thx_analysis/thx_spectrogram_linear.png`
+- `proposals/proof-substrate/thx_analysis/thx_spectrogram_log.png`
+- `proposals/proof-substrate/thx_analysis/thx_video.mp4`
+- `proposals/swarm-cost/PLAN_64X.md`
+- `proposals/swarm-cost/README.md`
+- `proposals/swarm-cost/swarm_cost`
+- `proposals/swarm-cost/swarm_cost_model.h`
+- `proposals/swarm-cost/swarm_cost_optimizer.c`
+- `proposals/swarm-cost/swarm_cost_props`
+- `proposals/swarm-cost/swarm_cost_props.c`
+- `proposals/swarm-cost/swarm_cost_props.lean`
+- `reports/consolidation-closeout-2026-07-05.md`
+- `reports/patches/runtime-power-hotpath-tests.patch`
+- `reports/perf_push_limit/PERFORMANCE_PUSH_LIMIT_REPORT.md`
+- `reports/perf_push_limit/baseline.md`
+- `reports/perf_push_limit/baseline_latency.svg`
+- `reports/perf_push_limit/baseline_runs.jsonl`
+- `reports/perf_push_limit/baseline_summary.json`
+- `reports/perf_push_limit/index.html`
+- `reports/perf_push_limit/multiturn_rollout.jsonl`
+- `reports/perf_push_limit/rollout_projection.svg`
+- `reports/perf_push_limit/rollout_stdout.jsonl`
+- `reports/perf_push_limit/startup_spans.csv`
+- `reports/perf_push_limit/startup_spans.svg`
+- `research/multi-tenant-quota-budget-design.md`
 - `rituals/CLASSIFY.md`
 - `rituals/DECLASSIFY.md`
 - `runbooks/incidents/COMPARTMENT_BREACH.md`

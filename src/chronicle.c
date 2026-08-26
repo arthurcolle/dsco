@@ -703,9 +703,20 @@ int chronicle_runs_cli(int argc, char **argv) {
     const char *cmd = argc >= 3 ? argv[2] : "list";
     char runs[PATH_MAX];
     runs_dir_path(runs, sizeof(runs));
+    if (strcmp(cmd, "help") == 0 || strcmp(cmd, "-h") == 0 ||
+        strcmp(cmd, "--help") == 0) {
+        printf("Usage: dsco runs [list|show <run-id>|check <run-id>|gc]\n"
+               "\n"
+               "Inspect crash-safe Chronicle run journals without creating a new run.\n");
+        return 0;
+    }
     if (strcmp(cmd, "list") == 0 || strcmp(cmd, "ls") == 0) {
         DIR *d = opendir(runs);
-        if (!d) { fprintf(stderr, "no runs directory: %s\n", runs); return 1; }
+        if (!d) {
+            if (errno == ENOENT) return 0;
+            fprintf(stderr, "cannot open runs directory: %s\n", runs);
+            return 1;
+        }
         struct dirent *ent;
         while ((ent = readdir(d))) {
             if (ent->d_name[0] == '.') continue;
