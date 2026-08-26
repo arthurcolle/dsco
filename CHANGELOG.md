@@ -11,9 +11,10 @@ _Nothing yet._
 ## [1.1.0] - 2026-08-26
 
 Promoted from the mixed working tree per the principal's release authorization:
-candidate isolated and committed (`5fc0d8b`), full test suite green
-(5,227/5,227), capability-gate end-to-end claim verifier passed (6/0/2 env-skipped),
-build clean on arm64 macOS.
+candidate isolated and committed (`edf15e1`), build clean on arm64 macOS, full test
+suite green on the local tree and on a fresh clone of the release commit
+(5,227/5,227 each; clone builds bake embedded data and derive a new scattered key),
+capability-gate end-to-end claim verifier passed (6/0/2 env-skipped).
 
 ### Added
 
@@ -49,6 +50,11 @@ build clean on arm64 macOS.
 - Removed undefined standard-stream manipulation from TUI tests and closed a
   C-string self-test failure-path resource leak.
 - Classified `tm__*` dynamic tools as network plus untrusted-input capabilities.
+- Fixed a hard build failure on fresh clones: make could not resolve the
+  generated key/registry headers (no rule existed; order-only phony bakes are
+  invisible during dependency resolution). Real delegating rules now produce
+  them via `scripts/bake_data.py`, and the key header is rewritten only when
+  its content changes, ending perpetual rebuilds of dependents.
 - Vision input: downscaled images now report the correct media type. When a large
   PNG/HEIC/WEBP is resized to JPEG, `load_and_encode_image` now propagates the
   corrected `image/jpeg` media type to the caller instead of mislabeling the JPEG
