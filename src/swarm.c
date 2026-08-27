@@ -443,6 +443,31 @@ int swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char 
     if (s->child_count >= dsco_swarm_max_children())
         return -1;
 
+    /* T21–T23 admission control: per-provider and per-model concurrency
+     * semaphores, env-tunable (DSCO_LANE_MAX_PROVIDER / _MODEL), defaulting
+     * to full lane depth. Throttled spawns return -2 and are the caller's
+     * backpressure signal — taxonomy class "throttled", not "failed". */
+    {
+        int max_provider = dsco_env_int("DSCO_LANE_MAX_PROVIDER", 64, 1, 2048);
+        int max_model    = dsco_env_int("DSCO_LANE_MAX_MODEL", 64, 1, 2048);
+        int prov_n = 0, model_n = 0;
+        for (int i = 0; i < s->group_count; i++) {
+            swarm_group_t *gr = &s->groups[i];
+            if (!gr->active) continue;
+            for (int k = 0; k < gr->child_count; k++) {
+                swarm_child_t *c = &s->children[gr->child_ids[k]];
+                prov_n++;
+                if (model && strncmp(c->model, model, sizeof(c->model)) == 0)
+                    model_n++;
+            }
+        }
+        if (prov_n >= max_provider || (model && model_n >= max_model)) {
+            fprintf(stderr, "  \033[33m[swarm] lane throttled: provider=%d/%d model=%d/%d\033[0m\n",
+                    prov_n, max_provider, model_n, max_model);
+            return -2;
+        }
+    }
+
     int stdout_pipe[2];
     if (pipe(stdout_pipe) < 0)
         return -1;
