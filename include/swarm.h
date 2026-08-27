@@ -8,8 +8,21 @@
 
 /* ── Sub-dsco process handle ──────────────────────────────────────────── */
 
-#define SWARM_MAX_CHILDREN  64  /* structural array/bitset cap; not env-resizable */
-#define SWARM_MAX_GROUPS    16  /* structural array cap; not env-resizable */
+#define SWARM_MAX_CHILDREN  64  /* legacy default; runtime cap via dsco_env_int */
+#define SWARM_MAX_GROUPS    16  /* legacy default; runtime cap via dsco_env_int */
+
+/* 2048-lane scaling ceiling (proposal: proposals/swarm-scale-2048).
+ * Env-overridable between legacy default and compiled safety maxima;
+ * never exceed these without a build-time change. Fail closed OOM. */
+#define SWARM_CHILD_CAP_MAX 2048
+#define SWARM_GROUP_CAP_MAX 256
+
+static inline int dsco_swarm_child_cap(void) {
+    return dsco_env_int("DSCO_SWARM_CHILD_CAP", SWARM_MAX_CHILDREN, 1, SWARM_CHILD_CAP_MAX);
+}
+static inline int dsco_swarm_group_cap(void) {
+    return dsco_env_int("DSCO_SWARM_GROUP_CAP", SWARM_MAX_GROUPS, 1, SWARM_GROUP_CAP_MAX);
+}
 #define SWARM_MAX_OUTPUT    (512 * 1024)
 #define SWARM_LABEL_LEN     128
 #define SWARM_GROUP_NAME_LEN 64
