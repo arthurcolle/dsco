@@ -78,7 +78,6 @@ jobs:
           path: |
             dsco
             dsco-lite
-            dsc
           if-no-files-found: error
           retention-days: 7
 

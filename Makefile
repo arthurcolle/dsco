@@ -526,13 +526,15 @@ test-spine-dsco-slim: $(SPINE_TARGET)
 # Source compilation rules
 # ── Pizza box: bake data/ blobs before generated .o files are compiled ──
 .PHONY: bake_data
+# NOTE: bake_data.sh execs scripts/bake_data.py, so every bake path inherits
+# the credential/size refusal gate — there is no ungated bake route.
 bake_data: $(BUILD_DIR)/.bake_data.stamp
 
-$(BUILD_DIR)/.bake_data.stamp: $(BAKED_DATA) scripts/bake_data.sh | $(BUILD_DIR)
+$(BUILD_DIR)/.bake_data.stamp: $(BAKED_DATA) scripts/bake_data.sh scripts/bake_data.py | $(BUILD_DIR)
 	@bash scripts/bake_data.sh data src/generated include
 	@touch $@
 
-$(GENERATED_C) $(GENERATED_REGISTRY): $(BUILD_DIR)/.bake_data.stamp
+$(GENERATED_C) $(GENERATED_REGISTRY) include/embedded_key.gen.h: $(BUILD_DIR)/.bake_data.stamp
 	@if [ ! -f "$@" ]; then \
 		rm -f $(BUILD_DIR)/.bake_data.stamp; \
 		$(MAKE) --no-print-directory bake_data; \
@@ -574,6 +576,14 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 $(OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h | bake_data
 $(DEBUG_OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h | bake_data
 $(TEST_OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h | bake_data
+
+# Every obj dir must see the generated headers before ANY consumer compiles:
+# src/tools.c includes embedded_data_registry.h directly, and on a cold
+# checkout nothing else forces generation before parallel jobs reach tools.c
+# (this exact race broke every CI sanitizer/CodeQL job). Ordering-only deps are
+# deliberate: bake stamps control when regeneration happens.
+EMBEDDED_HDR_PREREQ = include/embedded_data_registry.h include/embedded_key.gen.h | bake_data
+$(ASAN_OBJ_DIR)/tools.o $(UBSAN_OBJ_DIR)/tools.o $(ASAN_TEST_OBJ_DIR)/tools.o $(UBSAN_TEST_OBJ_DIR)/tools.o $(TSAN_TEST_OBJ_DIR)/tools.o $(ASAN_UBSAN_TEST_OBJ_DIR)/tools.o $(TEST_COVERAGE_OBJ_DIR)/tools.o: $(EMBEDDED_HDR_PREREQ)
 
 ifeq ($(PROFILE_BUILD),1)
 $(OBJ_DIR)/instrumenter.o: CFLAGS := $(filter-out $(PROFILE_COVERAGE_FLAGS),$(CFLAGS)) -fsanitize-coverage=0
