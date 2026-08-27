@@ -38586,10 +38586,32 @@ static bool tool_is_governance_exempt(const char *n) {
     if (!n)
         return false;
     /* The governance primitives are exempt so a governance denial can still be
-     * inspected and resolved without recursive gating. */
-    return strcmp(n, "governance") == 0 || strcmp(n, "killswitch") == 0 || strcmp(n, "ooda") == 0 ||
-           strcmp(n, "pheromone") == 0 || strcmp(n, "avian") == 0 ||
-           strcmp(n, "wings_talons_status") == 0;
+     * inspected and resolved without recursive gating. Mutating control verbs
+     * (trigger, resolve, authorize, param, tamper) are NOT exempt: they must
+     * route through the capability gate (control requires DSCO_ALLOW_CONTROL=1).
+     * Only read-only introspection skips recursive gating. */
+    if (strcmp(n, "ooda") == 0 || strcmp(n, "pheromone") == 0 ||
+        strcmp(n, "avian") == 0 || strcmp(n, "wings_talons_status") == 0)
+        return true;
+    return false;
+}
+
+/* Mutating control-plane verbs must never be gate-exempt. Read-only actions on
+ * governance tools keep the exemption so denials remain inspectable. */
+static bool tool_is_control_read_only(const char *n, const char *input_json) {
+    if (!n)
+        return false;
+    char action[64] = {0};
+    char *_a = input_json ? json_get_str(input_json, "action") : NULL;
+    if (_a) {
+        snprintf(action, sizeof(action), "%s", _a);
+        free(_a);
+    }
+    if (strcmp(n, "killswitch") == 0 || strcmp(n, "governance") == 0 ||
+        strcmp(n, "self_exit") == 0 || strcmp(n, "gate_status") == 0 ||
+        strcmp(n, "gov_experiment") == 0 || strcmp(n, "tamper") == 0)
+        return strcmp(action, "status") == 0 || action[0] == '\0';
+    return false;
 }
 
 /* ── G5: Tool-class GSU cost table ───────────────────────────────────── */
@@ -39365,7 +39387,8 @@ bool tools_execute_for_tier(const char *name, const char *input_json, const char
     double _gate_t0 = now_ms();
 
     /* ── Exempt check ──────────────────────────────────────────────────── */
-    if (!name || tool_is_governance_exempt(name)) {
+    if (!name || (tool_is_governance_exempt(name) &&
+                  tool_is_control_read_only(name, input_json))) {
         gov_stage_record(GOV_STAGE_EXEMPT, now_ms() - _gate_t0, false, false);
         goto _skip_gate;
     }
