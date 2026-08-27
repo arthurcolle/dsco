@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* ── Default models ─────────────────────────────────────────────────── */
 
@@ -182,27 +183,63 @@ static char *run_worker_task(const char *task, const char *model) {
     conv_add_user_text(&conv, task);
 
     char *result = NULL;
+    const char *failure_class = NULL; /* transient | exhausted | ok */
+    int retries_left = dsco_env_int("DSCO_WORKER_RETRIES", 4, 0, 16);
+    int consecutive_transients = 0;
 
-    for (int turn = 0; turn < ORCH_WORKER_MAX_TURNS; turn++) {
-        char *req = llm_build_request_ex_for_credential(&conv, &session, 8192, key);
-        if (!req)
-            break;
+    for (int turn = 0; ; turn++) {
+        bool exhausted = (turn >= ORCH_WORKER_MAX_TURNS);
+        char *req = NULL;
+        if (!exhausted) {
+            req = llm_build_request_ex_for_credential(&conv, &session, 8192, key);
+            if (!req) { failure_class = "exhausted"; break; }
+        } else {
+            /* Forced checkpoint: never die silent. Ask the model to emit its
+             * best final answer NOW so the coordinator converges on something
+             * coherent instead of a truncated tool-loop corpse. */
+            req = llm_build_request_ex_for_credential(&conv, &session, 2048, key);
+            if (!req) { failure_class = "exhausted"; break; }
+            size_t rlen = strlen(req);
+            const char *checkpoint =
+                "\n\n[BUDGET CHECKPOINT] Turn limit reached. Emit your best "
+                "final answer immediately as plain text. No further tool calls.";
+            char *req2 = safe_malloc(rlen + strlen(checkpoint) + 1);
+            memcpy(req2, req, rlen); strcpy(req2 + rlen, checkpoint); free(req); req = req2;
+        }
 
-        /* Stream silently — worker output is returned as tool result */
         stream_result_t sr = llm_stream(key, req, NULL, NULL, NULL, NULL, NULL);
         free(req);
 
         if (!sr.ok) {
-            /* Capture error info if available */
-            if (!result) {
-                char errbuf[256];
-                snprintf(errbuf, sizeof(errbuf), "[worker error: HTTP %d, stop=%s]", sr.http_status,
-                         sr.parsed.stop_reason ? sr.parsed.stop_reason : "unknown");
+            bool transient = sr.http_status >= 500 || sr.http_status == 429 ||
+                             sr.http_status == 408 || sr.http_status == 0;
+            json_free_response(&sr.parsed);
+            if (transient && retries_left > 0 && !exhausted) {
+                retries_left--; consecutive_transients++;
+                long backoff_ms = 500L << (consecutive_transients > 4 ? 4 : consecutive_transients);
+                fprintf(stderr, "  \033[33m[worker] transient HTTP %d, retrying in %ldms (%d left)\033[0m\n",
+                        sr.http_status, backoff_ms, retries_left);
+                usleep(backoff_ms * 1000);
+                continue; /* turn does NOT advance on transient failures */
+            }
+            failure_class = "transient";
+            char errbuf[192];
+            snprintf(errbuf, sizeof(errbuf), "\n[worker error after %d retries: HTTP %d%s]",
+                     dsco_env_int("DSCO_WORKER_RETRIES", 4, 0, 16) - retries_left,
+                     sr.http_status,
+                     result ? "; last good output retained below" : "");
+            if (result) {
+                size_t rl = strlen(result);
+                char *merged = safe_malloc(rl + strlen(errbuf) + 1);
+                memcpy(merged, result, rl); strcpy(merged + rl, errbuf);
+                free(result); result = merged;
+            } else {
                 result = safe_strdup(errbuf);
             }
-            json_free_response(&sr.parsed);
             break;
         }
+
+        consecutive_transients = 0;
 
         /* Track tokens for budget_ratio updates */
         session.total_input_tokens += sr.usage.input_tokens;
@@ -237,19 +274,30 @@ static char *run_worker_task(const char *task, const char *model) {
             free(tr);
         }
 
-        bool done =
-            !has_tools || (sr.parsed.stop_reason && strcmp(sr.parsed.stop_reason, "end_turn") == 0);
-
-        /* Capture final assistant text */
-        if (done) {
-            for (int i = 0; i < sr.parsed.count; i++) {
-                content_block_t *blk = &sr.parsed.blocks[i];
-                if (blk->type && strcmp(blk->type, "text") == 0 && blk->text) {
-                    free(result);
-                    result = safe_strdup(blk->text);
-                }
+        /* Capture assistant text unconditionally: last GOOD text always wins,
+         * so a later transient failure retains substance, not error text. */
+        for (int i = 0; i < sr.parsed.count; i++) {
+            content_block_t *blk = &sr.parsed.blocks[i];
+            if (blk->type && strcmp(blk->type, "text") == 0 && blk->text && blk->text[0]) {
+                free(result);
+                result = safe_strdup(blk->text);
             }
+        }
+
+        bool done = exhausted ||
+                    !has_tools ||
+                    (sr.parsed.stop_reason && strcmp(sr.parsed.stop_reason, "end_turn") == 0);
+
+        if (done) {
             json_free_response(&sr.parsed);
+            if (exhausted && result) {
+                size_t rl = strlen(result);
+                const char *tag = "\n[budget_checkpoint: emitted-at-turn-limit]";
+                char *tagged = safe_malloc(rl + strlen(tag) + 1);
+                memcpy(tagged, result, rl); strcpy(tagged + rl, tag);
+                free(result);
+                result = tagged;
+            }
             break;
         }
 
