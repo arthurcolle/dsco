@@ -3,7 +3,7 @@
 This file is auto-generated from header declarations in `include/`.
 
 - Generator: `./scripts/gen_api_reference.sh`
-- Headers scanned: 143
+- Headers scanned: 151
 
 ## Regeneration
 
@@ -350,12 +350,13 @@ Function-like declarations: 2
 
 ## `config.h`
 
-Function-like declarations: 25
+Function-like declarations: 26
 
 ### Declarations
 
 - `const char *v = getenv("DSCO_SWARM_DEFAULT_MINI");`
-- `} static inline int dsco_max_tokens(void) { return dsco_env_int("DSCO_MAX_TOKENS", MAX_TOKENS, 1, 100000);`
+- `} const char *dsco_secret(const char *key);`
+- `static inline int dsco_max_tokens(void) { return dsco_env_int("DSCO_MAX_TOKENS", MAX_TOKENS, 1, 100000);`
 - `} static inline int dsco_max_agent_turns(void) { return dsco_env_int("DSCO_MAX_AGENT_TURNS", MAX_AGENT_TURNS, 1, 999999);`
 - `} static inline int dsco_hard_turn_ceiling(void) { return dsco_env_int("DSCO_HARD_TURN_CEILING", HARD_TURN_CEILING, 1, 100000000);`
 - `const model_info_t *openrouter_cache_lookup(const char *slug);`
@@ -664,6 +665,14 @@ Function-like declarations: 2
 - `int durable_agents_cli(int argc, char **argv);`
 
 ## `embedded_data_registry.h`
+
+Function-like declarations: 1
+
+### Declarations
+
+- `const unsigned char *embedded_data_get(const char *name, size_t *out_len);`
+
+## `embedded_key.gen.h`
 
 Function-like declarations: 0
 
@@ -975,6 +984,16 @@ Function-like declarations: 18
 - `char *graphsub_bridge_fleet(const char *peers_json);`
 - `char *graphsub_post(const char *path, const char *json_body);`
 - `char *graphsub_get(const char *path);`
+
+## `harden.h`
+
+Function-like declarations: 3
+
+### Declarations
+
+- `void dsco_harden_init(void);`
+- `bool dsco_harden_checkpoint(void);`
+- `bool dsco_harden_enabled(void);`
 
 ## `heartbeat.h`
 
@@ -1460,12 +1479,13 @@ Function-like declarations: 12
 
 ## `llm.h`
 
-Function-like declarations: 64
+Function-like declarations: 65
 
 ### Declarations
 
 - `typedef void (*stream_text_cb)(const char *text, void *ctx);`
 - `typedef void (*stream_tool_start_cb)(const char *name, const char *id, void *ctx);`
+- `typedef void (*stream_tool_arg_delta_cb)(const char *name, const char *id, const char *delta, void *ctx);`
 - `typedef void (*stream_thinking_cb)(const char *text, void *ctx);`
 - `void session_state_init(session_state_t *s, const char *model);`
 - `const char *session_trust_tier_to_string(dsco_trust_tier_t tier);`
@@ -1515,7 +1535,7 @@ Function-like declarations: 64
 - `const char *llm_get_custom_system_prompt(void);`
 - `void llm_debug_save_request(const char *request_json, int http_status);`
 - `bool llm_anthropic_uses_claude_code_auth(const char *credential);`
-- `stream_result_t llm_stream(const char *api_key, const char *request_json, stream_text_cb text_cb, stream_tool_start_cb tool_cb, stream_thinking_cb thinking_cb, void *cb_ctx);`
+- `stream_result_t llm_stream(const char *api_key, const char *request_json, stream_text_cb text_cb, stream_tool_start_cb tool_cb, stream_tool_arg_delta_cb tool_delta_cb, stream_thinking_cb thinking_cb, void *cb_ctx);`
 - `void dsco_strip_terminal_controls_inplace(char *s);`
 - `void tool_metrics_init(tool_metrics_t *m);`
 - `void tool_metrics_record(tool_metrics_t *m, const char *name, bool success, double latency_ms);`
@@ -1542,6 +1562,18 @@ Function-like declarations: 6
 - `int local_llm_context_window(const char *server, const char *model);`
 - `bool local_llm_is_local_ref(const char *name);`
 
+## `local_smart_router.h`
+
+Function-like declarations: 5
+
+### Declarations
+
+- `const char *dsco_local_lane_name(dsco_local_lane_t lane);`
+- `dsco_local_lane_t dsco_local_smart_classify(const char *body, size_t body_len, const char *override_lane, size_t smart_threshold);`
+- `dsco_local_decision_t dsco_local_smart_decide(const char *body, size_t body_len, const char *override_lane, size_t smart_threshold);`
+- `char *dsco_local_smart_patch_body(const char *body, dsco_local_lane_t lane);`
+- `char *dsco_local_smart_patch_decision(const char *body, const dsco_local_decision_t *decision);`
+
 ## `math_fastpath.h`
 
 Function-like declarations: 6
@@ -1554,6 +1586,15 @@ Function-like declarations: 6
 - `bool mfp_is_pure_math(const char *expr, char *reason);`
 - `bool mfp_rewrite_func_shorthand(const char *expr, char *out, size_t out_len);`
 - `bool mfp_eval(const char *expr, char *out, size_t out_len);`
+
+## `matrix_inference.h`
+
+Function-like declarations: 2
+
+### Declarations
+
+- `int matrix_inference_cli(int argc, char **argv);`
+- `bool matrix_inference_canary_response_ok(const char *response);`
 
 ## `mcp.h`
 
@@ -1713,6 +1754,14 @@ Function-like declarations: 20
 - `const char *ooda_capability_name(capability_tier_t t);`
 - `void ooda_set_scheduler(struct scheduler_t *sched);`
 - `int ooda_run_scheduled(ooda_cycle_t *cycle, struct scheduler_t *sched);`
+
+## `openai_images.h`
+
+Function-like declarations: 1
+
+### Declarations
+
+- `bool tool_openai_image_generate(const char *input_json, char *result, size_t result_len);`
 
 ## `openai_oauth.h`
 
@@ -2090,17 +2139,17 @@ Function-like declarations: 8
 
 ## `provider.h`
 
-Function-like declarations: 44
+Function-like declarations: 47
 
 ### Declarations
 
 - `char *(*build_request)(provider_t *p, conversation_t *conv, session_state_t *session, int max_tokens, const char *credential);`
 - `struct curl_slist *(*build_headers)(provider_t *p, const char *api_key);`
-- `stream_result_t (*stream)(provider_t *p, const char *api_key, const char *request_json, stream_text_cb text_cb, stream_tool_start_cb tool_cb, stream_thinking_cb thinking_cb, void *cb_ctx);`
+- `stream_result_t (*stream)(provider_t *p, const char *api_key, const char *request_json, stream_text_cb text_cb, stream_tool_start_cb tool_cb, stream_tool_arg_delta_cb tool_delta_cb, stream_thinking_cb thinking_cb, void *cb_ctx);`
 - `provider_t *provider_create(const char *name);`
 - `void provider_free(provider_t *p);`
 - `bool provider_prepare(provider_t *p);`
-- `stream_result_t provider_stream_reuse(provider_t *p, const char *api_key, const char *request_json, stream_text_cb text_cb, stream_tool_start_cb tool_cb, stream_thinking_cb thinking_cb, void *cb_ctx);`
+- `stream_result_t provider_stream_reuse(provider_t *p, const char *api_key, const char *request_json, stream_text_cb text_cb, stream_tool_start_cb tool_cb, stream_tool_arg_delta_cb tool_delta_cb, stream_thinking_cb thinking_cb, void *cb_ctx);`
 - `void provider_reset_connection(provider_t *p);`
 - `const char *provider_detect(const char *model, const char *api_key);`
 - `const char *provider_model_family(const char *model);`
@@ -2138,6 +2187,9 @@ Function-like declarations: 44
 - `const char *provider_provider_for_api_key(const char *api_key);`
 - `const char *provider_publish_api_key_env(const char *api_key);`
 - `const char *provider_primary_model_for(const char *family, bool prefer_code);`
+- `bool provider_test_parse_openai_sse(const char *bytes, size_t len, provider_test_openai_sse_result_t *out);`
+- `bool provider_test_parse_openai_sse_for_model(const char *bytes, size_t len, const char *source_provider, const char *request_model, provider_test_openai_sse_result_t *out);`
+- `void provider_test_free_openai_sse_result(provider_test_openai_sse_result_t *result);`
 
 ## `provider_pool.h`
 
@@ -2212,6 +2264,33 @@ Function-like declarations: 3
 - `int dsco_remote_cli(int argc, char **argv);`
 - `int dsco_fleet_cli(int argc, char **argv);`
 - `bool dsco_fleet_resolve(const char *peer, char *user, size_t ul, char *addr, size_t al);`
+
+## `rl_hooks.h`
+
+Function-like declarations: 3
+
+### Declarations
+
+- `bool rl_hooks_record_event(const rl_hook_event_t *event);`
+- `bool rl_hooks_format_event(const rl_hook_event_t *event, char *out, size_t out_len);`
+- `bool rl_hooks_inspect_run(const char *run_id, char *out, size_t out_len);`
+
+## `route_catalog.h`
+
+Function-like declarations: 10
+
+### Declarations
+
+- `void dsco_route_catalog_init(dsco_route_catalog_t *catalog);`
+- `void dsco_route_catalog_destroy(dsco_route_catalog_t *catalog);`
+- `void dsco_route_catalog_clear(dsco_route_catalog_t *catalog);`
+- `bool dsco_route_catalog_add(dsco_route_catalog_t *catalog, const dsco_route_record_t *record);`
+- `dsco_route_record_t *dsco_route_catalog_find(dsco_route_catalog_t *catalog, const char *route_id);`
+- `const dsco_route_record_t *dsco_route_catalog_find_const(const dsco_route_catalog_t *catalog, const char *route_id);`
+- `void dsco_route_catalog_report(dsco_route_catalog_t *catalog, const char *route_id, bool ok, double latency_ms, time_t now);`
+- `size_t dsco_route_catalog_count(const dsco_route_catalog_t *catalog);`
+- `const char *dsco_route_billing_name(dsco_route_billing_t billing);`
+- `const char *dsco_route_state_name(dsco_route_state_t state);`
 
 ## `router.h`
 
@@ -2638,6 +2717,15 @@ Function-like declarations: 5
 - `const topology_t *task_profile_best_topology(const task_profile_t *tp);`
 - `int task_profile_explain(const task_profile_t *tp, char *buf, size_t len);`
 
+## `tool_call_normalizer.h`
+
+Function-like declarations: 2
+
+### Declarations
+
+- `bool tool_calls_normalize(const char *text, normalized_tool_calls_t *out);`
+- `void tool_calls_normalized_free(normalized_tool_calls_t *out);`
+
 ## `tool_embeddings.h`
 
 Function-like declarations: 0
@@ -2668,7 +2756,7 @@ Function-like declarations: 14
 
 ## `tools.h`
 
-Function-like declarations: 107
+Function-like declarations: 108
 
 ### Declarations
 
@@ -2732,6 +2820,7 @@ Function-like declarations: 107
 - `external_tool_snapshot_t tools_external_snapshot(void);`
 - `void tools_external_snapshot_free(external_tool_snapshot_t *snapshot);`
 - `int tools_rank_external_snapshot(const external_tool_snapshot_t *snapshot, const char *context, int *out_indices, int max_indices);`
+- `int tools_retrieve_capabilities(const char *query, int candidate_limit, tool_retrieval_hit_t *out_hits, int max_hits, bool *out_reranked);`
 - `void dsco_locks_init(dsco_locks_t *l);`
 - `void dsco_locks_destroy(dsco_locks_t *l);`
 - `void watchdog_start(tool_watchdog_t *wd, pthread_t target, const char *name, int timeout_s);`
@@ -2782,7 +2871,7 @@ Function-like declarations: 107
 
 ## `topology.h`
 
-Function-like declarations: 19
+Function-like declarations: 21
 
 ### Declarations
 
@@ -2795,6 +2884,7 @@ Function-like declarations: 19
 - `bool topology_profile_task(const char *task, topology_task_profile_t *profile);`
 - `bool topology_plan_build(const char *preferred_topology, bool auto_mode, const char *task, topology_plan_t *plan);`
 - `bool topology_plan_run(const topology_plan_t *plan, const char *api_key, const char *coordinator_model, const char *task, char *result, size_t rlen, topology_run_stats_t *stats);`
+- `bool topology_plan_run_with_options(const topology_plan_t *plan, const char *api_key, const char *coordinator_model, const char *task, const topology_run_options_t *options, char *result, size_t rlen, topology_run_stats_t *stats);`
 - `int topology_render_ascii(const topology_t *t, char *buf, size_t buflen);`
 - `double topology_estimate_cost(const topology_t *t, int input_tokens, int output_tokens);`
 - `const char *topology_resolve_model_for_tier(const char *coordinator_model, const char *api_key, model_tier_t tier, char *buf, size_t buflen);`
@@ -2802,6 +2892,7 @@ Function-like declarations: 19
 - `bool topology_resolve_throughput_lane_for_tier(const char *api_key, model_tier_t tier, int slot, char *provider_buf, size_t provider_len, char *model_buf, size_t model_len);`
 - `bool topology_hetero_enabled(void);`
 - `bool topology_run(const topology_t *t, const char *api_key, const char *coordinator_model, const char *task, char *result, size_t rlen, topology_run_stats_t *stats);`
+- `bool topology_run_with_options(const topology_t *t, const char *api_key, const char *coordinator_model, const char *task, const topology_run_options_t *options, char *result, size_t rlen, topology_run_stats_t *stats);`
 - `void topology_set_scheduler(struct scheduler_t *sched);`
 - `bool topology_run_scheduled(const topology_t *t, const char *api_key, const char *coordinator_model, const char *task, char *result, size_t rlen, topology_run_stats_t *stats);`
 - `bool topology_plan_run_scheduled(const topology_plan_t *plan, const char *api_key, const char *coordinator_model, const char *task, char *result, size_t rlen, topology_run_stats_t *stats);`
