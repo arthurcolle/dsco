@@ -1093,3 +1093,7 @@ ui: $(TARGET) ui-deps
 	lint clang-tidy cppcheck static-analysis check-version \
 	ui ui-deps bench-startup bench-tool bench-agent-loop bench-local \
 	bench-sota bench-ttft bench-worker bench-size release-hardened release-hardened-native
+
+.PHONY: test-gate-claims
+test-gate-claims: $(TARGET)
+	@tests/test_gate_claims.sh
