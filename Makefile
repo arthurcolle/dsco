@@ -522,7 +522,7 @@ $(COSMO_TARGET): $(OBJS) $(GSL_OBJS)
 endif
 endif
 
-dsc: dsc.c
+dsc: demos/toys/dsc.c
 	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -o $@ $< -lcurl -lreadline
 
 # Standalone animated Distributed Systems wordmark (Kitty graphics protocol).

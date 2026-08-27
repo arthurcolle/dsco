@@ -69,9 +69,9 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `graphsub-phosphor-sota.html`
 - `logo_crop_local.png`
 - `mobius`
-- `mobius.c`
+- `demos/toys/mobius.c`
 - `quine`
-- `quine.c`
+- `demos/toys/quine.c`
 - `quine_out.txt`
 
 ### Repository policy and CI
