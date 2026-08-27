@@ -1,3 +1,4 @@
+#include "guardian.h"
 #include "swarm.h"
 #include "openrouter_cache.h"
 #include "config.h"
@@ -356,7 +357,22 @@ static struct {
     int top_k, thinking_budget;
     char tool_choice[128];
     char *system_prompt;
+    /* Guardian covenant (T12): injected by tenured cell at spawn time */
+    bool covenant_set;
+    char covenant[GUARDIAN_Covenant_ID_LEN];
+    int covenant_role;         /* guardian_role_t */
+    unsigned long long revocation_handle;
 } s_next_instance;
+
+void swarm_set_next_covenant(const char *run_id, int role, unsigned long long revocation_handle) {
+    if (!run_id || !run_id[0] || role <= GUARDIAN_ROLE_NONE || revocation_handle == 0)
+        return; /* fail-closed: half-covenants are never injected */
+    s_next_instance.covenant_set = true;
+    snprintf(s_next_instance.covenant, sizeof(s_next_instance.covenant), "%s", run_id);
+    s_next_instance.covenant_role = role;
+    s_next_instance.revocation_handle = revocation_handle;
+    s_next_instance.set = true;
+}
 
 void swarm_set_next_instance(const char *effort, double temperature, double top_p, int top_k,
                              int thinking_budget, const char *tool_choice,
@@ -381,6 +397,15 @@ void swarm_set_next_instance(const char *effort, double temperature, double top_
 static void swarm_apply_instance_env(void) {
     if (!s_next_instance.set)
         return;
+    /* Guardian covenant lands FIRST (L1: children name their Guardian). */
+    if (s_next_instance.covenant_set) {
+        setenv("DSCO_GUARDIAN_RUN_ID", s_next_instance.covenant, 1);
+        char rb[32];
+        snprintf(rb, sizeof rb, "%d", s_next_instance.covenant_role);
+        setenv("DSCO_GUARDIAN_ROLE", rb, 1);
+        snprintf(rb, sizeof(rb), "%llu", s_next_instance.revocation_handle);
+        setenv("DSCO_GUARDIAN_REVOCATION", rb, 1);
+    }
     char b[32];
     if (s_next_instance.effort[0])
         setenv("DSCO_EFFORT", s_next_instance.effort, 1);
