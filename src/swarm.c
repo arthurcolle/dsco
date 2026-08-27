@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <stdint.h>
 #include <unistd.h>
 #include <signal.h>
@@ -1842,6 +1843,72 @@ int swarm_group_render_frame(swarm_t *s, int group_id, const char *run_id,
     return 0;
 }
 
+/* ── Secret scrubbing for durable artifacts (T02) ─────────────────────── */
+static int swarm_str_is_secret_name(const char *tok, size_t len) {
+    static const char *suffixes[] = {"TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL", NULL};
+    char up[128];
+    if (len == 0 || len >= sizeof(up)) return 0;
+    for (size_t i = 0; i < len; i++)
+        up[i] = (tok[i] >= 'a' && tok[i] <= 'z') ? (char)(tok[i] - 32) : tok[i];
+    up[len] = '\0';
+    for (int i = 0; suffixes[i]; i++) {
+        size_t sl = strlen(suffixes[i]);
+        if (len > sl && strncmp(up + len - sl, suffixes[i], sl) == 0 &&
+            memchr(up, '_', len) != NULL)
+            return 1;
+    }
+    return 0;
+}
+
+static void swarm_redact_span(char *s, size_t start, size_t end) {
+    /* keep nothing of the value: uniform marker keeps lengths meaningless */
+    const char *marker = "[REDACTED]";
+    size_t mlen = strlen(marker);
+    if (end <= start || start >= strlen(s)) return;
+    size_t tail = strlen(s) - end;
+    if (mlen > end - start) return; /* span too small to hold marker */
+    memmove(s + start + mlen, s + end, tail + 1);
+    memcpy(s + start, marker, mlen);
+}
+
+static void swarm_scrub(char *s) {
+    if (!s) return;
+    size_t n = strlen(s);
+    for (size_t i = 0; i < n;) {
+        if ((strncmp(s + i, "sk-", 3) == 0) ||
+            (strncmp(s + i, "ghp_", 4) == 0 && n - i >= 40)) {
+            swarm_redact_span(s, i, i + (n - i > 60 ? 60 : 20));
+            n = strlen(s);
+            continue;
+        }
+        if (strncmp(s + i, "eyJ", 3) == 0 && n - i >= 30) { /* JWT */
+            swarm_redact_span(s, i, i + 40);
+            n = strlen(s);
+            continue;
+        }
+        /* NAME=value where NAME ends in secret-ish suffix and value is long */
+        if (i == 0 || s[i-1] == '\n' || s[i-1] == ' ' || s[i-1] == '"') {
+            size_t j = i;
+            while (j < n && (isalnum((unsigned char)s[j]) || s[j] == '_')) j++;
+            size_t namelen = j - i;
+            if (j < n && s[j] == '=' && j + 1 < n && swarm_str_is_secret_name(s + i, namelen)) {
+                size_t vs = j + 1, ve = vs;
+                while (ve < n && (isalnum((unsigned char)s[ve]) ||
+                       strchr("_+/.:-", s[ve]) != NULL))
+                    ve++;
+                if (ve - vs >= 12) {
+                    swarm_redact_span(s, vs, ve);
+                    n = strlen(s);
+                    continue;
+                }
+                i = vs;
+                continue;
+            }
+        }
+        i++;
+    }
+}
+
 int swarm_group_persist_run(swarm_t *s, int group_id, const char *run_id,
                             const char *topology, const char *user_prompt,
                             const char *coordinator_output,
@@ -1876,8 +1943,14 @@ int swarm_group_persist_run(swarm_t *s, int group_id, const char *run_id,
     snprintf(num, sizeof(num), ",\"worker_count\":%d,\"completed_workers\":%d,\"failed_workers\":%d,\"estimated_cost_usd\":%.6f",
              g->child_count, done, errors, swarm_group_est_cost_usd(s, group_id));
     jbuf_append(&b, num);
-    jbuf_append(&b, ",\"user_prompt\":"); jbuf_append_json_str(&b, user_prompt ? user_prompt : "");
-    jbuf_append(&b, ",\"coordinator_output\":"); jbuf_append_json_str(&b, coordinator_output ? coordinator_output : "");
+    jbuf_append(&b, ",\"user_prompt\":");
+    { char *scr = safe_strdup(user_prompt ? user_prompt : "");
+      swarm_scrub(scr);
+      jbuf_append_json_str(&b, scr); free(scr); }
+    jbuf_append(&b, ",\"coordinator_output\":");
+    { char *scr = safe_strdup(coordinator_output ? coordinator_output : "");
+      swarm_scrub(scr);
+      jbuf_append_json_str(&b, scr); free(scr); }
     jbuf_append(&b, ",\"workers\":[");
     for (int i = 0; i < g->child_count; i++) {
         swarm_child_t *c = &s->children[g->child_ids[i]];
@@ -1889,7 +1962,9 @@ int swarm_group_persist_run(swarm_t *s, int group_id, const char *run_id,
         snprintf(num, sizeof(num), ",\"elapsed_seconds\":%.3f,\"estimated_cost_usd\":%.6f,\"output\":",
                  swarm_child_elapsed_sec(c), c->est_cost_usd);
         jbuf_append(&b, num);
-        jbuf_append_json_str(&b, c->output ? c->output : "");
+        { char *scr = safe_strdup(c->output ? c->output : "");
+          swarm_scrub(scr);
+          jbuf_append_json_str(&b, scr); free(scr); }
         jbuf_append(&b, "}");
     }
     jbuf_append(&b, "]}");
