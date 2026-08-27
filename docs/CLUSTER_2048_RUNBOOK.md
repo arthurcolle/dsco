@@ -36,3 +36,15 @@ Bitset/ring/poll arrays stay correctly sized because *lane depth* is unchanged; 
 - fd exhaustion -> raise ulimit -n to 65535 on all nodes pre-run
 - zombie buildup between ladders -> pkill pattern sweep script between runs
 - github CI red does NOT block cluster day (it tracks hygiene gates, orthogonal to runtime scaling)
+
+## Failure taxonomy (T10) — every lane ends in exactly one of these
+| class | meaning | retry? | ledger entry |
+|---|---|---|---|
+| ok | natural end_turn with output | n/a | completed |
+| budget_checkpoint | emitted-at-turn-limit (tagged) | no; forced summary | completed(checkpoint) |
+| transient | HTTP 429/5xx/408/0 after retries exhausted | auto: 4x exp backoff (DSCO_WORKER_RETRIES) | failed(transient) |
+| exhausted | context/token window died mid-run | no | failed(exhausted) |
+| cancelled | veto/signal from Guardian or operator | by order | cancelled |
+| throttled | semaphore/backpressure deferral | yes, parked | throttled |
+| policy | hard gate (region/credential/tool req) | never | rejected(policy) |
+Invariant at reduce time: launched == completed+failed+cancelled+throttled. Anything else = unaccounted = run invalid.

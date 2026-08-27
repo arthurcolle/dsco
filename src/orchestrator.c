@@ -241,6 +241,12 @@ static char *run_worker_task(const char *task, const char *model) {
 
         consecutive_transients = 0;
 
+        /* T06 heartbeat: one liveness line per turn, watchdog-visible */
+        fprintf(stderr, "  \033[2m[worker] turn %d/%d in=%llu out=%llu\033[0m\n",
+                turn + 1, ORCH_WORKER_MAX_TURNS,
+                (unsigned long long)session.total_input_tokens + sr.usage.input_tokens,
+                (unsigned long long)session.total_output_tokens);
+
         /* Track tokens for budget_ratio updates */
         session.total_input_tokens += sr.usage.input_tokens;
         session.total_output_tokens += sr.usage.output_tokens;
