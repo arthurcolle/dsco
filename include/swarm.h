@@ -191,6 +191,7 @@ int  swarm_spawn_in_group(swarm_t *s, int group_id, const char *task, const char
  * The freshly-forked child exports these as DSCO_* env and session_state_init()
  * picks them up. Pass -1 / NULL to leave a field at its default. The spec is
  * consumed (cleared) by the next spawn — set it immediately before spawning. */
+void swarm_set_next_covenant(const char *run_id, int role, unsigned long long revocation_handle);
 void swarm_set_next_instance(const char *effort, double temperature,
                              double top_p, int top_k, int thinking_budget,
                              const char *tool_choice, const char *system_prompt);

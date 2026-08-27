@@ -52,4 +52,9 @@ bool guardian_holds_tenure(const guardian_state_t *g);
 /* Bump-and-check ledger sequence (L4 monotonicity); rejects regressions. */
 bool guardian_ledger_advance(guardian_state_t *g, uint64_t next_seq);
 
+/* T13 tenure election (atomic O_EXCL; split-brain fence on second acquire) */
+bool guardian_tenure_acquire(guardian_state_t *g, const char *run_id);
+void guardian_tenure_release(guardian_state_t *g);
+const char *guardian_role_name(int role);
+
 #endif /* DSCO_GUARDIAN_H */
