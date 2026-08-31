@@ -579,6 +579,23 @@ $(OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_ke
 $(DEBUG_OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h | bake_data
 $(TEST_OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h | bake_data
 
+# Version stamp freshness: main.c bakes in GIT_HASH via -DGIT_HASH, but a bare
+# `make` after a commit would NOT recompile main.o (its .c/.h are unchanged),
+# so `dsco --version` reported a stale hash. Depend main.o on a sentinel that is
+# refreshed only when HEAD actually moves, so the stamp is correct without
+# forcing needless rebuilds. .git/HEAD covers branch switches; the resolved ref
+# file covers new commits on the current branch.
+GIT_REF_FILE := $(shell git rev-parse --git-path HEAD 2>/dev/null)
+# Capture symbolic-ref's stdout into a shell var so only the rev-parse result
+# becomes the prerequisite. (A plain `A && B` chain leaks A's output — the bare
+# ref name — into the prerequisite list as a target with no rule.)
+GIT_HEAD_REF := $(shell ref=$$(git symbolic-ref -q HEAD 2>/dev/null); test -z "$$ref" || git rev-parse --git-path "$$ref" 2>/dev/null)
+build/.git-stamp: $(GIT_REF_FILE) $(GIT_HEAD_REF)
+	@mkdir -p build
+	@printf '%s' '$(GIT_HASH)' > $@.tmp
+	@cmp -s $@.tmp $@ 2>/dev/null && rm -f $@.tmp || mv $@.tmp $@
+$(OBJ_DIR)/main.o: build/.git-stamp
+
 # Every obj dir must see the generated headers before ANY consumer compiles:
 # src/tools.c includes embedded_data_registry.h directly, and on a cold
 # checkout nothing else forces generation before parallel jobs reach tools.c
