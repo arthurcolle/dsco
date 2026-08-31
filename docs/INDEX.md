@@ -27,7 +27,6 @@ This documentation set is intended as a full-codebase reference for `dsco-cli`, 
 - [Cosmopolitan Build Lane](COSMOPOLITAN.md)
 - [Local Control Plane](LOCAL_CONTROL_PLANE.md)
 - [Distributed Agent Performance Doctrine](DISTRIBUTED_AGENT_PERFORMANCE.md)
-- [Blog: Modal Tool Calling and Hosted Tools](BLOG_MODAL_TOOL_CALLING.md) ([HTML](BLOG_MODAL_TOOL_CALLING.html))
 - [Avian Mechanisms](AVIAN_MECHANISMS.md)
 - [Sakana Fugu Provider](SAKANA_FUGU_PROVIDER.md)
 - [Plugin Manifest + Lockfile Spec](PLUGIN_MANIFEST_LOCK_SPEC.md)
