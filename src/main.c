@@ -2231,6 +2231,31 @@ static int run_status_flow(void) {
         fprintf(stderr, "  \033[2m○ not authenticated\033[0m\n");
     }
 
+    /* Governance posture: make the active control arm + capability overrides
+     * observable so "why did the gate allow that?" is always one command away. */
+    {
+        gov_model_t gm = gov_experiment_model();
+        const char *gm_name = gov_model_name(gm);
+        fprintf(stderr, "  \033[1mGovernance posture\033[0m\n");
+        if (gm == GOV_MODEL_NONE) {
+            fprintf(stderr, "  \033[31m● GOVERNANCE DISABLED\033[0m — ungoverned control arm "
+                            "(model=none, bypass=1; \033[1;31m--systems-agent\033[0m or env)\n");
+        } else {
+            fprintf(stderr, "  \033[32m● model:\033[0m %s\n", gm_name);
+        }
+        static const char *ovr[] = {"DSCO_GOV_BYPASS",  "DSCO_GOV_MODEL",
+                                    "DSCO_ALLOW_EXFIL", "DSCO_ALLOW_CONTROL",
+                                    "DSCO_ALLOW_NET",   "DSCO_ALLOW_WRITE",
+                                    "DSCO_ALLOW_RUN",   "DSCO_ALLOW_SECRETS"};
+        for (int i = 0; i < (int)(sizeof(ovr) / sizeof(ovr[0])); i++) {
+            const char *v = getenv(ovr[i]);
+            if (v && v[0])
+                fprintf(stderr, "    %s%s=%s%s%s\n", v[0] == '0' ? "\033[2m" : "\033[33m",
+                        ovr[i], v, "\033[0m", v[0] == '0' ? " (disabled)" : "");
+        }
+        fprintf(stderr, "\n");
+    }
+
     fprintf(stderr, "\n  env file: %s\n\n", dsco_setup_env_path());
     return 0;
 }
