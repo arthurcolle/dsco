@@ -142,10 +142,8 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `docs/API_REFERENCE.md`
 - `docs/ARCHITECTURE.md`
 - `docs/AVIAN_MECHANISMS.md`
-- `docs/BLOG_MODAL_TOOL_CALLING.html`
 - `docs/BLOG_MODAL_TOOL_CALLING.md`
 - `docs/CHRONICLE_TOKENLEDGER.md`
-- `docs/CLOUD_ENDPOINTS_MODAL_COMPATIBILITY.html`
 - `docs/CONSTANTS_ENV_INDEX.md`
 - `docs/COSMOPOLITAN.md`
 - `docs/C_MODULE_REFERENCE.md`
@@ -171,13 +169,6 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `docs/TOOL_CATALOG.md`
 - `docs/WASM.md`
 - `docs/assets/provider_fabric.svg`
-- `docs/consumer_profile_ontology/ARCHITECTURE.md`
-- `docs/consumer_profile_ontology/EXTENDED_50K.md`
-- `docs/consumer_profile_ontology/EXTENDED_50K_WITH_BOUNDARIES.md`
-- `docs/consumer_profile_ontology/HYPER_PRIVATE_BOUNDARIES.md`
-- `docs/consumer_profile_ontology/POLICY.md`
-- `docs/consumer_profile_ontology/README.md`
-- `docs/fisher-ewc-spec.md`
 - `docs/harness.json`
 - `docs/llms.txt`
 - `docs/topologies/01_chains.md`
@@ -533,10 +524,6 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `scripts/check_version_consistency.sh`
 - `scripts/clang_format_apply.sh`
 - `scripts/clang_format_check.sh`
-- `scripts/consumer_profile_ontology/generate_extended_ontology.py`
-- `scripts/consumer_profile_ontology/generate_extended_with_boundaries.py`
-- `scripts/consumer_profile_ontology/generate_hyper_private_boundaries.py`
-- `scripts/consumer_profile_ontology/generate_ontology.py`
 - `scripts/cosmo_bootstrap.sh`
 - `scripts/cosmo_build.sh`
 - `scripts/dev_fast.sh`
@@ -574,13 +561,6 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 ### Generated data assets
 
 - `data/constants_env_index.json`
-- `data/consumer_profile_ontology/example_user_profile.json`
-- `data/consumer_profile_ontology/prohibited_patterns.json`
-- `data/consumer_profile_ontology/prompt_analyzer.py`
-- `data/consumer_profile_ontology/summary.json`
-- `data/consumer_profile_ontology/summary_base_with_boundaries.json`
-- `data/consumer_profile_ontology/summary_extended_50k.json`
-- `data/consumer_profile_ontology/summary_extended_50k_with_boundaries.json`
 - `data/tool_embeddings.bin`
 
 ### Provider metadata
@@ -862,7 +842,3 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `rituals/CLASSIFY.md`
 - `rituals/DECLASSIFY.md`
 - `runbooks/incidents/COMPARTMENT_BREACH.md`
-- `schemas/consumer_profile_ontology/activation_request.schema.json`
-- `schemas/consumer_profile_ontology/evidence_event.schema.json`
-- `schemas/consumer_profile_ontology/facet_definition.schema.json`
-- `schemas/consumer_profile_ontology/user_facet_value.schema.json`
