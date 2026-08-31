@@ -341,6 +341,23 @@ static bool maybe_escalate_tool_permission(const char *tool_name, const char *ba
     return false;
 }
 
+/* W2 (durable execution): canonical TOOL_CALL/TOOL_RESULT journal records live
+ * in src/chronicle.c. These wrappers are called around every dispatch path
+ * (serial, interactive, batch, concurrent worker) so the journal holds one
+ * durable TOOL_CALL before tools_execute_for_tier() and exactly one
+ * TOOL_RESULT after it returns — including denial, timeout, and failure. */
+bool chronicle_journal_tool_call(const char *turn_id, const char *call_id,
+                                 const char *tool, const char *input_json,
+                                 const char *trust_tier, const char *trace_id);
+bool chronicle_journal_tool_result(const char *turn_id, const char *call_id,
+                                   const char *tool, bool ok, bool cached, bool timed_out,
+                                   double elapsed_ms, const char *result_text);
+static void journal_tool_call_record(const char *tool, const char *tool_id,
+                                     const char *input_json, const char *trust_tier);
+static void journal_tool_result_record(const char *tool, const char *tool_id, bool ok,
+                                       bool cached, bool timed_out, double elapsed_ms,
+                                       const char *result);
+
 static void *concurrent_tool_thread(void *arg) {
     concurrent_tool_slot_t *slot = (concurrent_tool_slot_t *)arg;
     double t0 = now_ms();
@@ -349,6 +366,9 @@ static void *concurrent_tool_thread(void *arg) {
     int timeout = tool_timeout_for(slot->tool_name);
     g_tool_timed_out = 0;
     watchdog_start(&wd, pthread_self(), slot->tool_name, timeout);
+
+    /* W2: durable TOOL_CALL before dispatch (fsynced by Chronicle's writer). */
+    journal_tool_call_record(slot->tool_name, slot->tool_id, slot->tool_input, slot->tier);
 
     slot->ok = tools_execute_for_tier(slot->tool_name, slot->tool_input, slot->tier, slot->result,
                                       MAX_TOOL_RESULT);
@@ -372,6 +392,10 @@ static void *concurrent_tool_thread(void *arg) {
         snprintf(slot->result + cur, MAX_TOOL_RESULT - cur,
                  "\n[WARNING: output truncated at %zu bytes]", rlen);
     }
+
+    /* W2: durable TOOL_RESULT on every exit (timeout included). */
+    journal_tool_result_record(slot->tool_name, slot->tool_id, slot->ok, false, slot->was_timeout,
+                               slot->elapsed_ms, slot->result);
 
     slot->done = true;
     return NULL;
@@ -4060,7 +4084,12 @@ static void journal_turn_checkpoint(int turn, const char *model, const usage_t *
     jbuf_free(&b);
 }
 
-static void journal_tool_call_record(const char *tool, const char *tool_id, const char *input_json) {
+static void journal_tool_call_record(const char *tool, const char *tool_id,
+                                     const char *input_json, const char *trust_tier) {
+    /* W2: canonical durable TOOL_CALL — CRC32-framed and fsynced before the
+     * tool is dispatched. tool_id is the replay/idempotency key. */
+    chronicle_journal_tool_call(NULL, tool_id, tool, input_json,
+                                trust_tier && trust_tier[0] ? trust_tier : NULL, NULL);
     jbuf_t b;
     jbuf_init(&b, 512);
     jbuf_append(&b, "{\"tool\":"); jbuf_append_json_str(&b, tool ? tool : "");
@@ -4072,7 +4101,12 @@ static void journal_tool_call_record(const char *tool, const char *tool_id, cons
     jbuf_free(&b);
 }
 
-static void journal_tool_result_record(const char *tool, const char *tool_id, bool ok, bool cached, double elapsed_ms, const char *result) {
+static void journal_tool_result_record(const char *tool, const char *tool_id, bool ok,
+                                       bool cached, bool timed_out, double elapsed_ms,
+                                       const char *result) {
+    /* W2: canonical durable TOOL_RESULT — emitted on every exit after dispatch
+     * returns, including denied, timed-out, and failed calls. */
+    chronicle_journal_tool_result(NULL, tool_id, tool, ok, cached, timed_out, elapsed_ms, result);
     jbuf_t b;
     jbuf_init(&b, 768);
     int n = result ? (int)strlen(result) : 0;
@@ -10099,8 +10133,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                                 baseline_log("security", "tool_blocked", deny_reason, NULL);
                                 conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
                                                            deny_reason, true);
-                                journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input);
-                                journal_tool_result_record(blk->tool_name, blk->tool_id, false, false,
+                                journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input, tier);
+                                journal_tool_result_record(blk->tool_name, blk->tool_id, false, false, false,
                                                            0.0, deny_reason);
                                 break;
                             }
@@ -10124,8 +10158,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                                          : "");
                             conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
                                                        validation_result, true);
-                            journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input);
-                            journal_tool_result_record(blk->tool_name, blk->tool_id, false, false,
+                            journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input, tier);
+                            journal_tool_result_record(blk->tool_name, blk->tool_id, false, false, false,
                                                        0.0, validation_result);
                             if (repeated_validation) {
                                 fprintf(stderr,
@@ -10158,7 +10192,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                             chronicle_tool_call_start(trace_id, chron_prompt_span, blk->tool_name,
                                                       blk->tool_id, blk->tool_input,
                                                       chron_tool_span);
-                            journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input);
+                            journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input, exec_tier);
                             double t0 = now_ms();
                             tools_set_trace_context(trace_id, chron_prompt_span, chron_tool_span,
                                                     blk->tool_name);
@@ -10182,7 +10216,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                             chronicle_tool_call_end(trace_id, chron_tool_span, blk->tool_name,
                                                     tool_result, ok, false, elapsed);
                             journal_tool_result_record(blk->tool_name, blk->tool_id, ok, false,
-                                                       elapsed, tool_result);
+                                                       false, elapsed, tool_result);
                             conv_add_tool_result_named(&conv, blk->tool_id, blk->tool_name,
                                                        tool_result, !ok);
                             free(tool_result);
@@ -10270,7 +10304,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                             chronicle_tool_call_start(trace_id, chron_prompt_span, blk->tool_name,
                                                       blk->tool_id, blk->tool_input,
                                                       chron_tool_span);
-                            journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input);
+                            journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input, exec_tier);
 
                             /* Start async spinner + watchdog */
                             tui_async_spinner_t spinner;
@@ -10650,7 +10684,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
                         chronicle_tool_call_start(trace_id, chron_prompt_span, blk->tool_name,
                                                   blk->tool_id, blk->tool_input, chron_tool_span);
-                        journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input);
+                        journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input,
+                                                 batch_tiers[bi]);
                         double t0 = now_ms();
                         tools_set_trace_context(trace_id, chron_prompt_span, chron_tool_span,
                                                 blk->tool_name);
@@ -10683,7 +10718,8 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                     trace_span_begin(trace_id, blk->tool_name, prompt_span, tool_span);
                     chronicle_tool_call_start(trace_id, chron_prompt_span, blk->tool_name,
                                               blk->tool_id, blk->tool_input, chron_tool_span);
-                    journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input);
+                    journal_tool_call_record(blk->tool_name, blk->tool_id, blk->tool_input,
+                                             batch_tiers[bi]);
 
                     tool_watchdog_t wd;
                     int timeout = tool_timeout_for(blk->tool_name);
@@ -10743,6 +10779,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                                    NULL);
                     chronicle_tool_call_end(trace_id, chron_tool_span, blk->tool_name, tool_result,
                                             ok && !was_timeout, was_timeout, elapsed);
+                    /* W2: durable TOOL_RESULT on every exit incl. timeout/failure. */
+                    journal_tool_result_record(blk->tool_name, blk->tool_id, ok, false,
+                                               was_timeout, elapsed, tool_result);
 
                     /* Track file reads */
                     if (ok && blk->tool_name &&
@@ -10788,7 +10827,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
                         char chron_tool_span[37] = "";
                         chronicle_tool_call_start(trace_id, chron_prompt_span, s->tool_name,
                                                   blk->tool_id, s->tool_input, chron_tool_span);
-                        journal_tool_call_record(s->tool_name, blk->tool_id, s->tool_input);
+                        /* W2: TOOL_CALL/TOOL_RESULT were journaled inside
+                         * concurrent_tool_thread around dispatch (serialized by
+                         * the Chronicle writer lock); do not duplicate here. */
 
                         tui_batch_spinner_complete(&batch_spinner, s->batch_index,
                                                    s->ok && !s->was_timeout, s->result,
