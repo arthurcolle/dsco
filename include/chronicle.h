@@ -57,6 +57,12 @@ int chronicle_runs_cli(int argc, char **argv);
  * automatically by chronicle start/journal-open; RUN_END by chronicle_stop. */
 bool chronicle_journal_run_start(const char *goal, const char *model, const char *config_hash);
 bool chronicle_journal_turn_start(int turn, const char *prompt_text);
+bool chronicle_journal_tool_call(const char *turn_id, const char *call_id,
+                                 const char *tool, const char *input_json,
+                                 const char *trust_tier, const char *trace_id);
+bool chronicle_journal_tool_result(const char *turn_id, const char *call_id,
+                                   const char *tool, bool ok, bool cached, bool timed_out,
+                                   double elapsed_ms, const char *result_text);
 bool chronicle_journal_checkpoint(int turn, double cost_usd, long long input_tokens,
                                   long long output_tokens, const char *stop_reason);
 bool chronicle_journal_run_end(const char *status, double cost_usd, long long turns);
