@@ -46,7 +46,7 @@ def classify(path: str) -> str:
         return "Repository policy and CI"
     if path.startswith("docs/"):
         return "Documentation"
-    if path.startswith("src/") or path.startswith("include/") or path == "dsc.c":
+    if path.startswith("src/") or path.startswith("include/"):
         return "Runtime source and headers"
     if path.startswith("tests/"):
         return "Tests"
