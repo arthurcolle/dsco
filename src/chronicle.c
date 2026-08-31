@@ -410,6 +410,7 @@ static bool ensure_schema(void) {
         " sensitivity TEXT, prev_event_hash TEXT, event_hash TEXT, sync_state TEXT DEFAULT 'local');"
         "CREATE INDEX IF NOT EXISTS idx_chronicle_events_session_seq ON events(session_id, seq);"
         "CREATE INDEX IF NOT EXISTS idx_chronicle_events_type_time ON events(event_type, wall_time DESC);"
+        "CREATE INDEX IF NOT EXISTS idx_chronicle_events_type_session ON events(event_type, session_id);"
         "CREATE TABLE IF NOT EXISTS spans ("
         " span_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL, parent_span_id TEXT, span_type TEXT NOT NULL, name TEXT,"
         " started_at INTEGER NOT NULL, ended_at INTEGER, status TEXT, payload_json TEXT);"
