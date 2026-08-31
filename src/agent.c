@@ -353,20 +353,12 @@ static bool maybe_escalate_tool_permission(const char *tool_name, const char *ba
     return false;
 }
 
-/* W2 (durable execution): canonical TOOL_CALL/TOOL_RESULT journal records live
- * in src/chronicle.c. These wrappers are called around every dispatch path
- * (serial, interactive, batch, concurrent worker) so the journal holds one
- * durable TOOL_CALL before tools_execute_for_tier() and exactly one
- * TOOL_RESULT after it returns — including denial, timeout, and failure. */
-bool chronicle_journal_tool_call(const char *turn_id, const char *call_id,
-                                 const char *tool, const char *input_json,
-                                 const char *trust_tier, const char *trace_id);
-bool chronicle_journal_tool_result(const char *turn_id, const char *call_id,
-                                   const char *tool, bool ok, bool cached, bool timed_out,
-                                   double elapsed_ms, const char *result_text);
-bool chronicle_journal_turn_start(int turn, const char *prompt_text);
-bool chronicle_journal_checkpoint(int turn, double cost_usd, long long input_tokens,
-                                  long long output_tokens, const char *stop_reason);
+/* W2 (durable execution): canonical TOOL_CALL/TOOL_RESULT/TURN_START/CHECKPOINT
+ * journal writers are declared in chronicle.h and defined in src/chronicle.c.
+ * These static wrappers are called around every dispatch path (serial,
+ * interactive, batch, concurrent worker) so the journal holds one durable
+ * TOOL_CALL before tools_execute_for_tier() and exactly one TOOL_RESULT after
+ * it returns — including denial, timeout, and failure. */
 static void journal_tool_call_record(const char *tool, const char *tool_id,
                                      const char *input_json, const char *trust_tier);
 static void journal_tool_result_record(const char *tool, const char *tool_id, bool ok,
@@ -4751,6 +4743,23 @@ static bool interactive_composer_enabled(void) {
  * Cursor advances only after a receipt is queued; restart/reconnect replays
  * terminal records newer than the local observer's start point. */
 static int64_t g_command_notify_cursor = 0;
+/* SQLite command timestamps are second-resolution. Querying strictly after the
+ * high-water timestamp could lose two different task completions written in
+ * the same second; retain a small receipt-id set and overlap one second. */
+#define COMMAND_NOTIFY_SEEN_MAX 64
+static char g_command_notify_seen[COMMAND_NOTIFY_SEEN_MAX][COMMAND_PLANE_ID_LEN];
+static unsigned g_command_notify_seen_next = 0;
+static bool command_notify_seen(const char *id) {
+    for (int i = 0; i < COMMAND_NOTIFY_SEEN_MAX; i++)
+        if (g_command_notify_seen[i][0] && strcmp(g_command_notify_seen[i], id) == 0)
+            return true;
+    return false;
+}
+static void command_notify_remember(const char *id) {
+    snprintf(g_command_notify_seen[g_command_notify_seen_next % COMMAND_NOTIFY_SEEN_MAX],
+             COMMAND_PLANE_ID_LEN, "%s", id ? id : "");
+    g_command_notify_seen_next++;
+}
 static void drain_command_plane_notifications(tui_status_bar_t *sb) {
     if (!sb || !sb->visible)
         return;
@@ -4758,10 +4767,13 @@ static void drain_command_plane_notifications(tui_status_bar_t *sb) {
     if (command_plane_open(&cp, NULL) != COMMAND_PLANE_OK)
         return;
     command_record_t recs[8];
-    int n = command_plane_list_terminal_since(&cp, g_command_notify_cursor, recs, 8);
+    int64_t query_after = g_command_notify_cursor > 0 ? g_command_notify_cursor - 1 : 0;
+    int n = command_plane_list_terminal_since(&cp, query_after, recs, 8);
     if (n > 0) {
         for (int i = 0; i < n; i++) {
             command_record_t *r = &recs[i];
+            if (command_notify_seen(r->id))
+                continue;
             const char *state = command_plane_status_name(r->status);
             char note[300];
             if (r->status == COMMAND_PLANE_STATUS_SUCCEEDED) {
