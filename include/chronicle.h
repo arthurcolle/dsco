@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 
 /* DSCO Chronicle: local-first full activity recorder.
  *
@@ -50,6 +51,27 @@ const char *chronicle_journal_path(void);
 const char *chronicle_run_dir(void);
 bool chronicle_journal_append(const char *record_type, const char *payload_json, bool durable);
 int chronicle_runs_cli(int argc, char **argv);
+
+/* ── replay engine (Wave B P2.1) ────────────────────────────────────── */
+
+typedef struct {
+    long long records;
+    long long turns;
+    long long tool_calls;
+    long long tool_results;
+    long long frontier_calls;   /* calls with no matching result */
+    long long checkpoints;
+    double cost_usd;
+    bool corrupt_tail;          /* torn/corrupt frame stopped the scan early */
+} chronicle_replay_summary_t;
+
+/* Reconstruct run steps from <runs_dir>/<run_id>/journal.wal as JSON lines
+ * (dsco.replay.step.v1) to `out`; `out` may be NULL for summary-only use.
+ * Marks the resume frontier (tool.call with no matching tool.result) and a
+ * conservative replay policy per tool name. Returns false only when the
+ * journal cannot be opened. */
+bool chronicle_replay_run(const char *runs_dir, const char *run_id, FILE *out,
+                          chronicle_replay_summary_t *summary);
 
 /* Budget ledger summaries derived from llm.response.completed events. */
 typedef struct {
