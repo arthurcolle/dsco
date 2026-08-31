@@ -62,9 +62,6 @@ def repo_files(root: Path) -> Iterable[Path]:
         for p in base.rglob("*"):
             if p.suffix in {".c", ".h"} and p.is_file():
                 yield p
-    dsc = root / "dsc.c"
-    if dsc.exists():
-        yield dsc
 
 
 def rel(root: Path, p: Path) -> str:
