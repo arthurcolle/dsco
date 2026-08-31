@@ -1093,3 +1093,13 @@ ui: $(TARGET) ui-deps
 	lint clang-tidy cppcheck static-analysis check-version \
 	ui ui-deps bench-startup bench-tool bench-agent-loop bench-local \
 	bench-sota bench-ttft bench-worker bench-size release-hardened release-hardened-native
+
+# Governance posture guard: make-spawned processes (tests, evals, gate
+# verification) must measure the REAL gate, never an inherited override.
+# Ambient DSCO_GOV_BYPASS/DSCO_ALLOW_* from a --systems-agent parent is
+# stripped here so test results cannot be silently inverted. Deliberate
+# ungoverned runs are opt-in via `--systems-agent` / `--gov-model none`
+# on the binary invocation itself (see docs/GOVERNANCE_POSTURE.md).
+unexport DSCO_GOV_BYPASS DSCO_GOV_MODEL DSCO_TRUST_TIER DSCO_APPROVAL_MODE
+unexport DSCO_ALLOW_READ DSCO_ALLOW_WRITE DSCO_ALLOW_NET DSCO_ALLOW_RUN
+unexport DSCO_ALLOW_SECRETS DSCO_ALLOW_CONTROL DSCO_ALLOW_EXFIL
