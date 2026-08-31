@@ -2,6 +2,7 @@
 #define DSCO_ORCHESTRATOR_H
 
 #include <stdbool.h>
+#include <stddef.h> /* size_t — orch_budget_checkpoint */
 
 /*
  * Orchestrator mode: GLM as chat/routing model + specialist worker agents
