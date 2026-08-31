@@ -1,4 +1,5 @@
 #include "vecstore.h"
+#include "dsco_accel.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,31 +28,16 @@ struct vecstore {
 
 /* ── Cosine Similarity ────────────────────────────────────────────────── */
 
-/* Cosine similarity. NEON-vectorized on Apple Silicon / ARM (measured ~4.6x
- * over the scalar loop at dim=1024 — the vecstore brute-force query hot path);
- * scalar fallback keeps the cosmo/APE, wasm, and non-NEON lanes correct. */
+/* Cosine similarity. Routes through the unified accel layer (dsco_accel_cosine):
+ * Accelerate.framework cblas_sdot on macOS when available, else a 4-accumulator
+ * NEON path, else scalar. Preserves the prior local semantics: returns 0.0f when
+ * either norm is ~0 instead of NaN. Public symbol — callers outside vecstore
+ * link against it (include/vecstore.h). */
 float cosine_similarity_f(const float *a, const float *b, int dim) {
-    float dot = 0.0f, na = 0.0f, nb = 0.0f;
-    int i = 0;
-#if defined(__ARM_NEON)
-    float32x4_t vdot = vdupq_n_f32(0), vna = vdupq_n_f32(0), vnb = vdupq_n_f32(0);
-    for (; i + 4 <= dim; i += 4) {
-        float32x4_t xa = vld1q_f32(a + i), xb = vld1q_f32(b + i);
-        vdot = vfmaq_f32(vdot, xa, xb);
-        vna = vfmaq_f32(vna, xa, xa);
-        vnb = vfmaq_f32(vnb, xb, xb);
-    }
-    dot = vaddvq_f32(vdot);
-    na = vaddvq_f32(vna);
-    nb = vaddvq_f32(vnb);
-#endif
-    for (; i < dim; i++) {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
-    }
-    float denom = sqrtf(na) * sqrtf(nb);
-    return denom > 1e-8f ? dot / denom : 0.0f;
+    if (!a || !b || dim <= 0)
+        return 0.0f;
+    float r = dsco_accel_cosine(a, b, dim);
+    return isfinite(r) ? r : 0.0f;
 }
 
 /* ── Lifecycle ────────────────────────────────────────────────────────── */
