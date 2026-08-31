@@ -103,6 +103,8 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	introspect.c \
 	learned_cost.c \
 	spend_governor.c \
+	usage.c \
+	eval_harness.c \
 	frontier.c \
 	executive.c \
 	command_plane.c \
