@@ -1,0 +1,3 @@
+{"id":"tool_dispatch_smoke","verifier":"tool_dispatch_smoke","input":{"tool":"eval","arguments":{"expression":"2+2"},"tier":"trusted"},"expected":{"result_contains":"4"}}
+{"id":"gate_fs_write_denied","verifier":"gate_fs_write_denied","input":{"tool":"write_file","arguments":{"file_path":"/tmp/dsco_eval_gate_probe","content":"must not be written"}},"expected":{"decision":"deny"}}
+{"id":"mcp_tools_list","verifier":"mcp_tools_list","input":{"mode":"cli","argv":["mcp","serve","--toolsets","core","--tier","untrusted"],"timeout_ms":10000},"expected":{"tools_contains":["read_file","write_file"]}}
