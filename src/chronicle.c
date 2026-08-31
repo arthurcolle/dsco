@@ -996,7 +996,11 @@ static bool replay_collect_results(FILE *fp, replay_call_ref_t **out, size_t *ou
         if (crc32_update(0, buf, len) != want_crc) { free(buf); break; }
         char *type = json_get_str(buf, "type");
         if (type && strcmp(type, "tool.result") == 0) {
-            char *tid = json_get_str(buf, "tool_id");
+            /* tool_id lives at depth 3: frame → payload(env) → payload(data) */
+            char *env = json_get_raw(buf, "payload");
+            char *data = env ? json_get_raw(env, "payload") : NULL;
+            char *tid = data ? json_get_str(data, "tool_id") : NULL;
+            free(env); free(data);
             if (tid) {
                 if (n == cap) {
                     cap *= 2;
@@ -1060,8 +1064,8 @@ bool chronicle_replay_run(const char *runs_dir, const char *run_id, FILE *out,
         const char *dn = data && data[0] ? data : "null";
 
         if (type && strcmp(type, "tool.call") == 0) {
-            char *tool = json_get_str(buf, "tool");
-            char *tid = json_get_str(buf, "tool_id");
+            char *tool = data ? json_get_str(data, "tool") : NULL;
+            char *tid = data ? json_get_str(data, "tool_id") : NULL;
             bool frontier = false;
             if (tid) frontier = !replay_id_in_set(results, n_results, tid, NULL);
             if (frontier) summary->frontier_calls++;
@@ -1070,8 +1074,8 @@ bool chronicle_replay_run(const char *runs_dir, const char *run_id, FILE *out,
             summary->tool_calls++;
             free(tool); free(tid);
         } else if (type && strcmp(type, "tool.result") == 0) {
-            char *tool = json_get_str(buf, "tool");
-            char *tid = json_get_str(buf, "tool_id");
+            char *tool = data ? json_get_str(data, "tool") : NULL;
+            char *tid = data ? json_get_str(data, "tool_id") : NULL;
             replay_emit_step(out, seq, wall, "tool.result", "tool.result", tool, tid,
                              NULL, false, dn);
             summary->tool_results++;
@@ -1082,7 +1086,7 @@ bool chronicle_replay_run(const char *runs_dir, const char *run_id, FILE *out,
         } else if (type && strcmp(type, "turn.checkpoint") == 0) {
             replay_emit_step(out, seq, wall, "checkpoint", "turn.checkpoint", NULL, NULL, NULL, false, dn);
             summary->checkpoints++;
-            if (env) summary->cost_usd += json_get_double(env, "cost_usd", 0.0);
+            if (data) summary->cost_usd += json_get_double(data, "cost_usd", 0.0);
         } else if (type && strcmp(type, "run.started") == 0) {
             replay_emit_step(out, seq, wall, "run", "run.started", NULL, NULL, NULL, false, dn);
         } else if (type && strcmp(type, "run.completed") == 0) {
