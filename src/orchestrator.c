@@ -178,6 +178,19 @@ static char *run_worker_task(const char *task, const char *model) {
     tools_set_context_window(session.context_window);
 
     /* Conversation: single user turn with the task */
+
+/* ── T04/T05: extracted, unit-testable convergence seams ─────────────── */
+int orch_http_transient(int http_status) {
+    return http_status >= 500 || http_status == 429 || http_status == 408 || http_status == 0;
+}
+
+void orch_budget_checkpoint(char *result, size_t cap) {
+    if (!result || !result[0]) return;
+    const char *tag = "\n[budget_checkpoint: emitted-at-turn-limit]";
+    size_t rl = strnlen(result, cap - 1);
+    snprintf(result + rl, cap - rl, "%s", tag);
+}
+
     conversation_t conv;
     conv_init(&conv);
     conv_add_user_text(&conv, task);
@@ -211,8 +224,7 @@ static char *run_worker_task(const char *task, const char *model) {
         free(req);
 
         if (!sr.ok) {
-            bool transient = sr.http_status >= 500 || sr.http_status == 429 ||
-                             sr.http_status == 408 || sr.http_status == 0;
+            bool transient = orch_http_transient(sr.http_status);
             json_free_response(&sr.parsed);
             if (transient && retries_left > 0 && !exhausted) {
                 retries_left--; consecutive_transients++;
@@ -298,9 +310,9 @@ static char *run_worker_task(const char *task, const char *model) {
             json_free_response(&sr.parsed);
             if (exhausted && result) {
                 size_t rl = strlen(result);
-                const char *tag = "\n[budget_checkpoint: emitted-at-turn-limit]";
-                char *tagged = safe_malloc(rl + strlen(tag) + 1);
-                memcpy(tagged, result, rl); strcpy(tagged + rl, tag);
+                char *tagged = safe_malloc(rl + 64);
+                memcpy(tagged, result, rl); tagged[rl] = '\0';
+                orch_budget_checkpoint(tagged, rl + 64);
                 free(result);
                 result = tagged;
             }

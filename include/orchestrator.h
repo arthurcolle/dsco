@@ -28,4 +28,8 @@ bool agent_run_orchestrated(const char *api_key,
                              const char *worker_model,
                              const char *provider_override);
 
+/* T04/T05 testable seams: transient classification + checkpoint tagging */
+int  orch_http_transient(int http_status);          /* 1 = retryable class */
+void orch_budget_checkpoint(char *result, size_t cap);
+
 #endif /* DSCO_ORCHESTRATOR_H */
