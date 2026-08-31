@@ -21,6 +21,7 @@
 #include "md.h"
 #include "baseline.h"
 #include "chronicle.h"
+#include "usage.h"
 #include "rl_hooks.h"
 #include "plugin.h"
 #include "setup.h"
@@ -2740,10 +2741,15 @@ static bool session_switch_to_file(conversation_t *conv, session_state_t *sessio
 
 /* ── Cost tracking ─────────────────────────────────────────────────────── */
 
+/* W2/#12: durable usage receipt — one append-only ledger line per session.
+ * Declared here, defined after the chronicle trace-id globals. */
+static void usage_receipt_from_session(const session_state_t *session, double total_usd);
+
 static void print_cost(session_state_t *session) {
     const model_info_t *mi = model_lookup(session->model);
     if (!mi) {
         fprintf(stderr, "  %sunknown model for pricing%s\n", TUI_DIM, TUI_RESET);
+        usage_receipt_from_session(session, 0.0); /* record facts even when unpriced */
         return;
     }
     double in_cost = session->total_input_tokens * mi->input_price / 1e6;
@@ -2773,6 +2779,7 @@ static void print_cost(session_state_t *session) {
     fprintf(stderr, "  %s%s──────────────────────%s\n", TUI_BOLD, TUI_CYAN, TUI_RESET);
     fprintf(stderr, "  %sTotal:%s       %s$%.4f%s\n\n", TUI_BOLD, TUI_RESET, TUI_BGREEN, total,
             TUI_RESET);
+    usage_receipt_from_session(session, total); /* #12: durable receipt */
 }
 
 /* ── Structured output presets ─────────────────────────────────────────── */
@@ -4061,6 +4068,41 @@ static void fsm_tool_pending_enter(void *ctx) {
 static char g_chronicle_active_trace_id[37] = "";
 static char g_chronicle_active_llm_span_id[37] = "";
 
+/* #12: persist the session's durable accounting facts to ~/.dsco/usage/.
+ * Every run traces to a dollar: token buckets + budget-accounted estimate,
+ * no prompts/outputs/credentials. Idempotent per print; ledger is append-only. */
+static void usage_receipt_from_session(const session_state_t *session, double total_usd) {
+    usage_receipt_t r;
+    memset(&r, 0, sizeof(r));
+    if (g_chronicle_active_trace_id[0])
+        snprintf(r.session_id, sizeof(r.session_id), "%s", g_chronicle_active_trace_id);
+    else
+        snprintf(r.session_id, sizeof(r.session_id), "local-%d-%lld", (int)getpid(),
+                 (long long)time(NULL));
+    r.timestamp_ms = (long long)time(NULL) * 1000;
+    r.tokens_in = session->total_input_tokens;
+    r.tokens_out = session->total_output_tokens;
+    r.cache_read_tokens = session->total_cache_read_tokens;
+    r.cache_write_tokens = session->total_cache_write_tokens;
+    r.turns = session->turn_count;
+    snprintf(r.model, sizeof(r.model), "%s", session->model);
+    if (g_provider_override_name && g_provider_override_name[0])
+        snprintf(r.provider, sizeof(r.provider), "%s", g_provider_override_name);
+    /* Self-price when the caller didn't supply a computed total (exit-path calls
+     * arrive after turn accounting is final but before print_cost runs). */
+    if (total_usd <= 0.0) {
+        const model_info_t *mi = model_lookup(session->model);
+        if (mi)
+            total_usd = session->total_input_tokens * mi->input_price / 1e6 +
+                        session->total_output_tokens * mi->output_price / 1e6 +
+                        session->total_cache_read_tokens * mi->cache_read_price / 1e6 +
+                        session->total_cache_write_tokens * mi->cache_write_price / 1e6;
+    }
+    r.cost_usd = total_usd;
+    r.locally_derived_usd = total_usd;
+    usage_receipt_record(&r);
+}
+
 static void journal_turn_start(int turn, const char *model, int conv_count) {
     jbuf_t b;
     jbuf_init(&b, 256);
@@ -5192,6 +5234,7 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
             strcmp(input_buf, "/exit") == 0 || strcmp(input_buf, "/quit") == 0) {
             /* The caller returns DSCO_EXIT_USER_REQUESTED so the supervisor stops. */
             setenv("DSCO_SUPERVISE_RESTART", "transient", 1);
+            print_cost(&session); /* #12: final receipt lands in the ledger on every exit */
             user_exit_requested = true;
             break;
         }
@@ -11386,6 +11429,9 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
 
     g_autosave_conv = NULL;
     g_autosave_session = NULL;
+    /* #12: final durable usage receipt — every exit path (interactive quit,
+     * EOF, headless prompt) funnels through here. */
+    usage_receipt_from_session(&session, 0.0); /* token facts always; cost via print_cost when priced */
     autosave(&conv, &session);
     conv_free(&conv);
 #ifdef HAVE_READLINE
