@@ -1082,8 +1082,10 @@ static void replay_emit_step(FILE *out, long long seq, long long wall_ms,
 }
 
 /* Pass 1: collect tool.result tool_ids into a growable set. */
-static bool replay_collect_results(FILE *fp, replay_call_ref_t **out, size_t *out_n) {
+static bool replay_collect_results(FILE *fp, replay_call_ref_t **out, size_t *out_n,
+                                   bool *out_has_canonical) {
     size_t cap = 32, n = 0;
+    bool has_canonical = false;
     replay_call_ref_t *set = (replay_call_ref_t *)malloc(cap * sizeof(*set));
     if (!set) return false;
     rewind(fp);
@@ -1098,6 +1100,10 @@ static bool replay_collect_results(FILE *fp, replay_call_ref_t **out, size_t *ou
         buf[len] = 0;
         if (crc32_update(0, buf, len) != want_crc) { free(buf); break; }
         char *type = json_get_str(buf, "type");
+        if (type && (strcmp(type, "RUN_START") == 0 || strcmp(type, "TURN_START") == 0 ||
+                     strcmp(type, "TOOL_CALL") == 0 || strcmp(type, "TOOL_RESULT") == 0 ||
+                     strcmp(type, "CHECKPOINT") == 0 || strcmp(type, "RUN_END") == 0))
+            has_canonical = true;
         if (type && strcmp(type, "tool.result") == 0) {
             /* lowercase agent-event: tool_id at depth 3 (frame.payload.payload) */
             char *env = json_get_raw(buf, "payload");
@@ -1137,6 +1143,7 @@ static bool replay_collect_results(FILE *fp, replay_call_ref_t **out, size_t *ou
     }
     *out = set;
     *out_n = n;
+    if (out_has_canonical) *out_has_canonical = has_canonical;
     return true;
 }
 
@@ -1160,7 +1167,8 @@ bool chronicle_replay_run(const char *runs_dir, const char *run_id, FILE *out,
 
     replay_call_ref_t *results = NULL;
     size_t n_results = 0;
-    replay_collect_results(fp, &results, &n_results);
+    bool has_canonical = false;
+    replay_collect_results(fp, &results, &n_results, &has_canonical);
 
     rewind(fp);
     for (;;) {
@@ -1190,12 +1198,17 @@ bool chronicle_replay_run(const char *runs_dir, const char *run_id, FILE *out,
         if (type && strcmp(type, "tool.call") == 0) {
             char *tool = data ? json_get_str(data, "tool") : NULL;
             char *tid = data ? json_get_str(data, "tool_id") : NULL;
-            bool frontier = false;
-            if (tid) frontier = !replay_id_in_set(results, n_results, tid, NULL);
-            if (frontier) summary->frontier_calls++;
-            replay_emit_step(out, seq, wall, "tool.call", "tool.call", tool, tid,
-                             replay_policy_for_tool(tool), frontier, dn);
-            summary->tool_calls++;
+            if (has_canonical) {
+                /* canonical TOOL_CALL is authoritative; lowercase is a mirror. */
+                replay_emit_step(out, seq, wall, "record", "tool.call", tool, tid, NULL, false, dn);
+            } else {
+                bool frontier = false;
+                if (tid) frontier = !replay_id_in_set(results, n_results, tid, NULL);
+                if (frontier) summary->frontier_calls++;
+                replay_emit_step(out, seq, wall, "tool.call", "tool.call", tool, tid,
+                                 replay_policy_for_tool(tool), frontier, dn);
+                summary->tool_calls++;
+            }
             free(tool); free(tid);
         } else if (type && strcmp(type, "TOOL_CALL") == 0) {
             char *tool = env ? json_get_str(env, "tool") : NULL;
@@ -1211,9 +1224,9 @@ bool chronicle_replay_run(const char *runs_dir, const char *run_id, FILE *out,
         } else if (type && strcmp(type, "tool.result") == 0) {
             char *tool = data ? json_get_str(data, "tool") : NULL;
             char *tid = data ? json_get_str(data, "tool_id") : NULL;
-            replay_emit_step(out, seq, wall, "tool.result", "tool.result", tool, tid,
-                             NULL, false, dn);
-            summary->tool_results++;
+            replay_emit_step(out, seq, wall, has_canonical ? "record" : "tool.result",
+                             "tool.result", tool, tid, NULL, false, dn);
+            if (!has_canonical) summary->tool_results++;
             free(tool); free(tid);
         } else if (type && strcmp(type, "TOOL_RESULT") == 0) {
             char *tool = env ? json_get_str(env, "tool") : NULL;
@@ -1224,15 +1237,19 @@ bool chronicle_replay_run(const char *runs_dir, const char *run_id, FILE *out,
             summary->tool_results++;
             free(tool); free(tid);
         } else if (type && strcmp(type, "turn.started") == 0) {
-            replay_emit_step(out, seq, wall, "turn", "turn.started", NULL, NULL, NULL, false, dn);
-            summary->turns++;
+            replay_emit_step(out, seq, wall, has_canonical ? "record" : "turn",
+                             "turn.started", NULL, NULL, NULL, false, dn);
+            if (!has_canonical) summary->turns++;
         } else if (type && strcmp(type, "TURN_START") == 0) {
             replay_emit_step(out, seq, wall, "turn", "TURN_START", NULL, NULL, NULL, false, dn);
             summary->turns++;
         } else if (type && strcmp(type, "turn.checkpoint") == 0) {
-            replay_emit_step(out, seq, wall, "checkpoint", "turn.checkpoint", NULL, NULL, NULL, false, dn);
-            summary->checkpoints++;
-            if (data) summary->cost_usd += json_get_double(data, "cost_usd", 0.0);
+            replay_emit_step(out, seq, wall, has_canonical ? "record" : "checkpoint",
+                             "turn.checkpoint", NULL, NULL, NULL, false, dn);
+            if (!has_canonical) {
+                summary->checkpoints++;
+                if (data) summary->cost_usd += json_get_double(data, "cost_usd", 0.0);
+            }
         } else if (type && strcmp(type, "CHECKPOINT") == 0) {
             replay_emit_step(out, seq, wall, "checkpoint", "CHECKPOINT", NULL, NULL, NULL, false, dn);
             summary->checkpoints++;
