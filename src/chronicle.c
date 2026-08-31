@@ -700,35 +700,256 @@ static void runs_dir_path(char *out, size_t out_len) {
     }
 }
 
+/* ── runs list / gc (Wave B P1.3 durable execution) ──────────────────── */
+
+typedef struct {
+    char run_id[64];
+    char status[24];
+    long long started_at;
+    long long ended_at;
+    long long records;   /* manifest seq; 0 when manifest absent */
+    long long bytes;     /* journal.wal size */
+} run_entry_t;
+
+/* Read a small file into a malloc'd NUL-terminated buffer. NULL on failure. */
+static char *read_small_file(const char *path, size_t max_bytes) {
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || (size_t)st.st_size > max_bytes)
+        return NULL;
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    size_t n = (size_t)st.st_size;
+    char *buf = (char *)malloc(n + 1);
+    if (!buf) { fclose(fp); return NULL; }
+    size_t got = fread(buf, 1, n, fp);
+    fclose(fp);
+    if (got != n) { free(buf); return NULL; }
+    buf[n] = 0;
+    return buf;
+}
+
+static bool looks_like_run_id(const char *s) {
+    /* 8-4-4-4-12 hex; conservative guard for gc deletion targets. */
+    if (strlen(s) != 36) return false;
+    for (int i = 0; s[i]; i++) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (s[i] != '-') return false;
+        } else if (!isxdigit((unsigned char)s[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Populate one run entry from manifest.json + journal stat. */
+static void runs_scan_one(const char *runs_dir, const char *name, run_entry_t *e) {
+    memset(e, 0, sizeof(*e));
+    snprintf(e->run_id, sizeof(e->run_id), "%s", name);
+    snprintf(e->status, sizeof(e->status), "unknown");
+
+    char mp[PATH_MAX], jp[PATH_MAX];
+    snprintf(mp, sizeof(mp), "%s/%s/manifest.json", runs_dir, name);
+    snprintf(jp, sizeof(jp), "%s/%s/journal.wal", runs_dir, name);
+
+    char *mj = read_small_file(mp, 64 * 1024);
+    if (mj) {
+        char *status = json_get_str(mj, "status");
+        if (status) {
+            snprintf(e->status, sizeof(e->status), "%s", status);
+            free(status);
+        }
+        e->started_at = json_get_i64(mj, "started_at", 0);
+        e->ended_at = json_get_i64(mj, "ended_at", 0);
+        e->records = json_get_i64(mj, "seq", 0);
+        free(mj);
+    }
+    struct stat st;
+    if (stat(jp, &st) == 0) e->bytes = (long long)st.st_size;
+    if (e->started_at == 0 && stat(mp, &st) == 0) e->started_at = (long long)st.st_mtime;
+}
+
+static int runs_cmp_started_desc(const void *a, const void *b) {
+    const run_entry_t *ra = (const run_entry_t *)a, *rb = (const run_entry_t *)b;
+    if (rb->started_at != ra->started_at) return rb->started_at < ra->started_at ? -1 : 1;
+    return strcmp(ra->run_id, rb->run_id);
+}
+
+static void runs_print_iso(long long epoch, char *out, size_t out_len) {
+    if (epoch <= 0) { snprintf(out, out_len, "-"); return; }
+    time_t t = (time_t)epoch;
+    struct tm tmv;
+    if (!localtime_r(&t, &tmv)) { snprintf(out, out_len, "-"); return; }
+    strftime(out, out_len, "%Y-%m-%d %H:%M:%S", &tmv);
+}
+
+/* Human-readable byte count (<= 4 significant chars, e.g. 5.9K, 12M). */
+static void runs_print_bytes(long long n, char *out, size_t out_len) {
+    if (n >= 1024 * 1024) snprintf(out, out_len, "%.1fM", (double)n / (1024.0 * 1024.0));
+    else if (n >= 1024) snprintf(out, out_len, "%.1fK", (double)n / 1024.0);
+    else snprintf(out, out_len, "%lldB", n);
+}
+
+/* Bounded recursive delete. Returns bytes unlinked, or -1 on error. */
+static long long runs_rm_tree(const char *dir) {
+    if (!path_is_safe_dir(dir)) return -1;
+    long long freed = 0;
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    struct dirent *ent;
+    while ((ent = readdir(d))) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        char p[PATH_MAX];
+        if (snprintf(p, sizeof(p), "%s/%s", dir, ent->d_name) >= (int)sizeof(p)) continue;
+        struct stat st;
+        if (lstat(p, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            long long sub = runs_rm_tree(p);
+            if (sub < 0) { closedir(d); return -1; }
+            freed += sub;
+        } else {
+            if (unlink(p) != 0) { closedir(d); return -1; }
+            freed += (long long)st.st_size;
+        }
+    }
+    closedir(d);
+    if (rmdir(dir) != 0) return -1;
+    return freed;
+}
+
+static int runs_cmd_list(const char *runs_dir, int argc, char **argv) {
+    long limit = 20;
+    bool json = false;
+    for (int i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "--json") == 0) json = true;
+        else if (strcmp(argv[i], "--limit") == 0 && i + 1 < argc) {
+            limit = strtol(argv[++i], NULL, 10);
+            if (limit < 0) limit = 20;
+        } else if (strcmp(argv[i], "--all") == 0) limit = 0;
+        else { fprintf(stderr, "usage: dsco runs list [--limit N|--all] [--json]\n"); return 2; }
+    }
+    DIR *d = opendir(runs_dir);
+    if (!d) {
+        if (errno == ENOENT) return 0;
+        fprintf(stderr, "cannot open runs directory: %s\n", runs_dir);
+        return 1;
+    }
+    size_t cap = 256, n = 0;
+    run_entry_t *ents = (run_entry_t *)malloc(cap * sizeof(*ents));
+    if (!ents) { closedir(d); fprintf(stderr, "out of memory\n"); return 1; }
+    struct dirent *ent;
+    while ((ent = readdir(d))) {
+        if (ent->d_name[0] == '.') continue;
+        char jp[PATH_MAX];
+        if (snprintf(jp, sizeof(jp), "%s/%s/journal.wal", runs_dir, ent->d_name) >= (int)sizeof(jp)) continue;
+        struct stat st;
+        if (stat(jp, &st) != 0) continue; /* not a run dir */
+        if (n == cap) {
+            cap *= 2;
+            run_entry_t *ne = (run_entry_t *)realloc(ents, cap * sizeof(*ents));
+            if (!ne) { free(ents); closedir(d); fprintf(stderr, "out of memory\n"); return 1; }
+            ents = ne;
+        }
+        runs_scan_one(runs_dir, ent->d_name, &ents[n++]);
+    }
+    closedir(d);
+    qsort(ents, n, sizeof(*ents), runs_cmp_started_desc);
+    size_t shown = (limit > 0 && (size_t)limit < n) ? (size_t)limit : n;
+    if (json) {
+        printf("{\"schema\":\"dsco.runs.list.v1\",\"total\":%zu,\"shown\":%zu}\n", n, shown);
+        for (size_t i = 0; i < shown; i++) {
+            run_entry_t *e = &ents[i];
+            printf("{\"run_id\":\"%s\",\"status\":\"%s\",\"started_at\":%lld,"
+                   "\"ended_at\":%lld,\"records\":%lld,\"bytes\":%lld}\n",
+                   e->run_id, e->status, e->started_at, e->ended_at, e->records, e->bytes);
+        }
+    } else {
+        printf("%-36s  %-10s  %-19s  %-7s  %5s  %7s\n",
+               "RUN-ID", "STATUS", "STARTED", "DUR", "RECS", "SIZE");
+        for (size_t i = 0; i < shown; i++) {
+            run_entry_t *e = &ents[i];
+            char started[24], size_s[16];
+            runs_print_iso(e->started_at, started, sizeof(started));
+            runs_print_bytes(e->bytes, size_s, sizeof(size_s));
+            long long dur_s = (e->ended_at > 0 && e->started_at > 0) ? e->ended_at - e->started_at : -1;
+            char dur_s_str[16];
+            if (dur_s < 0) snprintf(dur_s_str, sizeof(dur_s_str), "-");
+            else if (dur_s < 60) snprintf(dur_s_str, sizeof(dur_s_str), "%llds", dur_s);
+            else if (dur_s < 3600) snprintf(dur_s_str, sizeof(dur_s_str), "%lldm", dur_s / 60);
+            else snprintf(dur_s_str, sizeof(dur_s_str), "%lldh", dur_s / 3600);
+            printf("%-36s  %-10s  %-19s  %-7s  %5lld  %7s\n",
+                   e->run_id, e->status, started, dur_s_str, e->records, size_s);
+        }
+        if (n > shown) printf("… %zu more (use --limit/--all)\n", n - shown);
+    }
+    free(ents);
+    return 0;
+}
+
+static int runs_cmd_gc(const char *runs_dir, int argc, char **argv) {
+    long days = 30;
+    bool dry_run = false, include_running = false;
+    for (int i = 3; i < argc; i++) {
+        if (strcmp(argv[i], "--days") == 0 && i + 1 < argc) {
+            days = strtol(argv[++i], NULL, 10);
+            if (days < 0) days = 0;
+        } else if (strcmp(argv[i], "--dry-run") == 0) dry_run = true;
+        else if (strcmp(argv[i], "--include-running") == 0) include_running = true;
+        else { fprintf(stderr, "usage: dsco runs gc [--days N] [--dry-run] [--include-running]\n"); return 2; }
+    }
+    DIR *d = opendir(runs_dir);
+    if (!d) {
+        if (errno == ENOENT) return 0;
+        fprintf(stderr, "cannot open runs directory: %s\n", runs_dir);
+        return 1;
+    }
+    long long cutoff = (long long)time(NULL) - (long long)days * 86400;
+    long long freed_bytes = 0;
+    long scanned = 0, eligible = 0, deleted = 0, kept_running = 0, failed = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d))) {
+        if (ent->d_name[0] == '.') continue;
+        if (!looks_like_run_id(ent->d_name)) continue; /* never touch non-run dirs */
+        char rd[PATH_MAX];
+        if (snprintf(rd, sizeof(rd), "%s/%s", runs_dir, ent->d_name) >= (int)sizeof(rd)) continue;
+        scanned++;
+        run_entry_t e;
+        runs_scan_one(runs_dir, ent->d_name, &e);
+        if (strcmp(e.status, "running") == 0 && !include_running) { kept_running++; continue; }
+        if (e.started_at >= cutoff) continue;
+        eligible++;
+        if (dry_run) {
+            printf("would delete %s (status=%s, started %lld)\n", ent->d_name, e.status, e.started_at);
+            continue;
+        }
+        long long freed = runs_rm_tree(rd);
+        if (freed < 0) { failed++; fprintf(stderr, "gc: failed to remove %s\n", ent->d_name); }
+        else { deleted++; freed_bytes += freed; }
+    }
+    closedir(d);
+    char size_s[16];
+    runs_print_bytes(freed_bytes, size_s, sizeof(size_s));
+    if (dry_run)
+        printf("gc dry-run: %ld scanned, %ld eligible (older than %ld days), %ld running kept\n",
+               scanned, eligible, days, kept_running);
+    else
+        printf("gc: %ld scanned, %ld deleted, %ld failed, %s freed, %ld running kept\n",
+               scanned, deleted, failed, size_s, kept_running);
+    return failed > 0 ? 1 : 0;
+}
+
 int chronicle_runs_cli(int argc, char **argv) {
     const char *cmd = argc >= 3 ? argv[2] : "list";
     char runs[PATH_MAX];
     runs_dir_path(runs, sizeof(runs));
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "-h") == 0 ||
         strcmp(cmd, "--help") == 0) {
-        printf("Usage: dsco runs [list|show <run-id>|check <run-id>|gc]\n"
+        printf("Usage: dsco runs [list [--limit N|--all] [--json]|show <run-id>|check <run-id>|gc [--days N] [--dry-run] [--include-running]]\n"
                "\n"
                "Inspect crash-safe Chronicle run journals without creating a new run.\n");
         return 0;
     }
-    if (strcmp(cmd, "list") == 0 || strcmp(cmd, "ls") == 0) {
-        DIR *d = opendir(runs);
-        if (!d) {
-            if (errno == ENOENT) return 0;
-            fprintf(stderr, "cannot open runs directory: %s\n", runs);
-            return 1;
-        }
-        struct dirent *ent;
-        while ((ent = readdir(d))) {
-            if (ent->d_name[0] == '.') continue;
-            char jp[PATH_MAX];
-            snprintf(jp, sizeof(jp), "%s/%s/journal.wal", runs, ent->d_name);
-            struct stat st;
-            if (stat(jp, &st) == 0) printf("%s\t%lld bytes\t%lld\n", ent->d_name, (long long)st.st_size, (long long)st.st_mtime);
-        }
-        closedir(d);
-        return 0;
-    }
+    if (strcmp(cmd, "list") == 0 || strcmp(cmd, "ls") == 0)
+        return runs_cmd_list(runs, argc, argv);
     if (strcmp(cmd, "show") == 0) {
         if (argc < 4) { fprintf(stderr, "usage: dsco runs show <run-id>\n"); return 2; }
         char jp[PATH_MAX];
@@ -742,10 +963,8 @@ int chronicle_runs_cli(int argc, char **argv) {
         int rc = journal_print_file(jp, stdout, true);
         return rc < 0 ? 1 : rc;
     }
-    if (strcmp(cmd, "gc") == 0) {
-        fprintf(stderr, "dsco runs gc: not implemented yet (Wave B P1.3)\n");
-        return 2;
-    }
+    if (strcmp(cmd, "gc") == 0)
+        return runs_cmd_gc(runs, argc, argv);
     fprintf(stderr, "usage: dsco runs [list|show <run-id>|check <run-id>|gc]\n");
     return 2;
 }
