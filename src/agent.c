@@ -124,10 +124,20 @@ static bool s_turn_streamed_text = false;
 
 #define THINKING_LIVE_PREVIEW_DEFAULT 1200
 #define THINKING_LIVE_PREVIEW_MAX 16000
-static int s_thinking_live_preview_limit = -1;
+#define THINKING_LIVE_PREVIEW_UNLIMITED (-1) /* full trace, no cap (default) */
+static int s_thinking_live_preview_limit = -2; /* -2 = uncomputed sentinel */
 static int s_thinking_live_preview_emitted = 0;
 static bool s_thinking_live_preview_open = false;
 static bool s_thinking_live_preview_capped = false;
+/* Cross-chunk whitespace-collapse state: reasoning deltas arrive split at
+ * arbitrary byte boundaries. Flattening every whitespace run (incl. newlines)
+ * to a single space must persist across chunks so the full trace renders as one
+ * continuous unsplit line. We DEFER whitespace: a run sets pending_space, and a
+ * single space is only emitted when a subsequent non-whitespace byte actually
+ * arrives. This means leading and trailing whitespace never produce a stray
+ * space, and any run (even one spanning delta chunks) collapses to one space. */
+static bool s_thinking_flat_pending_space = false;
+static bool s_thinking_flat_started = false;
 
 /* Stream heartbeat global — shared with llm.c write callback */
 extern tui_stream_heartbeat_t *g_stream_heartbeat;
@@ -992,17 +1002,23 @@ static bool env_truthy(const char *value) {
 }
 
 static int thinking_live_preview_limit(void) {
-    if (s_thinking_live_preview_limit >= 0)
+    if (s_thinking_live_preview_limit != -2)
         return s_thinking_live_preview_limit;
 
     const char *env = getenv("DSCO_THINKING_STREAM_PREVIEW");
     if (!env || !env[0]) {
-        s_thinking_live_preview_limit = THINKING_LIVE_PREVIEW_DEFAULT;
+        /* Default: full reasoning trace, uncapped. */
+        s_thinking_live_preview_limit = THINKING_LIVE_PREVIEW_UNLIMITED;
         return s_thinking_live_preview_limit;
     }
     if (strcmp(env, "0") == 0 || strcasecmp(env, "false") == 0 ||
         strcasecmp(env, "no") == 0 || strcasecmp(env, "off") == 0) {
         s_thinking_live_preview_limit = 0;
+        return s_thinking_live_preview_limit;
+    }
+    if (strcasecmp(env, "full") == 0 || strcasecmp(env, "all") == 0 ||
+        strcasecmp(env, "-1") == 0 || strcasecmp(env, "unlimited") == 0) {
+        s_thinking_live_preview_limit = THINKING_LIVE_PREVIEW_UNLIMITED;
         return s_thinking_live_preview_limit;
     }
 
@@ -1013,7 +1029,7 @@ static int thinking_live_preview_limit(void) {
             n = THINKING_LIVE_PREVIEW_MAX;
         s_thinking_live_preview_limit = (int)n;
     } else {
-        s_thinking_live_preview_limit = THINKING_LIVE_PREVIEW_DEFAULT;
+        s_thinking_live_preview_limit = THINKING_LIVE_PREVIEW_UNLIMITED;
     }
     return s_thinking_live_preview_limit;
 }
@@ -1022,11 +1038,16 @@ static void thinking_live_preview_reset(void) {
     s_thinking_live_preview_emitted = 0;
     s_thinking_live_preview_open = false;
     s_thinking_live_preview_capped = false;
+    s_thinking_flat_pending_space = false;
+    s_thinking_flat_started = false;
 }
 
 static void thinking_live_preview_feed(const char *text) {
     int limit = thinking_live_preview_limit();
-    if (limit <= 0 || !text || !text[0] || s_thinking_live_preview_emitted >= limit)
+    bool unlimited = (limit < 0); /* THINKING_LIVE_PREVIEW_UNLIMITED */
+    if (limit == 0 || !text || !text[0])
+        return;
+    if (!unlimited && s_thinking_live_preview_emitted >= limit)
         return;
 
     if (!s_thinking_live_preview_open) {
@@ -1034,26 +1055,57 @@ static void thinking_live_preview_feed(const char *text) {
         s_thinking_live_preview_open = true;
     }
 
-    int remaining = limit - s_thinking_live_preview_emitted;
-    while (*text && remaining > 0) {
-        char chunk[384];
-        int n = 0;
-        while (text[n] && n < remaining && n < (int)sizeof(chunk) - 1)
-            n++;
-        if (n <= 0)
+    /* Flatten every whitespace run (incl. newlines) to a single space so the
+     * full reasoning trace renders as one continuous, unsplit line. Whitespace
+     * is DEFERRED: a run only becomes a single space once a following
+     * non-whitespace byte arrives, so leading/trailing whitespace — even across
+     * delta-chunk boundaries — never emits a stray space. State persists via
+     * s_thinking_flat_{pending_space,started}. Bounded stack buffer, flush when
+     * full. */
+    char out[512];
+    int oi = 0;
+    fputs(TUI_DIM TUI_ITALIC, stderr);
+    for (const char *p = text; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v') {
+            if (s_thinking_flat_started)
+                s_thinking_flat_pending_space = true;
+            continue; /* defer — emit at most one space when text resumes */
+        }
+        if (s_thinking_flat_pending_space) {
+            if (!unlimited && s_thinking_live_preview_emitted >= limit)
+                break;
+            out[oi++] = ' ';
+            s_thinking_live_preview_emitted++;
+            s_thinking_flat_pending_space = false;
+            if (oi >= (int)sizeof(out) - 1) {
+                out[oi] = '\0';
+                dsco_strip_terminal_controls_inplace(out);
+                fputs(out, stderr);
+                oi = 0;
+            }
+        }
+        if (!unlimited && s_thinking_live_preview_emitted >= limit)
             break;
-        memcpy(chunk, text, (size_t)n);
-        chunk[n] = '\0';
-        dsco_strip_terminal_controls_inplace(chunk);
-        fputs(TUI_DIM TUI_ITALIC, stderr);
-        fputs(chunk, stderr);
-        fputs(TUI_RESET, stderr);
-        s_thinking_live_preview_emitted += n;
-        remaining -= n;
-        text += n;
+        out[oi++] = (char)c;
+        s_thinking_live_preview_emitted++;
+        s_thinking_flat_started = true;
+        if (oi >= (int)sizeof(out) - 1) {
+            out[oi] = '\0';
+            dsco_strip_terminal_controls_inplace(out);
+            fputs(out, stderr);
+            oi = 0;
+        }
     }
+    if (oi > 0) {
+        out[oi] = '\0';
+        dsco_strip_terminal_controls_inplace(out);
+        fputs(out, stderr);
+    }
+    fputs(TUI_RESET, stderr);
 
-    if (s_thinking_live_preview_emitted >= limit && !s_thinking_live_preview_capped) {
+    if (!unlimited && s_thinking_live_preview_emitted >= limit &&
+        !s_thinking_live_preview_capped) {
         fprintf(stderr, "%s ... [thinking preview capped at %d chars]%s", TUI_DIM, limit,
                 TUI_RESET);
         s_thinking_live_preview_capped = true;
@@ -4021,7 +4073,10 @@ static void fsm_thinking_enter(void *ctx) {
         tui_prepare_external_output();
     if (!g_features.collapsible_thinking) {
         tui_term_lock();
-        fprintf(stderr, "  \033[2m\033[3m[thinking]\n");
+        /* Header on its own line, then the flattened trace streams inline as
+         * one continuous unsplit run (see on_stream_thinking). Deferred-space
+         * flattening suppresses any leading gap automatically. */
+        fprintf(stderr, "  \033[2m\033[3m[thinking]\033[0m ");
         fflush(stderr);
         tui_term_unlock();
     }
@@ -4214,7 +4269,46 @@ static void on_stream_thinking(const char *text, void *ctx) {
         tui_thinking_feed(&s_thinking, text);
         thinking_live_preview_feed(text);
     } else {
-        fprintf(stderr, " %s", text);
+        /* Full trace, flattened (deferred-space model, shared cross-chunk
+         * state with the collapsible preview): whitespace runs — including
+         * provider newlines and runs spanning delta chunks — collapse to a
+         * single space, emitted only when following text arrives, so the trace
+         * never splits across terminal lines and has no leading/trailing gap. */
+        fputs(TUI_DIM TUI_ITALIC, stderr);
+        char out[512];
+        int oi = 0;
+        for (const char *p = text; *p; p++) {
+            unsigned char c = (unsigned char)*p;
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v') {
+                if (s_thinking_flat_started)
+                    s_thinking_flat_pending_space = true;
+                continue;
+            }
+            if (s_thinking_flat_pending_space) {
+                out[oi++] = ' ';
+                s_thinking_flat_pending_space = false;
+                if (oi >= (int)sizeof(out) - 1) {
+                    out[oi] = '\0';
+                    dsco_strip_terminal_controls_inplace(out);
+                    fputs(out, stderr);
+                    oi = 0;
+                }
+            }
+            out[oi++] = (char)c;
+            s_thinking_flat_started = true;
+            if (oi >= (int)sizeof(out) - 1) {
+                out[oi] = '\0';
+                dsco_strip_terminal_controls_inplace(out);
+                fputs(out, stderr);
+                oi = 0;
+            }
+        }
+        if (oi > 0) {
+            out[oi] = '\0';
+            dsco_strip_terminal_controls_inplace(out);
+            fputs(out, stderr);
+        }
+        fputs(TUI_RESET, stderr);
         fflush(stderr);
     }
     tui_term_unlock();
