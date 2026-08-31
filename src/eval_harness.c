@@ -698,6 +698,18 @@ static void eval_report_json(const char *set, const eval_result_t *res, int coun
 /* ── CLI entry ───────────────────────────────────────────────────────── */
 
 int eval_cli(int argc, char **argv) {
+    /* A governance test that inherits the ungoverned control arm
+     * (--systems-agent sets DSCO_GOV_BYPASS=1 etc. and every child inherits)
+     * proves nothing: the gate is bypassed before the verifier runs.
+     * Sanitize the control-arm overrides unless the operator explicitly
+     * asked to evaluate the arm itself. */
+    if (getenv("DSCO_EVAL_INHERIT_ENV") == NULL) {
+        unsetenv("DSCO_GOV_BYPASS");
+        unsetenv("DSCO_GOV_MODEL");
+        unsetenv("DSCO_ALLOW_CONTROL");
+        unsetenv("DSCO_ALLOW_EXFIL");
+    }
+
     const char *set = NULL;
     bool as_json = false;
 
