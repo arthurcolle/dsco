@@ -2,7 +2,7 @@
 
 **Status:** shipped (Wave B P1.1–P1.3, P2.1 read side + P1.2 write-side standardization)
 **Verified:** `test_journal_wal` 31/31 · `test-gate-claims` 6/6 · live corpus (72 calls, 71 frontier)
-**Branch:** `fix/ci-release-readiness` @ `a33988c`
+**Branch:** `fix/ci-release-readiness` @ `1d304c4`
 
 ---
 
@@ -257,6 +257,7 @@ The journal carries two families that the replay engine reconciles:
 | Torn tail stops cleanly + flagged | test truncates 7 bytes, asserts corrupt_tail | ✅ |
 | >64KB result → blob ref not inline | test writes 70KB, asserts blob_sha256 | ✅ |
 | Both schemas replayable | live corpus: 345 rec, 72 calls, 71 frontier | ✅ |
+| Canonical authoritative (no 2x on mixed journals) | pass 1 detects canonical; lowercase passive | ✅ |
 | No capability-gate regression | `test-gate-claims` 6/6 | ✅ |
 | Clean-HEAD full build | isolated worktree build | ✅ |
 
