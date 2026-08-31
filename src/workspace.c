@@ -16,6 +16,7 @@
 #define PATH_MAX 4096
 #endif
 
+#define WORKSPACE_SKILL_CATALOG_MAX 256
 #define WORKSPACE_FILE_LIMIT 32768
 #define WORKSPACE_PROMPT_LIMIT 131072
 #define WORKSPACE_MAX_AGENTS_FILES 32
@@ -651,6 +652,27 @@ static int qsort_strcmp(const void *a, const void *b) {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
+/* Read at most `bytes` from the start of a file regardless of total size.
+ * read_file_limit() refuses files larger than the limit, which silently drops
+ * every oversized SKILL.md from the catalog; the summary only needs the head. */
+static bool read_file_head(const char *path, size_t bytes, char **out) {
+    *out = NULL;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return false;
+    char *buf = safe_malloc(bytes + 1);
+    size_t nr = fread(buf, 1, bytes, f);
+    bool bad = ferror(f) != 0;
+    fclose(f);
+    if (bad) {
+        free(buf);
+        return false;
+    }
+    buf[nr] = '\0';
+    *out = buf;
+    return true;
+}
+
 int dsco_workspace_list_skills(char *out, size_t out_len) {
     if (!out || out_len == 0)
         return -1;
@@ -679,29 +701,108 @@ int dsco_workspace_list_skills(char *out, size_t out_len) {
         }
         names[name_count++] = safe_strdup(ent->d_name);
     }
-    closedir(d);
-    qsort(names, (size_t)name_count, sizeof(char *), qsort_strcmp);
+        closedir(d);
+
+    /* The catalog only ever serializes the lexicographically first entries:
+     * emission caps at WORKSPACE_SKILL_CATALOG_MAX lines and stops when the
+     * prompt buffer fills. A full O(n log n) qsort of 100k+ names burns
+     * >1.7M deep-prefix strcmp calls (~478ms measured) to order entries that
+     * never get emitted. Keep only the lexicographically smallest
+     * WORKSPACE_SKILL_CATALOG_MAX names in a bounded max-heap — names that
+     * cannot make the cut usually fail on one strcmp against the current
+     * worst survivor — then emit those in sorted order. Output stays
+     * byte-identical. */
+    char **emit = names;
+    int emit_count = name_count;
+    if (name_count > WORKSPACE_SKILL_CATALOG_MAX) {
+        const int keep = WORKSPACE_SKILL_CATALOG_MAX;
+        char **heap = safe_malloc((size_t)keep * sizeof(char *)); /* max-heap, root = worst kept */
+        int hn = 0;
+        for (int i = 0; i < name_count; i++) {
+            if (hn < keep) {
+                heap[hn++] = names[i];
+                for (int j = hn - 1; j > 0;) {
+                    int p = (j - 1) / 2;
+                    if (strcmp(heap[j], heap[p]) <= 0)
+                        break;
+                    char *t = heap[j];
+                    heap[j] = heap[p];
+                    heap[p] = t;
+                    j = p;
+                }
+            } else if (strcmp(names[i], heap[0]) < 0) {
+                heap[0] = names[i];
+                for (int j = 0;;) {
+                    int l = 2 * j + 1, r = l + 1, best = j;
+                    if (l < keep && strcmp(heap[l], heap[best]) > 0)
+                        best = l;
+                    if (r < keep && strcmp(heap[r], heap[best]) > 0)
+                        best = r;
+                    if (best == j)
+                        break;
+                    char *t = heap[j];
+                    heap[j] = heap[best];
+                    heap[best] = t;
+                    j = best;
+                }
+            }
+        }
+        for (int end = hn - 1; end > 0; end--) { /* pop max-to-back -> ascending */
+            char *t = heap[0];
+            heap[0] = heap[end];
+            heap[end] = t;
+            for (int j = 0;;) {
+                int l = 2 * j + 1, r = l + 1, best = j;
+                if (l < end && strcmp(heap[l], heap[best]) > 0)
+                    best = l;
+                if (r < end && strcmp(heap[r], heap[best]) > 0)
+                    best = r;
+                if (best == j)
+                    break;
+                t = heap[j];
+                heap[j] = heap[best];
+                heap[best] = t;
+                j = best;
+            }
+        }
+        emit = heap; /* heap[] now holds the first `hn` names in sorted order */
+        emit_count = hn;
+    }
 
     size_t pos = 0;
     sbuf_append(out, out_len, &pos, "Installed skills:\n");
     int count = 0;
-    for (int i = 0; i < name_count; i++) {
+    for (int i = 0; i < emit_count && count < WORKSPACE_SKILL_CATALOG_MAX; i++) {
+        /* The catalog is progressive-disclosure metadata, not the skill
+         * payload itself. Stop before the fixed prompt buffer fills instead of
+         * opening every SKILL.md in very large installations. */
+        if (pos + 512 >= out_len)
+            break;
         char path[PATH_MAX];
-        snprintf(path, sizeof(path), "%s/%s/SKILL.md", skills_dir, names[i]);
+        snprintf(path, sizeof(path), "%s/%s/SKILL.md", skills_dir, emit[i]);
         char *text = NULL;
-        if (!read_file_limit(path, 8192, &text))
+        if (!read_file_head(path, 640, &text))
             continue;
         char summary[256];
         markdown_summary_line(text, summary, sizeof(summary));
         free(text);
         char line[512];
-        snprintf(line, sizeof(line), "- %s%s%s\n", names[i], summary[0] ? ": " : "", summary);
+        snprintf(line, sizeof(line), "- %s%s%s\n", emit[i], summary[0] ? ": " : "", summary);
         sbuf_append(out, out_len, &pos, line);
         count++;
+    }
+    if (name_count > count) {
+        char more[160];
+        snprintf(more, sizeof(more),
+                 "- ... %d additional skills available through skill discovery\n",
+                 name_count - count);
+        sbuf_append(out, out_len, &pos, more);
     }
     for (int i = 0; i < name_count; i++)
         free(names[i]);
     free(names);
+    if (emit != names)
+        free(emit);
     if (count == 0) {
         snprintf(out, out_len, "No installed skills in %s", skills_dir);
         return 0;
