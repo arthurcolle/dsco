@@ -3,7 +3,6 @@
 #endif
 #include "agent.h"
 #include "agent_event.h"
-#include "command_plane.h"
 #include "http_pool.h"
 #include "llm.h"
 #include "tools.h"
@@ -4737,72 +4736,11 @@ static bool interactive_composer_enabled(void) {
              strcasecmp(v, "off") == 0);
 }
 
-/* Durable command-plane events are a separate notification source from local
- * swarm/pet completions. Polling the local SQLite WAL while the composer is
- * mounted makes cross-process work completion visible without user polling.
- * Cursor advances only after a receipt is queued; restart/reconnect replays
- * terminal records newer than the local observer's start point. */
-static int64_t g_command_notify_cursor = 0;
-/* SQLite command timestamps are second-resolution. Querying strictly after the
- * high-water timestamp could lose two different task completions written in
- * the same second; retain a small receipt-id set and overlap one second. */
-#define COMMAND_NOTIFY_SEEN_MAX 64
-static char g_command_notify_seen[COMMAND_NOTIFY_SEEN_MAX][COMMAND_PLANE_ID_LEN];
-static unsigned g_command_notify_seen_next = 0;
-static bool command_notify_seen(const char *id) {
-    for (int i = 0; i < COMMAND_NOTIFY_SEEN_MAX; i++)
-        if (g_command_notify_seen[i][0] && strcmp(g_command_notify_seen[i], id) == 0)
-            return true;
-    return false;
-}
-static void command_notify_remember(const char *id) {
-    snprintf(g_command_notify_seen[g_command_notify_seen_next % COMMAND_NOTIFY_SEEN_MAX],
-             COMMAND_PLANE_ID_LEN, "%s", id ? id : "");
-    g_command_notify_seen_next++;
-}
-static void drain_command_plane_notifications(tui_status_bar_t *sb) {
-    if (!sb || !sb->visible)
-        return;
-    command_plane_t cp;
-    if (command_plane_open(&cp, NULL) != COMMAND_PLANE_OK)
-        return;
-    command_record_t recs[8];
-    int64_t query_after = g_command_notify_cursor > 0 ? g_command_notify_cursor - 1 : 0;
-    int n = command_plane_list_terminal_since(&cp, query_after, recs, 8);
-    if (n > 0) {
-        for (int i = 0; i < n; i++) {
-            command_record_t *r = &recs[i];
-            if (command_notify_seen(r->id))
-                continue;
-            const char *state = command_plane_status_name(r->status);
-            char note[300];
-            if (r->status == COMMAND_PLANE_STATUS_SUCCEEDED) {
-                snprintf(note, sizeof(note), "task complete · %s (%s)", r->kind, r->id);
-                tui_panel_notify(sb, TUI_PANEL_NOTE_OK, note);
-            } else {
-                const char *detail = r->error[0] ? r->error : state;
-                snprintf(note, sizeof(note), "task %s · %s: %.180s", state, r->kind, detail);
-                tui_panel_notify(sb, TUI_PANEL_NOTE_ERROR, note);
-            }
-            if (r->updated_at_unix > g_command_notify_cursor)
-                g_command_notify_cursor = r->updated_at_unix;
-        }
-    }
-    command_plane_close(&cp);
-}
-
-static void command_plane_composer_tick(void *ctx) {
-    drain_command_plane_notifications((tui_status_bar_t *)ctx);
-}
-
 static char *read_input_line_prompt(char *buf, size_t buf_sz, const char *prompt) {
     const char *p = prompt ? prompt : "\033[1m\033[95m\xe2\x9d\xaf\033[0m ";
 
-    /* Surface local and cross-process background work before opening input;
-     * then keep the durable observer live while the user is thinking/typing. */
+    /* Surface any background agents that finished since the last prompt. */
     drain_pet_notifications(g_winch_sb);
-    drain_command_plane_notifications(g_winch_sb);
-    tui_composer_set_tick_hook(command_plane_composer_tick, g_winch_sb);
 
     /* The cursor-addressed composer is on by default; opt out with
      * DSCO_TUI_COMPOSER=0 if its per-keystroke repaint churns scrollback. */
