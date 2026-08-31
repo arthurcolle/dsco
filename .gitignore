@@ -167,3 +167,11 @@ PAT_BOLAND_THE_MEMORY_REPRICING.html
 
 # scratch outputs
 quine_out.txt
+
+# agent swarm run droppings (transcripts, claims, metrics) — session-local
+.swarm/runs/
+reports/
+tmp/
+*.live.log
+quine_out.txt
+*.tmp
