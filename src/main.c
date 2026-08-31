@@ -31,6 +31,8 @@
 #include "workspace.h"
 #include "durable_agents.h"
 #include "trace.h"
+#include "usage.h"
+#include "eval_harness.h"
 #include "output_guard.h"
 #include "router.h"
 #include "arena_alloc.h"
@@ -3505,6 +3507,8 @@ static bool main_is_dispatch_subcommand(const char *arg) {
     return arg &&
            (strcmp(arg, "tools") == 0 ||
             strcmp(arg, "runs") == 0 ||
+            strcmp(arg, "eval") == 0 ||
+            strcmp(arg, "usage") == 0 ||
             strcmp(arg, "callbacks") == 0 ||
             strcmp(arg, "command") == 0 ||
             strcmp(arg, "agents") == 0 ||
@@ -3623,6 +3627,10 @@ static int main_dispatch_subcommand_normalized(int argc, char **argv,
         rc = toolmgmt_cli(nargc, nargv);
     else if (strcmp(sub, "runs") == 0)
         rc = chronicle_runs_cli(nargc, nargv);
+    else if (strcmp(sub, "usage") == 0)
+        rc = usage_cli(nargc, nargv);
+    else if (strcmp(sub, "eval") == 0)
+        rc = eval_cli(nargc, nargv);
     else if (strcmp(sub, "callbacks") == 0)
         rc = callbacks_cli(nargc, nargv);
     else if (strcmp(sub, "command") == 0)
@@ -4159,12 +4167,15 @@ int main(int argc, char **argv) {
                                                                   runtime_profile);
     if (pre_chronicle_fast_rc >= 0) return pre_chronicle_fast_rc;
 
-    /* Run-journal inspection must not create a new run journal of its own.
-     * Dispatch `runs list|show|check|gc` before Chronicle starts so read-only
-     * introspection does not perturb ordering or make itself the newest run. */
+    /* Run-journal and usage-ledger inspection must not create a new run
+     * journal of its own. Dispatch `runs list|show|check|gc` and the
+     * read-only `usage` CLI before Chronicle starts so read-only
+     * introspection does not perturb ordering or make itself the newest
+     * run. */
     int pre_chronicle_sub_i = main_find_global_subcommand(argc, argv);
     if (pre_chronicle_sub_i >= 1 &&
-        strcmp(argv[pre_chronicle_sub_i], "runs") == 0) {
+        (strcmp(argv[pre_chronicle_sub_i], "runs") == 0 ||
+         strcmp(argv[pre_chronicle_sub_i], "usage") == 0)) {
         bool handled = false;
         int rc = main_dispatch_subcommand_normalized(argc, argv,
                                                       pre_chronicle_sub_i,
