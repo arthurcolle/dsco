@@ -80,8 +80,10 @@ int main(void) {
                                                      .model = "test-model",
                                                      .mode = "full-local"}),
            "chronicle_start(full-local)");
-    const char *run_id = chronicle_run_id();
-    ASSERT(run_id && run_id[0], "run id minted");
+    const char *run_id_ptr = chronicle_run_id();
+    ASSERT(run_id_ptr && run_id_ptr[0], "run id minted");
+    char run_id[128];
+    snprintf(run_id, sizeof(run_id), "%s", run_id_ptr ? run_id_ptr : "");
 
     /* A turn with a prompt, two tool calls (one completed, one frontier). */
     ASSERT(chronicle_journal_turn_start(1, "read /tmp/x and report"), "TURN_START journaled");
@@ -158,7 +160,9 @@ int main(void) {
            "TOOL_CALL before big result");
     ASSERT(chronicle_journal_tool_result(NULL, "call-big", "bash", true, false, false, 10.0, big),
            "TOOL_RESULT with >64KB result journaled");
-    const char *run2 = chronicle_run_id();
+    const char *run2_ptr = chronicle_run_id();
+    char run2[128];
+    snprintf(run2, sizeof(run2), "%s", run2_ptr ? run2_ptr : "");
     char wal2[512];
     snprintf(wal2, sizeof(wal2), "%s/%s/journal.wal", runsdir, run2);
     ASSERT(count_frames(wal2, "TOOL_RESULT") == 1, "big result frame present");
