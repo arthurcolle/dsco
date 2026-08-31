@@ -622,6 +622,7 @@ void chronicle_stop(void) {
     stopping = true;
     agent_event_emit_simple("run.completed", "ok", "{\"status\":\"completed\"}",
                             AGENT_EVENT_DURABLE | AGENT_EVENT_CALLBACK);
+    chronicle_journal_run_end("completed", 0.0, 0); /* canonical run boundary; per-turn cost lives in CHECKPOINTs */
     chronicle_emit_run_receipt();
     chronicle_event("session.completed", NULL, NULL, NULL, "runtime", "dsco", NULL, "product_telemetry");
     sqlite3_stmt *st = NULL;
@@ -661,6 +662,108 @@ const char *chronicle_run_dir(void) {
 
 static uint32_t load_le32(const unsigned char b[4]) {
     return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+}
+
+/* W1: canonical inline-vs-blob threshold. Records larger than this put the
+ * payload in the blob store and journal only its sha256 ref. */
+#define JOURNAL_INLINE_MAX (32ULL * 1024ULL)
+
+/* W1: canonical RUN_START — emitted by chronicle_journal_open() with best-
+ * effort goal/model/config provenance. Nulls are legal: the frame's presence
+ * is what marks the run boundary. */
+bool chronicle_journal_run_start(const char *goal, const char *model,
+                                 const char *config_hash) {
+    jbuf_t b;
+    jbuf_init(&b, 256);
+    jbuf_append(&b, "{\"goal\":");
+    if (goal && goal[0]) jbuf_append_json_str(&b, goal); else jbuf_append(&b, "null");
+    jbuf_append(&b, ",\"model\":");
+    if (model && model[0]) jbuf_append_json_str(&b, model); else jbuf_append(&b, "null");
+    jbuf_append(&b, ",\"config_hash\":");
+    if (config_hash && config_hash[0]) jbuf_append_json_str(&b, config_hash); else jbuf_append(&b, "null");
+    jbuf_append(&b, ",\"cwd\":");
+    char cwd[PATH_MAX];
+    jbuf_append_json_str(&b, getcwd(cwd, sizeof(cwd)) ? cwd : "");
+    jbuf_append(&b, ",\"git_head\":");
+    char head[65] = "";
+    { /* best-effort: loose ref first, then packed-refs */
+        char p[PATH_MAX];
+        FILE *fp = NULL;
+        snprintf(p, sizeof(p), ".git/HEAD");
+        char hb[256] = "";
+        if ((fp = fopen(p, "r")) && fgets(hb, sizeof(hb), fp)) {
+            char *nl = strchr(hb, '\n'); if (nl) *nl = 0;
+            fclose(fp); fp = NULL;
+            if (strncmp(hb, "ref: ", 5) == 0) {
+                snprintf(p, sizeof(p), ".git/%s", hb + 5);
+                fp = fopen(p, "r"); /* loose ref; packed-refs left as best-effort miss */
+            } else {
+                snprintf(head, sizeof(head), "%s", hb); /* detached: HEAD holds the sha */
+            }
+        }
+        if (fp) {
+            if (fgets(head, 41, fp)) head[40] = 0;
+            fclose(fp);
+        }
+    }
+    jbuf_append_json_str(&b, head);
+    jbuf_append(&b, "}");
+    bool ok = chronicle_journal_append("RUN_START", b.data, true);
+    jbuf_free(&b);
+    return ok;
+}
+
+/* W1: canonical TURN_START — turn number plus prompt provenance. The prompt
+ * is hashed always (replay idempotency key) and blob-ref'd when it exceeds
+ * the inline threshold. This closes the P1.2 write-side gap: resume can now
+ * reconstruct what the model was asked, not just that it was asked. */
+bool chronicle_journal_turn_start(int turn, const char *prompt_text) {
+    size_t n = prompt_text ? strlen(prompt_text) : 0;
+    char p_sha[65];
+    sha256_hex(prompt_text ? prompt_text : "", n, p_sha);
+    jbuf_t b;
+    jbuf_init(&b, 512);
+    jbuf_appendf(&b, "{\"turn\":%d,\"prompt_bytes\":%zu,\"prompt_sha256\":", turn, n);
+    jbuf_append_json_str(&b, p_sha);
+    if (n > JOURNAL_INLINE_MAX) {
+        char bsha[65] = "";
+        chronicle_blob_put_text(prompt_text, "journal.turn_prompt", "local", bsha, sizeof(bsha));
+        jbuf_append(&b, ",\"prompt_blob_sha256\":");
+        jbuf_append_json_str(&b, bsha[0] ? bsha : "");
+    }
+    jbuf_append(&b, "}");
+    bool ok = chronicle_journal_append("TURN_START", b.data, true);
+    jbuf_free(&b);
+    return ok;
+}
+
+/* W1: canonical CHECKPOINT — per-turn accounting snapshot; the fsynced
+ * run-resume anchor between turns. */
+bool chronicle_journal_checkpoint(int turn, double cost_usd, long long input_tokens,
+                                  long long output_tokens, const char *stop_reason) {
+    jbuf_t b;
+    jbuf_init(&b, 256);
+    jbuf_appendf(&b, "{\"turn\":%d,\"cost_usd\":%.8f,\"input_tokens\":%lld,"
+                     "\"output_tokens\":%lld,\"stop_reason\":",
+                 turn, cost_usd, input_tokens, output_tokens);
+    jbuf_append_json_str(&b, stop_reason && stop_reason[0] ? stop_reason : "");
+    jbuf_append(&b, "}");
+    bool ok = chronicle_journal_append("CHECKPOINT", b.data, true);
+    jbuf_free(&b);
+    return ok;
+}
+
+/* W1: canonical RUN_END — terminal record; emitted from chronicle_stop()
+ * before the manifest is sealed so the WAL is self-describing. */
+bool chronicle_journal_run_end(const char *status, double cost_usd, long long turns) {
+    jbuf_t b;
+    jbuf_init(&b, 192);
+    jbuf_append(&b, "{\"status\":");
+    jbuf_append_json_str(&b, status && status[0] ? status : "completed");
+    jbuf_appendf(&b, ",\"cost_usd\":%.8f,\"turns\":%lld}", cost_usd, turns);
+    bool ok = chronicle_journal_append("RUN_END", b.data, true);
+    jbuf_free(&b);
+    return ok;
 }
 
 static int journal_print_file(const char *path, FILE *out, bool summary_only) {
@@ -996,7 +1099,7 @@ static bool replay_collect_results(FILE *fp, replay_call_ref_t **out, size_t *ou
         if (crc32_update(0, buf, len) != want_crc) { free(buf); break; }
         char *type = json_get_str(buf, "type");
         if (type && strcmp(type, "tool.result") == 0) {
-            /* tool_id lives at depth 3: frame → payload(env) → payload(data) */
+            /* lowercase agent-event: tool_id at depth 3 (frame.payload.payload) */
             char *env = json_get_raw(buf, "payload");
             char *data = env ? json_get_raw(env, "payload") : NULL;
             char *tid = data ? json_get_str(data, "tool_id") : NULL;
@@ -1011,7 +1114,23 @@ static bool replay_collect_results(FILE *fp, replay_call_ref_t **out, size_t *ou
                 set[n].tool_id = tid;
                 set[n].matched = false;
                 n++;
-            } else { /* result frame lacking tool_id: nothing to match */ }
+            }
+        } else if (type && strcmp(type, "TOOL_RESULT") == 0) {
+            /* canonical W1: call_id at depth 2 (frame.payload) */
+            char *env = json_get_raw(buf, "payload");
+            char *tid = env ? json_get_str(env, "call_id") : NULL;
+            free(env);
+            if (tid && tid[0]) {
+                if (n == cap) {
+                    cap *= 2;
+                    replay_call_ref_t *ns = (replay_call_ref_t *)realloc(set, cap * sizeof(*set));
+                    if (!ns) { free(tid); free(type); free(buf); break; }
+                    set = ns;
+                }
+                set[n].tool_id = tid;
+                set[n].matched = false;
+                n++;
+            } else free(tid);
         }
         free(type);
         free(buf);
@@ -1059,8 +1178,13 @@ bool chronicle_replay_run(const char *runs_dir, const char *run_id, FILE *out,
         long long seq = json_get_i64(buf, "seq", 0);
         long long wall = json_get_i64(buf, "wall_ms", 0);
         char *type = json_get_str(buf, "type");
-        char *env = json_get_raw(buf, "payload");   /* agent_event envelope */
-        char *data = env ? json_get_raw(env, "payload") : NULL; /* event data */
+        char *env = json_get_raw(buf, "payload");   /* depth 1 */
+        bool canonical = type && (strcmp(type, "TOOL_CALL") == 0 || strcmp(type, "TOOL_RESULT") == 0 ||
+                                  strcmp(type, "TURN_START") == 0 || strcmp(type, "CHECKPOINT") == 0 ||
+                                  strcmp(type, "RUN_START") == 0 || strcmp(type, "RUN_END") == 0);
+        /* Canonical W1 frames: env IS the event data. Lowercase agent-event
+         * frames nest the event data one level deeper (env.payload). */
+        char *data = canonical ? (env ? strdup(env) : NULL) : (env ? json_get_raw(env, "payload") : NULL);
         const char *dn = data && data[0] ? data : "null";
 
         if (type && strcmp(type, "tool.call") == 0) {
@@ -1073,6 +1197,17 @@ bool chronicle_replay_run(const char *runs_dir, const char *run_id, FILE *out,
                              replay_policy_for_tool(tool), frontier, dn);
             summary->tool_calls++;
             free(tool); free(tid);
+        } else if (type && strcmp(type, "TOOL_CALL") == 0) {
+            char *tool = env ? json_get_str(env, "tool") : NULL;
+            char *tid = env ? json_get_str(env, "call_id") : NULL;
+            if (tid && !tid[0]) { free(tid); tid = NULL; }
+            bool frontier = false;
+            if (tid) frontier = !replay_id_in_set(results, n_results, tid, NULL);
+            if (frontier) summary->frontier_calls++;
+            replay_emit_step(out, seq, wall, "tool.call", "TOOL_CALL", tool, tid,
+                             replay_policy_for_tool(tool), frontier, dn);
+            summary->tool_calls++;
+            free(tool); free(tid);
         } else if (type && strcmp(type, "tool.result") == 0) {
             char *tool = data ? json_get_str(data, "tool") : NULL;
             char *tid = data ? json_get_str(data, "tool_id") : NULL;
@@ -1080,17 +1215,36 @@ bool chronicle_replay_run(const char *runs_dir, const char *run_id, FILE *out,
                              NULL, false, dn);
             summary->tool_results++;
             free(tool); free(tid);
+        } else if (type && strcmp(type, "TOOL_RESULT") == 0) {
+            char *tool = env ? json_get_str(env, "tool") : NULL;
+            char *tid = env ? json_get_str(env, "call_id") : NULL;
+            if (tid && !tid[0]) { free(tid); tid = NULL; }
+            replay_emit_step(out, seq, wall, "tool.result", "TOOL_RESULT", tool, tid,
+                             NULL, false, dn);
+            summary->tool_results++;
+            free(tool); free(tid);
         } else if (type && strcmp(type, "turn.started") == 0) {
             replay_emit_step(out, seq, wall, "turn", "turn.started", NULL, NULL, NULL, false, dn);
+            summary->turns++;
+        } else if (type && strcmp(type, "TURN_START") == 0) {
+            replay_emit_step(out, seq, wall, "turn", "TURN_START", NULL, NULL, NULL, false, dn);
             summary->turns++;
         } else if (type && strcmp(type, "turn.checkpoint") == 0) {
             replay_emit_step(out, seq, wall, "checkpoint", "turn.checkpoint", NULL, NULL, NULL, false, dn);
             summary->checkpoints++;
             if (data) summary->cost_usd += json_get_double(data, "cost_usd", 0.0);
+        } else if (type && strcmp(type, "CHECKPOINT") == 0) {
+            replay_emit_step(out, seq, wall, "checkpoint", "CHECKPOINT", NULL, NULL, NULL, false, dn);
+            summary->checkpoints++;
+            if (env) summary->cost_usd += json_get_double(env, "cost_usd", 0.0);
         } else if (type && strcmp(type, "run.started") == 0) {
             replay_emit_step(out, seq, wall, "run", "run.started", NULL, NULL, NULL, false, dn);
         } else if (type && strcmp(type, "run.completed") == 0) {
             replay_emit_step(out, seq, wall, "run", "run.completed", NULL, NULL, NULL, false, dn);
+        } else if (type && strcmp(type, "RUN_START") == 0) {
+            replay_emit_step(out, seq, wall, "run", "RUN_START", NULL, NULL, NULL, false, dn);
+        } else if (type && strcmp(type, "RUN_END") == 0) {
+            replay_emit_step(out, seq, wall, "run", "RUN_END", NULL, NULL, NULL, false, dn);
         } else {
             replay_emit_step(out, seq, wall, "record", type ? type : "unknown", NULL, NULL, NULL, false, dn);
         }
@@ -1250,6 +1404,7 @@ static bool chronicle_journal_open(void) {
     bool ok = agent_event_emit_simple("run.started", "ok", p.data,
                                       AGENT_EVENT_DURABLE | AGENT_EVENT_CALLBACK);
     jbuf_free(&p);
+    if (ok) chronicle_journal_run_start(NULL, NULL, NULL); /* canonical run boundary */
     return ok;
 }
 
