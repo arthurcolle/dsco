@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -810,6 +811,10 @@ static bool chronicle_journal_open(void) {
     if (!chronicle_run_manifest_write("running")) return false;
     g_chronicle.journal_fd = open(g_chronicle.journal_path, O_CREAT | O_APPEND | O_WRONLY, 0644);
     if (g_chronicle.journal_fd < 0) return false;
+    /* W1 startup durability: make the journal's directory entry durable before
+     * any frame is appended. */
+    int journal_dfd = open(run_dir, O_RDONLY);
+    if (journal_dfd >= 0) { fsync(journal_dfd); close(journal_dfd); }
     g_chronicle.journal_enabled = true;
     jbuf_t p;
     jbuf_init(&p, 512);
@@ -827,31 +832,127 @@ static bool chronicle_journal_open(void) {
     return ok;
 }
 
+/* W1 (durable execution): one writer at a time. Sequence allocation and both
+ * write_all_fd() calls must be atomic with respect to parallel agent/worker
+ * paths, which can otherwise interleave frames or race the shared seq. */
+static pthread_mutex_t g_journal_write_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* W1: the six canonical run-journal record types (dsco.run_journal.v1). */
+static bool journal_type_is_canonical(const char *t) {
+    static const char *const k_canonical[] = {
+        "RUN_START", "TURN_START", "TOOL_CALL",
+        "TOOL_RESULT", "CHECKPOINT", "RUN_END",
+    };
+    if (!t || !t[0]) return false;
+    for (size_t i = 0; i < sizeof(k_canonical) / sizeof(k_canonical[0]); i++)
+        if (strcmp(t, k_canonical[i]) == 0) return true;
+    return false;
+}
+
 bool chronicle_journal_append(const char *record_type, const char *payload_json, bool durable) {
     if (!g_chronicle.ready || !g_chronicle.journal_enabled || g_chronicle.journal_fd < 0) return false;
     if (!record_type || !record_type[0]) return false;
-    long long ms = 0;
-    struct timeval tv;
-    if (gettimeofday(&tv, NULL) == 0) ms = (long long)tv.tv_sec * 1000LL + tv.tv_usec / 1000;
+    /* W1: canonical execution records may never rely on process exit to flush. */
+    if (journal_type_is_canonical(record_type)) durable = true;
     jbuf_t rec;
     jbuf_init(&rec, 1024);
-    jbuf_append(&rec, "{\"v\":1,\"type\":"); jbuf_append_json_str(&rec, record_type);
-    jbuf_append(&rec, ",\"run_id\":"); jbuf_append_json_str(&rec, g_chronicle.session_id);
-    jbuf_appendf(&rec, ",\"seq\":%llu,\"wall_ms\":%lld,\"payload\":", ++g_chronicle.seq, ms);
-    if (payload_json && json_is_valid_container(payload_json)) jbuf_append(&rec, payload_json);
-    else { jbuf_append(&rec, "{\"text\":"); jbuf_append_json_str(&rec, nz(payload_json)); jbuf_append(&rec, "}"); }
-    jbuf_append(&rec, "}\n");
-    uint32_t len = (uint32_t)rec.len;
-    uint32_t crc = crc32_update(0, rec.data, rec.len);
-    unsigned char hdr[8];
-    hdr[0] = (unsigned char)(len & 0xff); hdr[1] = (unsigned char)((len >> 8) & 0xff);
-    hdr[2] = (unsigned char)((len >> 16) & 0xff); hdr[3] = (unsigned char)((len >> 24) & 0xff);
-    hdr[4] = (unsigned char)(crc & 0xff); hdr[5] = (unsigned char)((crc >> 8) & 0xff);
-    hdr[6] = (unsigned char)((crc >> 16) & 0xff); hdr[7] = (unsigned char)((crc >> 24) & 0xff);
-    bool ok = write_all_fd(g_chronicle.journal_fd, hdr, sizeof(hdr)) && write_all_fd(g_chronicle.journal_fd, rec.data, rec.len);
-    if (ok && durable) ok = (fsync(g_chronicle.journal_fd) == 0);
+    bool ok = false;
+    pthread_mutex_lock(&g_journal_write_mu);
+    do {
+        long long ms = 0;
+        struct timeval tv;
+        if (gettimeofday(&tv, NULL) == 0) ms = (long long)tv.tv_sec * 1000LL + tv.tv_usec / 1000;
+        jbuf_append(&rec, "{\"v\":1,\"type\":"); jbuf_append_json_str(&rec, record_type);
+        jbuf_append(&rec, ",\"run_id\":"); jbuf_append_json_str(&rec, g_chronicle.session_id);
+        jbuf_appendf(&rec, ",\"seq\":%llu,\"wall_ms\":%lld,\"payload\":", ++g_chronicle.seq, ms);
+        if (payload_json && json_is_valid_container(payload_json)) jbuf_append(&rec, payload_json);
+        else { jbuf_append(&rec, "{\"text\":"); jbuf_append_json_str(&rec, nz(payload_json)); jbuf_append(&rec, "}"); }
+        jbuf_append(&rec, "}\n");
+        /* W1: the scanner rejects len==0 or len>32MB; never emit an
+         * unreadable frame, and the length must stay within u32. */
+        if (rec.len == 0 || rec.len > (32ULL * 1024ULL * 1024ULL)) break;
+        uint32_t len = (uint32_t)rec.len;
+        uint32_t crc = crc32_update(0, rec.data, rec.len);
+        unsigned char hdr[8];
+        hdr[0] = (unsigned char)(len & 0xff); hdr[1] = (unsigned char)((len >> 8) & 0xff);
+        hdr[2] = (unsigned char)((len >> 16) & 0xff); hdr[3] = (unsigned char)((len >> 24) & 0xff);
+        hdr[4] = (unsigned char)(crc & 0xff); hdr[5] = (unsigned char)((crc >> 8) & 0xff);
+        hdr[6] = (unsigned char)((crc >> 16) & 0xff); hdr[7] = (unsigned char)((crc >> 24) & 0xff);
+        ok = write_all_fd(g_chronicle.journal_fd, hdr, sizeof(hdr)) && write_all_fd(g_chronicle.journal_fd, rec.data, rec.len);
+        if (ok && durable) ok = (fsync(g_chronicle.journal_fd) == 0);
+    } while (0);
+    pthread_mutex_unlock(&g_journal_write_mu);
     jbuf_free(&rec);
     return ok;
+}
+
+/* W1: canonical TOOL_CALL record (dsco.run_journal.v1). Callers must journal
+ * this before tools_execute_for_tier(); durable=true forces fsync here so the
+ * call is on disk before the tool may cause an external effect. call_id is the
+ * replay/idempotency key (provider tool id). */
+bool chronicle_journal_tool_call(const char *turn_id, const char *call_id,
+                                 const char *tool, const char *input_json,
+                                 const char *trust_tier, const char *trace_id) {
+    if (!tool || !tool[0]) return false;
+    char in_sha[65];
+    sha256_hex(input_json ? input_json : "", input_json ? strlen(input_json) : 0, in_sha);
+    jbuf_t b;
+    jbuf_init(&b, 1024);
+    jbuf_append(&b, "{\"turn_id\":");
+    if (turn_id && turn_id[0]) jbuf_append_json_str(&b, turn_id); else jbuf_append(&b, "null");
+    jbuf_append(&b, ",\"call_id\":");
+    jbuf_append_json_str(&b, call_id && call_id[0] ? call_id : "");
+    jbuf_append(&b, ",\"tool\":"); jbuf_append_json_str(&b, tool);
+    jbuf_append(&b, ",\"input\":");
+    if (input_json && json_is_valid_container(input_json)) jbuf_append(&b, input_json);
+    else { jbuf_append(&b, "{\"text\":"); jbuf_append_json_str(&b, nz(input_json)); jbuf_append(&b, "}"); }
+    jbuf_append(&b, ",\"input_sha256\":"); jbuf_append_json_str(&b, in_sha);
+    jbuf_append(&b, ",\"trust_tier\":");
+    if (trust_tier && trust_tier[0]) jbuf_append_json_str(&b, trust_tier); else jbuf_append(&b, "null");
+    jbuf_append(&b, ",\"trace_id\":");
+    if (trace_id && trace_id[0]) jbuf_append_json_str(&b, trace_id); else jbuf_append(&b, "null");
+    jbuf_append(&b, "}");
+    bool ok = chronicle_journal_append("TOOL_CALL", b.data, true);
+    jbuf_free(&b);
+    return ok;
+}
+
+/* W1: canonical TOOL_RESULT record. Must be emitted on every exit path after
+ * dispatch returns, including denied, timed-out, and failed calls. Full result
+ * text is inlined up to 64KB; larger results go to a content-addressed blob
+ * and only the blob reference is journaled. result_sha256 always hashes the
+ * full text. */
+bool chronicle_journal_tool_result(const char *turn_id, const char *call_id,
+                                   const char *tool, bool ok, bool cached, bool timed_out,
+                                   double elapsed_ms, const char *result_text) {
+    size_t n = result_text ? strlen(result_text) : 0;
+    char r_sha[65];
+    sha256_hex(result_text ? result_text : "", n, r_sha);
+    jbuf_t b;
+    jbuf_init(&b, 4096);
+    jbuf_append(&b, "{\"turn_id\":");
+    if (turn_id && turn_id[0]) jbuf_append_json_str(&b, turn_id); else jbuf_append(&b, "null");
+    jbuf_append(&b, ",\"call_id\":");
+    jbuf_append_json_str(&b, call_id && call_id[0] ? call_id : "");
+    jbuf_append(&b, ",\"tool\":"); jbuf_append_json_str(&b, tool ? tool : "");
+    jbuf_appendf(&b, ",\"ok\":%s,\"cached\":%s,\"timed_out\":%s,\"elapsed_ms\":%.3f",
+                 ok ? "true" : "false", cached ? "true" : "false",
+                 timed_out ? "true" : "false", elapsed_ms);
+    jbuf_append(&b, ",\"result\":");
+    if (n <= (64ULL * 1024ULL)) {
+        jbuf_append_json_str(&b, result_text ? result_text : "");
+    } else {
+        char bsha[65] = "";
+        chronicle_blob_put_text(result_text, "journal.tool_result", "local", bsha, sizeof(bsha));
+        jbuf_append(&b, "{\"blob_sha256\":");
+        jbuf_append_json_str(&b, bsha[0] ? bsha : "");
+        jbuf_appendf(&b, ",\"byte_len\":%zu}", n);
+    }
+    jbuf_append(&b, ",\"result_sha256\":"); jbuf_append_json_str(&b, r_sha);
+    jbuf_append(&b, "}");
+    bool rc = chronicle_journal_append("TOOL_RESULT", b.data, true);
+    jbuf_free(&b);
+    return rc;
 }
 
 static bool append_event_to_sqlite(const char *event_id, const char *trace_id, const char *span_id,
