@@ -3,12 +3,15 @@
 Repo-scoped briefing for coding agents (agents.md v1.1 hierarchical scope).
 
 ## What this is
-dsco: a local-first agentic CLI in pure C (current checkout, top-level runtime:
-~199K LOC across 136 `.c` files and 138 headers; 140 files in `src/`).
+dsco: a local-first agentic CLI in pure C (current checkout: branch `fix/ci-release-readiness` @ `0bd4cb7`,
+recomputed 2026-08-30: **205,172 hand-written LOC** across 146 `.c` files and 147 headers (304 files),
+plus 213,226 LOC of generated embedded-data blobs in `src/generated/` (3 files) — **418,398 total**.
+Prior calibration (2026-07-07): ~199K LOC, 136 `.c`/138 `.h`; the 2x "growth" was the generated
+blobs entering `find src include`, not code growth — see `.workspace/harness-parity/swarm-20260827/01-loc-audit.md`).
 Overmind Soul architecture: Wings (autonomy) + Talons (competition) + Immune System (safety).
 
 ## Map (load details on demand — do not bulk-read)
-- `src/` — all C sources. Hotspots: `tools.c` (39K lines, tool registry + immune gate),
+- `src/` — all C sources. Hotspots: `tools.c` (~40K lines, 40,503 at 2026-08-30, tool registry + immune gate),
   `main.c` (CLI entry), `agent.c` (loop), `llm.c` (providers), `mcp.c` (MCP client),
   `mcp_server.c` (MCP server mode), `supervisor.c`/`swarm` (orchestration)
 - `include/` — headers; `tools.h` defines `tool_def_t` and the execute-for-tier gate
@@ -18,6 +21,7 @@ Overmind Soul architecture: Wings (autonomy) + Talons (competition) + Immune Sys
 
 ## Build & test
 - `make` (see Makefile targets); binary: `./dsco`
+  (observed 2026-08-30: v`1.0.2`, built 2026-08-27 from build `56be6a8`; doc-repair HEAD `0bd4cb7`)
 - Tests: `make test` where present; smoke: `./dsco --help`
 
 ## Hard rules
