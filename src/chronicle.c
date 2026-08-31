@@ -937,13 +937,208 @@ static int runs_cmd_gc(const char *runs_dir, int argc, char **argv) {
     return failed > 0 ? 1 : 0;
 }
 
+/* ── replay engine (Wave B P2.1 durable execution) ────────────────────── */
+
+typedef struct {
+    char *tool_id;
+    bool matched;
+} replay_call_ref_t;
+
+/* Conservative idempotency classification (P2.3 will move this to the
+ * registry; until every core tool is audited we default non-read tools to
+ * "interrupted" = surface to model, never auto-re-run). */
+static const char *replay_policy_for_tool(const char *tool) {
+    static const char *idempotent[] = {
+        "read_file", "page_file", "head_tail", "grep_files", "find_files",
+        "Glob", "list_directory", "file_info", "file_hash", "word_count",
+        "api_outline", "inspect_file", "symbol_refs", "ls", "cat", "stat",
+        NULL
+    };
+    if (!tool) return "interrupted";
+    for (int i = 0; idempotent[i]; i++)
+        if (strcmp(tool, idempotent[i]) == 0) return "idempotent";
+    return "interrupted";
+}
+
+/* Emit one replay step as a JSON line. `data_json` is the raw nested payload
+ * object (already known to be JSON); emitted inline as "data". */
+static void replay_emit_step(FILE *out, long long seq, long long wall_ms,
+                             const char *type, const char *event_name,
+                             const char *tool, const char *tool_id,
+                             const char *policy, bool frontier,
+                             const char *data_json) {
+    fprintf(out, "{\"schema\":\"dsco.replay.step.v1\",\"seq\":%lld,\"wall_ms\":%lld,"
+                 "\"type\":\"%s\",\"event\":\"%s\"",
+            seq, wall_ms, type, event_name ? event_name : "");
+    if (tool)     fprintf(out, ",\"tool\":\"%s\"", tool);
+    if (tool_id)  fprintf(out, ",\"tool_id\":\"%s\"", tool_id);
+    if (policy)   fprintf(out, ",\"replay_policy\":\"%s\"", policy);
+    if (frontier) fprintf(out, ",\"frontier\":true");
+    fprintf(out, ",\"data\":%s}\n", data_json && data_json[0] ? data_json : "null");
+}
+
+/* Pass 1: collect tool.result tool_ids into a growable set. */
+static bool replay_collect_results(FILE *fp, replay_call_ref_t **out, size_t *out_n) {
+    size_t cap = 32, n = 0;
+    replay_call_ref_t *set = (replay_call_ref_t *)malloc(cap * sizeof(*set));
+    if (!set) return false;
+    rewind(fp);
+    for (;;) {
+        unsigned char hdr[8];
+        if (fread(hdr, 1, 8, fp) != 8) break;
+        uint32_t len = load_le32(hdr), want_crc = load_le32(hdr + 4);
+        if (len == 0 || len > (32U * 1024U * 1024U)) break;
+        char *buf = (char *)malloc(len + 1);
+        if (!buf) break;
+        if (fread(buf, 1, len, fp) != len) { free(buf); break; }
+        buf[len] = 0;
+        if (crc32_update(0, buf, len) != want_crc) { free(buf); break; }
+        char *type = json_get_str(buf, "type");
+        if (type && strcmp(type, "tool.result") == 0) {
+            char *tid = json_get_str(buf, "tool_id");
+            if (tid) {
+                if (n == cap) {
+                    cap *= 2;
+                    replay_call_ref_t *ns = (replay_call_ref_t *)realloc(set, cap * sizeof(*set));
+                    if (!ns) { free(tid); free(type); free(buf); break; }
+                    set = ns;
+                }
+                set[n].tool_id = tid;
+                set[n].matched = false;
+                n++;
+            } else { /* result frame lacking tool_id: nothing to match */ }
+        }
+        free(type);
+        free(buf);
+    }
+    *out = set;
+    *out_n = n;
+    return true;
+}
+
+static bool replay_id_in_set(replay_call_ref_t *set, size_t n, const char *id, size_t *idx) {
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(set[i].tool_id, id) == 0) { if (idx) *idx = i; return true; }
+    }
+    return false;
+}
+
+/* Reconstruct a run's steps from its journal. Returns false when the journal
+ * cannot be opened at all; a torn/corrupt tail is reported via
+ * summary->corrupt_tail rather than failing the whole replay. */
+bool chronicle_replay_run(const char *runs_dir, const char *run_id, FILE *out,
+                          chronicle_replay_summary_t *summary) {
+    char jp[PATH_MAX];
+    snprintf(jp, sizeof(jp), "%s/%s/journal.wal", runs_dir, run_id);
+    memset(summary, 0, sizeof(*summary));
+    FILE *fp = fopen(jp, "rb");
+    if (!fp) return false;
+
+    replay_call_ref_t *results = NULL;
+    size_t n_results = 0;
+    replay_collect_results(fp, &results, &n_results);
+
+    rewind(fp);
+    for (;;) {
+        unsigned char hdr[8];
+        if (fread(hdr, 1, 8, fp) != 8) break;
+        uint32_t len = load_le32(hdr), want_crc = load_le32(hdr + 4);
+        if (len == 0 || len > (32U * 1024U * 1024U)) { summary->corrupt_tail = true; break; }
+        char *buf = (char *)malloc(len + 1);
+        if (!buf) { summary->corrupt_tail = true; break; }
+        if (fread(buf, 1, len, fp) != len) { free(buf); summary->corrupt_tail = true; break; }
+        buf[len] = 0;
+        if (crc32_update(0, buf, len) != want_crc) { free(buf); summary->corrupt_tail = true; break; }
+        summary->records++;
+
+        long long seq = json_get_i64(buf, "seq", 0);
+        long long wall = json_get_i64(buf, "wall_ms", 0);
+        char *type = json_get_str(buf, "type");
+        char *env = json_get_raw(buf, "payload");   /* agent_event envelope */
+        char *data = env ? json_get_raw(env, "payload") : NULL; /* event data */
+        const char *dn = data && data[0] ? data : "null";
+
+        if (type && strcmp(type, "tool.call") == 0) {
+            char *tool = json_get_str(buf, "tool");
+            char *tid = json_get_str(buf, "tool_id");
+            bool frontier = false;
+            if (tid) frontier = !replay_id_in_set(results, n_results, tid, NULL);
+            if (frontier) summary->frontier_calls++;
+            replay_emit_step(out, seq, wall, "tool.call", "tool.call", tool, tid,
+                             replay_policy_for_tool(tool), frontier, dn);
+            summary->tool_calls++;
+            free(tool); free(tid);
+        } else if (type && strcmp(type, "tool.result") == 0) {
+            char *tool = json_get_str(buf, "tool");
+            char *tid = json_get_str(buf, "tool_id");
+            replay_emit_step(out, seq, wall, "tool.result", "tool.result", tool, tid,
+                             NULL, false, dn);
+            summary->tool_results++;
+            free(tool); free(tid);
+        } else if (type && strcmp(type, "turn.started") == 0) {
+            replay_emit_step(out, seq, wall, "turn", "turn.started", NULL, NULL, NULL, false, dn);
+            summary->turns++;
+        } else if (type && strcmp(type, "turn.checkpoint") == 0) {
+            replay_emit_step(out, seq, wall, "checkpoint", "turn.checkpoint", NULL, NULL, NULL, false, dn);
+            summary->checkpoints++;
+            if (env) summary->cost_usd += json_get_double(env, "cost_usd", 0.0);
+        } else if (type && strcmp(type, "run.started") == 0) {
+            replay_emit_step(out, seq, wall, "run", "run.started", NULL, NULL, NULL, false, dn);
+        } else if (type && strcmp(type, "run.completed") == 0) {
+            replay_emit_step(out, seq, wall, "run", "run.completed", NULL, NULL, NULL, false, dn);
+        } else {
+            replay_emit_step(out, seq, wall, "record", type ? type : "unknown", NULL, NULL, NULL, false, dn);
+        }
+        free(type); free(env); free(data);
+        free(buf);
+    }
+    fclose(fp);
+    for (size_t i = 0; i < n_results; i++) free(results[i].tool_id);
+    free(results);
+    return true;
+}
+
+static int runs_cmd_replay(const char *runs_dir, int argc, char **argv) {
+    if (argc < 4 || argv[3][0] == '-') {
+        fprintf(stderr, "usage: dsco runs replay <run-id> [--summary]\n");
+        return 2;
+    }
+    const char *run_id = argv[3];
+    bool summary_only = false;
+    for (int i = 4; i < argc; i++) {
+        if (strcmp(argv[i], "--summary") == 0) summary_only = true;
+        else { fprintf(stderr, "unknown flag: %s\n", argv[i]); return 2; }
+    }
+    /* run-id guard: same shape rule as gc — replay is read-only but keep the
+     * corpus path predictable. */
+    if (!looks_like_run_id(run_id)) {
+        fprintf(stderr, "not a run id: %s\n", run_id);
+        return 2;
+    }
+    chronicle_replay_summary_t s;
+    bool ok;
+    if (summary_only) {
+        ok = chronicle_replay_run(runs_dir, run_id, NULL, &s);
+    } else {
+        ok = chronicle_replay_run(runs_dir, run_id, stdout, &s);
+    }
+    if (!ok) { fprintf(stderr, "cannot open journal for run %s\n", run_id); return 1; }
+    printf("{\"schema\":\"dsco.replay.summary.v1\",\"run_id\":\"%s\",\"records\":%lld,"
+           "\"turns\":%lld,\"tool_calls\":%lld,\"tool_results\":%lld,"
+           "\"frontier_calls\":%lld,\"checkpoints\":%lld,\"cost_usd\":%.6f,"
+           "\"corrupt_tail\":%s}\n",
+           run_id, s.records, s.turns, s.tool_calls, s.tool_results,
+           s.frontier_calls, s.checkpoints, s.cost_usd, s.corrupt_tail ? "true" : "false");
+    return 0;
+}
+
 int chronicle_runs_cli(int argc, char **argv) {
     const char *cmd = argc >= 3 ? argv[2] : "list";
     char runs[PATH_MAX];
     runs_dir_path(runs, sizeof(runs));
     if (strcmp(cmd, "help") == 0 || strcmp(cmd, "-h") == 0 ||
         strcmp(cmd, "--help") == 0) {
-        printf("Usage: dsco runs [list [--limit N|--all] [--json]|show <run-id>|check <run-id>|gc [--days N] [--dry-run] [--include-running]]\n"
+        printf("Usage: dsco runs [list [--limit N|--all] [--json]|show <run-id>|check <run-id>|replay <run-id> [--summary]|gc [--days N] [--dry-run] [--include-running]]\n"
                "\n"
                "Inspect crash-safe Chronicle run journals without creating a new run.\n");
         return 0;
@@ -965,7 +1160,9 @@ int chronicle_runs_cli(int argc, char **argv) {
     }
     if (strcmp(cmd, "gc") == 0)
         return runs_cmd_gc(runs, argc, argv);
-    fprintf(stderr, "usage: dsco runs [list|show <run-id>|check <run-id>|gc]\n");
+    if (strcmp(cmd, "replay") == 0)
+        return runs_cmd_replay(runs, argc, argv);
+    fprintf(stderr, "usage: dsco runs [list|show <run-id>|check <run-id>|replay <run-id>|gc]\n");
     return 2;
 }
 
