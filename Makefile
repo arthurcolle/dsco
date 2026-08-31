@@ -863,6 +863,14 @@ test_session_memory: $(TEST_OBJ_DIR)/test_session_memory.o \
 	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
+$(TEST_OBJ_DIR)/test_journal_wal.o: $(TEST_DIR)/test_journal_wal.c | $(TEST_OBJ_DIR)
+	$(CC) $(TEST_CFLAGS) -c -o $@ $<
+# journal WAL + replay engine end-to-end; links full chronicle lib set.
+test_journal_wal: $(TEST_OBJ_DIR)/test_journal_wal.o \
+	$(LIB_OBJS:$(OBJ_DIR)/%=$(TEST_OBJ_DIR)/%) $(GSL_TEST_OBJS)
+	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+	./$@
+
 $(TEST_OBJ_DIR)/test_memory_keep_score.o: $(TEST_DIR)/test_memory_keep_score.c | $(TEST_OBJ_DIR)
 	$(CC) $(TEST_CFLAGS) -c -o $@ $<
 # memory_keep_score pulls in vecstore + tools_embed_text via memory_tier.c; link full lib set.

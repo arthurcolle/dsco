@@ -3,6 +3,7 @@
 #endif
 #include "agent.h"
 #include "agent_event.h"
+#include "command_plane.h"
 #include "http_pool.h"
 #include "llm.h"
 #include "tools.h"
@@ -363,6 +364,9 @@ bool chronicle_journal_tool_call(const char *turn_id, const char *call_id,
 bool chronicle_journal_tool_result(const char *turn_id, const char *call_id,
                                    const char *tool, bool ok, bool cached, bool timed_out,
                                    double elapsed_ms, const char *result_text);
+bool chronicle_journal_turn_start(int turn, const char *prompt_text);
+bool chronicle_journal_checkpoint(int turn, double cost_usd, long long input_tokens,
+                                  long long output_tokens, const char *stop_reason);
 static void journal_tool_call_record(const char *tool, const char *tool_id,
                                      const char *input_json, const char *trust_tier);
 static void journal_tool_result_record(const char *tool, const char *tool_id, bool ok,
@@ -4161,7 +4165,7 @@ static void usage_receipt_from_session(const session_state_t *session, double to
     usage_receipt_record(&r);
 }
 
-static void journal_turn_start(int turn, const char *model, int conv_count) {
+static void journal_turn_start(int turn, const char *model, int conv_count, const char *prompt_text) {
     jbuf_t b;
     jbuf_init(&b, 256);
     jbuf_appendf(&b, "{\"turn\":%d,\"conv_count\":%d,\"model\":", turn, conv_count);
@@ -4169,6 +4173,9 @@ static void journal_turn_start(int turn, const char *model, int conv_count) {
     jbuf_append(&b, "}");
     agent_event_emit_simple("turn.started", "ok", b.data, AGENT_EVENT_CALLBACK);
     jbuf_free(&b);
+    /* W1 canonical: TURN_START with prompt hash (+ blob ref when large) so
+     * resume reconstructs the ask, not just the fact of a turn. */
+    chronicle_journal_turn_start(turn, prompt_text);
 }
 
 static void journal_turn_checkpoint(int turn, const char *model, const usage_t *u, double cost, const char *stop_reason) {
@@ -4182,6 +4189,9 @@ static void journal_turn_checkpoint(int turn, const char *model, const usage_t *
     jbuf_append(&b, "}");
     agent_event_emit_simple("turn.checkpoint", "ok", b.data, AGENT_EVENT_DURABLE | AGENT_EVENT_CALLBACK);
     jbuf_free(&b);
+    /* W1 canonical: CHECKPOINT — fsynced per-turn accounting anchor. */
+    chronicle_journal_checkpoint(turn, cost, u ? u->input_tokens : 0, u ? u->output_tokens : 0,
+                                 stop_reason);
 }
 
 static void journal_tool_call_record(const char *tool, const char *tool_id,
@@ -4735,11 +4745,52 @@ static bool interactive_composer_enabled(void) {
              strcasecmp(v, "off") == 0);
 }
 
+/* Durable command-plane events are a separate notification source from local
+ * swarm/pet completions. Polling the local SQLite WAL while the composer is
+ * mounted makes cross-process work completion visible without user polling.
+ * Cursor advances only after a receipt is queued; restart/reconnect replays
+ * terminal records newer than the local observer's start point. */
+static int64_t g_command_notify_cursor = 0;
+static void drain_command_plane_notifications(tui_status_bar_t *sb) {
+    if (!sb || !sb->visible)
+        return;
+    command_plane_t cp;
+    if (command_plane_open(&cp, NULL) != COMMAND_PLANE_OK)
+        return;
+    command_record_t recs[8];
+    int n = command_plane_list_terminal_since(&cp, g_command_notify_cursor, recs, 8);
+    if (n > 0) {
+        for (int i = 0; i < n; i++) {
+            command_record_t *r = &recs[i];
+            const char *state = command_plane_status_name(r->status);
+            char note[300];
+            if (r->status == COMMAND_PLANE_STATUS_SUCCEEDED) {
+                snprintf(note, sizeof(note), "task complete · %s (%s)", r->kind, r->id);
+                tui_panel_notify(sb, TUI_PANEL_NOTE_OK, note);
+            } else {
+                const char *detail = r->error[0] ? r->error : state;
+                snprintf(note, sizeof(note), "task %s · %s: %.180s", state, r->kind, detail);
+                tui_panel_notify(sb, TUI_PANEL_NOTE_ERROR, note);
+            }
+            if (r->updated_at_unix > g_command_notify_cursor)
+                g_command_notify_cursor = r->updated_at_unix;
+        }
+    }
+    command_plane_close(&cp);
+}
+
+static void command_plane_composer_tick(void *ctx) {
+    drain_command_plane_notifications((tui_status_bar_t *)ctx);
+}
+
 static char *read_input_line_prompt(char *buf, size_t buf_sz, const char *prompt) {
     const char *p = prompt ? prompt : "\033[1m\033[95m\xe2\x9d\xaf\033[0m ";
 
-    /* Surface any background agents that finished since the last prompt. */
+    /* Surface local and cross-process background work before opening input;
+     * then keep the durable observer live while the user is thinking/typing. */
     drain_pet_notifications(g_winch_sb);
+    drain_command_plane_notifications(g_winch_sb);
+    tui_composer_set_tick_hook(command_plane_composer_tick, g_winch_sb);
 
     /* The cursor-addressed composer is on by default; opt out with
      * DSCO_TUI_COMPOSER=0 if its per-keystroke repaint churns scrollback. */
@@ -8828,7 +8879,18 @@ bool agent_run(const char *api_key, const char *model, const char *topology_name
     resume_turn_loop:
         while (turns < hard_ceiling && !g_interrupted) {
             turns++;
-            journal_turn_start(turns, session.model, conv.count);
+            { /* W1: last user message in conv = this turn's prompt */
+                const char *jt_prompt = NULL;
+                for (int ci = conv.count - 1; ci >= 0 && !jt_prompt; ci--) {
+                    if (conv.msgs[ci].role != ROLE_USER) continue;
+                    for (int cj = 0; cj < conv.msgs[ci].content_count; cj++)
+                        if (conv.msgs[ci].content[cj].text && conv.msgs[ci].content[cj].type == NULL) {
+                            jt_prompt = conv.msgs[ci].content[cj].text;
+                            break;
+                        }
+                }
+                journal_turn_start(turns, session.model, conv.count, jt_prompt);
+            }
             md_reset(&s_md);
 
             /* Agentic checkpoint: at each cadence boundary the loop is still

@@ -52,6 +52,15 @@ const char *chronicle_run_dir(void);
 bool chronicle_journal_append(const char *record_type, const char *payload_json, bool durable);
 int chronicle_runs_cli(int argc, char **argv);
 
+/* ── W1 canonical journal writers (durable execution) ─────────────────
+ * All four append a canonical record type and fsync. RUN_START is emitted
+ * automatically by chronicle start/journal-open; RUN_END by chronicle_stop. */
+bool chronicle_journal_run_start(const char *goal, const char *model, const char *config_hash);
+bool chronicle_journal_turn_start(int turn, const char *prompt_text);
+bool chronicle_journal_checkpoint(int turn, double cost_usd, long long input_tokens,
+                                  long long output_tokens, const char *stop_reason);
+bool chronicle_journal_run_end(const char *status, double cost_usd, long long turns);
+
 /* ── replay engine (Wave B P2.1) ────────────────────────────────────── */
 
 typedef struct {
