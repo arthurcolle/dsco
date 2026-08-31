@@ -1073,17 +1073,20 @@ static void thinking_live_preview_feed(const char *text) {
             continue; /* defer — emit at most one space when text resumes */
         }
         if (s_thinking_flat_pending_space) {
-            if (!unlimited && s_thinking_live_preview_emitted >= limit)
-                break;
-            out[oi++] = ' ';
-            s_thinking_live_preview_emitted++;
-            s_thinking_flat_pending_space = false;
-            if (oi >= (int)sizeof(out) - 1) {
-                out[oi] = '\0';
-                dsco_strip_terminal_controls_inplace(out);
-                fputs(out, stderr);
-                oi = 0;
+            /* Reserve one byte for the non-whitespace character that follows.
+             * A finite preview must never spend its final slot on a separator
+             * and end with a trailing space. */
+            if (unlimited || s_thinking_live_preview_emitted + 1 < limit) {
+                out[oi++] = ' ';
+                s_thinking_live_preview_emitted++;
+                if (oi >= (int)sizeof(out) - 1) {
+                    out[oi] = '\0';
+                    dsco_strip_terminal_controls_inplace(out);
+                    fputs(out, stderr);
+                    oi = 0;
+                }
             }
+            s_thinking_flat_pending_space = false;
         }
         if (!unlimited && s_thinking_live_preview_emitted >= limit)
             break;
