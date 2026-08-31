@@ -20,6 +20,15 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include "vm.h"
+
+/* main.c-owned globals the library objects reference; agent.o/main.o are
+ * filtered out of the test link, so the test TU provides them (same shim
+ * pattern as test_session_memory.c). */
+volatile int g_interrupted = 0;
+double g_cost_budget = 0.0;
+int g_cheap_mode = 0;
+vm_t g_vm = {0};
 
 static int failures = 0;
 #define ASSERT(cond, msg) do { \
