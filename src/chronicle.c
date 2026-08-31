@@ -967,6 +967,7 @@ static void replay_emit_step(FILE *out, long long seq, long long wall_ms,
                              const char *tool, const char *tool_id,
                              const char *policy, bool frontier,
                              const char *data_json) {
+    if (!out) return; /* summary-only mode */
     fprintf(out, "{\"schema\":\"dsco.replay.step.v1\",\"seq\":%lld,\"wall_ms\":%lld,"
                  "\"type\":\"%s\",\"event\":\"%s\"",
             seq, wall_ms, type, event_name ? event_name : "");
