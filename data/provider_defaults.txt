@@ -1,0 +1,5 @@
+API_URL_ANTHROPIC=https://api.anthropic.com/v1/messages
+API_URL_COUNT_TOKENS=https://api.anthropic.com/v1/messages/count_tokens
+ANTHROPIC_VERSION=2023-06-01
+ANTHROPIC_BETAS=interleaved-thinking-2025-05-14,code-execution-2025-05-22,advanced-tool-use-2025-11-20
+CLAUDE_CODE_OAUTH_BETA=oauth-2025-04-20

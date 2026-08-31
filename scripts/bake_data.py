@@ -23,7 +23,6 @@ import os
 import re
 import struct
 import sys
-import sys
 
 data_dir = sys.argv[1] if len(sys.argv) > 1 else "data"
 out_c_dir = sys.argv[2] if len(sys.argv) > 2 else "src/generated"
@@ -89,6 +88,24 @@ def c_bytes(b: bytes) -> str:
     return "\n".join(lines)
 
 
+HEX_RE = re.compile(r"0x[0-9a-fA-F]{2}")
+
+
+def verify_c(out_c: str, csym: str, plaintext: bytes, key: bytes, nonce: bytes) -> bool:
+    """Round-trip check: re-read the emitted .c, parse its ciphertext array,
+    decrypt under (key, nonce), and compare with the plaintext source.
+    Guards against silent mixed-key/corrupt states: any stale blob written
+    under an older key decrypts to garbage and fails here (loudly)."""
+    try:
+        src = open(out_c, "r").read()
+        arr = HEX_RE.findall(src.split(csym + "[]", 1)[1].split("};", 1)[0])
+        ct = bytes(int(h, 16) for h in arr)
+        dec = keystream_xor(key, nonce, ct)
+        return dec == plaintext
+    except (IOError, IndexError, ValueError):
+        return False
+
+
 entries = []  # (csym, filename)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from secret_scan import SUSPICIOUS_RE  # noqa: E402  (shared credential gate)
@@ -119,8 +136,12 @@ for filename in sorted(os.listdir(data_dir)):
 
     if (not force_all and os.path.exists(out_c)
             and os.path.getmtime(out_c) >= os.path.getmtime(filepath)):
-        print("  [bake] up-to-date: %s" % filename)
-        continue
+        with open(filepath, "rb") as fh:
+            plaintext = fh.read()
+        if verify_c(out_c, csym, plaintext, key, nonce):
+            print("  [bake] up-to-date: %s (verified)" % filename)
+            continue
+        print("  [bake] stale/corrupt blob detected: %s — re-encrypting" % filename)
 
     print("  [bake] encrypting: %s -> %s" % (filename, out_c))
     with open(filepath, "rb") as fh:
@@ -132,6 +153,10 @@ for filename in sorted(os.listdir(data_dir)):
         fh.write("#include <stddef.h>\n\n")
         fh.write("const unsigned char %s[] = {\n%s\n};\n\n" % (csym, c_bytes(ciphertext)))
         fh.write("const size_t %s_len = %d;\n" % (csym, len(plaintext)))
+    if not verify_c(out_c, csym, plaintext, key, nonce):
+        sys.exit("[bake] FATAL: decrypt-verify failed for %s — emitted blob does not "
+                 "round-trip under the current key; refusing to ship (delete %s and "
+                 "rebuild)" % (out_c, key_file))
 
 
 # ── Scattered key header (gitignored) ──

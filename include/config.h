@@ -63,7 +63,7 @@ static inline const char *dsco_swarm_default_model(const char *api_key_unused) {
  * set by `make harden`) these resolve to runtime lookups of encrypted values so
  * the literals never appear in __cstring; dev builds keep them inline for
  * debuggability. All use sites are runtime contexts (curl/snprintf/assignment),
- * so a function call substitutes cleanly. See src/embedded_data.c / data/dsco_secrets.txt. */
+ * so a function call substitutes cleanly. See src/embedded_data.c / data/provider_defaults.txt. */
 const char *dsco_secret(const char *key);
 #ifdef DSCO_USE_OBF_SECRETS
 #define API_URL_ANTHROPIC    dsco_secret("API_URL_ANTHROPIC")
