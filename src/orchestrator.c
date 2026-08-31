@@ -159,6 +159,18 @@ static bool orch_worker_filter(const char *name, const char *group_hint) {
 
 /* ── Lightweight worker task runner ─────────────────────────────────── */
 
+/* ── T04/T05: extracted, unit-testable convergence seams ─────────────── */
+int orch_http_transient(int http_status) {
+    return http_status >= 500 || http_status == 429 || http_status == 408 || http_status == 0;
+}
+
+void orch_budget_checkpoint(char *result, size_t cap) {
+    if (!result || !result[0]) return;
+    const char *tag = "\n[budget_checkpoint: emitted-at-turn-limit]";
+    size_t rl = strnlen(result, cap - 1);
+    snprintf(result + rl, cap - rl, "%s", tag);
+}
+
 static char *run_worker_task(const char *task, const char *model) {
     const char *api_key = tools_runtime_api_key();
     if (!api_key || !api_key[0]) {
@@ -178,19 +190,6 @@ static char *run_worker_task(const char *task, const char *model) {
     tools_set_context_window(session.context_window);
 
     /* Conversation: single user turn with the task */
-
-/* ── T04/T05: extracted, unit-testable convergence seams ─────────────── */
-int orch_http_transient(int http_status) {
-    return http_status >= 500 || http_status == 429 || http_status == 408 || http_status == 0;
-}
-
-void orch_budget_checkpoint(char *result, size_t cap) {
-    if (!result || !result[0]) return;
-    const char *tag = "\n[budget_checkpoint: emitted-at-turn-limit]";
-    size_t rl = strnlen(result, cap - 1);
-    snprintf(result + rl, cap - rl, "%s", tag);
-}
-
     conversation_t conv;
     conv_init(&conv);
     conv_add_user_text(&conv, task);
