@@ -100,6 +100,8 @@ response.json
 
 # Large data / generated corpora (relocated out of repo)
 # data/ is the pizza-box — tracked in git
+# NOTE: credentials must never live here; scripts/bake_data.py refuses
+# credential-shaped input (sk-/ghp_/AKIA/BEGIN PRIVATE KEY/xox[bpars]-/Bearer).
 data/cache/
 data/tmp/
 books/
@@ -163,7 +165,7 @@ PAT_BOLAND_THE_MEMORY_REPRICING.html
 /soap2.png
 
 # local side of the embedded-blob pipeline: per-machine, never commit
-/data/dsco_secrets.txt
+
 
 # scratch outputs
 quine_out.txt

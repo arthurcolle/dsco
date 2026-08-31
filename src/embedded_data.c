@@ -13,6 +13,7 @@
 
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -83,10 +84,12 @@ const unsigned char *embedded_data_get(const char *name, size_t *out_len)
     return result;
 }
 
-/* ── Obfuscated inline secrets (KEY=VALUE table in data/dsco_secrets.txt) ─────
- * Lets sensitive string literals live encrypted in the binary instead of plain
- * in __cstring. Parsed once from the (decrypted) blob into a null-terminated
- * cache; returns "" for a missing key so callers never deref NULL. */
+/* ── Obfuscated provider defaults (KEY=VALUE table in data/provider_defaults.txt)
+ * These are PUBLIC endpoint/protocol constants (no credentials — bake_data.py
+ * refuses credential-shaped input). Lets the literals live encrypted in the
+ * binary instead of plain in __cstring. Parsed once from the (decrypted) blob
+ * into a null-terminated cache; returns "" for a missing key so callers never
+ * deref NULL. Absent blob emits a one-time stderr warning at first use. */
 #define DSCO_SECRETS_MAX 128
 static struct {
     char *key;
@@ -99,9 +102,14 @@ static void dsco_secrets_parse(void)
 {
     s_secret_count = 0;
     size_t len = 0;
-    const unsigned char *blob = embedded_data_get("dsco_secrets.txt", &len);
-    if (!blob || !len)
+    const unsigned char *blob = embedded_data_get("provider_defaults.txt", &len);
+    if (!blob || !len) {
+        fprintf(stderr,
+                "dsco: warning: embedded provider_defaults.txt blob is missing — "
+                "provider constants (API URLs, protocol versions, beta flags) "
+                "resolve to \"\" until rebuilt with `make bake_data`\n");
         return;
+    }
     char *buf = (char *)malloc(len + 1);
     if (!buf)
         return;
