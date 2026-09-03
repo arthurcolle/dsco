@@ -4,6 +4,10 @@ on:
   pull_request:
   push:
     branches: [main, master]
+  schedule:
+    # Nightly CI on the default branch to catch dependency/toolchain drift.
+    - cron: "0 13 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
