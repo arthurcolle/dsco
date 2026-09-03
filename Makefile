@@ -78,11 +78,11 @@ COSMO_TARGET ?= dsco.distributed.systems
 COSMO_LEGACY_TARGET ?= dsco.com
 COSMOCC_VERSION ?= 4.0.2
 
-SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swarm.c swarm_daemon.c tui.c native_ui.c native_ui_json.c pixel_tui.c pixel_tui_perf.c pixel_fx.c ui_motion.c kitty_graphics.c rich_text.c font_compat.c kitty_tools.c kitty_agent_windows.c env_config.c \
+SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swarm.c machine_society.c swarm_daemon.c tui.c native_ui.c native_ui_json.c pixel_tui.c pixel_tui_perf.c pixel_fx.c ui_motion.c kitty_graphics.c rich_text.c font_compat.c kitty_tools.c kitty_agent_windows.c env_config.c \
 	px_backend.c px_theme.c native_composer.c native_masthead.c compositor_parity.c compositor_stream_bench.c \
 	md.c rtf.c baseline.c chronicle.c agent_event.c callbacks.c setup.c crypto.c eval.c pipeline.c plugin.c kitty_banner.c \
-			semantic.c hlc.c ipc.c mcp.c mcp_server.c mcp_names.c provider_profiles.c provider.c integrations.c error.c trace.c instrumenter.c structured_process.c task_profile.c \
-	output_guard.c topology.c workspace.c plan.c stateful_atoms.c recovery.c router.c \
+			semantic.c hlc.c ipc.c mcp.c mcp_server.c mcp_names.c provider_profiles.c abliteration.c provider.c integrations.c error.c trace.c instrumenter.c structured_process.c task_profile.c \
+	output_guard.c topology.c workspace.c directive_store.c value_ledger.c plan.c stateful_atoms.c recovery.c router.c \
 		durable_agents.c bus_cli.c skills_cli.c skill_index.c \
 	capability.c \
 	pheromone.c ooda.c overmind.c killswitch.c governance.c gov_experiment.c memory_tier.c talons.c avian.c \
@@ -92,7 +92,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	project.c project_mux.c project_grid.c \
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
 	fingerprint.c trust.c toolmgmt.c connector.c integration_fabric.c codex_app_directory.c openrouter_cache.c codex_cache.c codex_usage.c dcr.c \
-	openai_oauth.c kimi_oauth.c local_llm.c model_pricing.c subscription_gate.c subscription_bench.c \
+	openai_oauth.c kimi_oauth.c local_llm.c model_pricing.c subscription_gate.c subscription_bench.c auth_lanes.c \
 	startup.c plot.c anim.c fractal.c shadeexpr.c face_sdf.c avatar.c self_improve.c bg_learn.c autoresearch.c rsi_curriculum.c pets.c img_util.c supervisor.c ring_buffer.c \
 	graphsub_client.c graphsub_tools.c \
 	openai_images.c \
@@ -101,6 +101,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	extension/eigen_backend.c extension/fftw_backend.c extension/backend_selftest.c \
 	control_flow.c \
 	introspect.c \
+	chimera_scale.c \
 	learned_cost.c \
 	spend_governor.c \
 	frontier.c \
@@ -117,7 +118,7 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	remote_cli.c \
 	cluster.c \
 	activation_lease.c \
-	cloud_runtime.c context_fabric.c acp_server.c \
+	cloud_runtime.c context_fabric.c capsule.c acp_server.c \
 	json_fast.c \
 	construct.c prompt_pool.c rl_hooks.c \
 	$(OPTIONAL_SRCS)
@@ -218,7 +219,9 @@ UBSAN_OBJS += $(OBJC_NAMES:%.m=$(UBSAN_OBJ_DIR)/%.o)
 endif
 endif
 
-PREFIX ?= /opt/homebrew
+PREFIX ?= $(HOME)/.local
+BINDIR ?= $(PREFIX)/bin
+DSCO_INSTALL_SYNC_PATH ?= auto
 DSCO_DIR = $(HOME)/.dsco
 DSCO_SHARE_DIR = $(PREFIX)/share/dsco
 
@@ -363,6 +366,14 @@ endif
 endif
 
 all: $(TARGET) dsc dsco-new $(LITE_TARGET) $(SPINE_TARGET)
+	@# Keep PATH current: every full build refreshes $(BINDIR) via `install`.
+	@# Skip with DSCO_NO_INSTALL=1; CI never auto-installs.
+	@if [ "$${DSCO_NO_INSTALL:-0}" = "1" ] || [ "$${DSCO_CI:-0}" = "1" ]; then \
+		echo "skipping PATH install (DSCO_NO_INSTALL/CI)"; \
+	else \
+		$(MAKE) --no-print-directory install >/dev/null && \
+		echo "PATH refreshed: installed dsco, dsco-lite, dsc, dsco-new to $(BINDIR)"; \
+	fi
 debug: $(DEBUG_TARGET)
 dev: $(DEBUG_TARGET)
 
@@ -821,9 +832,31 @@ test-gate-claims: $(TARGET)
 		-u DSCO_ALLOW_EXFIL \
 		bash tests/verify_gate_claims.sh ./dsco
 
+.PHONY: test-directive-store
+test-directive-store:
+	$(CC) $(TEST_CFLAGS) -Iinclude -o $(BUILD_DIR)/test_directive_store tests/test_directive_store.c src/directive_store.c src/workspace.c src/capsule.c tests/directive_context_stubs.c src/json_fast.c src/crypto.c src/json_util.c $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/test_directive_store
+
+.PHONY: test-value-ledger
+test-value-ledger: $(TARGET)
+	$(CC) $(TEST_CFLAGS) -Iinclude -c tests/test_value_ledger.c -o $(BUILD_DIR)/obj/test_value_ledger.o
+	$(CC) $(CFLAGS) -o $(BUILD_DIR)/test_value_ledger \
+		$(BUILD_DIR)/obj/test_value_ledger.o \
+		$(filter-out $(BUILD_DIR)/obj/main.o $(BUILD_DIR)/obj/mcp_server.o,$(OBJS)) $(GSL_OBJS) \
+		$(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/test_value_ledger
+
 test-fast: $(TARGET) test_runner test_command_plane
 	./test_command_plane
 	DSCO_TEST_QUICK=1 ./test_runner
+
+# Diff the Claude Code OAuth wire fingerprint (version/beta list/entrypoint/
+# User-Agent literals) against upstream oh-my-pi. Anthropic ships new Claude
+# Code releases on no fixed schedule and each one can silently invalidate
+# these bytes; run this after pulling oh-my-pi to catch drift before it ships.
+.PHONY: check-oauth-fingerprint
+check-oauth-fingerprint:
+	python3 scripts/check_claude_oauth_fingerprint.py
 
 # Client SDK: unit tests (framing/correlation, no binary needed) + live e2e vs ./dsco
 test-sdk: $(TARGET)
@@ -908,8 +941,13 @@ test_tui_theme_snapshot: $(TEST_OBJ_DIR)/test_tui_theme_snapshot.o $(TUI_TEST_LI
 test_tui_snapshots: test_tui_snapshot test_tui_theme_snapshot test_pixel_plan
 
 # Pixel compositor geometry/DPR tests (headless; public native_ui API only)
-.PHONY: test_pixel_geometry
+.PHONY: test_pixel_geometry test_native_compositor
 test_pixel_geometry: $(TEST_OBJ_DIR)/test_pixel_geometry.o $(TUI_TEST_LIB_OBJS)
+	$(CC) $(TEST_CFLAGS) -fcommon -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+# Full retained-compositor, performance telemetry, transport, and parity suite.
+test_native_compositor: $(TEST_OBJ_DIR)/test_native_compositor.o $(TUI_TEST_LIB_OBJS)
 	$(CC) $(TEST_CFLAGS) -fcommon -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
 	$(BUILD_DIR)/$@
 
@@ -1208,31 +1246,66 @@ clean:
 	rm -rf $(BUILD_DIR) $(TARGET) $(LITE_TARGET) $(DEBUG_TARGET) $(PROFILE_TARGET) dsc test_runner coverage_runner $(TARGET)-asan $(TARGET)-ubsan asan-test_runner ubsan-test_runner test_runner_asan test_runner_ubsan test_runner_asan_ubsan test_runner_tsan
 
 install: $(TARGET) dsco-new $(LITE_TARGET) dsc
-	install -d $(PREFIX)/bin
-	install -d $(DSCO_SHARE_DIR)
-	install -m 755 $(TARGET) $(PREFIX)/bin/
-	install -m 755 $(LITE_TARGET) $(PREFIX)/bin/
-	install -m 755 dsc $(PREFIX)/bin/
-	install -m 755 scripts/live_face_avatar.sh $(PREFIX)/bin/dsco-live-face-avatar
-	install -m 755 dsco-new $(PREFIX)/bin/
-	install -m 644 $(INC_DIR)/tool_embeddings.bin $(DSCO_SHARE_DIR)/
-	install -m 755 face_capture.py $(DSCO_SHARE_DIR)/
-	install -d $(DSCO_DIR)/sessions $(DSCO_DIR)/plugins $(DSCO_DIR)/debug
-	@echo "installed dsco, dsco-lite, dsc, dsco-new to $(PREFIX)/bin/"
+	install -d "$(BINDIR)"
+	install -d "$(DSCO_SHARE_DIR)"
+	install -m 755 $(TARGET) "$(BINDIR)/"
+	install -m 755 $(LITE_TARGET) "$(BINDIR)/"
+	install -m 755 dsc "$(BINDIR)/"
+	install -m 755 dsco-new "$(BINDIR)/"
+	install -m 644 $(INC_DIR)/tool_embeddings.bin "$(DSCO_SHARE_DIR)/"
+	install -d "$(DSCO_DIR)/sessions" "$(DSCO_DIR)/plugins" "$(DSCO_DIR)/debug"
+	@canonical="$$(cd "$(BINDIR)" && pwd -P)/$(TARGET)"; \
+	sync_path="$(DSCO_INSTALL_SYNC_PATH)"; \
+	if [ "$$sync_path" = auto ]; then \
+		default_dir="$$(cd "$(HOME)/.local/bin" 2>/dev/null && pwd -P)"; \
+		if [ "$$canonical" = "$$default_dir/$(TARGET)" ]; then sync_path=1; else sync_path=0; fi; \
+	fi; \
+	if [ "$$sync_path" != 1 ]; then \
+		echo "skipped PATH synchronization for non-default install prefix"; \
+		exit 0; \
+	fi; \
+	printf '%s\n' "$$PATH" | tr ':' '\n' | while IFS= read -r dir; do \
+		[ -n "$$dir" ] || continue; \
+		candidate="$$dir/$(TARGET)"; \
+		[ -e "$$candidate" ] || [ -L "$$candidate" ] || continue; \
+		physical_dir="$$(cd "$$dir" 2>/dev/null && pwd -P)" || continue; \
+		[ "$$physical_dir/$(TARGET)" != "$$canonical" ] || continue; \
+		if [ -d "$$candidate" ] && [ ! -L "$$candidate" ]; then \
+			echo "warning: cannot synchronize directory $$candidate" >&2; \
+		elif [ -w "$$dir" ]; then \
+			ln -sfn "$$canonical" "$$candidate"; \
+			echo "linked $$candidate -> $$canonical"; \
+		elif ! cmp -s "$$canonical" "$$candidate"; then \
+			echo "warning: stale $$candidate is not writable; remove it or reinstall there with appropriate privileges" >&2; \
+		fi; \
+	done
+	@echo "installed dsco, dsco-lite, dsc, dsco-new to $(BINDIR)/"
 	@echo "installed tool_embeddings.bin to $(DSCO_SHARE_DIR)/"
-	@echo "installed dsco-live-face-avatar and face_capture.py"
 	@echo "created $(DSCO_DIR)/{sessions,plugins,debug}"
+	@echo "canonical dsco: $(BINDIR)/$(TARGET)"
 
 uninstall:
-	rm -f $(PREFIX)/bin/$(TARGET)
-	rm -f $(PREFIX)/bin/$(LITE_TARGET)
-	rm -f $(PREFIX)/bin/dsc
-	rm -f $(PREFIX)/bin/dsco-new
-	rm -f $(PREFIX)/bin/dsco-live-face-avatar
-	rm -f $(DSCO_SHARE_DIR)/tool_embeddings.bin
-	rm -f $(DSCO_SHARE_DIR)/face_capture.py
-	-rmdir $(DSCO_SHARE_DIR) 2>/dev/null || true
-	@echo "removed $(PREFIX)/bin/$(TARGET)"
+	@canonical="$$(cd "$(BINDIR)" 2>/dev/null && pwd -P)/$(TARGET)"; \
+	sync_path="$(DSCO_INSTALL_SYNC_PATH)"; \
+	if [ "$$sync_path" = auto ]; then \
+		default_dir="$$(cd "$(HOME)/.local/bin" 2>/dev/null && pwd -P)"; \
+		if [ "$$canonical" = "$$default_dir/$(TARGET)" ]; then sync_path=1; else sync_path=0; fi; \
+	fi; \
+	[ "$$sync_path" = 1 ] || exit 0; \
+	printf '%s\n' "$$PATH" | tr ':' '\n' | while IFS= read -r dir; do \
+		[ -n "$$dir" ] || continue; \
+		candidate="$$dir/$(TARGET)"; \
+		[ -L "$$candidate" ] || continue; \
+		[ "$$(readlink "$$candidate")" = "$$canonical" ] || continue; \
+		rm -f "$$candidate"; \
+	done
+	rm -f "$(BINDIR)/$(TARGET)"
+	rm -f "$(BINDIR)/$(LITE_TARGET)"
+	rm -f "$(BINDIR)/dsc"
+	rm -f "$(BINDIR)/dsco-new"
+	rm -f "$(DSCO_SHARE_DIR)/tool_embeddings.bin"
+	-rmdir "$(DSCO_SHARE_DIR)" 2>/dev/null || true
+	@echo "removed $(BINDIR)/$(TARGET) and installer-managed PATH links"
 
 ui-deps:
 	pip install -r web/requirements.txt
@@ -1250,3 +1323,16 @@ ui: $(TARGET) ui-deps
 	lint clang-tidy cppcheck static-analysis check-version \
 	ui ui-deps bench-startup bench-tool bench-agent-loop bench-local \
 	bench-sota bench-ttft bench-worker bench-size release-hardened release-hardened-native
+
+# Tripwire quartet (SOTA_FRAMES_2026-09-02.md, T12; #1/#2 of 4 already ship
+# as 'make test-gate-claims' and 'make docs-check' above). Deliberately
+# cheap, read-only, no gate/RSI blast radius: observability signals only.
+.PHONY: staleness-check revenue-check tripwires
+staleness-check:
+	./scripts/staleness_alarm.sh --check
+
+revenue-check:
+	./scripts/revenue_pace_reconciliation.sh --check
+
+tripwires: staleness-check revenue-check
+	@echo "tripwires: staleness + revenue-pace both ran (see exit code / output above)"
