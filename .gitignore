@@ -235,3 +235,31 @@ rana-hajdini-evidence-report.html
 /oh-my-pi/
 /raag.rep/
 /dsco-cli.rep/
+
+# Embedded Lingo runtime generated from reviewed Lua source
+include/lingo_runtime.gen.h
+include/lingo_operator.gen.h
+include/lingo_dsco.gen.h
+include/lingo_autobot.gen.h
+include/lingo_chimera.gen.h
+
+# ── 2026-09-14 sync hygiene ────────────────────────────────────────────────
+# Backup/scratch copies at any depth (src/swarm.c.bak2-*, tests/test.c.bak-*)
+*.bak*
+# scala-cli / BSP IDE state
+.bsp/
+.scala-build/
+# One-off replication probes
+.replication-probe-*/
+# Repo-local scratch
+/tmp/
+# Abliteration benchmark worker run outputs (timestamped, regenerable)
+/benchmarks/
+# Agent swarm run outputs under reports/ — runtime state (full build trees,
+# sqlite DBs, .o/.dylib binaries, logs), not source. Top-level reports/*.md
+# summaries stay tracked.
+/reports/*/
+!/reports/patches/
+!/reports/perf_push_limit/
+# Packaged zip duplicates of committed docs bundles
+/docs/*.zip
