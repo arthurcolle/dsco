@@ -68,6 +68,7 @@ static native_masthead_model_t fixture_model(void) {
         .queue_capacity = 8,
         .context_percent = 41.0,
         .cost_usd = 0.1275,
+        .unpriced_responses = 1,
         .show_compact_metrics = true,
     };
 }
@@ -93,7 +94,9 @@ static void test_masthead_semantics_and_layout(void) {
           "model and slot should share one semantic identity line");
     CHECK(metrics && strstr(metrics->text, "CTX 41%") && strstr(metrics->text, "9 TOOLS"),
           "dense resource metrics should be retained");
-    CHECK(state && !strcmp(state->text, "EXECUTING") && state->element == NATIVE_UI_ELEMENT_BADGE,
+    CHECK(metrics && strstr(metrics->text, "VALUE $0.1275+?"),
+          "accounted value must remain labeled and mark unknown-cost attempts");
+    CHECK(state && !strcmp(state->text, "Executing") && state->element == NATIVE_UI_ELEMENT_BADGE,
           "agent lifecycle should be a semantic badge");
     CHECK(soul && soul->element == NATIVE_UI_ELEMENT_CUSTOM &&
               soul->agent_state == NATIVE_UI_AGENT_EXECUTING,
@@ -129,6 +132,21 @@ static void test_masthead_density_and_damage(void) {
     CHECK(turn && !(turn->state & NATIVE_UI_STATE_VISIBLE),
           "turn zero should not reserve visible status text");
 
+    model = fixture_model();
+    for (int width = 360; width <= 760; width += 40) {
+        CHECK(native_masthead_build(&compact, width, 48, &model),
+              "readable masthead builds at %d", width);
+        const native_ui_node_t *m = find_key(&compact, NATIVE_MASTHEAD_KEY_MODEL);
+        const native_ui_node_t *stats = find_key(&compact, NATIVE_MASTHEAD_KEY_METRICS);
+        const native_ui_node_t *t = find_key(&compact, NATIVE_MASTHEAD_KEY_TURN);
+        CHECK(stats && !(stats->state & NATIVE_UI_STATE_VISIBLE),
+              "narrow header omits competing counters at %d", width);
+        CHECK(m && m->frame.width >= 150 && frame_inside(m->frame, compact.viewport),
+              "model retains readable width at %d", width);
+        if (width < 620)
+            CHECK(t && !(t->state & NATIVE_UI_STATE_VISIBLE), "narrow turn collapses");
+    }
+
     native_ui_scene_t before;
     native_ui_scene_t after;
     model = fixture_model();
@@ -140,11 +158,10 @@ static void test_masthead_density_and_damage(void) {
     native_ui_damage_t damage;
     native_ui_diff(&before, &after, &damage);
     const native_ui_node_t *after_metrics = find_key(&after, NATIVE_MASTHEAD_KEY_METRICS);
-    CHECK(!damage.full_repaint && damage.count == 1,
-          "metric mutation should produce one semantic dirty region, got %d", damage.count);
-    CHECK(after_metrics && damage.count == 1 && damage.regions[0].x == after_metrics->frame.x &&
-              damage.regions[0].width == after_metrics->frame.width,
-          "damage should stay on the retained metrics node");
+    CHECK(!damage.full_repaint && damage.count == 0,
+          "hidden metric mutation should not dirty the visible header, got %d", damage.count);
+    CHECK(after_metrics && !(after_metrics->state & NATIVE_UI_STATE_VISIBLE),
+          "dense metrics remain retained without competing with header identity");
 }
 
 static native_composer_model_t composer_fixture(void) {
@@ -167,7 +184,7 @@ static void test_composer_semantics_and_damage(void) {
     native_ui_scene_t scene;
     native_composer_model_t model = composer_fixture();
     CHECK(native_composer_build(&scene, 1120, 84, &model), "dense retained composer should build");
-    CHECK(scene.count == 12, "composer should have 12 stable nodes, got %d", scene.count);
+    CHECK(scene.count == 13, "composer should have 13 stable nodes, got %d", scene.count);
     CHECK(scene.nodes[scene.root].key == NATIVE_COMPOSER_KEY_ROOT &&
               scene.nodes[scene.root].role == NATIVE_UI_ROLE_COMPOSER &&
               (scene.nodes[scene.root].state & NATIVE_UI_STATE_LIVE),
@@ -222,10 +239,31 @@ static void test_composer_semantics_and_damage(void) {
           "compact composer should preserve the shared editor");
     const native_ui_node_t *hint = find_key(&compact, NATIVE_COMPOSER_KEY_HINT);
     clock = find_key(&compact, NATIVE_COMPOSER_KEY_CLOCK);
-    CHECK(hint && strstr(hint->text, "PGUP PGDN") && !strstr(hint->text, "OPTION+ENTER"),
+    CHECK(hint && strstr(hint->text, "Enter to send") && strstr(hint->text, "PgUp history") &&
+              !strstr(hint->text, "Option+Enter"),
           "compact hint should retain essential editing controls");
     CHECK(clock && !(clock->state & NATIVE_UI_STATE_VISIBLE),
           "missing clock should collapse without changing node identity");
+    model.diagnostics_label="Ask AI about trace";
+    model.diagnostics_detail="Recording saved. Your draft stays here.";
+    model.diagnostics_enabled=true;
+    for(int width=160;width<=1120;width+=40) {
+        CHECK(native_composer_build(&compact,width,56,&model),"diagnostic composer builds at %d",width);
+        const native_ui_node_t *button=find_key(&compact,NATIVE_COMPOSER_KEY_DIAGNOSTICS);
+        const native_ui_node_t *editor=find_key(&compact,NATIVE_COMPOSER_KEY_INPUT);
+        const native_ui_node_t *help=find_key(&compact,NATIVE_COMPOSER_KEY_HINT);
+        if (width < 360)
+            CHECK(help && !(help->state & NATIVE_UI_STATE_VISIBLE),
+                  "short footer prioritizes complete trace action at %d", width);
+        else
+            CHECK(help && (help->state & NATIVE_UI_STATE_VISIBLE) &&
+                      frame_inside(help->frame, compact.viewport),
+                  "roomy footer retains help beside the trace action at %d", width);
+        CHECK(button && frame_inside(button->frame,compact.viewport) && button->frame.width>=120 &&
+              button->frame.height>=16,"diagnostic control remains reachable at %d",width);
+        CHECK(editor && editor->frame.height>=14 && editor->frame.width>=32,
+              "diagnostics preserve usable editor geometry at %d",width);
+    }
     CHECK(!native_composer_build(&compact, 159, 84, &model) &&
               !native_composer_build(&compact, 420, 55, &model),
           "composer should reject layouts that cannot preserve its regions");
@@ -840,6 +878,27 @@ static void test_tool_result_views(void) {
                                   &bytes);
     CHECK(!strcmp(preview, result) && tail == 0 && bytes == strlen(result),
           "full view should preserve a bounded multiline result");
+
+    char long_line[4096];
+    memset(long_line, 'x', sizeof(long_line) - 1U);
+    long_line[sizeof(long_line) - 1U] = '\0';
+    pixel_tui_tool_result_preview(long_line, PIXEL_TUI_TOOL_VIEW_RESULTS, preview, sizeof(preview),
+                                  &tail, &bytes);
+    CHECK(strlen(preview) <= 240U && strlen(preview) >= 3U &&
+              !strcmp(preview + strlen(preview) - 3U, "…") && tail == 0 &&
+              bytes == sizeof(long_line) - 1U,
+          "single-line byte truncation is explicit without expanding the preview budget");
+    char full_preview[2300];
+    pixel_tui_tool_result_preview(long_line, PIXEL_TUI_TOOL_VIEW_FULL, full_preview,
+                                  sizeof(full_preview), &tail, &bytes);
+    CHECK(strlen(full_preview) == 2048U && !strcmp(full_preview + 2045U, "…") &&
+              bytes == sizeof(long_line) - 1U,
+          "full preview retains its 2048-byte cap with an explicit truncation marker");
+    char narrow[8];
+    pixel_tui_tool_result_preview("雪雪雪雪", PIXEL_TUI_TOOL_VIEW_FULL, narrow, sizeof(narrow),
+                                  &tail, &bytes);
+    CHECK(!strcmp(narrow, "雪…") && bytes == 12U,
+          "small destination preserves Unicode boundaries and its truncation marker");
 }
 
 static void test_live_op_presence_motion(void) {

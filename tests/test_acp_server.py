@@ -2,6 +2,7 @@
 """Protocol smoke for `dsco acp serve` without consuming a model provider."""
 
 import json
+import argparse
 import os
 import stat
 import subprocess
@@ -12,6 +13,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--binary", default=str(ROOT / "dsco"))
+    args = parser.parse_args()
+    binary = str(Path(args.binary).resolve())
+
     with tempfile.TemporaryDirectory(prefix="dsco-acp-test-") as tmp:
         fake = Path(tmp) / "fake-dsco"
         fake.write_text(
@@ -36,7 +42,7 @@ def main() -> None:
             }
         )
         proc = subprocess.Popen(
-            [str(ROOT / "dsco"), "acp", "serve"],
+            [binary, "acp", "serve"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

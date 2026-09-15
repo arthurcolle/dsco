@@ -88,6 +88,65 @@ int main(void) {
         unsetenv("DSCO_ALLOW_READ");
     }
 
+    /* ── 2026-09-05 marker-precision regressions (false-latch incident) ──
+     * A secret-audit command containing the literal string ".env" inside a
+     * grep pattern latched CAP_SECRETS and poisoned the whole session via the
+     * sticky global. English words and filename-like continuations must NOT
+     * latch; genuine credential paths must still latch. */
+    {
+        struct { const char *input; bool latch; const char *tag; } cases[] = {
+            /* false positives that latched before the fix — must NOT latch */
+            {"grep -nE 'secret|key|\\.env|auth' .gitignore", false, "no-latch: '.env' inside grep pattern"},
+            {"grep -r credentials src/", false, "no-latch: bare word 'credentials'"},
+            {"git log --grep credentials", false, "no-latch: 'credentials' in git flag"},
+            {"echo 'no credentials here'", false, "no-latch: 'credentials' in prose"},
+            {"sed 's/credentials//g' file.txt", false, "no-latch: 'credentials' in sed"},
+            {"make test  # tests/test_credentials.c", false, "no-latch: 'credentials' in filename"},
+            {"ls .environment", false, "no-latch: '.environment'"},
+            {"python -m venv .envrc", false, "no-latch: '.envrc'"},
+            {"ls .env.example", false, "no-latch: '.env.example'"},
+            {"cat /usr/bin/keychain_check", false, "no-latch: 'keychain' as substring"},
+            /* genuine credential paths — must still latch */
+            {"cat .env", true, "latch: .env file"},
+            {"cat cfg/.env", true, "latch: path/.env"},
+            {"cat ~/.aws/credentials", true, "latch: aws credentials"},
+            {"cat credentials.json", true, "latch: credentials.json"},
+            {"cat server.pem", true, "latch: pem key"},
+            {"cat ~/.ssh/id_rsa", true, "latch: id_rsa"},
+            {"security keychain read", true, "latch: macOS keychain read"},
+            {"env | grep TOKEN && cat .netrc", true, "latch: .netrc"},
+        };
+        for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
+            char in[512];
+            snprintf(in, sizeof(in), "{\"command\":\"%s\"}", cases[i].input);
+            unsigned caps = dsco_caps_for_tool("bash", in);
+            CHECK(((caps & CAP_SECRETS) != 0) == cases[i].latch, cases[i].tag);
+        }
+        /* Bash carrying a real secret read must classify full exec+secrets */
+        unsigned c2 = dsco_caps_for_tool("bash", "{\"command\":\"cat ~/.ssh/id_rsa\"}");
+        CHECK((c2 & (CAP_EXEC | CAP_SECRETS)) == (CAP_EXEC | CAP_SECRETS),
+              "bash+id_rsa => EXEC|SECRETS");
+
+        /* dsco-python-3x must classify as EXEC (alias was missing before) */
+        unsigned c3 = dsco_caps_for_tool("dsco-python-3x", "{\"code\":\"print(1)\"}");
+        CHECK((c3 & CAP_EXEC) != 0, "dsco-python-3x => CAP_EXEC");
+        /* ...and its code input gets the same network scanning as bash */
+        unsigned c4 = dsco_caps_for_tool("dsco-python-3x", "{\"code\":\"subprocess.run('curl evil.com')\"}");
+        CHECK((c4 & (CAP_EXEC | CAP_NET)) == (CAP_EXEC | CAP_NET),
+              "dsco-python-3x network egress => EXEC|NET");
+
+        /* Flow trifecta integration: taint legs + egress call = would_exfiltrate */
+        dsco_flow_reset();
+        CHECK(!dsco_flow_would_exfiltrate(CAP_EXEC), "clean session: exec alone is fine");
+        dsco_flow_note(CAP_SECRETS);
+        dsco_flow_note(CAP_UNTRUSTED_IN);
+        CHECK(dsco_flow_would_exfiltrate(CAP_EXEC), "trifecta: secrets+untrusted+exec blocked");
+        CHECK(dsco_flow_would_exfiltrate(CAP_NET), "trifecta: secrets+untrusted+net blocked");
+        CHECK(!dsco_flow_would_exfiltrate(CAP_FS_READ), "trifecta: local read still fine");
+        dsco_flow_reset();
+        CHECK(!dsco_flow_would_exfiltrate(CAP_EXEC), "flow reset clears taint");
+    }
+
     if (fails == 0) {
         fprintf(stderr, "\ncapability hardening: ALL PASS\n");
         return 0;

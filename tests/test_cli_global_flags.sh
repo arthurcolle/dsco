@@ -105,10 +105,25 @@ printf '%s\n' "$out" | grep -q '"governance_model": "standard"' ||
   fail "override: --gov-model standard did not override baked-in default"
 
 # Pre-set environment variable must still override the baked-in default.
-out="$(env DSCO_GOV_MODEL=paranoid DSCO_NO_AUTO_SUPERVISE=1 \
+out="$(env -u DSCO_GOV_BYPASS -u DSCO_SYSTEMS_AGENT \
+  DSCO_GOV_MODEL=paranoid DSCO_NO_AUTO_SUPERVISE=1 \
   DSCO_SETUP_NO_AUTO_BOOTSTRAP=1 DSCO_CREDENTIAL_DISCOVERY_NO_PROMPT=1 \
   DSCO_SECURE_STORE_NO_PROMPT=1 "$bin" runtime status --json 2>/dev/null)"
 printf '%s\n' "$out" | grep -q '"governance_model": "paranoid"' ||
   fail "override: DSCO_GOV_MODEL=paranoid env did not override baked-in default"
+
+# Swarm workers select native providers through --exec. The Router profile
+# must also appear in the CLI's native registry, even with an OpenAI model.
+out="$(DSCO_PRICING_OFFLINE=1 run_stdout --exec dsco-router --route-explain openai/gpt-5.6-luna)"
+printf '%s\n' "$out" | grep -q '^provider_override: dsco-router$' ||
+  fail "--exec dsco-router was not recognized as a native provider"
+printf '%s\n' "$out" | grep -q '^route_provider: dsco-router$' ||
+  fail "--exec dsco-router did not preserve the explicit provider with an OpenAI model"
+
+out="$(DSCO_PRICING_OFFLINE=1 run_stdout_clean --luna-astra --route-explain)"
+printf '%s\n' "$out" | grep -q '^model: gpt-5.6-luna$' ||
+  fail "--luna-astra did not pin the top-level model to Luna"
+printf '%s\n' "$out" | grep -q '^reasoning_effort: xhigh$' ||
+  fail "--luna-astra did not set xhigh effort"
 
 printf 'cli global flag dispatch: ok\n'
