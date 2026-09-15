@@ -23,4 +23,12 @@ bool kitty_lab_write_ppm_view(const char *path, int width, int height, int frame
 bool kitty_lab_render_view(FILE *out, int width, int height, int frames, bool animate,
                            kitty_lab_view_t view);
 
+/* Opt-in HDR resolve.  The scene is authored in SDR, lifted to linear float,
+ * given synthetic highlight headroom, bloomed, tonemapped, and dithered back
+ * to the RGB24 the Kitty wire requires.  Off by default: it costs a float
+ * buffer plus a mip pyramid per frame and materially reduces zlib ratio on
+ * the transmit path, so animated surfaces should measure before enabling. */
+void kitty_lab_set_hdr(bool enabled);
+bool kitty_lab_hdr_enabled(void);
+
 #endif /* DSCO_KITTY_LAB_H */

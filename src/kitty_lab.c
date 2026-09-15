@@ -3,6 +3,7 @@
 #include "kitty_lab.h"
 
 #include "kitty_graphics.h"
+#include "pixel_hdr.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -561,6 +562,39 @@ static void lab_render_actions_frame(lab_canvas_t *c, int frame, int frames) {
                   LAB_CYAN, 0.76f, c->width - margin * 2 - 32);
 }
 
+static bool s_hdr_enabled = false;
+
+void kitty_lab_set_hdr(bool enabled) { s_hdr_enabled = enabled; }
+bool kitty_lab_hdr_enabled(void) { return s_hdr_enabled; }
+
+/* Resolve the SDR scene through the linear HDR pipeline, in place.  Failure
+ * is non-fatal by design: the untouched SDR canvas is already correct, so a
+ * transient allocation failure degrades quality rather than the render. */
+static void lab_apply_hdr(lab_canvas_t *c) {
+    if (!s_hdr_enabled || !c || !c->pixels) return;
+    pixel_hdr_surface_t hdr;
+    if (!pixel_hdr_surface_init(&hdr, c->width, c->height)) return;
+    pixel_hdr_from_srgb(&hdr, c->pixels);
+    /* Knee/gain measured against this scene: 0.30/4.0 lifts ~0.15% of the
+     * frame (the cyan/amber accents and the cursor rule) above 1.0 so the
+     * bright pass has something to bloom from.  A higher knee left the peak
+     * at 0.94 and made the whole pyramid a no-op. */
+    pixel_hdr_expand_highlights(&hdr, 0.30f, 4.0f);
+    pixel_hdr_resolve_opts_t opts;
+    pixel_hdr_resolve_opts_default(&opts);
+    opts.curve = PIXEL_HDR_TONEMAP_ACES;
+    opts.bloom_strength = 0.45f;
+    opts.bloom_threshold = 1.0f;
+    opts.bloom_levels = 5;
+    /* Dither costs ~14x on the zlib transmit path for this content and only
+     * pays for itself on smooth wide gradients, which this scene does not
+     * have.  Leave it off here; pixel_hdr_resolve_opts_default() keeps it on
+     * for callers whose content actually bands. */
+    opts.dither = false;
+    (void)pixel_hdr_resolve(&hdr, c->pixels, &opts);
+    pixel_hdr_surface_free(&hdr);
+}
+
 static void lab_render_scene(lab_canvas_t *c, int frame, int frames, kitty_lab_view_t view) {
     switch (view) {
     case KITTY_LAB_VIEW_PLAN:
@@ -574,6 +608,7 @@ static void lab_render_scene(lab_canvas_t *c, int frame, int frames, kitty_lab_v
         lab_render_overview_frame(c, frame, frames);
         break;
     }
+    lab_apply_hdr(c);
 }
 
 bool kitty_lab_write_ppm(const char *path, int width, int height, int frame, int frames) {

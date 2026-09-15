@@ -45,6 +45,7 @@ static int netsrv_compat_set_serial_raw(mbedtls_x509write_cert *ctx, unsigned ch
 #include <ctype.h>
 #include <time.h>
 #include <errno.h>
+#include <sys/time.h>
 
 static void netsrv_tune_socket(int fd, bool listener) {
     if (fd < 0)
@@ -100,6 +101,9 @@ struct dsco_net_server {
 
     uint8_t auth_key[crypto_auth_hmacsha512256_KEYBYTES];
     bool auth_enabled;
+    char bind_host[256];
+    pthread_mutex_t replay_mu;
+    struct { uint64_t ts; char nonce[65]; } replay[1024];
 };
 
 /* ── Per-connection handler arg ───────────────────────────────────────── */
@@ -203,25 +207,70 @@ static bool client_write_all(bool use_tls, mbedtls_ssl_context *ssl, mbedtls_net
 }
 
 /* ── HMAC auth ─────────────────────────────────────────────────────────── */
-static bool verify_auth(dsco_net_server_t *srv, const char *token, const char *body,
-                        size_t body_len) {
-    if (!srv->auth_enabled)
-        return true;
-    if (!token || !token[0])
-        return false;
-
-    uint8_t mac[crypto_auth_hmacsha512256_BYTES];
-    crypto_auth_hmacsha512256(mac, (const uint8_t *)body, body_len, srv->auth_key);
-
-    char hex[crypto_auth_hmacsha512256_BYTES * 2 + 1];
-    static const char hexc[] = "0123456789abcdef";
-    for (int i = 0; i < (int)crypto_auth_hmacsha512256_BYTES; i++) {
-        hex[i * 2] = hexc[mac[i] >> 4];
-        hex[i * 2 + 1] = hexc[mac[i] & 0xF];
+#define NETSRV_AUTH_WINDOW 300
+#define NETSRV_NONCE_HEX 32
+static bool hex_decode_key(const char *in, uint8_t out[crypto_auth_hmacsha512256_KEYBYTES]) {
+    if (!in || strlen(in) != crypto_auth_hmacsha512256_KEYBYTES * 2) return false;
+    for (size_t i = 0; i < crypto_auth_hmacsha512256_KEYBYTES; i++) {
+        int a = isdigit((unsigned char)in[i*2]) ? in[i*2]-'0' :
+                (in[i*2] >= 'a' && in[i*2] <= 'f') ? in[i*2]-'a'+10 :
+                (in[i*2] >= 'A' && in[i*2] <= 'F') ? in[i*2]-'A'+10 : -1;
+        int b = isdigit((unsigned char)in[i*2+1]) ? in[i*2+1]-'0' :
+                (in[i*2+1] >= 'a' && in[i*2+1] <= 'f') ? in[i*2+1]-'a'+10 :
+                (in[i*2+1] >= 'A' && in[i*2+1] <= 'F') ? in[i*2+1]-'A'+10 : -1;
+        if (a < 0 || b < 0) return false;
+        out[i] = (uint8_t)((a << 4) | b);
     }
-    hex[crypto_auth_hmacsha512256_BYTES * 2] = '\0';
-
-    return strcmp(token, hex) == 0;
+    return true;
+}
+static void hex_encode(const uint8_t *in, size_t n, char *out) {
+    static const char h[] = "0123456789abcdef";
+    for (size_t i=0; i<n; i++) { out[i*2]=h[in[i]>>4]; out[i*2+1]=h[in[i]&15]; }
+    out[n*2]='\0';
+}
+static uint64_t netsrv_now(void) { return (uint64_t)time(NULL); }
+static bool replay_seen(dsco_net_server_t *s, uint64_t ts, const char *nonce) {
+    /* Never evict an unexpired nonce: saturation fails closed, not replay-open. */
+    bool reject = false;
+    size_t slot = sizeof(s->replay) / sizeof(s->replay[0]);
+    uint64_t now = netsrv_now();
+    pthread_mutex_lock(&s->replay_mu);
+    for (size_t i = 0; i < sizeof(s->replay) / sizeof(s->replay[0]); i++) {
+        if (!s->replay[i].ts || now > s->replay[i].ts + NETSRV_AUTH_WINDOW) {
+            if (slot == sizeof(s->replay) / sizeof(s->replay[0])) slot = i;
+        } else if (!strcmp(s->replay[i].nonce, nonce)) { reject = true; break; }
+    }
+    if (!reject) {
+        if (slot == sizeof(s->replay) / sizeof(s->replay[0])) reject = true;
+        else {
+            s->replay[slot].ts = ts;
+            snprintf(s->replay[slot].nonce, sizeof(s->replay[slot].nonce), "%s", nonce);
+        }
+    }
+    pthread_mutex_unlock(&s->replay_mu);
+    return reject;
+}
+static bool verify_auth(dsco_net_server_t *s, const char *token, const char *method,
+                        const char *path, const char *body, size_t body_len) {
+    if (!s->auth_enabled || !token || strncmp(token, "v1:", 3) != 0) return false;
+    char tsbuf[32], nonce[65], machex[crypto_auth_hmacsha512256_BYTES*2+1];
+    if (sscanf(token+3, "%31[^:]:%64[^:]:%64s", tsbuf, nonce, machex) != 3 || strlen(nonce) != NETSRV_NONCE_HEX || strlen(machex) != 64) return false;
+    for (size_t i = 0; tsbuf[i]; i++) if (!isdigit((unsigned char)tsbuf[i])) return false;
+    char *end=NULL; errno=0; unsigned long long t=strtoull(tsbuf,&end,10);
+    uint64_t now=netsrv_now(); if (errno || !end || *end || t > now + NETSRV_AUTH_WINDOW || (t < now && now - t > NETSRV_AUTH_WINDOW)) return false;
+    for (size_t i=0;i<strlen(nonce);i++) if (!isxdigit((unsigned char)nonce[i])) return false;
+    size_t n = strlen(tsbuf)+1+strlen(nonce)+1+strlen(method)+1+strlen(path)+1+body_len;
+    char *msg=malloc(n + 1); if (!msg) return false;
+    int used=snprintf(msg,n+1,"%s\n%s\n%s\n%s\n",tsbuf,nonce,method,path);
+    if (used < 0 || (size_t)used + body_len != n) { free(msg); return false; }
+    if (body_len) memcpy(msg+used,body,body_len);
+    uint8_t mac[crypto_auth_hmacsha512256_BYTES], supplied[sizeof(mac)];
+    if (!hex_decode_key(machex, supplied)) { free(msg); return false; }
+    crypto_auth_hmacsha512256(mac,(const uint8_t*)msg,n,s->auth_key); free(msg);
+    bool ok = sodium_memcmp(mac,supplied,sizeof(mac)) == 0;
+    if (ok && replay_seen(s,(uint64_t)t,nonce)) ok=false;
+    sodium_memzero(supplied,sizeof(supplied)); sodium_memzero(mac,sizeof(mac));
+    return ok;
 }
 
 /* ── Connection handler thread ─────────────────────────────────────────── */
@@ -249,13 +298,20 @@ static void *handle_conn(void *arg) {
 
     /* ── Parse headers until blank line ────────────────────────────── */
     long content_length = 0;
-    char auth_token[128] = {0};
+    char auth_token[256] = {0};
 
     while (read_line(srv, srv->tls_ready ? &ca->ssl : NULL, &ca->client_fd, line, sizeof(line))) {
         if (line[0] == '\0')
             break; /* blank line = end of headers */
         if (strncasecmp(line, "Content-Length:", 15) == 0) {
-            content_length = atol(line + 15);
+            char *ep = NULL; errno = 0;
+            content_length = strtol(line + 15, &ep, 10);
+            while (ep && isspace((unsigned char)*ep)) ep++;
+            if (errno || !ep || ep == line + 15 || *ep || content_length < 0 || content_length > NETSRV_MAX_BODY) {
+                const char *bad = "HTTP/1.0 400 Bad Request\r\nContent-Length: 0\r\n\r\n";
+                write_all(srv, srv->tls_ready ? &ca->ssl : NULL, &ca->client_fd, bad, strlen(bad));
+                goto cleanup;
+            }
         } else if (strncasecmp(line, "X-DSCO-Auth:", 12) == 0) {
             const char *v = line + 12;
             while (*v == ' ')
@@ -280,7 +336,8 @@ static void *handle_conn(void *arg) {
 
     /* ── Auth check ─────────────────────────────────────────────────── */
     const char *tok = auth_token[0] ? auth_token : NULL;
-    if (!verify_auth(srv, tok, body ? body : "", (size_t)content_length)) {
+    bool public_health = (strcasecmp(method, "GET") == 0 && strcmp(path, "/health") == 0);
+    if (!public_health && !verify_auth(srv, tok, method, path, body ? body : "", (size_t)content_length)) {
         const char *resp = "HTTP/1.0 401 Unauthorized\r\n"
                            "Content-Length: 0\r\n\r\n";
         write_all(srv, srv->tls_ready ? &ca->ssl : NULL, &ca->client_fd, resp, strlen(resp));
@@ -399,6 +456,10 @@ dsco_net_server_t *netsrv_create(uint16_t port, bool use_tls, const char *cert_p
 
     s->port = port;
     s->use_tls = use_tls;
+    snprintf(s->bind_host, sizeof(s->bind_host), "%s", getenv("DSCO_NET_BIND") ? getenv("DSCO_NET_BIND") : "127.0.0.1");
+    pthread_mutex_init(&s->replay_mu, NULL);
+    const char *envkey = getenv("DSCO_NET_AUTH_KEY");
+    if (envkey && hex_decode_key(envkey, s->auth_key)) s->auth_enabled = true;
     if (cert_pem_path)
         snprintf(s->cert_path, sizeof(s->cert_path), "%s", cert_pem_path);
     if (key_pem_path)
@@ -428,6 +489,7 @@ void netsrv_destroy(dsco_net_server_t *s) {
     mbedtls_entropy_free(&s->entropy);
     mbedtls_net_free(&s->listen_fd);
     sodium_memzero(s->auth_key, sizeof(s->auth_key));
+    pthread_mutex_destroy(&s->replay_mu);
     free(s);
 }
 
@@ -460,22 +522,26 @@ bool netsrv_route_stream(dsco_net_server_t *s, const char *method, const char *p
 void netsrv_set_auth_key(dsco_net_server_t *s, const uint8_t *key, size_t key_len) {
     if (!s)
         return;
-    size_t n =
-        key_len < crypto_auth_hmacsha512256_KEYBYTES ? key_len : crypto_auth_hmacsha512256_KEYBYTES;
-    memcpy(s->auth_key, key, n);
+    if (!key || key_len != crypto_auth_hmacsha512256_KEYBYTES) { s->auth_enabled = false; return; }
+    memcpy(s->auth_key, key, crypto_auth_hmacsha512256_KEYBYTES);
     s->auth_enabled = true;
 }
 
 bool netsrv_start(dsco_net_server_t *s) {
-    /* Load TLS cert+key if requested and files exist */
-    if (s->use_tls && s->cert_path[0] && s->key_path[0]) {
+    const char *ak = getenv("DSCO_NET_AUTH_KEY");
+    if (!s->auth_enabled && ak) s->auth_enabled = hex_decode_key(ak, s->auth_key);
+    bool loopback = strcmp(s->bind_host,"localhost")==0 || strcmp(s->bind_host,"::1")==0 ||
+                    (strncmp(s->bind_host,"127.",4)==0);
+    if (!loopback && !s->auth_enabled) { fprintf(stderr,"[netsrv] non-loopback bind requires DSCO_NET_AUTH_KEY (64 hex chars)\n"); return false; }
+    if (s->use_tls) {
+        if (!s->cert_path[0] || !s->key_path[0]) { fprintf(stderr,"[netsrv] TLS requires certificate and key\n"); return false; }
         int r;
         r = mbedtls_x509_crt_parse_file(&s->srvcert, s->cert_path);
         if (r != 0) {
             char errbuf[128];
             mbedtls_strerror(r, errbuf, sizeof(errbuf));
             fprintf(stderr, "[netsrv] cert parse failed: %s\n", errbuf);
-            goto bind_plain;
+            return false;
         }
         r = mbedtls_pk_parse_keyfile(&s->pkey, s->key_path, NULL, mbedtls_ctr_drbg_random,
                                      &s->ctr_drbg);
@@ -483,25 +549,24 @@ bool netsrv_start(dsco_net_server_t *s) {
             char errbuf[128];
             mbedtls_strerror(r, errbuf, sizeof(errbuf));
             fprintf(stderr, "[netsrv] key parse failed: %s\n", errbuf);
-            goto bind_plain;
+            return false;
         }
         r = mbedtls_ssl_config_defaults(&s->conf, MBEDTLS_SSL_IS_SERVER,
                                         MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
         if (r != 0)
-            goto bind_plain;
+            return false;
 
         mbedtls_ssl_conf_rng(&s->conf, mbedtls_ctr_drbg_random, &s->ctr_drbg);
         mbedtls_ssl_conf_ca_chain(&s->conf, s->srvcert.next, NULL);
         r = mbedtls_ssl_conf_own_cert(&s->conf, &s->srvcert, &s->pkey);
         if (r != 0)
-            goto bind_plain;
+            return false;
 
         mbedtls_ssl_conf_min_tls_version(&s->conf, MBEDTLS_SSL_VERSION_TLS1_2);
         s->tls_ready = true;
     }
 
-bind_plain:;
-    /* Bind the configured port; if it's already taken (e.g. another dsco
+/* Bind the configured port; if it's already taken (e.g. another dsco
      * instance owns it), walk a small range of fallbacks rather than failing
      * loudly. Running a second instance is normal, so a wedged default port
      * shouldn't dump an mbedtls error into the TUI. */
@@ -512,7 +577,7 @@ bind_plain:;
         uint16_t try_port = (uint16_t)(want + i);
         char port_str[8];
         snprintf(port_str, sizeof(port_str), "%u", try_port);
-        r = mbedtls_net_bind(&s->listen_fd, NULL, port_str, MBEDTLS_NET_PROTO_TCP);
+        r = mbedtls_net_bind(&s->listen_fd, s->bind_host, port_str, MBEDTLS_NET_PROTO_TCP);
         if (r == 0) {
             s->port = try_port;
             break;
@@ -677,13 +742,15 @@ char *netsrv_client_post(const char *host, uint16_t port, const char *path, cons
                                         MBEDTLS_SSL_PRESET_DEFAULT) != 0)
             goto done;
         mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &ctr_drbg);
-        /* Hardening: only skip cert verification for loopback/internal hosts.
-         * External TLS must verify. TOFU remains opt-in for self-signed nodes. */
-        bool is_internal = (strcmp(host, "localhost") == 0 || strcmp(host, "127.0.0.1") == 0 ||
-                            strncmp(host, "192.168.", 8) == 0 || strncmp(host, "10.", 3) == 0 ||
-                            strncmp(host, "172.16.", 7) == 0);
-        mbedtls_ssl_conf_authmode(&conf, is_internal ? MBEDTLS_SSL_VERIFY_NONE
-                                                     : MBEDTLS_SSL_VERIFY_REQUIRED);
+        const char *ca_file = getenv("DSCO_NET_CA_FILE");
+        if (ca_file && *ca_file) {
+            if (mbedtls_x509_crt_parse_file(&cacert, ca_file) != 0) goto done;
+        } else if (mbedtls_x509_crt_parse_file(&cacert, "/etc/ssl/cert.pem") < 0 &&
+                   mbedtls_x509_crt_parse_file(&cacert, "/etc/ssl/certs/ca-certificates.crt") < 0) {
+            goto done;
+        }
+        mbedtls_ssl_conf_ca_chain(&conf, &cacert, NULL);
+        mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_REQUIRED);
         mbedtls_ssl_conf_min_tls_version(&conf, MBEDTLS_SSL_VERSION_TLS1_2);
         if (mbedtls_ssl_setup(&ssl, &conf) != 0)
             goto done;
@@ -699,24 +766,28 @@ char *netsrv_client_post(const char *host, uint16_t port, const char *path, cons
     /* Build request */
     size_t body_len = json_body ? strlen(json_body) : 0;
 
-    /* Optional HMAC auth header */
+    /* Signed request: v1:timestamp:nonce:HMAC(timestamp\nnonce\nmethod\npath\nbody).
+     * A NULL key means the process-scoped DSCO_NET_AUTH_KEY. */
+    uint8_t effective_key[crypto_auth_hmacsha512256_KEYBYTES];
+    const uint8_t *sign_key = auth_key;
+    if (!sign_key) { const char *ek=getenv("DSCO_NET_AUTH_KEY");
+        if (ek && hex_decode_key(ek,effective_key)) { sign_key=effective_key; auth_key_len=sizeof(effective_key); } }
     char auth_hdr[256] = {0};
-    if (auth_key && auth_key_len > 0 && body_len > 0) {
-        uint8_t mac[crypto_auth_hmacsha512256_BYTES];
-        uint8_t padded_key[crypto_auth_hmacsha512256_KEYBYTES] = {0};
-        size_t kn = auth_key_len < crypto_auth_hmacsha512256_KEYBYTES
-                        ? auth_key_len
-                        : crypto_auth_hmacsha512256_KEYBYTES;
-        memcpy(padded_key, auth_key, kn);
-        crypto_auth_hmacsha512256(mac, (const uint8_t *)json_body, body_len, padded_key);
-        static const char hex[] = "0123456789abcdef";
-        char hex_mac[crypto_auth_hmacsha512256_BYTES * 2 + 1];
-        for (int i = 0; i < (int)crypto_auth_hmacsha512256_BYTES; i++) {
-            hex_mac[i * 2] = hex[mac[i] >> 4];
-            hex_mac[i * 2 + 1] = hex[mac[i] & 0xF];
-        }
-        hex_mac[crypto_auth_hmacsha512256_BYTES * 2] = '\0';
-        snprintf(auth_hdr, sizeof(auth_hdr), "X-DSCO-Auth: %s\r\n", hex_mac);
+    if (sign_key && auth_key_len == crypto_auth_hmacsha512256_KEYBYTES) {
+        char ts[32], nonce[NETSRV_NONCE_HEX+1];
+        char *msg = malloc(body_len + 512);
+        if (!msg) goto done;
+        uint8_t nonce_raw[NETSRV_NONCE_HEX/2], mac[crypto_auth_hmacsha512256_BYTES];
+        randombytes_buf(nonce_raw, sizeof(nonce_raw)); hex_encode(nonce_raw,sizeof(nonce_raw),nonce);
+        snprintf(ts,sizeof(ts),"%llu",(unsigned long long)netsrv_now());
+        int ml=snprintf(msg,body_len + 512,"%s\n%s\nPOST\n%s\n",ts,nonce,path ? path : "/");
+        if (ml < 0 || (size_t)ml >= 512) { free(msg); goto done; }
+        if (body_len) memcpy(msg+ml,json_body,body_len);
+        crypto_auth_hmacsha512256(mac,(const uint8_t*)msg,(size_t)ml+body_len,sign_key);
+        free(msg);
+        char mh[sizeof(mac)*2+1]; hex_encode(mac,sizeof(mac),mh);
+        snprintf(auth_hdr,sizeof(auth_hdr),"X-DSCO-Auth: v1:%s:%s:%s\r\n",ts,nonce,mh);
+        sodium_memzero(effective_key,sizeof(effective_key));
     }
 
     char req_hdr[1024];
@@ -741,6 +812,7 @@ char *netsrv_client_post(const char *host, uint16_t port, const char *path, cons
         goto done;
 
     while (1) {
+        if (rpos + 1024 >= 2 * NETSRV_MAX_BODY) { free(rbuf); goto done; }
         if (rpos + 1024 >= rcap) {
             rcap *= 2;
             char *tmp = realloc(rbuf, rcap);

@@ -45,12 +45,12 @@ bool native_composer_build(native_ui_scene_t *scene, int width, int height,
     root->agent_state = model->agent_state;
     root->style.flow = NATIVE_UI_FLOW_COLUMN;
     root->style.align = NATIVE_UI_ALIGN_STRETCH;
-    root->style.padding = (native_ui_insets_t){3, 10, 3, 6};
+    root->style.padding = (native_ui_insets_t){5, 12, 5, 12};
     root->style.gap = 1;
     root->style.background = NATIVE_UI_COLOR_SURFACE_RAISED;
     root->style.border = NATIVE_UI_COLOR_BORDER;
     root->style.border_width = 1;
-    root->style.radius = 9;
+    root->style.radius = 8;
     root->style.opacity = 230;
     root->state |= NATIVE_UI_STATE_LIVE;
     native_ui_node_set_accessibility_label(root, "Persistent command composer");
@@ -85,13 +85,21 @@ bool native_composer_build(native_ui_scene_t *scene, int width, int height,
     title->style.type = NATIVE_UI_TYPE_LABEL;
     title->style.foreground = NATIVE_UI_COLOR_TEXT;
     title->style.opacity = 185;
-    native_ui_node_set_text(title, "COMPOSER");
+    native_ui_node_set_text(title, "Message");
     char live_label[64];
-    snprintf(live_label, sizeof(live_label), "LIVE  /  QUEUE %d/%d",
+    snprintf(live_label, sizeof(live_label), "QUEUE %d/%d",
              model->queue_depth,
              model->queue_capacity > 0 ? model->queue_capacity : 8);
     int live_width = (int)strlen(live_label) * 7;
     if (live_width < 100) live_width = 100;
+    int live_available = width - root->style.padding.left - root->style.padding.right -
+                         title->constraints.min_width - top->style.gap;
+    if (live_width > live_available) {
+        snprintf(live_label, sizeof(live_label), "Q %d/%d", model->queue_depth,
+                 model->queue_capacity > 0 ? model->queue_capacity : 8);
+        live_width = (int)strlen(live_label) * 7;
+        if (live_width > live_available) live_width = live_available;
+    }
     set_fixed_width(live, live_width);
     live->style.type = NATIVE_UI_TYPE_LABEL;
     live->style.foreground = model->queue_depth > 0
@@ -99,10 +107,14 @@ bool native_composer_build(native_ui_scene_t *scene, int width, int height,
     live->style.opacity = 185;
     native_ui_node_set_text(live, live_label);
     native_ui_node_set_accessibility_label(live, "Queued input status");
+    if (model->queue_depth == 0) {
+        set_fixed_width(live, 0);
+        live->state &= ~NATIVE_UI_STATE_VISIBLE;
+    }
 
     set_fixed_height(divider, 1);
     divider->style.background = NATIVE_UI_COLOR_BORDER;
-    divider->style.opacity = 48;
+    divider->style.opacity = 0;
 
     input_row->constraints.min_height = 14;
     input_row->constraints.grow = 1;
@@ -121,7 +133,7 @@ bool native_composer_build(native_ui_scene_t *scene, int width, int height,
     if (!accent || !prompt || !input) return false;
     set_fixed_width(accent, 2);
     accent->style.background = NATIVE_UI_COLOR_ACCENT;
-    accent->style.opacity = model->accent_opacity;
+    accent->style.opacity = 0;
     accent->style.radius = 1;
     set_fixed_width(prompt, 12);
     prompt->style.type = NATIVE_UI_TYPE_TITLE;
@@ -156,20 +168,49 @@ bool native_composer_build(native_ui_scene_t *scene, int width, int height,
     native_ui_node_t *hint = add_node(
         scene, node_index(scene, footer), NATIVE_COMPOSER_KEY_HINT,
         NATIVE_UI_ELEMENT_TEXT, NATIVE_UI_ROLE_STATUS);
+    native_ui_node_t *diagnostics = add_node(
+        scene, node_index(scene, footer), NATIVE_COMPOSER_KEY_DIAGNOSTICS,
+        NATIVE_UI_ELEMENT_BADGE, NATIVE_UI_ROLE_NOTIFICATION);
     native_ui_node_t *clock = add_node(
         scene, node_index(scene, footer), NATIVE_COMPOSER_KEY_CLOCK,
         NATIVE_UI_ELEMENT_TEXT, NATIVE_UI_ROLE_STATUS);
-    if (!hint || !clock) return false;
-    hint->constraints.min_width = 30;
+    if (!hint || !clock || !diagnostics) return false;
+    hint->constraints.min_width = 0;
     hint->constraints.grow = 1;
     hint->style.type = NATIVE_UI_TYPE_LABEL;
     hint->style.foreground = NATIVE_UI_COLOR_TEXT_MUTED;
-    hint->style.opacity = 158;
+    hint->style.opacity = 220;
     native_ui_node_set_text(
-        hint, model->compact
-            ? "ENTER SEND  /  PGUP PGDN HISTORY"
-            : "ENTER SEND  /  OPTION+ENTER NEWLINE  /  PGUP PGDN HISTORY  /  CTRL+C INTERRUPT");
-    if (model->clock && *model->clock) {
+        hint, model->diagnostics_detail && *model->diagnostics_detail ? model->diagnostics_detail : model->compact
+            ? "Enter to send  ·  PgUp history"
+            : "Enter to send  ·  Option+Enter new line  ·  PgUp history  ·  Ctrl+C stop");
+    if(model->diagnostics_label && *model->diagnostics_label) {
+        const char *button_label =
+            !strcmp(model->diagnostics_label, "Record UI issue")
+                ? "Report issue" : model->diagnostics_label;
+        int button_width=(int)strlen(button_label)*7+14;
+        int available=width-32;
+        if(button_width>available)button_width=available;
+        set_fixed_width(diagnostics,button_width);
+        diagnostics->style.type=NATIVE_UI_TYPE_LABEL;
+        diagnostics->style.foreground=NATIVE_UI_COLOR_TEXT_MUTED;
+        diagnostics->style.background=NATIVE_UI_COLOR_SURFACE;
+        diagnostics->style.border=NATIVE_UI_COLOR_BORDER;
+        diagnostics->style.border_width=0;
+        diagnostics->style.radius=4;
+        diagnostics->style.padding=(native_ui_insets_t){0,8,0,8};
+        diagnostics->style.opacity=235;
+        diagnostics->state|=NATIVE_UI_STATE_LIVE;
+        if(!model->diagnostics_enabled)diagnostics->state|=NATIVE_UI_STATE_DISABLED;
+        native_ui_node_set_text(diagnostics,button_label);
+        native_ui_node_set_accessibility_label(diagnostics,model->diagnostics_label);
+        /* Prefer a complete action button to a clipped duplicate explanation. */
+        if(width<360)hint->state &= ~NATIVE_UI_STATE_VISIBLE;
+    } else {
+        set_fixed_width(diagnostics,0);
+        diagnostics->state &= ~NATIVE_UI_STATE_VISIBLE;
+    }
+    if (width>=300 && model->clock && *model->clock) {
         set_fixed_width(clock, 42);
         clock->style.type = NATIVE_UI_TYPE_LABEL;
         clock->style.foreground = NATIVE_UI_COLOR_TEXT_MUTED;

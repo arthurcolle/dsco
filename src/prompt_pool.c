@@ -169,31 +169,31 @@ static const char *k_subjects[] = {
 };
 
 static const char *k_templates[] = {
-    "Explain %s to a systems engineer in 5 bullet points",
-    "Write a C program that demonstrates %s",
+    "Explain %s to a systems engineer in 5 bullet points, including one concrete example and its limits",
+    "Build and run a small C example illustrating %s. State simplifications and report the observed result",
     "What are the three biggest misconceptions about %s?",
-    "Benchmark plan: how would you measure the real-world impact of %s?",
+    "Design a benchmark for %s with a baseline, workload, success threshold, and confounders. Separate proposed measurements from measured results",
     "Compare %s with its closest alternative — table format",
     "Draft a doctrine document about %s for an agentic CLI",
-    "What changed in the last year regarding %s? Search and summarize",
+    "Research changes to %s over the past year. Cite primary sources and dates; distinguish releases from announcements",
     "Design an interview question that tests deep understanding of %s",
     "Steelman the case against %s",
-    "Write a runbook for debugging issues related to %s",
+    "Write a diagnostic runbook for %s: symptoms, checks, expected evidence, bounded recovery, and escalation when recovery fails",
     "How does %s affect tail latency in production systems?",
-    "Sketch a minimal implementation of %s in under 200 lines",
-    "What would a prediction market price about %s right now?",
-    "Find the canonical paper on %s and summarize its key result",
+    "Build a minimal example of %s in under 200 lines and run a representative check. State what the example does and does not establish",
+    "Find a current prediction market about %s. Report its resolution rules, observed price, and timestamp; say if no relevant market is found",
+    "Find a primary paper on %s, explain why it matters, and summarize its result and limitations with a source link",
     "How would you teach %s using only analogies from cooking?",
     "Threat-model %s: what are the failure modes and attack surfaces?",
     "Trace the money: who profits from %s and how?",
-    "Write property-based tests that would catch bugs in %s",
+    "Identify testable invariants for %s and write property-based tests. Run them when a relevant implementation is available; report verification limits",
     "What does %s look like at 10x scale? At 100x?",
-    "Post-mortem template: an outage caused by %s",
-    "Estimate the market size for tooling built around %s",
-    "Refactor plan: migrating a legacy system toward %s",
+    "Write a postmortem template for an outage involving %s. Use placeholders for unknown facts and separate confirmed causes from hypotheses",
+    "Estimate the market size for tooling around %s using sourced inputs, explicit assumptions, and a range",
+    "Plan a migration toward %s with prerequisites, incremental steps, validation, and rollback criteria",
     "What signals would tell you %s is about to become obsolete?",
     "Explain the second-order effects of %s on developer workflows",
-    "Build a one-file demo of %s and verify it compiles",
+    "Build and run a one-file demo of %s. Check a representative result, fix reproducible failures within scope, and report any remaining blocker",
     "Argue both sides: is %s overhyped or underrated?",
 };
 
@@ -246,14 +246,14 @@ static size_t fetch_write_cb(char *ptr, size_t size, size_t nmemb, void *ud) {
 }
 
 static const char *k_news_templates[] = {
-    "What's the story with \"%s\"? Search for context and give me the technical take",
-    "\"%s\" — is this significant or noise? Assess with evidence",
-    "Regarding \"%s\": what are the second-order effects for developers?",
-    "Summarize the discussion around \"%s\" and steelman both sides",
-    "\"%s\" — how does this affect the market? Any tradeable angle?",
-    "Deep-dive \"%s\": timeline, key players, and what happens next",
-    "If \"%s\" is true, what should an infrastructure company do about it?",
-    "Fact-check the headline \"%s\" against primary sources",
+    "Research the headline \"%s\" using primary sources. Explain what happened, when, and the technical implications",
+    "Assess the significance of \"%s\". Cite supporting evidence and identify what remains unverified",
+    "For \"%s\", identify likely effects on developers. Separate observed effects from forecasts",
+    "Summarize sourced discussion of \"%s\". Present the strongest supported arguments and unresolved questions",
+    "Investigate market effects of \"%s\" using current data. Separate observed price changes from speculative opportunities",
+    "Research \"%s\": establish the timeline and participants, then give plausible next steps with explicit uncertainty",
+    "Verify \"%s\", then identify practical implications for an infrastructure company and a low-cost next step",
+    "Fact-check the headline \"%s\" against primary sources. Report confirmed, contradicted, and unresolved claims",
 };
 #define N_NEWS_TEMPLATES ((int)(sizeof(k_news_templates) / sizeof(k_news_templates[0])))
 

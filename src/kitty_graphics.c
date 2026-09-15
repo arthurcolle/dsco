@@ -219,7 +219,15 @@ bool kitty_graphics_send_rgb_patch(FILE *out, uint32_t image_id,
 
     kitty_graphics_send_options_t options;
     kitty_graphics_send_options_default(&options);
-    options.continuation_control = "a=f,q=2";
+    /* Kitty 0.47.4 calculates frame_number/is_new_frame before restoring the
+     * first chunk in INIT_CHUNKED_LOAD. Without r on a continuation it appends
+     * a new frame instead of editing the requested one. Repeat i/r to preserve
+     * the target and response identity; newer Kitty restores these same values.
+     * https://github.com/kovidgoyal/kitty/blob/v0.47.4/kitty/graphics.c#L1557-L1569 */
+    char continuation[80];
+    n = snprintf(continuation, sizeof(continuation), "a=f,i=%u,r=%u,q=2", image_id, frame);
+    if (n < 0 || (size_t)n >= sizeof(continuation)) return false;
+    options.continuation_control = continuation;
     return kitty_graphics_send_pixels_ex(out, control, pixels, pixel_bytes,
                                          &options, stats);
 }
@@ -240,7 +248,9 @@ bool kitty_graphics_select_frame(FILE *out, uint32_t image_id,
 }
 
 bool kitty_graphics_environment_hint(void) {
-    if (env_false("DSCO_KITTY_GRAPHICS") || env_false("DSCO_PIXEL_TUI"))
+    /* Interface selection is independent of image transport. The text TUI
+     * still uses Kitty pixels for its splash and other inline images. */
+    if (env_false("DSCO_KITTY_GRAPHICS"))
         return false;
     const char *override = getenv("DSCO_KITTY_GRAPHICS");
     if (env_true("DSCO_KITTY_GRAPHICS") ||
@@ -369,7 +379,7 @@ bool kitty_graphics_available(FILE *out) {
     if (!out) return false;
     int fd = fileno(out);
     if (fd < 0 || !isatty(fd)) return false;
-    if (env_false("DSCO_KITTY_GRAPHICS") || env_false("DSCO_PIXEL_TUI"))
+    if (env_false("DSCO_KITTY_GRAPHICS"))
         return false;
     if (kitty_graphics_environment_hint()) return true;
     /* Never actively probe a terminal that positively is not a kitty-graphics

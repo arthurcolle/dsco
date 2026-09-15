@@ -1131,10 +1131,8 @@ int supervisor_run(int child_argc, char **child_argv) {
              *   2. <sibling dir>/dsco-new  (written by `make`)
              *   3. child_argv[0] (original binary — no-op, normal restart)
              *
-             * The staged binary is renamed to replace child_argv[0] so all
-             * future restarts also use it. This lets `make install` drop
-             * dsco-new and have it take effect on the next /restart or crash
-             * without killing the current session. */
+             * Execute the staged image directly. Renaming it over the original
+             * can interrupt sibling sessions watching that executable. */
             {
                 const char *hotswap_env = getenv("DSCO_HOTSWAP_BIN");
                 bool hotswap_explicit = hotswap_env && hotswap_env[0];
@@ -1156,31 +1154,14 @@ int supervisor_run(int child_argc, char **child_argv) {
                 }
 
                 if (hotswap_path[0] && access(hotswap_path, X_OK) == 0) {
-                    /* Atomically replace the running binary with the staged one */
-                    if (rename(hotswap_path, child_argv[0]) == 0) {
-                        fprintf(stderr,
-                            "[supervisor] hotswap: %s → %s\n",
-                            hotswap_path, child_argv[0]);
-                        supervisor_log("event=hotswap staged=%s target=%s",
-                                       hotswap_path, child_argv[0]);
-                    } else if (hotswap_explicit) {
-                        /* Explicit hotswaps may live on another device; run them directly. */
-                        fprintf(stderr,
-                            "[supervisor] hotswap: exec staged %s (rename failed: %s)\n",
-                            hotswap_path, strerror(errno));
-                        child_argv[0] = hotswap_path;
-                    } else {
-                        /* A sibling dsco-new must only win after an atomic install.
-                         * If replacement fails, keep the current binary; otherwise a
-                         * stale staged file can shadow a freshly rebuilt dsco forever. */
-                        fprintf(stderr,
-                            "[supervisor] hotswap: ignoring staged %s (rename failed: %s)\n",
-                            hotswap_path, strerror(errno));
-                        supervisor_log("event=hotswap_ignored staged=%s target=%s error=%s",
-                                       hotswap_path, child_argv[0], strerror(errno));
-                    }
+                    /* Do not mutate either executable when starting a child. */
                     if (hotswap_explicit)
                         unsetenv("DSCO_HOTSWAP_BIN");
+                    supervisor_log("event=staged_exec staged=%s target=%s",
+                                   hotswap_path, child_argv[0]);
+                    execv(hotswap_path, child_argv);
+                    supervisor_log("event=staged_exec_failed staged=%s error=%s",
+                                   hotswap_path, strerror(errno));
                 }
             }
 

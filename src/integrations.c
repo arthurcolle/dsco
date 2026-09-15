@@ -14,6 +14,7 @@
 #include "semantic.h"
 #include "config.h"
 #include "http_pool.h"
+#include "parallel_pricing.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <math.h>
@@ -22,6 +23,7 @@
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <curl/curl.h>
 #include <poll.h>
 #include <sys/wait.h>
@@ -1105,11 +1107,190 @@ bool tool_notion_page(const char *input, char *result, size_t rlen) {
  *  OPENWEATHERMAP — Weather data
  * ══════════════════════════════════════════════════════════════════════════ */
 
-bool tool_weather(const char *input, char *result, size_t rlen) {
-    const char *api_key;
-    if (!require_key("OPENWEATHERMAP_API_KEY", "OpenWeatherMap", result, rlen, &api_key))
-        return false;
+static const char *open_meteo_weather_description(int code) {
+    switch (code) {
+    case 0: return "Clear sky";
+    case 1: return "Mainly clear";
+    case 2: return "Partly cloudy";
+    case 3: return "Overcast";
+    case 45: return "Fog";
+    case 48: return "Rime fog";
+    case 51: return "Light drizzle";
+    case 53: return "Drizzle";
+    case 55: return "Dense drizzle";
+    case 56: return "Light freezing drizzle";
+    case 57: return "Dense freezing drizzle";
+    case 61: return "Light rain";
+    case 63: return "Rain";
+    case 65: return "Heavy rain";
+    case 66: return "Light freezing rain";
+    case 67: return "Heavy freezing rain";
+    case 71: return "Light snow";
+    case 73: return "Snow";
+    case 75: return "Heavy snow";
+    case 77: return "Snow grains";
+    case 80: return "Light rain showers";
+    case 81: return "Rain showers";
+    case 82: return "Violent rain showers";
+    case 85: return "Light snow showers";
+    case 86: return "Heavy snow showers";
+    case 95: return "Thunderstorm";
+    case 96: return "Thunderstorm with hail";
+    case 99: return "Heavy thunderstorm with hail";
+    default: return "Unknown";
+    }
+}
 
+static bool tool_weather_open_meteo(const char *location, const char *units,
+                                    char *result, size_t rlen) {
+    /* Open-Meteo's geocoder expects a place name rather than a free-form
+     * "city, region" address. Preserve the original label for errors/output,
+     * but search its leading place component. This also makes the common
+     * "Washington, DC" form resolve to the capital instead of zero results. */
+    char place[512];
+    const char *begin = location;
+    while (*begin && isspace((unsigned char)*begin))
+        begin++;
+    const char *end = strchr(begin, ',');
+    if (!end)
+        end = begin + strlen(begin);
+    while (end > begin && isspace((unsigned char)end[-1]))
+        end--;
+    size_t place_len = (size_t)(end - begin);
+    if (place_len == 0 || place_len >= sizeof(place)) {
+        snprintf(result, rlen, "Invalid weather location: %s", location);
+        return false;
+    }
+    memcpy(place, begin, place_len);
+    place[place_len] = '\0';
+    if (strcasecmp(place, "DC") == 0 || strcasecmp(place, "D.C.") == 0)
+        snprintf(place, sizeof(place), "Washington");
+
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+        snprintf(result, rlen, "weather: failed to initialize HTTP client");
+        return false;
+    }
+    char *encoded = curl_easy_escape(curl, place, 0);
+    curl_easy_cleanup(curl);
+    if (!encoded) {
+        snprintf(result, rlen, "weather: failed to encode location");
+        return false;
+    }
+
+    char url[2048];
+    snprintf(url, sizeof(url),
+             "https://geocoding-api.open-meteo.com/v1/search?name=%s&count=1&language=en&format=json",
+             encoded);
+    curl_free(encoded);
+
+    http_buf_t geo = {0};
+    long status = http_get_authed(url, NULL, &geo);
+    if (status != 200 || !geo.data) {
+        snprintf(result, rlen, "Weather geocoding error (HTTP %ld): %.500s", status,
+                 geo.data ? geo.data : "");
+        free(geo.data);
+        return false;
+    }
+
+    char *matches = json_get_raw(geo.data, "results");
+    const char *first = matches ? strchr(matches, '{') : NULL;
+    if (!first) {
+        snprintf(result, rlen, "No weather location found for: %s", location);
+        free(matches);
+        free(geo.data);
+        return false;
+    }
+    char *name = json_get_str(first, "name");
+    char *admin1 = json_get_str(first, "admin1");
+    char *country = json_get_str(first, "country");
+    double latitude = json_get_double(first, "latitude", NAN);
+    double longitude = json_get_double(first, "longitude", NAN);
+    free(matches);
+    free(geo.data);
+    if (!isfinite(latitude) || !isfinite(longitude)) {
+        snprintf(result, rlen, "Weather geocoder returned no coordinates for: %s", location);
+        free(name);
+        free(admin1);
+        free(country);
+        return false;
+    }
+
+    bool imperial = units && strcmp(units, "imperial") == 0;
+    bool standard = units && strcmp(units, "standard") == 0;
+    snprintf(url, sizeof(url),
+             "https://api.open-meteo.com/v1/forecast?latitude=%.6f&longitude=%.6f&"
+             "current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code,"
+             "cloud_cover,wind_speed_10m,wind_direction_10m,wind_gusts_10m&"
+             "temperature_unit=%s&wind_speed_unit=%s&timezone=auto",
+             latitude, longitude, imperial ? "fahrenheit" : "celsius",
+             imperial ? "mph" : "ms");
+
+    http_buf_t forecast = {0};
+    status = http_get_authed(url, NULL, &forecast);
+    if (status != 200 || !forecast.data) {
+        snprintf(result, rlen, "Weather forecast error (HTTP %ld): %.500s", status,
+                 forecast.data ? forecast.data : "");
+        free(forecast.data);
+        free(name);
+        free(admin1);
+        free(country);
+        return false;
+    }
+
+    char *current = json_get_raw(forecast.data, "current");
+    char *observed = current ? json_get_str(current, "time") : NULL;
+    char *timezone = json_get_str(forecast.data, "timezone_abbreviation");
+    double temp = current ? json_get_double(current, "temperature_2m", 0.0) : 0.0;
+    double feels = current ? json_get_double(current, "apparent_temperature", temp) : temp;
+    int humidity = current ? json_get_int(current, "relative_humidity_2m", 0) : 0;
+    int weather_code = current ? json_get_int(current, "weather_code", -1) : -1;
+    int clouds = current ? json_get_int(current, "cloud_cover", -1) : -1;
+    double wind = current ? json_get_double(current, "wind_speed_10m", 0.0) : 0.0;
+    int wind_deg = current ? json_get_int(current, "wind_direction_10m", -1) : -1;
+    double gust = current ? json_get_double(current, "wind_gusts_10m", 0.0) : 0.0;
+    if (standard) {
+        temp += 273.15;
+        feels += 273.15;
+    }
+    const char *temp_unit = imperial ? "°F" : standard ? "K" : "°C";
+    const char *wind_unit = imperial ? "mph" : "m/s";
+    static const char *compass[16] = {"N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+                                      "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"};
+    const char *direction = wind_deg >= 0 ? compass[(((wind_deg % 360) * 4 + 45) / 90) % 16]
+                                          : NULL;
+
+    int n = snprintf(result, rlen,
+                     "%s%s%s%s%s: %.1f%s (feels like %.1f%s)\n"
+                     "Conditions: %s\nHumidity: %d%%",
+                     name ? name : location, admin1 ? ", " : "", admin1 ? admin1 : "",
+                     country ? ", " : "", country ? country : "", temp, temp_unit, feels,
+                     temp_unit, open_meteo_weather_description(weather_code), humidity);
+    if (n > 0 && (size_t)n < rlen && clouds >= 0)
+        n += snprintf(result + n, rlen - (size_t)n, "   Cloud cover: %d%%", clouds);
+    if (n > 0 && (size_t)n < rlen) {
+        n += snprintf(result + n, rlen - (size_t)n, "\nWind: %.1f %s", wind, wind_unit);
+        if (direction)
+            n += snprintf(result + n, rlen - (size_t)n, " from %s (%d°)", direction, wind_deg);
+        if (gust > 0.0 && (size_t)n < rlen)
+            n += snprintf(result + n, rlen - (size_t)n, ", gusting %.1f %s", gust, wind_unit);
+    }
+    if (n > 0 && (size_t)n < rlen)
+        snprintf(result + n, rlen - (size_t)n, "\nObserved: %s%s%s\nSource: Open-Meteo",
+                 observed ? observed : "current model interval", timezone ? " " : "",
+                 timezone ? timezone : "");
+
+    free(current);
+    free(observed);
+    free(timezone);
+    free(forecast.data);
+    free(name);
+    free(admin1);
+    free(country);
+    return true;
+}
+
+bool tool_weather(const char *input, char *result, size_t rlen) {
     char *location = json_get_str(input, "location");
     if (!location || !location[0]) {
         free(location);
@@ -1119,6 +1300,13 @@ bool tool_weather(const char *input, char *result, size_t rlen) {
 
     char *units = json_get_str(input, "units");
     const char *u = (units && units[0]) ? units : "metric";
+    const char *api_key = getenv("OPENWEATHERMAP_API_KEY");
+    if (!api_key || !api_key[0]) {
+        bool ok = tool_weather_open_meteo(location, u, result, rlen);
+        free(location);
+        free(units);
+        return ok;
+    }
     /* Unit-aware labels: metric=°C/m·s⁻¹, imperial=°F/mph, standard=K/m·s⁻¹ */
     const char *tsym = (strcmp(u, "imperial") == 0)   ? "°F"
                        : (strcmp(u, "standard") == 0) ? "K"
@@ -1126,26 +1314,40 @@ bool tool_weather(const char *input, char *result, size_t rlen) {
     const char *wsym = (strcmp(u, "imperial") == 0) ? "mph" : "m/s";
 
     CURL *curl = curl_easy_init();
+    if (!curl) {
+        snprintf(result, rlen, "weather: failed to initialize HTTP client");
+        free(location);
+        free(units);
+        return false;
+    }
     dsco_http_pool_apply(curl);
     char *enc = curl_easy_escape(curl, location, 0);
+    if (!enc) {
+        curl_easy_cleanup(curl);
+        snprintf(result, rlen, "weather: failed to encode location");
+        free(location);
+        free(units);
+        return false;
+    }
     char url[2048];
     snprintf(url, sizeof(url),
              "https://api.openweathermap.org/data/2.5/weather?q=%s&appid=%s&units=%s", enc, api_key,
              u);
     curl_free(enc);
     curl_easy_cleanup(curl);
-    free(location);
-    free(units);
 
     http_buf_t resp = {0};
     long status = http_get_authed(url, NULL, &resp);
 
     if (status != 200) {
-        snprintf(result, rlen, "Weather API error (HTTP %ld): %.500s", status,
-                 resp.data ? resp.data : "");
         free(resp.data);
-        return false;
+        bool ok = tool_weather_open_meteo(location, u, result, rlen);
+        free(location);
+        free(units);
+        return ok;
     }
+    free(location);
+    free(units);
 
     /* Format a readable response */
     if (resp.data) {
@@ -4595,7 +4797,7 @@ bool tool_parallel_ai_constellation(const char *input, char *result, size_t rlen
     bool ok = false;
     if (strcmp(action, "capabilities") == 0) {
         snprintf(result, rlen,
-                 "{\"actions\":[\"research\",\"live_kb\",\"wait\",\"jobs\",\"search\","
+                 "{\"actions\":[\"pricing\",\"research\",\"live_kb\",\"wait\",\"jobs\",\"search\","
                  "\"extract\",\"task_create\",\"task_status\",\"task_result\",\"task_events\","
                  "\"task_input\",\"task_group_create\",\"task_group_get\",\"task_group_events\","
                  "\"task_group_add_runs\",\"task_group_runs\",\"task_group_run_get\","
@@ -4608,6 +4810,8 @@ bool tool_parallel_ai_constellation(const char *input, char *result, size_t rlen
                  "\"note\":\"Async jobs are tracked locally; wait can poll the latest tracked "
                  "task_run, task_group, FindAll run, or monitor.\"}");
         ok = true;
+    } else if (strcmp(action, "pricing") == 0) {
+        ok = parallel_ai_pricing_catalog_json(result, rlen) > 0;
     } else if (strcmp(action, "research") == 0) {
         ok = tool_parallel_ai_research(input, result, rlen);
     } else if (strcmp(action, "live_kb") == 0 || strcmp(action, "kb") == 0 ||

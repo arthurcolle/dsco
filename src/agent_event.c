@@ -7,13 +7,14 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
 
-static unsigned long long g_agent_event_seq = 0;
+static _Atomic unsigned long long g_agent_event_seq = 0;
 
 static const char *nz(const char *s) { return s ? s : ""; }
 

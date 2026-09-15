@@ -54,6 +54,7 @@
 #  include <mach/mach_time.h>
 #  include <CoreFoundation/CoreFoundation.h>
 #  include <IOKit/IOKitLib.h>
+#  include <DiskArbitration/DiskArbitration.h>
 #endif
 
 /* ── Linux-specific ─────────────────────────────────────────────────────── */
@@ -457,9 +458,9 @@ static void mac_collect_network(dsco_fingerprint_t *fp) {
     freeifaddrs(ifap);
 }
 
-/* L3: Storage — via system_profiler JSON */
+/* L3: Storage — read the boot volume directly without launching a profiler. */
 static void mac_collect_storage(dsco_fingerprint_t *fp) {
-    /* Fast mode: skip expensive system_profiler call */
+    /* Preserve explicit reduced-fingerprint identity semantics. */
     const char *fast_mode = getenv("DSCO_FAST_FINGERPRINT");
     const char *interactive_mode = getenv("DSCO_INTERACTIVE");
     if (fast_mode || interactive_mode) {
@@ -469,48 +470,32 @@ static void mac_collect_storage(dsco_fingerprint_t *fp) {
         return;
     }
 
-    FILE *f = popen("system_profiler SPStorageDataType -json 2>/dev/null", "r");
-    if (!f) return;
-    char buf[65536];
-    size_t n = fread(buf, 1, sizeof(buf)-1, f);
-    pclose(f);
-    buf[n] = '\0';
-
-    /* device_name (NVMe model) */
-    const char *p = buf;
-    while ((p = strstr(p, "\"device_name\"")) != NULL) {
-        p += 13;
-        const char *vs = strchr(p,'"'); if (!vs) break; vs++;
-        const char *ve = strchr(vs,'"'); if (!ve) break;
-        size_t len = (size_t)(ve-vs);
-        if (len > 0 && strncmp(vs,"Disk Image",len) && strncmp(vs,"disk image",len)) {
-            if (len >= sizeof(fp->storage_model)) len=sizeof(fp->storage_model)-1;
-            memcpy(fp->storage_model,vs,len); fp->storage_model[len]='\0'; break;
+    DASessionRef session = DASessionCreate(kCFAllocatorDefault);
+    if (!session) return;
+    CFURLRef root = CFURLCreateFromFileSystemRepresentation(
+        kCFAllocatorDefault, (const UInt8 *)"/", 1, true);
+    DADiskRef disk = root ? DADiskCreateFromVolumePath(kCFAllocatorDefault, session, root) : NULL;
+    CFDictionaryRef description = disk ? DADiskCopyDescription(disk) : NULL;
+    if (description) {
+        CFTypeRef model = CFDictionaryGetValue(description, kDADiskDescriptionDeviceModelKey);
+        CFTypeRef protocol = CFDictionaryGetValue(description, kDADiskDescriptionDeviceProtocolKey);
+        CFTypeRef uuid = CFDictionaryGetValue(description, kDADiskDescriptionVolumeUUIDKey);
+        if (model && CFGetTypeID(model) == CFStringGetTypeID())
+            CFStringGetCString(model, fp->storage_model, sizeof(fp->storage_model), kCFStringEncodingUTF8);
+        if (protocol && CFGetTypeID(protocol) == CFStringGetTypeID())
+            CFStringGetCString(protocol, fp->storage_protocol, sizeof(fp->storage_protocol), kCFStringEncodingUTF8);
+        if (uuid && CFGetTypeID(uuid) == CFUUIDGetTypeID()) {
+            CFStringRef value = CFUUIDCreateString(kCFAllocatorDefault, uuid);
+            if (value) {
+                CFStringGetCString(value, fp->primary_volume_uuid, sizeof(fp->primary_volume_uuid), kCFStringEncodingUTF8);
+                CFRelease(value);
+            }
         }
-        p = ve+1;
+        CFRelease(description);
     }
-    /* protocol */
-    p = buf;
-    if ((p = strstr(p,"\"protocol\"")) != NULL) {
-        const char *vs = strchr(p+10,'"'); if (vs) { vs++;
-        const char *ve = strchr(vs,'"'); if (ve) {
-            size_t len=(size_t)(ve-vs);
-            if(len>=sizeof(fp->storage_protocol))len=sizeof(fp->storage_protocol)-1;
-            memcpy(fp->storage_protocol,vs,len); fp->storage_protocol[len]='\0'; }}
-    }
-    /* volume_uuid (first real 36-char UUID) */
-    p = buf;
-    while ((p = strstr(p,"\"volume_uuid\"")) != NULL) {
-        p += 13;
-        const char *vs=strchr(p,'"'); if(!vs) break; vs++;
-        const char *ve=strchr(vs,'"'); if(!ve) break;
-        size_t len=(size_t)(ve-vs);
-        if (len==36) {
-            if(len>=sizeof(fp->primary_volume_uuid))len=sizeof(fp->primary_volume_uuid)-1;
-            memcpy(fp->primary_volume_uuid,vs,len); fp->primary_volume_uuid[len]='\0'; break;
-        }
-        p=ve+1;
-    }
+    if (disk) CFRelease(disk);
+    if (root) CFRelease(root);
+    CFRelease(session);
 }
 
 /* L1: Apple Silicon sysctl-based CPU collection */

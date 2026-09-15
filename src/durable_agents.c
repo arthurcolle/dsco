@@ -1,9 +1,11 @@
 #include "durable_agents.h"
 #include "ipc.h"
 #include "json_util.h"
+#include "local_llm.h"
 #include "tui.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -68,13 +70,15 @@ static void agents_usage(FILE *out, const char *prog) {
             "  %s agents tui [--once] [--interval-ms N] [--limit N] [--plain]\n"
             "  %s agents watch [--interval-ms N] [--limit N] [--plain]\n"
             "  %s agents send --from ID [--to ID|all] [--topic TOPIC] <message...>\n"
+            "  %s agents task --from ID --to ID [--priority N] <message...>\n"
+            "  %s agents activate <id> [--poll-ms N] [--idle-exit-ms N]\n"
             "  %s agents inbox <id> [--all] [--mark-read] [--limit N] [--json]\n"
             "  %s agents sent <id> [--limit N] [--json]\n"
             "  %s agents bus [--limit N] [--json]\n"
             "  %s agents db\n"
             "\n"
             "default durable bus: ~/.dsco/agents/bus.db (override DSCO_AGENTS_DB or DSCO_IPC_DB)\n",
-            prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
+            prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog, prog);
 }
 
 static bool open_agents_db(const char *self_id) {
@@ -139,12 +143,53 @@ static const char *paint(bool color, const char *s) {
     return color ? s : "";
 }
 
+bool durable_agents_wake(const char *program, const char *agent_id,
+                         int boot_task_id, const char *boot_task) {
+    if (!program || !agent_id || !agent_id[0] || boot_task_id < 1 || !boot_task)
+        return false;
+    const char *disabled = getenv("DSCO_DURABLE_AUTOWAKE");
+    if (disabled && strcmp(disabled, "0") == 0)
+        return false;
+    pid_t pid = fork();
+    if (pid < 0)
+        return false;
+    if (pid == 0) {
+        (void)setsid();
+        int nullfd = open("/dev/null", O_RDONLY);
+        if (nullfd >= 0) {
+            dup2(nullfd, STDIN_FILENO);
+            close(nullfd);
+        }
+        char log_path[PATH_MAX];
+        const char *home = getenv("HOME");
+        snprintf(log_path, sizeof(log_path), "%s/.dsco/agents/%s.log",
+                 home && home[0] ? home : "/tmp", agent_id);
+        ensure_parent_dir(log_path);
+        int logfd = open(log_path, O_CREAT | O_WRONLY | O_APPEND, 0600);
+        if (logfd >= 0) {
+            dup2(logfd, STDOUT_FILENO);
+            dup2(logfd, STDERR_FILENO);
+            if (logfd > STDERR_FILENO)
+                close(logfd);
+        }
+        char boot_id[32];
+        snprintf(boot_id, sizeof(boot_id), "%d", boot_task_id);
+        setenv("DSCO_DURABLE_BOOT_TASK_ID", boot_id, 1);
+        setenv("DSCO_DURABLE_BOOT_TASK", boot_task, 1);
+        execl(program, program, "agents", "activate", agent_id,
+              "--idle-exit-ms", "30000", (char *)NULL);
+        _exit(127);
+    }
+    return true;
+}
+
 static char *join_message_args(int argc, char **argv, int start) {
     size_t need = 1;
     for (int i = start; i < argc; i++) {
         if (strncmp(argv[i], "--", 2) == 0) {
             if (strcmp(argv[i], "--to") == 0 || strcmp(argv[i], "--from") == 0 ||
-                strcmp(argv[i], "--topic") == 0 || strcmp(argv[i], "--limit") == 0)
+                strcmp(argv[i], "--topic") == 0 || strcmp(argv[i], "--limit") == 0 ||
+                strcmp(argv[i], "--priority") == 0)
                 i++;
             continue;
         }
@@ -155,7 +200,8 @@ static char *join_message_args(int argc, char **argv, int start) {
     for (int i = start; i < argc; i++) {
         if (strncmp(argv[i], "--", 2) == 0) {
             if (strcmp(argv[i], "--to") == 0 || strcmp(argv[i], "--from") == 0 ||
-                strcmp(argv[i], "--topic") == 0 || strcmp(argv[i], "--limit") == 0)
+                strcmp(argv[i], "--topic") == 0 || strcmp(argv[i], "--limit") == 0 ||
+                strcmp(argv[i], "--priority") == 0)
                 i++;
             continue;
         }
@@ -681,6 +727,90 @@ int durable_agents_cli(int argc, char **argv) {
             return 1;
         }
         return 0;
+    }
+
+    if (strcmp(sub, "task") == 0) {
+        const char *from = arg_value(argc - 3, argv + 3, "--from", NULL);
+        const char *to = arg_value(argc - 3, argv + 3, "--to", NULL);
+        int priority = parse_int_option(argc - 3, argv + 3, "--priority", 0, -1000, 1000);
+        if (!from || !from[0] || !to || !to[0]) {
+            fprintf(stderr, "dsco agents task: --from ID and --to ID are required\n");
+            return 2;
+        }
+        char *body = join_message_args(argc, argv, 3);
+        if (!body[0]) {
+            free(body);
+            fprintf(stderr, "dsco agents task: message body is required\n");
+            return 2;
+        }
+        if (!open_agents_db(from)) {
+            free(body);
+            return 1;
+        }
+        ipc_agent_info_t target;
+        bool target_found = ipc_get_agent(to, &target);
+        bool awake = target_found && ipc_agent_alive(to);
+        int id = target_found ? ipc_task_submit_to(to, body, priority, 0) : -1;
+        ipc_shutdown();
+        if (id < 0) {
+            fprintf(stderr, "dsco agents task: unknown target or submit failed: %s\n", to);
+            free(body);
+            return 1;
+        }
+        bool spawned = awake ? false : durable_agents_wake(argv[0], to, id, body);
+        free(body);
+        printf("task=%d from=%s to=%s status=pending wake=%s\n", id, from, to,
+               awake ? "already-live" : (spawned ? "spawned" : "deferred"));
+        return 0;
+    }
+
+    if (strcmp(sub, "activate") == 0) {
+        if (argc < 4) {
+            agents_usage(stderr, argv[0]);
+            return 2;
+        }
+        const char *id = argv[3];
+        int poll_ms = parse_int_option(argc - 4, argv + 4, "--poll-ms", 1000, 100, 60000);
+        int idle_exit_ms = parse_int_option(argc - 4, argv + 4, "--idle-exit-ms", 30000, 1000,
+                                            86400000);
+        char db[PATH_MAX], poll_buf[32], idle_buf[32];
+        durable_agents_default_db_path(db, sizeof(db));
+        snprintf(poll_buf, sizeof(poll_buf), "%d", poll_ms);
+        snprintf(idle_buf, sizeof(idle_buf), "%d", idle_exit_ms);
+        setenv("DSCO_IPC_DB", db, 1);
+        setenv("DSCO_DURABLE_AGENT_ID", id, 1);
+        setenv("DSCO_SUBAGENT", "1", 1);
+        setenv("DSCO_DURABLE_POLL_MS", poll_buf, 1);
+        setenv("DSCO_DURABLE_IDLE_EXIT_MS", idle_buf, 1);
+        setenv("DSCO_PROFILE", "worker", 1);
+        ipc_agent_info_t agent;
+        if (!open_agents_db(id) || !ipc_get_agent(id, &agent)) {
+            fprintf(stderr, "dsco agents activate: unknown durable agent %s\n", id);
+            ipc_shutdown();
+            return 1;
+        }
+        ipc_shutdown();
+        const char *boot_task = getenv("DSCO_DURABLE_BOOT_TASK");
+        if (!boot_task || !boot_task[0] || !getenv("DSCO_DURABLE_BOOT_TASK_ID"))
+            return 0; /* explicit activation without queued work is free */
+        const char *model = agent.model[0] ? agent.model : "claude-sonnet-5";
+        bool use_ollama = local_llm_server_up("ollama");
+        const char *force_remote = getenv("DSCO_DURABLE_ALLOW_REMOTE");
+        if (!use_ollama && (!force_remote || strcmp(force_remote, "1") != 0)) {
+            fprintf(stderr, "dsco agents activate: no local Ollama server; refusing remote spend "
+                            "(set DSCO_DURABLE_ALLOW_REMOTE=1 to override)\n");
+            return 1;
+        }
+        if (use_ollama) {
+            const char *local_model = getenv("DSCO_DURABLE_LOCAL_MODEL");
+            model = local_model && local_model[0]
+                        ? local_model
+                        : "ollama:huihui_ai/Qwen3.8-abliterated:latest";
+        }
+        execl(argv[0], argv[0], "--profile", "worker", "-m", model, "-p",
+              boot_task, (char *)NULL);
+        perror("dsco agents activate");
+        return 1;
     }
 
     if (strcmp(sub, "send") == 0) {

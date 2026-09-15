@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include "env_config.h"
 #include <stddef.h>
+#include <stdint.h>
 #include <pthread.h>
 #include "swarm.h"
 #include "vm.h"
@@ -34,6 +35,11 @@ void tools_init(void);
 /* Local-only fast init for metadata and direct tool execution paths.
  * Skips plugin, browser profile, IPC, MCP, VFS, and daemon-facing setup. */
 void tools_init_local_only(void);
+/* Script host: no eager subsystem startup, but explicitly discovered external
+ * tools can execute through the normal gate. Restricted mode still applies. */
+void tools_init_scripting(void);
+/* Finalize processes owned by a one-shot script before sealing its event stream. */
+void tools_finish_scripting(void);
 tools_init_profile_t tools_current_profile(void);
 bool tools_profile_allows_index(int index);
 /* §8: VFS-backed tool result cache for deterministic tools */
@@ -41,8 +47,10 @@ struct vfs_db;
 void tools_set_vfs(struct vfs_db *vfs);
 void tools_set_runtime_api_key(const char *api_key);
 void tools_set_runtime_model(const char *model);
+void tools_set_runtime_provider(const char *provider);
 const char *tools_runtime_api_key(void);
 const char *tools_runtime_model(void);
+const char *tools_runtime_provider(void);
 /* self_exit is disabled during normal conversational turns. It may be enabled
  * only for explicit autonomous goal/supervisor runs. */
 void tools_set_self_exit_allowed(bool allowed);
@@ -53,6 +61,8 @@ void tools_set_context_window(int tokens);
 int tools_context_window(void);
 /* Pass current token usage so inline budget is based on remaining context */
 void tools_set_context_usage(int input_tokens, int output_tokens);
+/* Local request admission is independent of provider-counted context usage. */
+void tools_set_request_budget(int before, int after, int limit);
 /* Pass actual serialized tool-schema overhead from the latest request. */
 void tools_set_tool_schema_usage(int active_tools, int schema_tokens);
 /* Toggle inline tool-result truncation. Off = full output (human/raw dumps). */
@@ -68,6 +78,9 @@ bool tools_invoke_by_name(const char *name, const char *input, char *result, siz
 bool tools_is_offload_safe(const char *name);
 /* Report a builtin tool's declared read-only flag; *found = registered. */
 bool tools_meta_is_read_only(const char *name, bool *found);
+/* Unlike name-only metadata, these account for invocation-specific effects. */
+bool tools_call_is_read_only(const char *name, const char *input_json);
+bool tools_call_is_concurrent_safe(const char *name, const char *input_json);
 int tools_get_core_count(void); /* only .core=true tools */
 int tools_builtin_count(void);
 bool tools_execute(const char *name, const char *input_json, char *result, size_t result_len);
@@ -75,6 +88,7 @@ bool tools_execute(const char *name, const char *input_json, char *result, size_
 bool tools_execute_raw_for_test(const char *name, const char *input_json, char *result,
                                 size_t result_len);
 #endif
+const char *tools_execution_tier(void); /* current nested dispatch authority */
 bool tools_execute_for_tier(const char *name, const char *input_json, const char *tier,
                             char *result, size_t result_len);
 /* Governance-model A/B experiment counters: how many times the governance gate
@@ -177,6 +191,7 @@ typedef struct {
     external_tool_cb cb;
     void *ctx;
     bool loaded;
+    uint64_t context_seq; /* LRU position in the bounded external-schema context */
     char integration_id[256];
     char display_name[256];
     char distribution_channel[64];
@@ -198,6 +213,8 @@ typedef struct {
 } external_tool_snapshot_t;
 
 int tools_external_count(void);
+int tools_loaded_external_count(void);
+bool tools_is_external_loaded(const char *name);
 external_tool_snapshot_t tools_external_snapshot(void);
 void tools_external_snapshot_free(external_tool_snapshot_t *snapshot);
 int tools_rank_external_snapshot(const external_tool_snapshot_t *snapshot, const char *context,
@@ -226,6 +243,8 @@ extern dsco_locks_t g_locks;
 
 typedef struct {
     pthread_t thread;
+    pthread_cond_t wake;      /* deadline wait, signaled on stop or renewal */
+    int thread_started;      /* join/destroy only after successful startup */
     volatile int cancelled;   /* set by watchdog_stop to terminate watcher */
     volatile int timed_out;   /* set by watcher when deadline expires */
     volatile double deadline; /* absolute epoch time; renewable via watchdog_renew */
@@ -476,8 +495,8 @@ int safe_exec_argv(const char *const argv[], char *out, size_t out_len);
 
 /* ── Embedding API ─────────────────────────────────────────────────── */
 
-/* Embed text via Jina v4 API. Returns malloc'd float[*out_dim] or NULL.
- * Caller frees. Returns NULL if JINA_API_KEY is not set. */
+/* Embed text locally by default. DSCO_EMBED_REMOTE=1 opts into the bounded
+ * Tool Management/Jina path. Returns malloc'd float[*out_dim]; caller frees. */
 float *tools_embed_text(const char *text, int *out_dim);
 
 /* Set agent context for context-aware tool retrieval.

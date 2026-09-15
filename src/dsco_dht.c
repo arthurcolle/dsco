@@ -3,6 +3,7 @@
  * See include/dsco_dht.h. Wraps vendor/dht.c (compiled in dht_impl.c). */
 
 #include "dsco_dht.h"
+#include "crypto.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -11,6 +12,7 @@
 #define DSCO_DHT_ID_LEN 20
 #define DSCO_DHT_KBUCKET_COUNT (DSCO_DHT_ID_LEN * 8)
 #define DSCO_DHT_DEFAULT_K 8
+#define DSCO_DHT_MAX_PROVIDED_KEYS 256
 
 typedef struct {
     uint8_t  id[DSCO_DHT_ID_LEN];
@@ -42,6 +44,16 @@ static int dht_bucket_index_for(const uint8_t self_id[DSCO_DHT_ID_LEN],
         }
     }
     return DSCO_DHT_KBUCKET_COUNT - 1;
+}
+
+bool dsco_dht_key_from_sha256(const char *sha256_hex, uint8_t out_key[20]) {
+    uint8_t digest[32];
+    if (!sha256_hex || !out_key || strlen(sha256_hex) != 64 ||
+        hex_decode(sha256_hex, 64, digest, sizeof(digest)) != sizeof(digest))
+        return false;
+    memcpy(out_key, digest, 20);
+    memset(digest, 0, sizeof(digest));
+    return true;
 }
 
 dsco_dht_kbuckets_t *dsco_dht_kbuckets_create(const uint8_t self_id[20], int k) {
@@ -197,6 +209,9 @@ struct dsco_dht {
     uint64_t peer_tick;
     uint16_t mesh_port; /* announced port peers dial over the mesh */
     time_t next_search;
+    time_t next_provide;
+    unsigned char provided[DSCO_DHT_MAX_PROVIDED_KEYS][DHT_ID_LEN];
+    int provided_count;
     dsco_dht_stats_t stats;
     pthread_mutex_t lock; /* serializes all dht_* calls + stat fields */
 };
@@ -382,6 +397,11 @@ static void *dht_poll_thread(void *arg) {
             d->stats.searches++;
             d->next_search = now + DHT_SEARCH_INTERVAL_S;
         }
+        if (now >= d->next_provide) {
+            for (int i = 0; i < d->provided_count; i++)
+                dht_search(d->provided[i], (int)d->mesh_port, AF_INET, dht_event_cb, d);
+            d->next_provide = now + DHT_SEARCH_INTERVAL_S;
+        }
         if (n >= 0) {
             buf[n] = '\0';
             dht_periodic(buf, (size_t)n, (struct sockaddr *)&from, (int)fromlen, &tosleep,
@@ -499,8 +519,11 @@ dsco_dht_t *dsco_dht_start(const dsco_dht_config_t *cfg) {
 
     dht_load_or_make_id(d->id);
     d->kbuckets = dsco_dht_kbuckets_create(d->id, 8);
-    crypto_hash_sha256(d->infohash, (const unsigned char *)cfg->swarm_key,
-                       strlen(cfg->swarm_key)); /* first 20 bytes used as id */
+    unsigned char swarm_digest[crypto_hash_sha256_BYTES];
+    crypto_hash_sha256(swarm_digest, (const unsigned char *)cfg->swarm_key,
+                       strlen(cfg->swarm_key));
+    memcpy(d->infohash, swarm_digest, DHT_ID_LEN);
+    sodium_memzero(swarm_digest, sizeof(swarm_digest));
 
     pthread_mutex_lock(&d->lock);
     int ir = dht_init(d->sock, -1, d->id, NULL);
@@ -515,6 +538,7 @@ dsco_dht_t *dsco_dht_start(const dsco_dht_config_t *cfg) {
 
     d->running = true;
     d->next_search = 0; /* search immediately on first tick */
+    d->next_provide = time(NULL) + DHT_SEARCH_INTERVAL_S;
     d->stats.running = true;
     g_dht = d;
 
@@ -570,6 +594,39 @@ dsco_dht_t *dsco_dht_global(void) {
     return g_dht;
 }
 
+bool dsco_dht_provide_hash(dsco_dht_t *d, const char *sha256_hex) {
+    unsigned char key[DHT_ID_LEN];
+    if (!d || !dsco_dht_key_from_sha256(sha256_hex, key))
+        return false;
+    pthread_mutex_lock(&d->lock);
+    bool known = false;
+    for (int i = 0; i < d->provided_count; i++) {
+        if (memcmp(d->provided[i], key, DHT_ID_LEN) == 0) {
+            known = true;
+            break;
+        }
+    }
+    if (!known && d->provided_count < DSCO_DHT_MAX_PROVIDED_KEYS) {
+        memcpy(d->provided[d->provided_count++], key, DHT_ID_LEN);
+        d->stats.keys_provided = d->provided_count;
+    }
+    int rc = dht_search(key, (int)d->mesh_port, AF_INET, dht_event_cb, d);
+    pthread_mutex_unlock(&d->lock);
+    return known || rc >= 0;
+}
+
+bool dsco_dht_find_hash(dsco_dht_t *d, const char *sha256_hex) {
+    unsigned char key[DHT_ID_LEN];
+    if (!d || !dsco_dht_key_from_sha256(sha256_hex, key))
+        return false;
+    pthread_mutex_lock(&d->lock);
+    int rc = dht_search(key, 0, AF_INET, dht_event_cb, d);
+    if (rc >= 0)
+        d->stats.provider_lookups++;
+    pthread_mutex_unlock(&d->lock);
+    return rc >= 0;
+}
+
 #else /* !HAVE_LIBSODIUM — no-op stubs */
 
 dsco_dht_t *dsco_dht_start(const dsco_dht_config_t *cfg) {
@@ -594,6 +651,16 @@ void dsco_dht_stop(dsco_dht_t *d) {
 }
 dsco_dht_t *dsco_dht_global(void) {
     return NULL;
+}
+bool dsco_dht_provide_hash(dsco_dht_t *d, const char *sha256_hex) {
+    (void)d;
+    (void)sha256_hex;
+    return false;
+}
+bool dsco_dht_find_hash(dsco_dht_t *d, const char *sha256_hex) {
+    (void)d;
+    (void)sha256_hex;
+    return false;
 }
 
 #endif /* HAVE_LIBSODIUM */

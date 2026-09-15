@@ -25,13 +25,10 @@ bool webhook_hmac_sha256_header(const uint8_t *secret, size_t secret_len,
                                 const uint8_t *body, size_t body_len,
                                 char *out, size_t out_len);
 
-/* Webhook egress SSRF guard.
- *
- * This is a syntactic/IP-literal guard intended to run before any network I/O.
- * It blocks unsupported schemes, local hosts, and private/reserved IP literals.
- * A future resolver-aware slice should add DNS resolution + connect-time IP
- * enforcement to close DNS rebinding and CNAME-to-private gaps.
- */
+/* Webhook egress SSRF guard. It validates the URL and, for DNS names, checks
+ * every A/AAAA answer before allowing the request. The resolved addresses can
+ * also be supplied to libcurl so the connect cannot silently re-resolve a
+ * rebinding hostname. */
 typedef enum {
     WEBHOOK_SSRF_ALLOW = 0,
     WEBHOOK_SSRF_BLOCK_NULL_URL,
@@ -39,12 +36,30 @@ typedef enum {
     WEBHOOK_SSRF_BLOCK_UNSUPPORTED_SCHEME,
     WEBHOOK_SSRF_BLOCK_LOCAL_HOST,
     WEBHOOK_SSRF_BLOCK_PRIVATE_IP_LITERAL,
+    WEBHOOK_SSRF_BLOCK_PRIVATE_RESOLVED_IP,
     WEBHOOK_SSRF_BLOCK_UNRESOLVED_HOST_STUB
 } webhook_ssrf_decision_t;
 
 webhook_ssrf_decision_t webhook_ssrf_guard_url(const char *url,
                                                char *reason,
                                                size_t reason_len);
+
+#define WEBHOOK_RESOLVED_HOST_MAX 256u
+#define WEBHOOK_RESOLVED_ADDR_MAX 16u
+#define WEBHOOK_RESOLVED_ADDR_TEXT_MAX 64u
+
+typedef struct {
+    char host[WEBHOOK_RESOLVED_HOST_MAX];
+    unsigned short port;
+    char addresses[WEBHOOK_RESOLVED_ADDR_MAX][WEBHOOK_RESOLVED_ADDR_TEXT_MAX];
+    size_t address_count;
+} webhook_resolved_target_t;
+
+/* Resolve a callback URL and return only public A/AAAA targets. The result is
+ * a stable textual snapshot for CURLOPT_RESOLVE; callers must not resolve the
+ * hostname again between this check and the network operation. */
+bool webhook_resolve_public_url(const char *url, webhook_resolved_target_t *out,
+                                char *reason, size_t reason_len);
 
 bool webhook_egress_url_allowed(const char *url, char *reason, size_t reason_len);
 

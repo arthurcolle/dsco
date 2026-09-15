@@ -8,7 +8,9 @@
 
 /* ── Sub-dsco process handle ──────────────────────────────────────────── */
 
-#define SWARM_MAX_CHILDREN  64  /* structural array/bitset cap; not env-resizable */
+#define SWARM_DEFAULT_MAX_CHILDREN 256 /* enough recovery headroom for 37+ logical workers */
+#define SWARM_MAX_CHILDREN  1024 /* structural array/bitset cap */
+#define SWARM_BITSET_WORDS ((SWARM_MAX_CHILDREN + 63) / 64)
 #define SWARM_MAX_GROUPS    16  /* structural array cap; not env-resizable */
 #define SWARM_MAX_OUTPUT    (512 * 1024)
 #define SWARM_LABEL_LEN     128
@@ -16,10 +18,10 @@
 #define SWARM_MAX_DEPTH     7
 #define SWARM_READ_BUF      (64 * 1024) /* 64KB read buffer (was 4KB) */
 
-/* Runtime caps. These cannot exceed the structural compile-time maxima above
- * without changing struct layouts and the 64-bit active-child bitset. */
+/* Runtime caps. The default stays conservative, while the static pool can be
+ * raised to SWARM_MAX_CHILDREN for high-throughput sessions. */
 static inline int dsco_swarm_max_children(void) {
-    return dsco_env_int("DSCO_SWARM_MAX_CHILDREN", SWARM_MAX_CHILDREN, 1, SWARM_MAX_CHILDREN);
+    return dsco_env_int("DSCO_SWARM_MAX_CHILDREN", SWARM_DEFAULT_MAX_CHILDREN, 1, SWARM_MAX_CHILDREN);
 }
 static inline int dsco_swarm_max_groups(void) {
     return dsco_env_int("DSCO_SWARM_MAX_GROUPS", SWARM_MAX_GROUPS, 1, SWARM_MAX_GROUPS);
@@ -101,10 +103,25 @@ typedef struct {
 
     /* Cost tracking */
     double         est_cost_usd;
+    double         reserve_cost_usd;   /* conservative admission reservation       */
+    double         reserve_confidence; /* 0..1; learned interval confidence         */
+    bool           reserve_calibrated; /* true when learned high-side bound exists  */
     double         budget_usd;         /* allocated budget partition (0 = unlimited) */
     int            est_input_tokens;
     int            est_output_tokens;
     double         reported_cost_usd;  /* actual cost parsed from executor output  */
+    bool           reported_cost_known;
+    bool           estimated_cost_known;
+    bool           budget_cost_known;
+    double         budget_accounted_usd;
+    int            cost_samples;
+    int            unpriced_responses;
+    int            cost_fd; /* private unlinked accounting stream, never model output */
+    off_t          cost_offset;
+    bool           cost_transport;
+    bool           cost_class_explicit; /* provider fabric supplied billing class */
+    bool           scale_sampled;       /* service time already fed to autoscaler */
+    bool           subsidized;          /* flat-rate/local: not real-dollar draw   */
 
     /* Executor */
     executor_type_t executor;          /* which backend spawned this child */
@@ -146,7 +163,7 @@ typedef struct {
 /* ── Active bitset — O(1) membership test, fast iteration ────────────── */
 
 typedef struct {
-    unsigned long long bits;       /* 64-bit bitset — 1 bit per child */
+    unsigned long long words[SWARM_BITSET_WORDS]; /* 1 bit per child */
     int count;                     /* popcount cache */
 } swarm_bitset_t;
 
@@ -158,13 +175,12 @@ typedef struct {
 
     /* ── Slot recycling ────────────────────────────────────────────────
      * child_count/group_count were historically monotonic allocators: once
-     * a session spawned SWARM_MAX_CHILDREN (64) children over its lifetime,
+     * a session spawned SWARM_MAX_CHILDREN children over its lifetime,
      * every subsequent spawn silently failed forever, even though zero
      * children were actually running (all terminal + already collected).
      * These free-lists let terminal, already-collected slots be reclaimed
      * so a long-lived session can spawn far more than 64 children total
-     * without ever exceeding 64 *concurrent* children (the real, meaningful
-     * limit tied to the 64-bit active bitset and OS process-count sanity). */
+     * without ever exceeding the configured concurrent-child limit. */
     int            free_child_ids[SWARM_MAX_CHILDREN];
     int            free_child_count;
     int            free_group_ids[SWARM_MAX_GROUPS];
@@ -185,6 +201,8 @@ typedef struct {
      * tracked in subsidized_usd for visibility but does NOT draw the budget. */
     double         swarm_budget_usd;  /* total real-dollar budget (0=unlimited) */
     double         spent_usd;         /* metered real-dollar spend (draws budget) */
+    double         retired_spent_usd;
+    double         retired_subsidized_usd;
     double         subsidized_usd;    /* notional cost covered by flat-rate plans */
 
     /* External executor registry */
@@ -194,8 +212,17 @@ typedef struct {
     swarm_completion_q_t done_q;   /* O(1) completion notifications          */
     swarm_bitset_t       active;   /* bitset of running/streaming children   */
     int                  kq_fd;    /* kqueue fd (-1 if unavailable)          */
+    double               last_budget_enforcement; /* per-instance poll cadence */
     double               first_completion_time; /* timestamp of first child done */
 } swarm_t;
+
+/* Private native-worker accounting transport and presentation. */
+int swarm_accounting_open(void);
+void swarm_accounting_export(int fd);
+void swarm_child_budget_export(double cap);
+void swarm_accounting_read(swarm_child_t *child);
+double swarm_child_accounted_cost(const swarm_child_t *child);
+char *swarm_child_accounting_json(const swarm_child_t *child);
 
 /* ── Lifecycle ────────────────────────────────────────────────────────── */
 void swarm_init(swarm_t *s, const char *api_key, const char *model);
@@ -214,6 +241,12 @@ void swarm_set_next_instance(const char *effort, double temperature,
                              double top_p, int top_k, int thinking_budget,
                              const char *tool_choice, const char *system_prompt,
                              int max_agent_turns);
+void swarm_set_next_structured_output(const char *name, const char *schema_json, bool strict,
+                                      int max_repairs);
+/* Give the next child an explicit session-dollar ceiling. This is independent
+ * of the global swarm budget so callers can reserve heterogeneous lane costs. */
+void swarm_set_next_budget_usd(double budget_usd);
+void swarm_set_next_max_tokens(int max_tokens);
 
 /* Spawn a sub-dsco forced to a specific native provider (e.g. "openai", "groq").
  * The child process gets --exec <provider> -m <model> so it routes through
@@ -246,6 +279,18 @@ double swarm_budget_remaining(swarm_t *s);
  * Defaults to the claude+codex executors; override via DSCO_SUBSIDIZED_EXECUTORS. */
 bool swarm_child_is_subsidized(const swarm_child_t *c);
 double swarm_estimate_task_cost(swarm_t *s, const char *model);
+typedef struct {
+    int input_tokens;
+    int output_tokens;
+    double expected_cost_usd;
+    double reserved_cost_usd;
+    double latency_sec;
+    double confidence;
+    bool calibrated;
+} swarm_cost_reserve_t;
+void swarm_estimate_prompt_reserve(swarm_t *s, const char *model, int input_tokens,
+                                   int output_tokens, double reserve_multiplier,
+                                   swarm_cost_reserve_t *out);
 void swarm_enforce_budgets(swarm_t *s);  /* kill over-budget children */
 
 /* ── Groups ───────────────────────────────────────────────────────────── */
@@ -267,6 +312,7 @@ bool swarm_group_reclaim(swarm_t *s, int group_id);
 /* Total children ever spawned (child_count) vs. currently reclaimable slots
  * available for reuse — exposed for diagnostics/observability. */
 int  swarm_reclaimable_count(swarm_t *s);
+bool swarm_active_test(const swarm_t *s, int child_id);
 /* Sweep every active group whose children are ALL terminal (done/error/
  * killed — swarm_group_complete()==true) and reclaim it. Called
  * automatically by swarm_spawn*() when a spawn would otherwise fail due to
@@ -321,9 +367,9 @@ int  swarm_child_output(swarm_t *s, int child_id, char *buf, size_t len);
 int  swarm_group_status_json(swarm_t *s, int group_id, char *buf, size_t len);
 
 /* ── Swarm Mode v1 observability/persistence ─────────────────────────────
- * Persist a group as a first-class SwarmRun artifact directory:
- *   .swarm/runs/<run_id>/{manifest.json,workers/worker_N.json,coordinator.md,
- *                         claims.json,metrics.json,transcript.md}
+ * Persist a group as a first-class SwarmRun record in the flat artifact
+ * store. The returned out_dir is .swarm, containing latest.json and the
+ * append-only runs.jsonl ledger.
  * Returns 0 on success, -1 on validation/IO failure. */
 int  swarm_group_persist_run(swarm_t *s, int group_id, const char *run_id,
                              const char *topology, const char *user_prompt,

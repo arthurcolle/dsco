@@ -4,8 +4,9 @@
 /* ── Secure HTTP-like JSON server ─────────────────────────────────────────
  *
  * Transport : POSIX TCP via mbedTLS net_sockets helpers
- * TLS       : mbedTLS 3.x (optional; falls back to plaintext if no cert)
- * Auth      : libsodium HMAC-SHA512256 on request body via X-DSCO-Auth header
+ * TLS       : mbedTLS 3.x (requested TLS fails startup if cert/key are absent or invalid)
+ * Bind      : loopback by default; DSCO_NET_BIND requires DSCO_NET_AUTH_KEY
+ * Auth      : signed v1 timestamp+nonce+method+path+body via X-DSCO-Auth (GET /health public)
  *
  * Protocol  : HTTP/1.0 subset — GET/POST, Content-Length, one header per line
  * Default port: 7547
@@ -50,8 +51,8 @@ typedef void (*netsrv_stream_fn)(const netsrv_request_t *req, netsrv_stream_t *s
 
 typedef struct dsco_net_server dsco_net_server_t;
 
-/* Create a server instance.  cert_pem_path / key_pem_path may be NULL to
- * disable TLS; use_tls is ignored in that case. */
+/* Create a server instance.  With use_tls=true both paths are mandatory.
+ * DSCO_NET_AUTH_KEY (64 hex chars) and DSCO_NET_BIND are loaded automatically. */
 dsco_net_server_t *netsrv_create(uint16_t port, bool use_tls, const char *cert_pem_path,
                                  const char *key_pem_path);
 void netsrv_destroy(dsco_net_server_t *s);
@@ -65,7 +66,7 @@ bool netsrv_route(dsco_net_server_t *s, const char *method, const char *path, ne
 bool netsrv_route_stream(dsco_net_server_t *s, const char *method, const char *path,
                          netsrv_stream_fn fn, void *ctx);
 
-/* Optional: require HMAC-SHA512256(key, body) on every request. */
+/* Optional: set a raw 32-byte HMAC key (exact length required). */
 void netsrv_set_auth_key(dsco_net_server_t *s, const uint8_t *key, size_t key_len);
 
 bool netsrv_start(dsco_net_server_t *s);
@@ -78,8 +79,8 @@ bool netsrv_gen_tls_cert(const char *cert_path, const char *key_path, const char
 
 /* Client helper: POST JSON body to a remote dsco server.
  * Returns malloc'd response body on success, NULL on failure.
- * If auth_key != NULL it adds X-DSCO-Auth with HMAC over the body.
- * If use_tls, skips server cert verification (TOFU model). */
+ * If auth_key is NULL, DSCO_NET_AUTH_KEY is used when valid.
+ * TLS always verifies; DSCO_NET_CA_FILE supplies the trusted CA bundle/file. */
 char *netsrv_client_post(const char *host, uint16_t port, const char *path, const char *json_body,
                          const uint8_t *auth_key, size_t auth_key_len, bool use_tls);
 

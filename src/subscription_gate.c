@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,7 +19,7 @@
 #include <unistd.h>
 
 #define SUBSCRIPTION_GATE_POLL_MS 100L
-#define SUBSCRIPTION_GATE_DEFAULT_INTERVAL_MS 1000L
+#define SUBSCRIPTION_GATE_DEFAULT_INTERVAL_MS 0L
 #define SUBSCRIPTION_GATE_DEFAULT_MAX_WAIT_MS 900000L
 
 static bool gate_env_false(const char *value) {
@@ -47,6 +48,12 @@ static long long gate_now_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (long long)tv.tv_sec * 1000LL + tv.tv_usec / 1000LL;
+}
+
+static long long gate_monotonic_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
 }
 
 static uint64_t gate_scope_hash(const char *scope) {
@@ -101,17 +108,20 @@ static void gate_write_deadline_ms(int fd, long long deadline_ms) {
 }
 
 static bool gate_sleep_ms(long duration_ms, const volatile int *interrupted) {
-    while (duration_ms > 0) {
+    long long until_ms = gate_monotonic_ms() + duration_ms;
+    for (;;) {
         if (interrupted && *interrupted)
             return false;
+        long long remaining_ms = until_ms - gate_monotonic_ms();
+        if (remaining_ms <= 0)
+            break;
         long chunk =
-            duration_ms > SUBSCRIPTION_GATE_POLL_MS ? SUBSCRIPTION_GATE_POLL_MS : duration_ms;
+            remaining_ms > SUBSCRIPTION_GATE_POLL_MS ? SUBSCRIPTION_GATE_POLL_MS : (long)remaining_ms;
         struct timespec ts = {.tv_sec = chunk / 1000, .tv_nsec = (chunk % 1000) * 1000000L};
         while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
             if (interrupted && *interrupted)
                 return false;
         }
-        duration_ms -= chunk;
     }
     return !(interrupted && *interrupted);
 }
@@ -127,6 +137,21 @@ static void gate_close(subscription_gate_t *gate) {
     gate->held = false;
 }
 
+static void gate_set_waited(long long started_ms, long *waited_ms) {
+    if (waited_ms) {
+        long long elapsed = gate_monotonic_ms() - started_ms;
+        *waited_ms = elapsed > LONG_MAX ? LONG_MAX : elapsed > 0 ? (long)elapsed : 0;
+    }
+}
+
+static bool gate_wait_failed(subscription_gate_t *gate, long long started_ms,
+                             long *waited_ms, int reason) {
+    gate_close(gate);
+    gate_set_waited(started_ms, waited_ms);
+    errno = reason; /* close/unlock must not overwrite the acquisition reason */
+    return false;
+}
+
 bool subscription_gate_acquire(subscription_gate_t *gate, const char *scope,
                                const volatile int *interrupted, long *waited_ms) {
     if (!gate)
@@ -135,8 +160,14 @@ bool subscription_gate_acquire(subscription_gate_t *gate, const char *scope,
     gate->held = false;
     if (waited_ms)
         *waited_ms = 0;
+    long long started_ms = gate_monotonic_ms();
+    if (interrupted && *interrupted)
+        return gate_wait_failed(gate, started_ms, waited_ms, EINTR);
     if (gate_env_false(getenv("DSCO_CHATGPT_GLOBAL_GATE")))
         return true;
+    long max_wait_ms = gate_env_long("DSCO_CHATGPT_GATE_MAX_WAIT_MS",
+                                     SUBSCRIPTION_GATE_DEFAULT_MAX_WAIT_MS, 1000L, 3600000L);
+    long long expires_ms = started_ms + max_wait_ms;
 
     char path[1200];
     if (!gate_path(scope, path, sizeof(path)))
@@ -148,8 +179,12 @@ bool subscription_gate_acquire(subscription_gate_t *gate, const char *scope,
     fcntl(fd, F_SETFD, FD_CLOEXEC);
     gate->fd = fd;
 
-    long long started_ms = gate_now_ms();
     for (;;) {
+        if (interrupted && *interrupted)
+            return gate_wait_failed(gate, started_ms, waited_ms, EINTR);
+        long long budget_ms = expires_ms - gate_monotonic_ms();
+        if (budget_ms <= 0)
+            return gate_wait_failed(gate, started_ms, waited_ms, ETIMEDOUT);
         if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
             gate->held = true;
             break;
@@ -158,15 +193,18 @@ bool subscription_gate_acquire(subscription_gate_t *gate, const char *scope,
             gate_close(gate);
             return true; /* fail open on unsupported/advisory-lock errors */
         }
-        if (!gate_sleep_ms(SUBSCRIPTION_GATE_POLL_MS, interrupted)) {
-            gate_close(gate);
-            return false;
-        }
+        long pause_ms = budget_ms < SUBSCRIPTION_GATE_POLL_MS ? (long)budget_ms
+                                                             : SUBSCRIPTION_GATE_POLL_MS;
+        if (!gate_sleep_ms(pause_ms, interrupted))
+            return gate_wait_failed(gate, started_ms, waited_ms, EINTR);
     }
 
-    long max_wait_ms = gate_env_long("DSCO_CHATGPT_GATE_MAX_WAIT_MS",
-                                     SUBSCRIPTION_GATE_DEFAULT_MAX_WAIT_MS, 1000L, 3600000L);
     for (;;) {
+        if (interrupted && *interrupted)
+            return gate_wait_failed(gate, started_ms, waited_ms, EINTR);
+        long long budget_ms = expires_ms - gate_monotonic_ms();
+        if (budget_ms <= 0)
+            return gate_wait_failed(gate, started_ms, waited_ms, ETIMEDOUT);
         long long now_ms = gate_now_ms();
         long long deadline_ms = gate_read_deadline_ms(fd);
         if (deadline_ms <= now_ms)
@@ -177,16 +215,19 @@ bool subscription_gate_acquire(subscription_gate_t *gate, const char *scope,
             /* A corrupt or stale state file must not block the lane forever. */
             gate_write_deadline_ms(fd, now_ms + remaining);
         }
-        if (!gate_sleep_ms((long)remaining, interrupted)) {
-            gate_close(gate);
-            return false;
-        }
+        /* A lock wait consumes the same budget as cooldown. Never shorten a
+           valid persisted cooldown merely to fit this caller's time budget. */
+        if (remaining > budget_ms)
+            remaining = budget_ms;
+        if (!gate_sleep_ms((long)remaining, interrupted))
+            return gate_wait_failed(gate, started_ms, waited_ms, EINTR);
     }
 
-    if (waited_ms) {
-        long long elapsed = gate_now_ms() - started_ms;
-        *waited_ms = elapsed > 0 && elapsed < 2147483647LL ? (long)elapsed : 0;
-    }
+    if (interrupted && *interrupted)
+        return gate_wait_failed(gate, started_ms, waited_ms, EINTR);
+    if (gate_monotonic_ms() >= expires_ms)
+        return gate_wait_failed(gate, started_ms, waited_ms, ETIMEDOUT);
+    gate_set_waited(started_ms, waited_ms);
     return true;
 }
 

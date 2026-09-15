@@ -572,8 +572,8 @@ static char *oai_wait_for_callback(int listen_fd, char *state_out, size_t state_
             "<html><head><title>dsco</title></head>"
             "<body style='font-family:-apple-system,sans-serif;background:#0b0b0e;"
             "color:#e6e6e6;text-align:center;padding-top:18vh'>"
-            "<h2>\xe2\x9c\x93 ChatGPT account linked to dsco</h2>"
-            "<p style='color:#9aa'>You can close this tab and return to the terminal.</p>"
+            "<h2>Authorization received</h2>"
+            "<p style='color:#9aa'>Return to the terminal to check the sign-in result.</p>"
             "</body></html>";
         char resp[1024];
         int rl = snprintf(resp, sizeof(resp),
@@ -663,25 +663,10 @@ int openai_oauth_login(void) {
         fprintf(stderr, "dsco: login timed out or was cancelled.\n");
         return -1;
     }
-    if (got_state[0] && strcmp(got_state, state) != 0) {
-        /* State mismatch can happen when the browser completes a previous
-         * flow after dsco restarted (new state generated, old callback
-         * lands).  Since the real token path is ~/.codex/auth.json, check
-         * that first before giving up. */
-        openai_oauth_bundle_t existing;
-        if (openai_oauth_load(&existing) && existing.access_token[0]) {
-            static const char *src_names[] = {"missing","env","dsco-cache","codex"};
-            const char *sname = (existing.source < 4) ? src_names[existing.source] : "?";
-            fprintf(stderr,
-                    "  \033[32m✓ Signed in\033[0m (token loaded from %s).\n\n",
-                    sname);
-            free(code);
-            return 0;
-        }
-        /* No existing token — warn but proceed with the exchange anyway;
-         * the PKCE verifier still protects the code. */
-        fprintf(stderr,
-                "dsco: login: state mismatch — proceeding with token exchange.\n");
+    if (!got_state[0] || strcmp(got_state, state) != 0) {
+        fprintf(stderr, "dsco: login: invalid OAuth state; sign-in rejected.\n");
+        free(code);
+        return -1;
     }
 
     /* 5. exchange code (urldecode the code first) */
@@ -724,8 +709,7 @@ int openai_oauth_login(void) {
     long http_code = 0;
     char *resp = oai_http_post_form(token_url, form, &http_code);
     if (!resp || http_code != 200) {
-        fprintf(stderr, "dsco: token exchange failed (HTTP %ld)%s%s\n", http_code,
-                resp ? ": " : "", resp ? resp : "");
+        fprintf(stderr, "dsco: token exchange failed (HTTP %ld).\n", http_code);
         free(resp);
         return -1;
     }
@@ -740,7 +724,8 @@ int openai_oauth_login(void) {
         return -1;
     }
     if (!oai_write_cache(&bundle)) {
-        fprintf(stderr, "dsco: warning: could not persist token cache.\n");
+        fprintf(stderr, "dsco: could not persist token cache.\n");
+        return -1;
     }
     fprintf(stderr, "  \033[32m✓ Signed in.\033[0m ChatGPT account%s%s linked.\n\n",
             bundle.account_id[0] ? " " : "", bundle.account_id);

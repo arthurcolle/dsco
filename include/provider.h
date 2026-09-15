@@ -48,6 +48,7 @@ struct provider {
     /* Reusable transport owned by providers whose wire implementation is not
      * backed by openai_data_t (currently the native ChatGPT Responses lane). */
     CURL *transport_curl;
+    CURLM *transport_multi; /* native Responses connection cache, same owner */
 };
 
 /* Create a provider by name. Returns NULL if unknown. */
@@ -85,6 +86,11 @@ bool provider_model_supports_cache_control(const char *model);
 bool provider_model_supports_automatic_prompt_cache(const char *model);
 bool provider_model_supports_prompt_cache_key(const char *model);
 bool provider_model_supports_prompt_cache_retention(const char *model);
+
+/* Exact provider-native token counting where available. Currently implements
+ * Abliteration.ai's Anthropic-compatible /v1/messages/count_tokens surface. */
+int provider_count_tokens(const char *provider_name, const char *api_key,
+                          const char *request_json);
 
 /* Resolve the API key env var for a provider */
 const char *provider_resolve_api_key(const char *provider_name);
@@ -125,10 +131,24 @@ bool provider_usage_is_included(const char *provider_name, const char *resolved_
 long provider_last_subscription_queue_ms(void);
 void provider_debug_log_request(const char *provider_name, const char *model,
                                 const char *resolved_key);
+
+/* Anthropic validates these Cowork/Claude subscription OAuth fingerprint
+ * bytes at the wire boundary. Keep them pinned together and cover the exact
+ * literals in tests before changing either value. */
+#define CLAUDE_CODE_OAUTH_COMPAT_VERSION "2.1.257"
+#define CLAUDE_CODE_OAUTH_SDK_VERSION "0.112.1"
+#define CLAUDE_CODE_OAUTH_TOKEN_URL "https://api.anthropic.com/v1/oauth/token"
+#define CLAUDE_CODE_OAUTH_REFRESH_USER_AGENT                                                   \
+    "anthropic-sdk-typescript/" CLAUDE_CODE_OAUTH_SDK_VERSION " userOAuthProvider"
+
 const char *provider_claude_code_oauth_source(void);
 /* Explicitly import the user's Claude Code OAuth bundle into DSCO's 0600 cache.
- * This may invoke the OS credential UI and is therefore only called by login. */
+ * This may invoke the OS credential UI; login and bounded stale-cache recovery
+ * are the only callers. */
 bool provider_claude_code_import_credentials(void);
+/* Force a refresh of DSCO's cached Claude OAuth bundle. If the cached refresh
+ * token has rotated, recover once from Claude Code's authoritative local store. */
+bool provider_claude_code_refresh_credentials(void);
 /* Claude Code subscription requests bind the bearer to the local Claude
  * account/device/session identity via metadata.user_id. */
 const char *provider_claude_code_metadata_user_id(void);
@@ -227,6 +247,8 @@ typedef struct {
     usage_t usage;
     int reasoning_tokens;
     int cached_tokens;
+    double cost_usd;
+    bool cost_reported;
 } provider_test_openai_sse_result_t;
 
 /* Feed raw OpenAI-compatible SSE bytes through the production line parser.
@@ -240,6 +262,9 @@ bool provider_test_parse_openai_sse_for_model(const char *bytes, size_t len,
                                               provider_test_openai_sse_result_t *out);
 void provider_test_free_openai_sse_result(provider_test_openai_sse_result_t *result);
 long provider_test_chatgpt_retry_after_ms(const char *text);
+bool provider_test_chatgpt_transport_retry(int code, int http_status, bool response_started);
+long provider_test_chatgpt_http_version(void);
+bool provider_test_chatgpt_sse_is_framing_line(const char *line);
 #endif
 
 #endif

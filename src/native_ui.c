@@ -393,8 +393,8 @@ void native_ui_diff(const native_ui_scene_t *previous, const native_ui_scene_t *
 }
 
 static bool point_in_rect(native_ui_rect_t rect, int x, int y) {
-    return x >= rect.x && y >= rect.y && x < rect.x + rect.width &&
-           y < rect.y + rect.height;
+    return x >= rect.x && y >= rect.y && x < (int64_t)rect.x + rect.width &&
+           y < (int64_t)rect.y + rect.height;
 }
 
 static int hit_test_node(const native_ui_scene_t *scene, int index, int x, int y) {
@@ -487,7 +487,7 @@ static void render_node(const native_ui_scene_t *scene, int index,
     if ((node->element == NATIVE_UI_ELEMENT_TEXT ||
          node->element == NATIVE_UI_ELEMENT_BADGE ||
          node->element == NATIVE_UI_ELEMENT_INPUT) && backend->draw_text)
-        backend->draw_text(context, node->frame, node->text, node->style.type,
+        backend->draw_text(context, node->element == NATIVE_UI_ELEMENT_BADGE ? content_rect(node) : node->frame, node->text, node->style.type,
                            node->style.foreground, node->style.opacity);
     else if (node->element == NATIVE_UI_ELEMENT_ICON && backend->draw_icon)
         backend->draw_icon(context, node->frame, node->text, node->style.foreground,
@@ -569,10 +569,12 @@ native_ui_viewport_metrics_t native_ui_terminal_viewport(int columns, int rows,
     }
     metrics.logical_width = physical_width > 0 ?
                             physical_width / metrics.backing_scale :
-                            metrics.columns * 10;
+                            (metrics.columns > INT_MAX / 10 ? INT_MAX :
+                             metrics.columns * 10);
     metrics.logical_height = physical_height > 0 ?
                              physical_height / metrics.backing_scale :
-                             metrics.rows * 20;
+                             (metrics.rows > INT_MAX / 20 ? INT_MAX :
+                              metrics.rows * 20);
     return metrics;
 }
 

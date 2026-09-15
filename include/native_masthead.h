@@ -36,6 +36,7 @@ typedef struct {
     int queue_capacity;
     double context_percent;
     double cost_usd;
+    int unpriced_responses;
     bool show_compact_metrics;
 } native_masthead_model_t;
 

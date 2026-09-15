@@ -1,7 +1,9 @@
 #include "mesh.h"
+#include "mesh_identity.h"
 #include <sodium.h>
 #include <pthread.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
@@ -13,6 +15,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <poll.h>
+#include <time.h>
 
 #ifndef MSG_NOSIGNAL
 #define MSG_NOSIGNAL 0
@@ -69,6 +73,8 @@ typedef struct mesh_conn {
 
     uint8_t peer_pubkey[MESH_PUBKEY_LEN];
     uint8_t shared_key[SHARED_KEY_LEN];
+    uint8_t recv_key[SHARED_KEY_LEN];
+    uint64_t send_sequence, recv_sequence;
 
     char addr[48];
     bool outbound;
@@ -160,11 +166,15 @@ static bool conn_send_enc(mesh_conn_t *c, wire_type_t type, const void *payload,
     if (plen)
         memcpy(plain + INNER_HDR_LEN, payload, plen);
 
-    randombytes_buf(nonce, NONCE_LEN);
+    pthread_mutex_lock(&c->wlock);
+    if (c->send_sequence == UINT64_MAX) {
+        pthread_mutex_unlock(&c->wlock); free(wire); return false;
+    }
+    memset(nonce, 0, NONCE_LEN);
+    uint64_t sequence = ++c->send_sequence;
+    for (int i = 0; i < 8; i++) nonce[NONCE_LEN - 1 - i] = (uint8_t)(sequence >> (8 * i));
     put_u32be(wire, (uint32_t)body_len);
     crypto_box_easy_afternm(ciphertext, plain, plain_len, nonce, c->shared_key);
-
-    pthread_mutex_lock(&c->wlock);
     bool ok = send_exact(c->sock, wire, wire_len);
     pthread_mutex_unlock(&c->wlock);
 
@@ -199,6 +209,15 @@ static void *conn_reader(void *arg) {
     mesh_on_peer_fn on_dis = n->on_disconnect;
     void *dis_ctx = n->on_disconnect_ctx;
 
+    /* Handshake reads/writes must not allow a connected peer to pin a thread. */
+    struct timeval old_rcv, old_snd;
+    socklen_t old_rcv_len = sizeof(old_rcv), old_snd_len = sizeof(old_snd);
+    bool have_timeouts = getsockopt(c->sock, SOL_SOCKET, SO_RCVTIMEO, &old_rcv, &old_rcv_len) == 0 &&
+                         getsockopt(c->sock, SOL_SOCKET, SO_SNDTIMEO, &old_snd, &old_snd_len) == 0;
+    struct timeval handshake_timeout = { .tv_sec = 3, .tv_usec = 0 };
+    (void)setsockopt(c->sock, SOL_SOCKET, SO_RCVTIMEO, &handshake_timeout, sizeof(handshake_timeout));
+    (void)setsockopt(c->sock, SOL_SOCKET, SO_SNDTIMEO, &handshake_timeout, sizeof(handshake_timeout));
+
     /* ── Send handshake ─────────────────────────────────────────────── */
     uint8_t hs[HANDSHAKE_LEN];
     put_u32be(hs, MESH_MAGIC);
@@ -217,9 +236,55 @@ static void *conn_reader(void *arg) {
         goto done;
     memcpy(c->peer_pubkey, peer_hs + 4, MESH_PUBKEY_LEN);
 
-    /* Compute shared key once — used for all messages on this connection */
-    (void)crypto_box_beforenm(c->shared_key, c->peer_pubkey, n->seckey);
+    /* Discovery is not authority: authorization precedes key derivation/auth. */
+    if (!memcmp(c->peer_pubkey, n->pubkey, MESH_PUBKEY_LEN) ||
+        !mesh_identity_allowed(c->peer_pubkey))
+        goto done;
+
+    /* Compute shared key once — used for all messages on this connection. */
+    if (crypto_box_beforenm(c->shared_key, c->peer_pubkey, n->seckey) != 0)
+        goto done;
+    /* Prove possession of the pinned key before publishing membership. The
+     * transcript binds both challenges and directional identities, so reflecting
+     * a peer's proof or replaying an earlier connection cannot authenticate. */
+    uint8_t challenge[32], peer_challenge[32];
+    randombytes_buf(challenge, sizeof(challenge));
+    if (!send_exact(c->sock, challenge, sizeof(challenge)) ||
+        !recv_exact(c->sock, peer_challenge, sizeof(peer_challenge))) goto done;
+    uint8_t proof[128], expected[128], received[128];
+    memcpy(proof, peer_challenge, 32); memcpy(proof + 32, challenge, 32);
+    memcpy(proof + 64, n->pubkey, 32); memcpy(proof + 96, c->peer_pubkey, 32);
+    memcpy(expected, challenge, 32); memcpy(expected + 32, peer_challenge, 32);
+    memcpy(expected + 64, c->peer_pubkey, 32); memcpy(expected + 96, n->pubkey, 32);
+    uint8_t packet[crypto_box_NONCEBYTES + crypto_box_MACBYTES + sizeof(proof)];
+    uint8_t peer_packet[sizeof(packet)];
+    randombytes_buf(packet, crypto_box_NONCEBYTES);
+    if (crypto_box_easy_afternm(packet + crypto_box_NONCEBYTES, proof, sizeof(proof),
+                               packet, c->shared_key) != 0 ||
+        !send_exact(c->sock, packet, sizeof(packet)) ||
+        !recv_exact(c->sock, peer_packet, sizeof(peer_packet)) ||
+        crypto_box_open_easy_afternm(received, peer_packet + crypto_box_NONCEBYTES,
+                                    sizeof(peer_packet) - crypto_box_NONCEBYTES,
+                                    peer_packet, c->shared_key) != 0 ||
+        sodium_memcmp(received, expected, sizeof(expected)) != 0) goto done;
+    /* Connection-specific, direction-separated traffic keys. Static identity
+     * keys alone would allow recorded frames to replay into a new session. */
+    uint8_t transcript[128], traffic_keys[64];
+    bool lower = memcmp(n->pubkey, c->peer_pubkey, MESH_PUBKEY_LEN) < 0;
+    memcpy(transcript, lower ? n->pubkey : c->peer_pubkey, 32);
+    memcpy(transcript + 32, lower ? c->peer_pubkey : n->pubkey, 32);
+    memcpy(transcript + 64, lower ? challenge : peer_challenge, 32);
+    memcpy(transcript + 96, lower ? peer_challenge : challenge, 32);
+    if (crypto_generichash(traffic_keys, sizeof(traffic_keys), transcript, sizeof(transcript),
+                           c->shared_key, sizeof(c->shared_key)) != 0) goto done;
+    memcpy(c->shared_key, traffic_keys + (lower ? 0 : 32), 32);
+    memcpy(c->recv_key, traffic_keys + (lower ? 32 : 0), 32);
+    sodium_memzero(traffic_keys, sizeof(traffic_keys));
     c->authed = true;
+    if (have_timeouts) {
+        (void)setsockopt(c->sock, SOL_SOCKET, SO_RCVTIMEO, &old_rcv, sizeof(old_rcv));
+        (void)setsockopt(c->sock, SOL_SOCKET, SO_SNDTIMEO, &old_snd, sizeof(old_snd));
+    }
 
     if (on_con) {
         mesh_peer_info_t info;
@@ -305,13 +370,19 @@ static void *conn_reader(void *arg) {
             break;
         }
 
-        if (crypto_box_open_easy_afternm(plain, ciphertext, cipher_len, nonce, c->shared_key) !=
-            0) {
+        uint64_t sequence = 0;
+        for (int i = NONCE_LEN - 8; i < NONCE_LEN; i++) sequence = (sequence << 8) | nonce[i];
+        bool canonical_nonce = true;
+        for (int i = 0; i < NONCE_LEN - 8; i++) if (nonce[i]) canonical_nonce = false;
+        if (!canonical_nonce || c->recv_sequence == UINT64_MAX ||
+            sequence != c->recv_sequence + 1 ||
+            crypto_box_open_easy_afternm(plain, ciphertext, cipher_len, nonce, c->recv_key) != 0) {
             free(plain);
             free(body);
             fprintf(stderr, "[mesh] auth failure from %s — dropping\n", c->addr);
             break;
         }
+        c->recv_sequence = sequence;
         free(body);
 
         if (plain_len < INNER_HDR_LEN) {
@@ -453,7 +524,11 @@ mesh_node_t *mesh_node_create(uint16_t port) {
 
     n->port = port;
     n->server_sock = -1;
-    crypto_box_keypair(n->pubkey, n->seckey);
+    if (!mesh_identity_load(n->pubkey, n->seckey)) {
+        sodium_memzero(n, sizeof(*n));
+        free(n);
+        return NULL;
+    }
     pthread_mutex_init(&n->lock, NULL);
     return n;
 }
@@ -559,6 +634,46 @@ const uint8_t *mesh_node_pubkey(mesh_node_t *n) {
 }
 
 bool mesh_node_connect(mesh_node_t *n, const char *host, uint16_t port) {
+    return mesh_node_connect_interruptible(n, host, port, NULL, NULL);
+}
+
+static bool mesh_connect_socket(int fd, const struct sockaddr *addr, socklen_t addrlen,
+                                bool (*cancelled)(void *), void *ctx) {
+    int flags = fcntl(fd, F_GETFL);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0)
+        return false;
+    bool connected = connect(fd, addr, addrlen) == 0;
+    if (!connected && errno != EINPROGRESS)
+        return false;
+    struct timespec start, now;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    while (!connected) {
+        if (cancelled && cancelled(ctx))
+            return false;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        long elapsed = (now.tv_sec - start.tv_sec) * 1000L +
+                       (now.tv_nsec - start.tv_nsec) / 1000000L;
+        if (elapsed >= 3000)
+            return false;
+        struct pollfd pfd = {.fd = fd, .events = POLLOUT};
+        int rc = poll(&pfd, 1, elapsed > 2950 ? (int)(3000 - elapsed) : 50);
+        if (rc < 0 && errno != EINTR)
+            return false;
+        if (rc <= 0)
+            continue;
+        int error = 0;
+        socklen_t len = sizeof(error);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error != 0)
+            return false;
+        connected = true;
+    }
+    return !(cancelled && cancelled(ctx)) && fcntl(fd, F_SETFL, flags) == 0;
+}
+
+bool mesh_node_connect_interruptible(mesh_node_t *n, const char *host, uint16_t port,
+                                     bool (*cancelled)(void *), void *ctx) {
+    if (!n || !host || (cancelled && cancelled(ctx)))
+        return false;
     char port_str[8];
     snprintf(port_str, sizeof(port_str), "%u", port);
 
@@ -573,7 +688,7 @@ bool mesh_node_connect(mesh_node_t *n, const char *host, uint16_t port) {
         return false;
     }
     mesh_tune_socket(fd, false);
-    if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
+    if (!mesh_connect_socket(fd, res->ai_addr, res->ai_addrlen, cancelled, ctx)) {
         close(fd);
         freeaddrinfo(res);
         return false;

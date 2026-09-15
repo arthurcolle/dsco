@@ -29,8 +29,8 @@ static inline double cost_budget_session_spent_usd(const session_state_t *sessio
     if (!session)
         return 0.0;
     /* Once at least one turn has been accounted, the accumulator is
-     * authoritative even when it is exactly zero (for example, a turn covered
-     * by the user's ChatGPT/Codex subscription). */
+     * authoritative even when explicitly zero. Subscription inference is
+     * retained at its reported or estimated value, not discarded. */
     if (session->turn_count > 0)
         return session->total_reported_cost_usd > 0.0 ? session->total_reported_cost_usd : 0.0;
     const model_info_t *mi = model_lookup(session->model);

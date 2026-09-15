@@ -15,14 +15,15 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
+#include <unistd.h>
 
-#define CODEX_CACHE_TTL (60 * 60)
 #define CODEX_MODELS_CMD "codex debug models 2>/dev/null"
 
 typedef struct {
     model_info_t info; /* alias == model_id == slug (owned) */
     char *display_name;
     char *default_reasoning_level;
+    const char *default_verbosity;
     char *visibility;
     char *norm;
     int supported_in_api;
@@ -51,15 +52,7 @@ static const char *strip_openai_prefix(const char *model) {
     return model;
 }
 
-static int cache_ttl(void) {
-    const char *v = getenv("DSCO_MODEL_CACHE_TTL");
-    if (v && v[0]) {
-        int n = atoi(v);
-        if (n >= 60)
-            return n;
-    }
-    return CODEX_CACHE_TTL;
-}
+
 
 static int cache_path(char *out, size_t n) {
     const char *home = getenv("HOME");
@@ -99,23 +92,17 @@ static char *read_file(const char *path, size_t *len_out) {
 }
 
 static void write_file(const char *path, const char *data, size_t len) {
-    char tmp[1024];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    char tmp[1100];
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", path, (long)getpid());
     FILE *f = fopen(tmp, "wb");
     if (!f)
         return;
-    fwrite(data, 1, len, f);
-    fclose(f);
-    rename(tmp, path);
+    int ok = fwrite(data, 1, len, f) == len && fflush(f) == 0 && fsync(fileno(f)) == 0;
+    if (fclose(f) != 0) ok = 0;
+    if (!ok || rename(tmp, path) != 0) unlink(tmp);
 }
 
-static bool cache_is_stale(const char *path) {
-    struct stat st;
-    if (stat(path, &st) != 0)
-        return true;
-    time_t now = time(NULL);
-    return (now - st.st_mtime) > cache_ttl();
-}
+
 
 typedef struct {
     codex_model_t *models;
@@ -148,6 +135,24 @@ static void on_model(const char *elem, void *ctx) {
     m->info.model_id = slug;
     m->display_name = json_get_str(elem, "display_name");
     m->default_reasoning_level = json_get_str(elem, "default_reasoning_level");
+    /* Only explicit catalog support enables this optional request field.
+     * Keep invalid/missing metadata absent rather than inventing a default. */
+    char *verbosity_support = json_get_raw(elem, "support_verbosity");
+    char *verbosity = json_get_str(elem, "default_verbosity");
+    char *verbosity_raw = json_get_raw(elem, "default_verbosity");
+    /* A decoded NUL must not turn an invalid enum into a valid prefix. */
+    if (verbosity_support && strcmp(verbosity_support, "true") == 0 && verbosity &&
+        verbosity_raw && !strstr(verbosity_raw, "\\u0000")) {
+        if (strcmp(verbosity, "low") == 0)
+            m->default_verbosity = "low";
+        else if (strcmp(verbosity, "medium") == 0)
+            m->default_verbosity = "medium";
+        else if (strcmp(verbosity, "high") == 0)
+            m->default_verbosity = "high";
+    }
+    free(verbosity_support);
+    free(verbosity);
+    free(verbosity_raw);
     m->visibility = json_get_str(elem, "visibility");
     m->supported_in_api = json_get_bool(elem, "supported_in_api", false) ? 1 : 0;
     m->priority = json_get_int(elem, "priority", 0);
@@ -159,10 +164,12 @@ static void on_model(const char *elem, void *ctx) {
     m->max_context_window = max_ctx;
     m->info.context_window = ctx_len > 0 ? ctx_len : 272000;
     m->info.max_output = 32768;
-    m->info.input_price = 0.0;
-    m->info.output_price = 0.0;
-    m->info.cache_read_price = 0.0;
-    m->info.cache_write_price = 0.0;
+    /* Catalog availability is not a price quote. Subscription inclusion
+     * cannot be interpreted as zero inference cost. */
+    m->info.input_price = -1.0;
+    m->info.output_price = -1.0;
+    m->info.cache_read_price = -1.0;
+    m->info.cache_write_price = -1.0;
     m->info.supports_thinking =
         (m->default_reasoning_level && m->default_reasoning_level[0]) ? 1 : 0;
 
@@ -250,7 +257,7 @@ static int load_catalog(bool allow_refresh) {
         }
     }
 
-    if (allow_refresh && (!have_path || cache_is_stale(path))) {
+    if (allow_refresh && !getenv("DSCO_PRICING_OFFLINE")) {
         size_t len = 0;
         char *body = read_codex_debug_models(&len);
         if (body) {
@@ -280,6 +287,10 @@ static void start_once(void) {
 
 void codex_cache_init(void) {
     pthread_once(&g_once, start_once);
+}
+
+int codex_cache_load_cached(void) {
+    return load_catalog(false);
 }
 
 int codex_cache_load_sync(void) {
@@ -344,7 +355,8 @@ static const codex_model_t *find_model(const char *name) {
 static bool known_codex_model_fallback(const char *bare) {
     if (!bare || !bare[0])
         return false;
-    return strcmp(bare, "gpt-5.6-sol") == 0 ||
+    return strcmp(bare, "gpt-6-astra") == 0 ||
+           strcmp(bare, "gpt-5.6-sol") == 0 ||
            strcmp(bare, "gpt-5.6-terra") == 0 ||
            strcmp(bare, "gpt-5.6-luna") == 0 ||
            strcmp(bare, "gpt-5.5") == 0 ||
@@ -388,6 +400,11 @@ const char *codex_cache_default_effort(const char *model) {
     if (m && m->default_reasoning_level && m->default_reasoning_level[0])
         return m->default_reasoning_level;
     return "medium";
+}
+
+const char *codex_cache_default_verbosity(const char *model) {
+    const codex_model_t *m = find_model(model);
+    return m ? m->default_verbosity : NULL;
 }
 
 bool codex_cache_model_supported(const char *model) {

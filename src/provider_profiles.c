@@ -62,6 +62,21 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .caps = CAP_OPENAI_COMPAT_VISION,
     },
     {
+        .name = "abliteration-ai",
+        .display_name = "Abliteration.ai",
+        .description = "Abliteration.ai OpenAI-compatible unrestricted reasoning API.",
+        .api_mode = PROVIDER_API_CHAT_COMPLETIONS,
+        .auth_type = PROVIDER_AUTH_API_KEY,
+        .transport = PROVIDER_TRANSPORT_OPENAI_CHAT,
+        .base_url = "https://api.abliteration.ai/v1",
+        .transport_base_url = "https://api.abliteration.ai/v1",
+        .env_vars = {"ABLITERATION_API_KEY", "ABLIT_KEY"},
+        .aliases = {"abliteration", "ablit"},
+        .default_model = "abliterated-model-large-v2",
+        .default_aux_model = "abliterated-model",
+        .caps = CAP_OPENAI_COMPAT_VISION | PROVIDER_CAP_REASONING | PROVIDER_CAP_PROMPT_CACHE,
+    },
+    {
         .name = "dsco-router",
         .display_name = "Distributed Systems Router",
         .description = "Distributed Systems multi-model OpenAI-compatible gateway.",
@@ -87,7 +102,7 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .env_vars = {"GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_AI_API_KEY",
                      "GOOGLE_AI_STUDIO_API_KEY", "GOOGLE_VERTEX_API_KEY"},
         .aliases = {"gemini", "google-gemini", "google-ai-studio"},
-        .default_model = "gemini-2.5-pro",
+        .default_model = "gemini-3.5-flash",
         .caps = CAP_OPENAI_COMPAT_VISION,
     },
     {
@@ -100,7 +115,7 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .base_url = "https://api.groq.com/openai/v1",
         .transport_base_url = "https://api.groq.com/openai/v1",
         .env_vars = {"GROQ_API_KEY"},
-        .default_model = "llama-3.3-70b-versatile",
+        .default_model = "qwen/qwen3.8-27b",
         .caps = CAP_OPENAI_COMPAT,
     },
     {
@@ -127,7 +142,7 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .base_url = "https://api.mistral.ai/v1",
         .transport_base_url = "https://api.mistral.ai/v1",
         .env_vars = {"MISTRAL_API_KEY"},
-        .default_model = "mistral-large-latest",
+        .default_model = "mistral-medium-2604",
         .caps = CAP_OPENAI_COMPAT_VISION,
     },
     {
@@ -141,7 +156,7 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .transport_base_url = "https://api.x.ai/v1",
         .env_vars = {"XAI_API_KEY", "GROK_API_KEY", "X_AI_API_KEY"},
         .aliases = {"grok", "x-ai", "x.ai"},
-        .default_model = "grok-4-fast",
+        .default_model = "grok-4.6",
         .caps = CAP_OPENAI_COMPAT_VISION | PROVIDER_CAP_REASONING,
     },
     {
@@ -181,7 +196,7 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .base_url = "https://api.cerebras.ai/v1",
         .transport_base_url = "https://api.cerebras.ai/v1",
         .env_vars = {"CEREBRAS_API_KEY"},
-        .default_model = "qwen-3-235b-a22b-instruct-2507",
+        .default_model = "gemma-4-31b",
         .caps = CAP_OPENAI_COMPAT,
     },
     {
@@ -495,8 +510,8 @@ static const provider_profile_t PROVIDER_PROFILES[] = {
         .transport_base_url = "https://api.sakana.ai/v1",
         .env_vars = {"FUGU_API_KEY", "SAKANA_API_KEY", "FISH_API_KEY", "SAKANA_TOKEN"},
         .aliases = {"fugu", "sakana-ai", "sakanaai", "fugu-ultra"},
-        .default_model = "fugu",
-        .default_aux_model = "fugu-ultra",
+        .default_model = "fugu-ultra",
+        .default_aux_model = "fugu",
         .caps = CAP_OPENAI_COMPAT_VISION | PROVIDER_CAP_REASONING,
     },
     {

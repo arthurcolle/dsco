@@ -1,10 +1,12 @@
 #include "mcp.h"
+#include "mcp_response.h"
 #include "http_pool.h"
 #include "json_util.h"
 #include "config.h"
 #include "mcp_names.h"
 #include "tools.h"
 #include "tui.h"
+#include "../vendor/yyjson.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -504,11 +506,15 @@ typedef struct {
     char *data;
     size_t len;
     size_t cap;
+    size_t event_offset;
+    const char *request;
+    char *matched;
 } http_buf_t;
 
 static size_t http_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t total = size * nmemb;
     http_buf_t *b = (http_buf_t *)userdata;
+    if (total > 16u * 1024u * 1024u || b->len > 16u * 1024u * 1024u - total) return 0;
     if (b->len + total + 1 > b->cap) {
         size_t nc = (b->len + total + 1) * 2;
         char *np = realloc(b->data, nc);
@@ -520,7 +526,9 @@ static size_t http_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata
     memcpy(b->data + b->len, ptr, total);
     b->len += total;
     b->data[b->len] = '\0';
-    return total;
+    b->matched = mcp_response_sse(b->data, b->len, &b->event_offset, b->request);
+    /* A matched event completes the RPC even if its SSE connection stays open. */
+    return b->matched ? 0 : total;
 }
 
 static size_t http_header_cb(char *buffer, size_t size, size_t nitems, void *userdata) {
@@ -550,37 +558,6 @@ static int http_cancel_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow, c
     return mcp_cancelled() ? 1 : 0;
 }
 
-static char *extract_first_json_object(const char *data) {
-    if (!data)
-        return NULL;
-    const char *p = strchr(data, '{');
-    while (p) {
-        const char *q = p;
-        int depth = 0;
-        while (*q) {
-            if (*q == '"') {
-                q = skip_json_string_local(q);
-                continue;
-            }
-            if (*q == '{')
-                depth++;
-            else if (*q == '}') {
-                depth--;
-                if (depth == 0) {
-                    size_t n = (size_t)(q + 1 - p);
-                    char *out = safe_malloc(n + 1);
-                    memcpy(out, p, n);
-                    out[n] = '\0';
-                    return out;
-                }
-            }
-            q++;
-        }
-        p = strchr(p + 1, '{');
-    }
-    return NULL;
-}
-
 static char *http_post_rpc(mcp_server_t *srv, const char *payload, int timeout_ms) {
     if (mcp_cancelled())
         return NULL;
@@ -591,7 +568,7 @@ static char *http_post_rpc(mcp_server_t *srv, const char *payload, int timeout_m
         return NULL;
     dsco_http_pool_apply(curl);
 
-    http_buf_t resp = {0};
+    http_buf_t resp = {.request = payload};
     resp.cap = 8192;
     resp.data = calloc(1, resp.cap);
     if (!resp.data) {
@@ -636,21 +613,22 @@ static char *http_post_rpc(mcp_server_t *srv, const char *payload, int timeout_m
 
     CURLcode res = curl_easy_perform(curl);
     long code = 0;
-    if (res == CURLE_OK)
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
     curl_slist_free_all(hdrs);
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK || code < 200 || code >= 300) {
+    bool completed_event = res == CURLE_WRITE_ERROR && resp.matched != NULL;
+    if ((res != CURLE_OK && !completed_event) || code < 200 || code >= 300 || mcp_cancelled()) {
         if (getenv("DSCO_MCP_DEBUG")) {
             fprintf(stderr, "mcp: HTTP request failed: %s (status %ld, body %zu bytes)\n",
                     curl_easy_strerror(res), code, resp.len);
         }
+        free(resp.matched);
         free(resp.data);
         return NULL;
     }
 
-    char *json = extract_first_json_object(resp.data);
+    char *json = resp.matched ? resp.matched : mcp_response_match(resp.data, resp.len, payload);
     if (!json && getenv("DSCO_MCP_DEBUG"))
         fprintf(stderr,
                 "mcp: HTTP response contained no JSON object (status %ld, body %zu bytes)\n", code,
@@ -2147,21 +2125,14 @@ static void load_hermes_yaml_config(mcp_registry_t *reg, const char *path, const
 
 /* ── Public API ────────────────────────────────────────────────────────── */
 
-int mcp_init(mcp_registry_t *reg) {
-    (void)pthread_once(&g_mcp_sigpipe_once, mcp_ignore_sigpipe_once);
-    memset(reg, 0, sizeof(*reg));
-
+/* Parse every MCP config source into `collect` without connecting. Shared by
+ * mcp_init (phase 1) and mcp_list_configured (inventory without side effects). */
+static void mcp_collect_configured(mcp_registry_t *reg, pending_list_t *collect) {
     const char *home = getenv("HOME");
     if (!home)
-        return 0;
-
+        return;
     char path[1024];
-
-    /* Phase 1: parse every config file into a pending list (cheap, serial).
-     * start_configured_server appends here instead of connecting inline. */
-    pending_list_t collect = {0};
-    g_collect = &collect;
-
+    g_collect = collect;
     snprintf(path, sizeof(path), "%s/.dsco/mcp.json", home);
     load_json_config(reg, path, "dsco:mcp", true, true);
     snprintf(path, sizeof(path), "%s/.dsco/config.json", home);
@@ -2205,6 +2176,22 @@ int mcp_init(mcp_registry_t *reg) {
     load_hermes_yaml_config(reg, path, "hermes:mcp-servers", true);
     snprintf(path, sizeof(path), "%s/.hermes/mcp_servers.yml", home);
     load_hermes_yaml_config(reg, path, "hermes:mcp-servers", true);
+    g_collect = NULL;
+}
+
+int mcp_init(mcp_registry_t *reg) {
+    (void)pthread_once(&g_mcp_sigpipe_once, mcp_ignore_sigpipe_once);
+    memset(reg, 0, sizeof(*reg));
+
+    const char *home = getenv("HOME");
+    if (!home)
+        return 0;
+
+    /* Phase 1: parse every config file into a pending list (cheap, serial).
+     * start_configured_server appends here instead of connecting inline. */
+    pending_list_t collect = {0};
+
+    mcp_collect_configured(reg, &collect);
 
     /* Phase 2: connect every collected server concurrently so one slow or dead
      * endpoint can't stall the rest behind a per-RPC timeout. */
@@ -2276,6 +2263,106 @@ static char *extract_mcp_content_text(const char *content_raw) {
     return NULL;
 }
 
+/* tools.distributed.systems currently lists catalog leaves beside its MCP
+ * meta-tools, but rejects direct calls to those leaves before executing them.
+ * Recover only that exact rejection, using the same server's declared wrapper
+ * contract. A timeout, generic error, or another MCP server is never retried. */
+static _Thread_local bool mcp_catalog_retry_active;
+
+static yyjson_val *mcp_unique_member(yyjson_val *object, const char *name) {
+    if (!yyjson_is_obj(object)) return NULL;
+    size_t i, count;
+    yyjson_val *key, *value, *found = NULL;
+    yyjson_obj_foreach(object, i, count, key, value) {
+        if (!yyjson_equals_str(key, name)) continue;
+        if (found) return NULL;
+        found = value;
+    }
+    return found;
+}
+
+static bool mcp_catalog_execute_schema(const char *schema) {
+    yyjson_doc *doc = yyjson_read(schema, strlen(schema), 0);
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    yyjson_val *props = mcp_unique_member(root, "properties");
+    yyjson_val *required = mcp_unique_member(root, "required");
+    bool valid = yyjson_equals_str(mcp_unique_member(root, "type"), "object") &&
+        yyjson_equals_str(mcp_unique_member(mcp_unique_member(props, "tool_name"), "type"), "string") &&
+        yyjson_equals_str(mcp_unique_member(mcp_unique_member(props, "arguments"), "type"), "object") &&
+        yyjson_is_arr(required) && yyjson_arr_size(required) == 2;
+    bool have_name = false, have_arguments = false;
+    size_t i, count;
+    yyjson_val *value;
+    yyjson_arr_foreach(required, i, count, value) {
+        if (yyjson_equals_str(value, "tool_name")) have_name = true;
+        if (yyjson_equals_str(value, "arguments")) have_arguments = true;
+    }
+    yyjson_doc_free(doc);
+    return valid && have_name && have_arguments;
+}
+
+static char *mcp_retry_catalog_leaf(mcp_registry_t *reg, const mcp_tool_t *leaf,
+                                    const char *arguments, const char *rejection) {
+    if (mcp_catalog_retry_active || !rejection || !leaf->remote_name[0] ||
+        strcmp(leaf->remote_name, "execute_tool") == 0) return NULL;
+    const mcp_server_t *server = &reg->servers[leaf->server_idx];
+    if (server->transport != MCP_TRANSPORT_HTTP ||
+        (strcmp(server->url, "https://tools.distributed.systems/mcp") != 0 &&
+         strcmp(server->url, "https://tools.distributed.systems/mcp/") != 0)) return NULL;
+
+    char expected[sizeof(leaf->remote_name) + 32];
+    snprintf(expected, sizeof(expected), "Unknown meta-tool: %s", leaf->remote_name);
+    yyjson_doc *doc = yyjson_read(rejection, strlen(rejection), 0);
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    yyjson_val *available = mcp_unique_member(root, "available_meta_tools");
+    bool exact = yyjson_equals_str(mcp_unique_member(root, "error"), expected);
+    bool offers_execute = false;
+    size_t i, count;
+    yyjson_val *value;
+    yyjson_arr_foreach(available, i, count, value)
+        if (yyjson_equals_str(value, "execute_tool")) offers_execute = true;
+    yyjson_doc_free(doc);
+    if (!exact || !offers_execute) return NULL;
+
+    const mcp_tool_t *executor = NULL;
+    for (int j = 0; j < reg->tool_count; j++) {
+        const mcp_tool_t *candidate = &reg->tools[j];
+        if (candidate->server_idx != leaf->server_idx ||
+            strcmp(candidate->remote_name, "execute_tool") != 0) continue;
+        if (executor || !mcp_catalog_execute_schema(candidate->input_schema)) return NULL;
+        executor = candidate;
+    }
+    if (!executor) return NULL;
+    yyjson_doc *input_doc = yyjson_read(arguments, strlen(arguments), 0);
+    if (!input_doc || !yyjson_is_obj(yyjson_doc_get_root(input_doc))) {
+        yyjson_doc_free(input_doc);
+        return NULL;
+    }
+    yyjson_doc_free(input_doc);
+
+    jbuf_t input;
+    jbuf_init(&input, strlen(arguments) + 384);
+    jbuf_append(&input, "{\"tool_name\":");
+    jbuf_append_json_str(&input, leaf->remote_name);
+    jbuf_append(&input, ",\"arguments\":");
+    jbuf_append(&input, arguments);
+    jbuf_append(&input, "}");
+    char *result = calloc(1, MCP_MAX_LINE);
+    if (result) {
+        /* The leaf already crossed the normal gate. Re-enter it for the
+         * wrapper under the same authority, after transport I/O has returned;
+         * no MCP transport or tool-registry lock is held here. */
+        mcp_catalog_retry_active = true;
+        bool ok = tools_execute_for_tier(executor->name, input.data,
+                                         tools_execution_tier(), result, MCP_MAX_LINE);
+        mcp_catalog_retry_active = false;
+        if (!result[0]) snprintf(result, MCP_MAX_LINE, "%s", ok ? "{}" :
+                                 "{\"error\":\"catalog wrapper dispatch failed\"}");
+    }
+    jbuf_free(&input);
+    return result;
+}
+
 char *mcp_call_tool(mcp_registry_t *reg, const char *tool_name, const char *arguments_json) {
     int tool_idx = -1;
     for (int i = 0; i < reg->tool_count; i++) {
@@ -2332,5 +2419,11 @@ char *mcp_call_tool(mcp_registry_t *reg, const char *tool_name, const char *argu
 
     free(result);
     free(resp);
+    char *retry = mcp_retry_catalog_leaf(reg, tool, arguments_json ? arguments_json : "{}",
+                                         content_text);
+    if (retry) {
+        free(content_text);
+        return retry;
+    }
     return content_text;
 }

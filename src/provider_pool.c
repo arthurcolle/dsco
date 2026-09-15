@@ -136,7 +136,15 @@ static void pool_limits_load(void) {
         char *raw_until = json_get_raw(entry, "exhausted_until");
         if (raw_until) {
             time_t until = (time_t)atoll(raw_until);
-            s->exhausted_until = until > now ? until : 0;
+            /* ChatGPT/Codex allocation resets are account-global state.  A
+             * lease persisted by an earlier process can survive an OpenAI
+             * reset and turn a healthy OAuth lane into a local hard outage.
+             * Keep the lease for the lifetime of the current process (where
+             * it prevents a retry storm), but re-probe Codex on each new
+             * process instead of treating the old local observation as
+             * authoritative. */
+            if (strcmp(s->name, "openai-codex") != 0)
+                s->exhausted_until = until > now ? until : 0;
             free(raw_until);
         }
         free(entry);
@@ -268,7 +276,8 @@ void provider_pool_init(const char *session_key) {
         {"kimi-code", true},
         {"zai", provider_usage_is_included("zai", zai_key)},
         /* Common metered fallbacks — registered lazily-warm only if keyed. */
-        {"openrouter", false}, {"xai", false},      {"moonshot", false},
+        {"openrouter", false}, {"abliteration-ai", false}, {"xai", false},
+        {"moonshot", false},
         {"google", false},
     };
 

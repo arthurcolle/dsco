@@ -12,8 +12,8 @@
 
 /* ── Default models ─────────────────────────────────────────────────── */
 
-#define ORCH_CHAT_MODEL_DEFAULT "z-ai/glm-5.2"
-#define ORCH_WORKER_MODEL_DEFAULT "kimi-k2.7-code"
+#define ORCH_CHAT_MODEL_DEFAULT DEFAULT_MODEL
+#define ORCH_WORKER_MODEL_DEFAULT DEFAULT_SUBAGENT_MODEL
 
 /* Max LLM turns per worker task before forcing stop */
 #define ORCH_WORKER_MAX_TURNS 24
@@ -171,6 +171,20 @@ static char *run_worker_task(const char *task, const char *model) {
         key = api_key;
     provider_debug_log_request(pname, model, key);
 
+    /* The worker must use the selected provider's wire contract. The generic
+     * llm_stream() helper is the legacy Anthropic path, so using it here would
+     * send a ChatGPT subscription credential to api.anthropic.com and produce
+     * a misleading 401 even though the model route is correct. */
+    provider_t *worker_provider = provider_create(pname);
+    if (!worker_provider || !worker_provider->build_request || !worker_provider->stream) {
+        provider_free(worker_provider);
+        return safe_strdup("[error: provider unavailable for worker]");
+    }
+    if (!provider_prepare(worker_provider)) {
+        provider_free(worker_provider);
+        return safe_strdup("[error: provider transport unavailable for worker]");
+    }
+
     /* Session */
     session_state_t session;
     session_state_init(&session, model);
@@ -184,12 +198,13 @@ static char *run_worker_task(const char *task, const char *model) {
     char *result = NULL;
 
     for (int turn = 0; turn < ORCH_WORKER_MAX_TURNS; turn++) {
-        char *req = llm_build_request_ex_for_credential(&conv, &session, 8192, key);
+        char *req = worker_provider->build_request(worker_provider, &conv, &session, 8192, key);
         if (!req)
             break;
 
         /* Stream silently — worker output is returned as tool result */
-        stream_result_t sr = llm_stream(key, req, NULL, NULL, NULL, NULL, NULL);
+        stream_result_t sr = provider_stream_reuse(worker_provider, key, req, NULL, NULL, NULL,
+                                                   NULL, NULL);
         free(req);
 
         if (!sr.ok) {
@@ -260,28 +275,29 @@ static char *run_worker_task(const char *task, const char *model) {
             session.turn_count, session.total_input_tokens, session.total_output_tokens);
 
     conv_free(&conv);
+    provider_free(worker_provider);
     return result ? result : safe_strdup("[worker completed with no text output]");
 }
 
-/* ── Virtual Tool Wrapping: every tool as a Haiku micro-agent ───────── */
+/* ── Virtual Tool Wrapping: every tool as a small micro-agent ───────── */
 /*
  * Instead of sending 30 tools to one agent, wrap each tool in its own
- * Haiku instance. The coordinator (Sonnet/Opus) describes WHAT to do,
- * the Haiku wrapper figures out HOW to call its single tool.
+ * small instance. The coordinator describes WHAT to do, and the wrapper
+ * figures out HOW to call its single tool.
  *
  * Benefits:
  *   - Zero tool selection confusion (1 tool per agent)
- *   - Haiku is $0.25/MTok — cheaper than wasting Sonnet context on 30 schemas
+ *   - A small worker is cheaper than wasting coordinator context on 30 schemas
  *   - Natural parallelism via topology fan-out
  *   - Error isolation: one tool failure doesn't corrupt the whole session
  *
- * Cost: ~$0.001-0.003 per tool invocation (Haiku turn + tool execution)
+ * Cost depends on the configured worker lane and tool execution.
  */
 
-/* Run a single tool via a Haiku wrapper agent.
+/* Run a single tool via a small wrapper agent.
  * task: natural language description of what the tool should do.
  * tool_name: specific tool to invoke.
- * Returns: tool result interpreted by Haiku, or raw result on failure. */
+ * Returns: tool result interpreted by the wrapper, or raw result on failure. */
 static char *run_virtual_tool(const char *task, const char *tool_name) {
     const char *api_key = tools_runtime_api_key();
     if (!api_key || !api_key[0])
@@ -292,7 +308,7 @@ static char *run_virtual_tool(const char *task, const char *tool_name) {
     if (!key || !key[0])
         key = api_key;
 
-    /* Build a micro-session: Haiku, 1 tool */
+    /* Build a micro-session with one tool */
     session_state_t session;
     session_state_init(&session, "claude-haiku-4-5-20251001");
 
@@ -312,7 +328,7 @@ static char *run_virtual_tool(const char *task, const char *tool_name) {
         return tr;
     }
 
-    /* Build a Haiku conversation that forces it to call this specific tool */
+    /* Build a conversation that forces it to call this specific tool */
     conversation_t conv;
     conv_init(&conv);
 
@@ -321,8 +337,11 @@ static char *run_virtual_tool(const char *task, const char *tool_name) {
     snprintf(user_msg, sizeof(user_msg),
              "You have exactly one tool available: %s\n"
              "Call it to accomplish this task:\n\n%s\n\n"
-             "Call the tool now with the correct parameters. "
-             "After getting the result, return it with a brief summary.",
+             "Use its exact schema and the task context to supply correct parameters. "
+             "Do not invent missing required values or expand the task scope. "
+             "After the call, report the observed result in the requested format; "
+             "distinguish a successful call from an outcome that still needs verification. "
+             "For a denial or error, state the concrete blocker without claiming success.",
              tool_name, task);
     conv_add_user_text(&conv, user_msg);
 
@@ -516,7 +535,7 @@ static char *list_domains_cb(const char *name, const char *input_json, void *ctx
     jbuf_appendf(&b,
                  "\n## Models\n\n"
                  "  Default worker: %s\n"
-                 "  Override per-call: glm (general) | kimi/code (worker) | full model ID\n"
+                 "  Override per-call: luna (root) | astra (worker) | full model ID\n"
                  "\n## Always Available\n\n"
                  "  Pinned in all domains: bash, read_file, discover_tools, context_recall\n",
                  g_worker_model);
@@ -540,6 +559,10 @@ static orch_domain_t domain_from_str(const char *s) {
 static const char *resolve_model_alias(const char *alias) {
     if (!alias || !alias[0])
         return g_worker_model;
+    if (strcmp(alias, "luna") == 0)
+        return DEFAULT_MODEL;
+    if (strcmp(alias, "astra") == 0)
+        return DEFAULT_SUBAGENT_MODEL;
     if (strcmp(alias, "glm") == 0)
         return provider_select_default_primary_model(false);
     if (strcmp(alias, "kimi") == 0)
@@ -551,7 +574,7 @@ static const char *resolve_model_alias(const char *alias) {
     if (strcmp(alias, "sonnet") == 0)
         return provider_select_default_primary_model(true);
     if (strcmp(alias, "opus") == 0)
-        return "claude-opus-4-6";
+        return "claude-opus-5";
     return alias; /* pass through full model IDs */
 }
 
@@ -697,8 +720,8 @@ static const char s_dispatch_schema[] =
     "},"
     "\"model\":{"
     "\"type\":\"string\","
-    "\"description\":\"Worker model alias or full model ID. Default is kimi-k2.7-code; use glm for "
-    "GLM or kimi/code for Kimi K2.7 Code.\""
+    "\"description\":\"Worker model alias or full model ID. Default is gpt-6-astra; use astra "
+    "for Astra or luna for the top-level model.\""
     "}"
     "},"
     "\"required\":[\"domain\",\"task\"]"
@@ -731,7 +754,7 @@ static const char s_vtool_schema[] = "{"
                                      "\"properties\":{"
                                      "\"calls\":{"
                                      "\"type\":\"array\","
-                                     "\"description\":\"Array of tool invocations. Each is a Haiku "
+                                     "\"description\":\"Array of tool invocations. Each is a small "
                                      "micro-agent with exactly 1 tool.\","
                                      "\"items\":{"
                                      "\"type\":\"object\","
@@ -756,7 +779,7 @@ bool agent_run_orchestrated(const char *api_key, const char *chat_model, const c
                             const char *provider_override) {
     /* Apply defaults */
     if (!chat_model || !chat_model[0])
-        chat_model = provider_select_default_primary_model(false);
+        chat_model = ORCH_CHAT_MODEL_DEFAULT;
 
     /* Worker model: arg > env > default */
     const char *env_worker = getenv("DSCO_WORKER_MODEL");
@@ -766,7 +789,7 @@ bool agent_run_orchestrated(const char *api_key, const char *chat_model, const c
         snprintf(g_worker_model, sizeof(g_worker_model), "%s", env_worker);
     else
         snprintf(g_worker_model, sizeof(g_worker_model), "%s",
-                 provider_select_default_primary_model(true));
+                 ORCH_WORKER_MODEL_DEFAULT);
 
     fprintf(stderr,
             "\n  \033[1;36morchestrator mode\033[0m\n"
@@ -790,15 +813,15 @@ bool agent_run_orchestrated(const char *api_key, const char *chat_model, const c
     tools_register_external("dispatch_topology",
                             "Dispatch a multi-agent topology for complex tasks requiring multiple "
                             "specialist agents coordinated in a DAG. Topologies use 3-12 agents "
-                            "across Haiku/Sonnet/Opus tiers. Use for: code generation (clinic), "
+                            "across the configured model tiers. Use for: code generation (clinic), "
                             "research (research), code review (code_review), quality refinement "
                             "(critic_loop), competitive selection (tournament).",
                             s_topology_schema, dispatch_topology_cb, NULL);
 
     tools_register_external(
         "dispatch_tools",
-        "Execute specific tools via Haiku micro-agents (1 tool per agent). "
-        "Each tool call is wrapped in its own cheap Haiku instance that handles "
+        "Execute specific tools via small micro-agents (1 tool per agent). "
+        "Each tool call is wrapped in its own small instance that handles "
         "parameter construction and result interpretation. Use when you know EXACTLY "
         "which tools to call. Much cheaper than dispatch_agent for targeted operations. "
         "Example: [{tool:\"read_file\",task:\"read /etc/hosts\"}, "
@@ -814,7 +837,7 @@ bool agent_run_orchestrated(const char *api_key, const char *chat_model, const c
     g_worker_domain = ORCH_DOMAIN_GENERAL;
 
     /* Hand off to the full interactive agent loop (TUI + readline + history).
-     * Haiku sees only dispatch_agent, dispatch_topology, list_domains.
+     * Luna sees only dispatch_agent, dispatch_topology, list_domains.
      * It routes user requests to domain-filtered workers or multi-agent
      * topologies as needed. */
     bool user_exit_requested = agent_run(api_key, chat_model, NULL, false, provider_override);

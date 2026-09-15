@@ -3,6 +3,7 @@
    what each gate stage would decide. Lock-free-ish: counters are C11 atomics;
    we accept benign races on the double accumulators (measurement, not ledger). */
 #include "gov_experiment.h"
+#include "execution_events.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -154,6 +155,7 @@ static void atomic_add_double(_Atomic double *acc, double v) {
 void gov_stage_record(gov_stage_t s, double ms, bool would_deny, bool enforced) {
     if (s < 0 || s >= GOV_STAGE_COUNT)
         return;
+    execution_events_stage(gov_stage_name(s), ms, would_deny, enforced);
     stage_counter_t *c = &g_stage[s];
     atomic_fetch_add_explicit(&c->runs, 1, memory_order_relaxed);
     if (would_deny) {

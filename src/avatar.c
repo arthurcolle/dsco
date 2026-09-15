@@ -1227,7 +1227,7 @@ int avatar_anim(const char *json) {
         if (anim_interrupted())
             break;
         if (stdin_params) {
-            /* read one JSON line from stdin — face_capture.py drives us */
+            /* read one JSON landmark frame from stdin */
             if (!fgets(stdinbuf, sizeof(stdinbuf), stdin))
                 break;
             stdinbuf[strcspn(stdinbuf, "\n")] = 0;

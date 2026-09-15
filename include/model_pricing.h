@@ -13,6 +13,8 @@ typedef struct {
 } model_price_t;
 
 void model_pricing_init(void);
+void model_pricing_load_cached(void);
+int model_pricing_refresh_sync(void);
 void model_pricing_shutdown(void);
 int model_pricing_lookup(const char *provider, const char *model_id,
                          model_price_t *out);
