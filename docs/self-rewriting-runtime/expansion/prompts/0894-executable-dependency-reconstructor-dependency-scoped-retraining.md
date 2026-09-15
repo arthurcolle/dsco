@@ -1,0 +1,15 @@
+# 894 — Executable dependency-graph reconstructor: Dependency-scoped retraining
+
+Implement the dependency-scoped retraining feature for the Executable dependency-graph reconstructor RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Learn procedures that reconstruct executable dependency graphs from typed IR, imports, state access, and observed invocation relationships.
+
+REPL `procedure_ir`, `call_observations`, and `state_accesses` retain full definitions and dynamic evidence with exact generation identities. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root code clusters procedures, delegates indirect-call questions, and merges typed edges while preserving unresolved targets. Role output: Final `ExecutableDependencyGraph` handle names typed edges, provenance, unresolved targets, and graph-completeness counterexamples. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Bind training episodes and learned procedures to content and environment dependencies. When one dependency changes, select the affected development slices and train a bounded role update with replay from unaffected families. Version the dependency graph and resulting checkpoint separately.
+
+Train on synthetic modules with known dependency graphs and instrumented executions exposing missing static relationships. A fixed graph generator/reference analyzer verifies mandatory edges, target types, cycles, and explicit unknown-call coverage. Hold out callback shapes, import graphs, state-sharing patterns, and recursive structures with equivalent modules grouped. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: An indirect callback changes shared state even though its target never appears in the direct-call list. Editing content at the same path must reopen dependent learning claims. Retraining only on the changed slice must not hide regressions elsewhere, and unrelated episodes must not be relabeled stale merely to improve reported coverage.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/ast.c`, `src/plan_dag.c`, `src/trace_kg_store.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py` (`WorkflowToolkit.analyze_dependencies`). Donor baseline: Analyzes declared workflow dependencies; recovering native semantic dependencies requires additional mechanisms. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

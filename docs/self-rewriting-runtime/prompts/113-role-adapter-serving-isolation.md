@@ -1,0 +1,13 @@
+# 113 — Serve isolated role adapters by immutable version
+
+Once every role has a trained RLM, serving the wrong adapter becomes a behavioral correctness bug. Work in `/Users/arthurcolle/Dsco/dsco-cli` or an assigned worktree. `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/config.py` supplies `ModelSpec` and `normalize_model_id()`, but no immutable adapter-serving boundary. Implement one for role roots, preserving the [RLM paper's root/leaf distinction](https://arxiv.org/html/2512.24601v3).
+
+Bind a request tree to base checkpoint, root adapter tensor digest, tokenizer/renderer revision, role contract, and frozen leaf selector at admission. Loading a newer role adapter affects only newly admitted trees unless an explicit supported migration exists. Reject shape, rank, base-revision, or tokenizer incompatibility before serving. Cache keys must include role and adapter identity; a shared base does not imply shared behavioral state. Require the backend's actual loaded-version receipt or local artifact verification, not just the model string requested by the client.
+
+Add a small serving-snapshot module around `src/provider.c`, `src/provider_pool.c`, and `src/agent_profile.c`. A proposed `dsco role-model serve/verify` surface may use a pinned local inference backend; inspect its real adapter API rather than inventing load endpoints. If no role registry exists, accept a minimal manifest with explicit immutable versions. Produce two distinct root adapters by real bounded training on different executable role curricula, keeping the base and leaf frozen; these are the artifacts whose isolation must be demonstrated.
+
+Use the actual binary to issue concurrent recursive tasks for both roles while loading a new version of one adapter. Capture backend identity receipts and compare outputs to independent oracles on held-out role task families. No existing tree may mix root generations, and role B must retain its original adapter. Reject an adapter for the wrong base, a renamed unchanged checkpoint claimed trained, and a backend acknowledging the requested name while loading a different digest. Verify cache separation with identical prompt text under different roles. Report tensor-update evidence, version transitions, oracle results, and the concrete guarantees supported by the backend, without claiming unsupported hot-swapping behavior.
+
+The REPL holds external context; generated code invokes children and assigns the final output variable.
+
+Preserve dirty work; use new modules and small C hooks. Route dynamic tool effects through `tools_execute_for_tier()` and preserve denials. Build with `DSCO_NO_INSTALL=1 make -j2 dsco`; isolate state and never install worker binaries.

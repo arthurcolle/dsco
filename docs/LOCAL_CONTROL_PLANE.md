@@ -141,7 +141,9 @@ sequenceDiagram
 
 Operational notes:
 
-- `DSCO_TOOLMGMT=1` enables remote tool registration in interactive startup.
+- A configured Tool Management token enables demand-paged remote discovery when
+  `discover_tools` is called; it does not fetch the catalog during startup.
+  Set `DSCO_TOOLMGMT=0` only to force deterministic/offline local discovery.
 - `TOOLS_API_TOKEN` or `AUTH_TOKEN` provides the bearer token.
 - `TOOLS_API_URL` or `TOOL_MANAGEMENT_API_URL` can point to a staging plane.
 - A missing token should degrade to local-only tools, not block normal DSCO use.

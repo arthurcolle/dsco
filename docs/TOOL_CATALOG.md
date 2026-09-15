@@ -3,11 +3,11 @@
 This catalog is generated from the static `src/tools.c` built-in tool registry.
 
 - Source: `src/tools.c`
-- Total built-in tools: 287
-- Core tools: 52
-- Read-only tools: 167
-- Concurrent tools: 171
-- Interactive tools: 2
+- Total built-in tools: 314
+- Core tools: 66
+- Read-only tools: 171
+- Concurrent tools: 173
+- Interactive tools: 1
 
 Regeneration:
 
@@ -40,6 +40,8 @@ Flags:
 | <code>ast_index</code> |  | yes |  |  | Index dsco's own source into an AST-block vector store (one card per function/struct/typedef). Run once before ast_search; re-run to refresh. Defaults to src/ + include/; pass comma-separated paths to narrow. |
 | <code>ast_insights</code> |  | yes | yes |  | Structured aggregate analysis over dsco's source (no API, no index needed): node-type histogram, function complexity stats, complexity hotspots (the 'what needs attention' list), and per-directory rollups. Defaults to src/+include/; pass comma-separated paths to narrow. |
 | <code>ast_search</code> |  | yes | yes |  | Semantic retrieval over the indexed AST: describe a symptom or capability in natural language and get the source blocks where it lives, file:line anchored. Local recall + jina-reranker-v3 cross-encoder precision. Run ast_index first. |
+| <code>autobot_discover</code> |  | yes |  |  | Discover exact executable Autobot Tool Management contracts. Registers only bounded remote matches; no local fuzzy fallback. Returned tm__ names are invoked through the normal DSCO gate. Used by require('lingo.autobot'). |
+| <code>autobot_workflow</code> |  |  |  |  | Execute a bounded immutable Lingo workflow through Autobot's durable composition owner, or read its durable receipt. Exact ordered dependencies and mappings; passthrough/map only; at most 16 steps, 32 map items and 128 remote calls. Required idempotency key binds the full plan and inputs. No automatic retry. A failed or unknown execution remains evidence, not an accepted result. |
 | <code>avian</code> |  |  |  |  | Bird-inspired Wings mechanisms: nesting workspaces, brooding incubation, fledging promotion, roosting cooldown, molting refresh. |
 | <code>backtrace</code> |  | yes |  |  | Symbolicate a stack from a binary and optional core dump (lldb 'thread backtrace all'). Turns a crash into a readable stack. |
 | <code>base64</code> |  | yes | yes |  | Base64 encode/decode (legacy). |
@@ -49,9 +51,15 @@ Flags:
 | <code>BashOutput</code> | yes | yes | yes |  | Retrieve buffered output from a background Bash shell started with run_in_background. Returns {bash_id,status:running\|completed,output} with only the new bytes since the last call. |
 | <code>bg_learn</code> |  |  |  |  | Control the realtime background learner that consolidates self-improvement patterns and mines tool co-occurrence into auto-generated skills. action=status (default) \| on \| off \| run (force one cycle now). |
 | <code>big_factorial</code> |  | yes | yes |  | Compute n! for n from 0 through 500 using the bigint engine. |
+| <code>blackboard</code> |  |  |  |  | Coordinate workers through an explicit local SQLite board. Create immutable tasks with dependency IDs and an executable acceptance check; claim ready work with a lease, carry owner/token/generation into renew and publish, then verify the exact candidate and input snapshot. Only accepted artifacts release dependencies. Invalidation fences all dependent attempts. Inspect status or cursor-based events. See docs/BLACKBOARD.md for the protocol and trust boundary. |
 | <code>browser</code> |  | yes | yes |  | Browser operations: snapshot, extract, viewport, outline. |
+| <code>browser_session</code> | yes |  |  |  |  |
+| <code>buffer</code> | yes |  |  |  |  |
+| <code>buffer_view</code> | yes |  |  |  |  |
 | <code>calc</code> |  | yes | yes |  | Evaluate math expressions. |
 | <code>call_graph</code> |  | yes | yes |  | Build a call graph rooted at a C function in a project directory. |
+| <code>chimera_execute</code> |  |  |  |  | Execute a previously selected direct Chimera plan once through its Router owner. Requires matching request and plan fingerprints, one model call, at most 512 output tokens and a known-price estimate within $0.01. Plan changes and replay are refused before provider dispatch; uncertain outcomes are not automatically retried. Returns measured usage and model identity. Used by a Lingo Chimera plan's execute method. |
+| <code>chimera_route</code> |  | yes | yes |  | Request an actual Chimera routing decision with explicit per-request preferences and constraints. Uses the configured Router's /v1/route endpoint; does not execute inference or change account defaults. Used by require('lingo.chimera'). |
 | <code>chmod_tool</code> |  |  |  |  | Change file permissions. Accepts octal (e.g. 755) or symbolic (e.g. u+x, go-w). |
 | <code>clipboard</code> |  |  |  |  | Read or write the system clipboard via pbpaste/pbcopy with Linux fallbacks. |
 | <code>code_index</code> |  |  |  |  | Index source files into the local context store for later code_search. |
@@ -59,9 +67,10 @@ Flags:
 | <code>compile</code> |  |  |  |  | Compile source code. |
 | <code>computer</code> |  |  |  |  | Control the local desktop like a human: screenshot, mouse_move, left_click, right_click, middle_click, double_click, triple_click, left_click_drag, key (combos like cmd+a), type, scroll, cursor_position, wait. Coordinates are display points [x,y]; a fresh screenshot is attached after each action so you can see the result. |
 | <code>ConstructColorSample</code> | yes | yes |  |  | Sample deterministic named colors or export dynamic highlight colors for the entire live MetaConstruct stack. Use action=sample with name/kind/state/weight for one named color, or action=palette to return colors for loop constructs, effects, signals, graph nodes/edges, dyads, MapReduce jobs, SRM records, measurements, operations, refinements, and schema rewrites. Returns RGB, hex, ansi256, and optional ANSI escapes. |
-| <code>context_compact</code> | yes |  |  |  | Compress old conversation history to reclaim tokens. |
+| <code>context_compact</code> | yes |  |  |  | Shorten old tool observations; aggressive also collapses completed old tool calls. Keeps recent messages. Use context_evict first for recoverable archives. Reports actual changes; no model summary call. |
 | <code>context_control</code> | yes |  |  |  | Inspect and manage live session context. Mutate plain-text transcript messages or set/clear a session-local system directive overlay; tool protocol messages and higher-authority instructions are protected. |
-| <code>context_recall</code> |  | yes | yes |  | Retrieve persisted tool results. No args = list available keys. |
+| <code>context_evict</code> | yes |  |  |  | Archive completed old tool exchanges, including large call arguments, then replace them with excerpts and context_recall keys. Preserves user text, recent messages and pending calls; archive failures retain evidence. |
+| <code>context_recall</code> |  | yes | yes |  | Retrieve persisted tool results or ck: context archives. Append #b:START-END to a ck: key for bounded byte retrieval. No args lists persisted result keys. |
 | <code>context_status</code> | yes | yes | yes |  | Context window self-awareness: tokens, schema overhead, recommendations. |
 | <code>contract_ingest</code> |  |  |  |  | Bulk-fetch all open Kalshi events+markets into contracts.db. Persists title, settlement_date, strike, underlying, YES/NO meanings, prices. Run before searching. |
 | <code>contract_ingest_all</code> |  |  |  |  | Exhaustive historical ingestion: fetch ALL settled Kalshi markets via cursor pagination into contracts.db. Can take minutes for full history. Use max_pages to control depth. |
@@ -83,11 +92,12 @@ Flags:
 | <code>debugger</code> |  |  |  |  | Drive lldb in batch mode on a program: breakpoints, run, backtrace, inspect. Pass an lldb `script` (newline-separated commands; default run;bt;quit). |
 | <code>delete_file</code> |  |  |  |  | Delete a file or empty directory. |
 | <code>dependency_graph</code> |  | yes | yes |  | Build a C/C header dependency graph for a project directory. |
+| <code>desktop</code> | yes |  |  |  |  |
 | <code>diagnostics</code> |  | yes | yes |  | Fast single-file syntax check with the project's real compile flags (from compile_commands.json). Returns structured {severity,line,col,message} diagnostics in ~200ms — the tight edit→verify loop, no full make needed. Run after editing a .c/.h file. |
 | <code>diff</code> |  | yes | yes |  | Compare two files or strings. |
 | <code>disasm</code> |  | yes | yes |  | Disassemble a single symbol from a built binary (objdump). See the actual emitted machine code. Defaults to the dsco binary. |
 | <code>discover_integrations</code> | yes | yes | yes |  | Discover cached, installed, connected, live, inaccessible, stale, OAuth-gated, mutating, and sync-capable external integrations from the Codex app directory plus live MCP tools. |
-| <code>discover_tools</code> | yes | yes | yes |  | List available tools by category or search. |
+| <code>discover_tools</code> | yes | yes | yes |  | Search dsco's live Tool Management API, MCP, and builtin capability registry by query or category. The registry may contain thousands of executable tools beyond the small active model register. Query matches include full schemas; results are runtime capabilities, not documentation. |
 | <code>disk_usage</code> |  | yes | yes |  | Disk usage for a path. |
 | <code>docker</code> |  |  |  |  | Docker operations. |
 | <code>download_file</code> |  |  |  |  | Download a file from URL. |
@@ -99,6 +109,7 @@ Flags:
 | <code>EnterPlanMode</code> |  |  |  |  | Enter Claude-compatible advisory plan mode. |
 | <code>env_get</code> |  | yes | yes |  | Get environment variable. |
 | <code>env_scan</code> |  | yes | yes |  | Search environment variables with sensitive values redacted by default. Set reveal=true only when intentionally inspecting secrets. |
+| <code>env_set</code> |  |  |  |  | Set environment variable for this session. Authority vars (DSCO_ALLOW_*, DSCO_TRUST_TIER, DSCO_GOV_*, DSCO_APPROVAL_MODE, DSCO_IMMUNE_*, DSCO_ACTIVATE*) are refused; set those at launch. |
 | <code>eval</code> |  | yes | yes |  | Evaluate a math expression. |
 | <code>evict_tools</code> | yes |  |  |  | Unload dynamically loaded tools from the active register file. Provide names, tools, category, or all:true. |
 | <code>ExitPlanMode</code> |  |  |  |  | Exit Claude-compatible advisory plan mode. |
@@ -108,14 +119,18 @@ Flags:
 | <code>find_files</code> | yes | yes | yes |  | Find files by name pattern (glob). |
 | <code>format_code</code> |  |  |  |  | Run clang-format in place on a file (optionally --lines=A:B). Keeps edits style-consistent with the codebase. |
 | <code>fs_watch</code> |  | yes | yes |  | Bounded filesystem watcher: snapshot a path, wait briefly, and report created/changed/deleted files. Defaults to path=. seconds=2. |
+| <code>get_goal</code> | yes | yes |  |  | Read the active session goal, budgets, evidence, and two-queue controller summary. |
 | <code>git</code> | yes |  |  |  | Git operations: status, diff, log, commit, add, branch, stash, clone, push, pull. |
 | <code>git_bisect</code> |  |  |  |  | Automated git bisect: given good and bad refs and a test command, find the breaking commit. NOTE: moves HEAD across commits during the run, then resets. |
 | <code>git_blame</code> |  | yes | yes |  | Line-level authorship: commit, author, when for a file (optionally a start..end line range). |
 | <code>git_log_symbol</code> |  | yes | yes |  | Pickaxe history: every commit that changed the count of a symbol/identifier (git log -S). The history of a function. |
 | <code>github_search</code> |  | yes | yes |  | Search GitHub repos, code, issues. |
 | <code>Glob</code> | yes | yes | yes |  | Claude-compatible file glob search. |
+| <code>goal_queue</code> | yes |  |  |  | Operate an existing goal's leased task. The root must first decompose, even for one-step work: create one work child, verify it, complete it, then review and complete the re-leased root. Exact fields: status uses action only; decompose uses action,task_id,revision,children (1..8; NO evidence/reason); checkpoint/complete use action,task_id,revision,evidence; fail/block also require reason. Evidence <=511 UTF-8 bytes; reason <=255. Serialize mutations. Use the latest leased task and controller revision, NOT the goal revision; never guess IDs or revision increments. current_id=0 after a transition is normal: the next model request leases a task and changes revision. Checkpoint retains its lease with a new revision. Root complete/block commits the goal automatically; no extra update_goal is normally needed. See docs/GOAL_CONTROLLER.md for examples and error recovery. |
 | <code>governance</code> |  |  |  |  | Governance controls: status, curriculum, authorize, checkpoint, budget, capability, experiment, audit, param. capability records empirical outcome evidence and returns the evidence-earned tier; experiment reports per-stage governance overhead + would-block stats for the active governance model (reset:true clears counters). |
 | <code>graphsub</code> |  |  | yes |  | GraphSub substrate client: agent registration, pheromone coordination, graph traversal, memory sync, swarm topology, fleet management. Actions: status, register, pheromone (deposit\|query\|sweep), query (traverse), memory_sync, swarm, fleet. |
+| <code>graphsub_operator</code> |  | yes | yes |  | Browse the configured GraphSub native engine using bounded read-only GET operations: status, schema, list, read. Live observations only; no snapshot, transaction, arbitrary query or mutation. Used by require('lingo.operator'). |
+| <code>graphsub_world</code> |  |  |  |  | Publish a bounded Lingo stored-world snapshot as a new GraphSub State artifact, or read an existing artifact by opaque ID and expected SHA-256. Verifies exact content and reports server persistence evidence. No mutable head, CAS, automatic retry, or distributed transaction. Used by require('lingo.workspace'). |
 | <code>Grep</code> | yes | yes | yes |  | Claude-compatible content search with glob/output_mode/head_limit support. |
 | <code>grep_files</code> | yes | yes | yes |  | Search file contents with regex. |
 | <code>head_tail</code> |  | yes | yes |  | Read first or last N lines of a file. action=head (default) or tail. |
@@ -123,7 +138,9 @@ Flags:
 | <code>hkdf</code> |  | yes | yes |  | Derive bytes using HKDF-SHA256 from hex input key material. |
 | <code>hmac</code> |  | yes | yes |  | Compute HMAC-SHA256. |
 | <code>hostname</code> |  | yes | yes |  | DNS lookup: resolve hostname to IPs (action=resolve) or reverse DNS from IP (action=reverse). |
-| <code>http_request</code> | yes | yes | yes |  | Make HTTP requests (GET/POST/PUT/DELETE). |
+| <code>http_request</code> | yes |  | yes |  | Make HTTP requests (GET/POST/PUT/DELETE). |
+| <code>improvement_catalog</code> |  | yes |  |  | Inspect the local content-addressed DSCO improvement catalog. Actions: status, list, inspect. Received bundles report signature and trust state; nothing is applied automatically. |
+| <code>improvement_sync</code> |  |  |  |  | Exchange immutable DSCO improvement bundles through private DHT provider discovery and the encrypted mesh. Actions: publish, fetch, announce, trust, promote, materialize. Unknown signers are quarantined; there is no auto-apply. |
 | <code>include_graph</code> |  | yes | yes |  | Header include tree for a translation unit (cc -H) — what a file pulls in and why edits trigger big rebuilds. |
 | <code>inspect_file</code> |  | yes | yes |  | AST summary for one C/C header source file. |
 | <code>invoke_tool</code> | yes |  |  |  | Invoke a discovered or loaded capability without changing the provider tool schema. Use the exact target name and input schema returned by discover_tools/load_tools. The target still passes through normal trust, approval, budget, and audit gates. |
@@ -158,14 +175,16 @@ Flags:
 | <code>kalshi</code> |  |  |  |  | Kalshi prediction market. Actions: markets, events, search, orderbook, trades, series, candlesticks, weather, snapshot, event_detail, daily (read); positions, balance, portfolio, fills, open_orders (account); create_order, batch_create, cancel_order, cancel_all, amend_order (trade); historical_markets, historical_trades, historical_cutoff (history). |
 | <code>KillShell</code> |  |  |  |  | Terminate a background shell (Bash run_in_background) by shell_id (SIGTERM). |
 | <code>killswitch</code> |  |  |  |  | Kill switch control: trigger, resolve, status. |
-| <code>kitten</code> | yes |  |  | yes | Run any installed first-party kitten as a governed native interactive capability, including icat, clipboard, SSH/transfer, notifications, hints, diff, themes, font/file choosers, command palette, Unicode input, panels, and terminal queries. Arguments are passed directly as argv with no shell. |
+| <code>kitten</code> | yes |  |  |  | Run an installed first-party kitten with bounded captured output and isolated stdin. Arguments are direct argv. For a kitten needing terminal interaction, launch its executable through pty_session and use that session's read/write/resize actions. |
 | <code>kitty_remote</code> | yes |  |  |  | Native governed control of every Kitty remote-control capability: windows, tabs, layouts, launch/run, screen text, input, scrolling, colors, fonts, spacing, opacity, background images, logos, markers, environment, child signals, and kittens. Arguments are passed directly as argv with no shell. |
 | <code>knowledge_base</code> |  |  |  |  | KB operations: ingest, search, deep_search, list, get, delete, arxiv_search, arxiv_ingest. |
 | <code>learned_cost</code> |  |  |  |  | Learned k-NN cost model (Priority 3): predict/record/stats. action=predict needs {task,topology}; action=record needs {task,topology,tokens,cost}; action=stats returns DB summary. |
 | <code>legion</code> |  |  |  |  | Legion agent system: spawn, status, find. |
+| <code>lingo</code> |  |  |  |  | Run Lingo, the Distributed Systems object and calculation language on LuaJIT: named worlds, typed platform objects, dependencies, scenarios, source-bound snapshots, portable value addresses, and explicit governed service calls. See docs/LINGO.md. Source or path, optional args; check validates syntax only. |
+| <code>lingo_session</code> |  |  |  |  | Open and operate a bounded in-process Lingo worksheet. Inspect values and dependencies, change declared scenario controls, select values, save source-bound sessions, and restore with an explicit program path. Inspection performs no host calls; opening may initialize through governed tools; save uses the governed write_file tool. Session IDs belong to this DSCO process. |
 | <code>lint</code> |  |  |  |  | Run clang-tidy on a file and return its warnings/errors. Uses compile_commands.json automatically. |
 | <code>list_directory</code> | yes | yes | yes |  | List directory contents with file info. |
-| <code>load_tools</code> | yes |  |  |  | Dynamically load tools into the active register file. Provide at least one of: names (comma-separated), tools (array), or category. |
+| <code>load_tools</code> | yes |  |  |  | Load exact Tool Management API, MCP, or builtin schemas from the live executable registry into the active model register. Loading does not request permission: advertised tools are callable immediately and execution policy is enforced when called. Provide names, tools, or category. |
 | <code>LoopConstructStatus</code> | yes | yes |  |  | Inspect the live recursive MetaConstruct stack, parsed continue/break expressions, counters, override flags, ontology metadata, mutable graph nodes/edges, traversal state, dyads, MapReduce jobs, SRM/metrology and catalog/order state, effects, reward dynamics, learning signals, policies, decisions, attractors, prompt games, refinement rules, and schema rewrite rules. |
 | <code>LS</code> | yes | yes | yes |  | Claude-compatible directory listing (alias for list_directory). |
 | <code>lsof</code> |  | yes | yes |  | List open files/sockets by pid, port, path, or a short global sample. |
@@ -177,7 +196,8 @@ Flags:
 | <code>mkdir</code> |  |  |  |  | Create directory (with parents). |
 | <code>move_file</code> |  |  |  |  | Move or rename a file/directory. |
 | <code>MultiEdit</code> | yes |  |  |  | Apply an ordered batch of string edits to ONE file atomically. edits=[{old_string,new_string,replace_all?}] applied in order (each sees the prior result); if any old_string is missing NOTHING is written. |
-| <code>net</code> |  |  |  |  | Native networking: mesh P2P (libsodium encrypted), HTTP/TLS server/client (mbedTLS), bridge fleet ops, remote tool invocation. Actions: mesh/status, mesh/peers, mesh/send, mesh/broadcast, mesh/connect, http/post, http/status, bridge/fleet, bridge/exec, bridge/fanout (concurrent command across all fleet hosts with durable per-host RESULT.json envelopes; role=<filter>, concurrency=N), bridge/send, bridge/bus_put, bridge/bus_get, remote. |
+| <code>native_window</code> | yes |  |  |  |  |
+| <code>net</code> |  |  |  |  | Native mesh/TLS and structured fleet-mesh operations. fleet/status, fleet/exec (argv or cmd, targets), fleet/burst (commands), fleet/probe (registered witnesses), fleet/replication (latest evidence), fleet/replicate (payload, no deployment; Tailscale default), fleet/swarm (status). bridge/exec and bridge/fanout use the same receipt-backed argv adapter. mesh/*, http/*, bridge/fleet, bridge/send, bridge/bus_* and remote remain. |
 | <code>net_probe</code> |  |  | yes |  | Active network probe: ping a host or TCP-connect to host:port with a short timeout. |
 | <code>network</code> |  | yes | yes |  | Network diagnostics: dns, ping, port_check, port_scan, netstat, cert, traceroute, whois, interfaces, websocket. |
 | <code>notify</code> |  |  |  |  | Send a desktop notification (osascript on macOS, printf fallback elsewhere). |
@@ -225,6 +245,7 @@ Flags:
 | <code>parallel_ai_task_status</code> |  | yes | yes |  | Retrieve a Parallel.ai Task API run status by run_id, or the tracked latest task run when run_id is omitted. |
 | <code>parallel_ai_wait</code> |  | yes |  |  | Poll a tracked Parallel.ai async job until terminal status, then fetch the result/runs when available. Supports task_run, task_group, findall, and monitor; ids default to the locally tracked latest job for the kind. |
 | <code>parallel_search</code> | yes | yes | yes |  | Fan out web search to multiple providers (Jina, Tavily, Brave) concurrently. Returns merged results from all available providers. |
+| <code>persistent_directive</code> | yes |  |  |  | Inspect or mutate the persistent agent-authored system-prompt overlay. Changes survive sessions and are versioned with history and rollback. Mutations require fs_write capability; this layer cannot override higher-authority instructions. |
 | <code>pets</code> |  | yes | yes |  | Companion sprites for background agents. action=roster shows live background-agent pets (face, status, cost, activity sparkline); gallery shows a species sampler; roll shows a single deterministic pet for a seed string. Each agent deterministically hatches the same pet from its id/task. |
 | <code>pheromone</code> |  |  |  |  | Pheromone coordination (Wings): deposit, sense, status. |
 | <code>pipeline</code> |  |  |  |  | Pipeline execution and chaining. |
@@ -241,6 +262,7 @@ Flags:
 | <code>privacy_filter</code> |  | yes | yes |  | Redact obvious email addresses and phone-like tokens from text. |
 | <code>process_tree</code> |  | yes | yes |  | Show process parent/child rows, optionally filtered. |
 | <code>ps</code> |  | yes | yes |  | List running processes. |
+| <code>pty_session</code> | yes |  |  |  |  |
 | <code>random_bytes</code> |  | yes | yes |  | Generate random bytes (hex). |
 | <code>Read</code> | yes | yes | yes |  | Claude-compatible alias for read_file. |
 | <code>read_file</code> | yes | yes | yes |  | Read file with line numbers. Use offset/limit for large files. |
@@ -256,7 +278,7 @@ Flags:
 | <code>secret_scan</code> |  | yes | yes |  | Scan text or one file for obvious secret patterns. |
 | <code>self_analyze</code> |  | yes | yes |  | Deep self-analysis: per-tool efficiency (success rate, latency, efficiency score), session economy (turns/cost/failures/redundancy), adaptive strategy weights, and the live independent agent PROCESSES interoperating via IPC (pid, role, status, task). |
 | <code>self_assess</code> |  | yes | yes |  | Quick self-evaluation of current session performance. Returns efficiency score, top issues, and recommendations. No input required. |
-| <code>self_exit</code> | yes |  |  |  | Gracefully exit the agent loop. |
+| <code>self_exit</code> | yes |  |  |  | Gracefully stop the current agent loop. This does not complete an active goal. |
 | <code>self_exiting</code> | yes |  |  |  | Legacy alias for self_exit. |
 | <code>self_improve</code> |  | yes |  |  | Run the self-improvement loop and RSI safety curriculum: summary, consolidate, acknowledge, history, save, curriculum, skill, promotion_gate. |
 | <code>self_inspect</code> |  | yes | yes |  | AST summary for a C/C header project directory. |
@@ -269,10 +291,12 @@ Flags:
 | <code>sqlite</code> |  |  |  |  | Execute SQLite queries. |
 | <code>ssh_command</code> |  |  |  |  | Run command on remote host via SSH. |
 | <code>stage_hunk</code> |  |  |  |  | Stage a patch to the git index (git apply --cached) without touching the working tree — build tight, single-concern commits. |
+| <code>standing_directive</code> |  |  |  |  | Bridge the persistent directive to a standing autonomous activation. status reports the Autonomous Objective; deploy queues it as a durable task for the standing-directive agent and wakes a detached, cost-capped activation that refuses remote spend without an explicit operator env override. Deploy is exec-gated. |
 | <code>StartOfLoopConstruct</code> | yes |  |  |  | Start a live recursive agent loop construct. Accepts a bounded MetaConstruct/OORL DSL: continue/break expressions, max controls, DEFINE/GOAL/TASK/BELIEF/INFER/DECIDE/LEARN metadata, mutable ontology graph nodes/edges, dyad object interactions, reward objects, valence/intensity, causal/message links, stochastic exploration, pruning, credit assignment, attractors, prompt games, basin hopping, effect weights, traversal/find/balance operations, MapReduce map/shuffle/reduce job state, SRM catalog/store search, availability/orderability, licensed distributors, order policies, shipping restrictions, standard reference material records, certificates/reports/SDS, metrological traceability, calibration measurements, uncertainty budgets, one-shot REFINE rules, and bounded schema_rewrite rules. Example: define(sensor,state); reward_object success valence 0.8 intensity 0.5 target state; causal_link state -> action weight 0.7; schema_rewrite add_edge state -> policy relation optimized weight 0.9 when credit >= 0.8; continue when rewrites_applied >= 1. Expressions support loop variables plus meta_count, belief_count, goal_count, task_count, dyad_count, reward_object_count, causal_link_count, message_count, node_count, edge_count, graph_density, traverse_hits, mapreduce_count, map_count, shuffle_count, reduce_count, partition_count, rewrite_count, rewrites_applied, srm_count, current_certificate_count, sds_count, traceability_count, measurement_count, calibration_count, uncertainty_budget_count, mean_uncertainty, max_uncertainty, available_count, orderable_count, product_search_count, catalog_count, annual_catalog_count, licensed_distributor_count, order_policy_count, paper_checks_blocked, shipping_block_count, price_total, effect.tool, effect.world, effect.meta, reward, valence, intensity, exploration_rate, credit, curiosity, empowerment, confidence, uncertainty, learning_rate, pruning_threshold, basin_temperature. |
 | <code>strategy</code> |  | yes | yes |  | Trading strategies: completeness, binary_fade, stale_snipe, kelly, spread_scan. |
 | <code>string_transform</code> |  | yes | yes |  | String transformations: upper, lower, trim, reverse, slugify, capitalize. |
-| <code>swarm</code> | yes |  |  |  | Swarm orchestration: create, map_reduce, status, collect, inspect, budget, spawn_executor, spawn_provider, provider_fabric, create_executor_swarm, executor_status, topology_list, topology_run, task_profile. provider_fabric saturates available subscription/provider lanes (Fugu weighted first) by spawning independent provider-pinned dsco worker processes; it defaults to race/speculative execution, returning the first successful lane and killing slower losers; mode=collect waits for all, and mode=spawn returns the live group. map_reduce fans out 'tasks' as parallel workers then spawns a 'coordinator' sub-agent that synthesizes their outputs into one result. Each spawned agent is an INDEPENDENT OS process wrapping a model instance; action=create accepts per-agent effort/temperature/system_prompt/tool_choice so workers can run as distinct instances in parallel, interoperating via IPC. |
+| <code>surface</code> | yes |  |  |  |  |
+| <code>swarm</code> | yes |  |  |  | Swarm orchestration: create, scale (pure exact-work sharing), map_reduce, status, collect, inspect, budget, spawn_executor, spawn_provider, provider_fabric, machine_society, chimera_plan, create_executor_swarm, executor_status, topology_list, topology_run, task_profile. provider_fabric saturates available subscription/provider lanes (Fugu weighted first) by spawning independent provider-pinned dsco worker processes; it defaults to race/speculative execution, returning the first successful lane and killing slower losers; mode=collect waits for all, and mode=spawn returns the live group. machine_society runs bounded cross-provider rounds over an explicit parent-mediated PUBLIC_BRIEF board with dissent, hard time/cost budgets, and live telemetry. map_reduce fans out 'tasks' as parallel workers then spawns a 'coordinator' sub-agent that synthesizes their outputs into one result. Each spawned agent is an INDEPENDENT OS process wrapping a model instance; action=create accepts per-agent effort/temperature/system_prompt/tool_choice so workers can run as distinct instances in parallel, interoperating via IPC. |
 | <code>symbol_def</code> |  | yes | yes |  | Exact go-to-definition over the AST: find where a function/struct/typedef/enum named <name> is defined, with file:line and signature. Precise complement to the semantic ast_search. |
 | <code>symbol_refs</code> |  | yes | yes |  | Find-references: every whole-word use of an identifier across the source, file:line anchored with the source line. Use before renaming or to trace impact. |
 | <code>synoptic</code> |  | yes | yes |  | Synoptic Data real-time weather station observations (ASOS/METAR). Actions: latest (current obs), timeseries (historical), nearesttime, metadata, precip, kalshi_stations (all 29 Kalshi cities). Requires SYNOPTIC_API_TOKEN. |
@@ -293,15 +317,18 @@ Flags:
 | <code>token_audit</code> |  | yes | yes |  | Audit token usage across conversation. |
 | <code>trading</code> |  |  |  |  | Trading ops: arb_execute, arb_monitor, portfolio, risk_check, risk_configure. |
 | <code>type_at</code> |  | yes | yes |  | Clang AST nodes at file:line — the resolved types of what appears on that line. Precise type info the semantic search can't give. |
-| <code>ui_render</code> | yes |  |  |  | Render a declarative native UI scene as a pixel-native overlay in the Kitty workspace (generative UI). The spec is a nested object of elements (surface, stack, row, grid, text, badge, meter, sparkline, icon, rule) with semantic roles, style tokens (fg/bg/border: text\|muted\|accent\|success\|warning\|danger\|surface\|surface-raised; pad/gap/radius/columns; type: body\|label\|title\|code\|metric), size constraints (w/h/min_w/max_w/grow/shrink), and children. Meters use value 0..1; sparklines take numbers in text. Pass ppm_path to also write a deterministic image artifact when no Kitty surface is attached. |
+| <code>ui_render</code> | yes |  |  |  | Render one retained declarative native UI scene in the Kitty workspace (generative UI). The spec is a nested object of elements (surface, stack, row, grid, text, badge, meter, sparkline, icon, rule) with semantic roles, style tokens (fg/bg/border: text\|muted\|accent\|success\|warning\|danger\|surface\|surface-raised; pad/gap/radius/columns; type: body\|label\|title\|code\|metric), size constraints (w/h/min_w/max_w/grow/shrink), and children. Meters use value 0..1; sparklines take numbers in text. Pass ppm_path to also write a deterministic image artifact when no Kitty surface is attached. The session scene survives typing, tool activity and resize until replacement or action=close; transient menus temporarily hide it. |
+| <code>ui_trace</code> | yes |  |  |  |  |
 | <code>unused_symbols</code> |  | yes | yes |  | Find static functions that are referenced only at their own definition — dead code safe to remove. AST-based, file-scope-correct. |
+| <code>update_goal</code> | yes |  |  |  | Checkpoint or terminate the active goal using its exact goal revision and evidence. With the two-queue controller, complete/blocked is accepted only after the root reaches the matching terminal state. |
 | <code>url_parse</code> |  | yes | yes |  | Parse a URL into components. |
 | <code>uuid</code> |  | yes | yes |  | Generate a UUID v4. |
+| <code>value_ledger</code> | yes |  |  |  | The receipt spine of the Value Creation Engine. action=emit writes an append-only, content-addressed value receipt (workload, outcome, authority, economics, verification, reuse, recovery) to the durable Chronicle journal; action=summary rolls receipts into board metrics (verified work value, gross compute margin, autonomous completion rate, recovery rate, capability reuse, human leverage). Emitting requires fs_write; it never moves money or grants authority. |
 | <code>view_image</code> |  |  |  |  | Prepare a local image file for model-side vision analysis. |
 | <code>view_pdf</code> |  |  |  |  | Prepare a local PDF file for model-side document analysis. |
 | <code>vos_status</code> |  | yes | yes |  | Virtual OS subsystem status. |
 | <code>watch_run</code> |  |  |  |  | Run a command and return {exit, wall_ms, peak_rss_bytes} — structured resource accounting via /usr/bin/time -l. |
-| <code>weather</code> |  | yes | yes |  | Get weather data for a location. |
+| <code>weather</code> |  | yes | yes |  | Get current global weather for a location. Uses OpenWeatherMap when configured and a keyless Open-Meteo fallback. |
 | <code>weather_batch</code> |  | yes | yes |  | Native bounded-concurrency weather retrieval for up to 1,000 locations. Uses curl multi directly; it does not spawn model/agent workers. |
 | <code>WebFetch</code> | yes | yes | yes |  | Claude-compatible URL fetch/extract. |
 | <code>WebSearch</code> | yes | yes | yes |  | Claude-compatible web search alias. |

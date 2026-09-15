@@ -1,0 +1,574 @@
+{
+  "schema": "dsco.source-audit/v1",
+  "sources": {
+    "/Users/arthurcolle/Dsco/dsco-cli/include/arena_alloc.h": {
+      "sha256": "bddd779d4199491f2d1f8ea635095cbdbb895d20088345eda9479262d343ab6a",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/include/plugin.h": {
+      "sha256": "5da1e1a7473d55bc818edc454814c143b8b182ac4816c39753773f6bd4769ef8",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/include/simd.h": {
+      "sha256": "0a916db96df9d9c9593bc69062c22c894f35579599b37fef057595a9bbc7d072",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/include/vm.h": {
+      "sha256": "59e74e6c167f8792879cacfc2321d3ffabe43573235260c5e6585f48e5105467",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/agent.c": {
+      "sha256": "5d711c28360acd842b52da4ad8b0c3707aeb0f5596ab3b8f768580886d1e6817",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/agent_interop.c": {
+      "sha256": "7a8919e878de269a9ca9fcfb56afee869e871e6d9d4088dc8cada07346e85026",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/agent_profile.c": {
+      "sha256": "c38efff3aa3469dd05e4bcb4336fbffddfddab577a84b5ed72d5034b54899564",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/arena_alloc.c": {
+      "sha256": "ca24878e4117def67842c859034934d0da96585f4c394396c41a66a082fe4b98",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/ast.c": {
+      "sha256": "c1ecd5c943bd8f67686506fb405a7ccd3ae52660fd21ccabbf92c5bfff827e7e",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/autoresearch.c": {
+      "sha256": "732a5000b564c734d317bf47a36fe4fe18a1981fa3a673bea9472d07994b6351",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/baseline.c": {
+      "sha256": "a4ff79e8622ace51a8f3af9e600316e65c6e8461c8327c1d31e3d89304620719",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/bg_learn.c": {
+      "sha256": "7db2fe2f9210a5e9ebc6b0dc231cd82688e514f3b194885fb9c5986cfaa0802a",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/blackboard.c": {
+      "sha256": "cde901ab8e1bc86a3ae29c782403de14ba379dc29ddcc4efb07a5cc311c3a087",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/capability.c": {
+      "sha256": "64449d0e361800bb6075e18941c085027d087134446e917a5e0d894d460d0675",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/chronicle.c": {
+      "sha256": "5f1de4e6e70b6dca1b56b6f7fe13c778dc77f9760e9580a0dde4291781ef948e",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/context_fabric.c": {
+      "sha256": "6f0b06b15f07faf0f78a797e3b5514f5a7edba3380033395d300c6f7369c528d",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/cost_frontier.c": {
+      "sha256": "c650c377d9637d2743d993fab48b41d395f31491ebc59dcc60becd295c2b1219",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/cost_model.c": {
+      "sha256": "8e8262a74f4e45a96e7cac63466e13afe6bd896525a6a75238b56603d5b58940",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/eval.c": {
+      "sha256": "b87e247d60b98ceceb8504bfd4bdf799036416b064acb45c3a27e98c4d407bc7",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/event_loop.c": {
+      "sha256": "b086fdb4b3db0c4dd39177674f6b3ace0a584f60e9459731b66a00cddbe44888",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/event_stream.c": {
+      "sha256": "7f9e8ed5f14d23a647ee28fb148f04838f790697f6d85bbb6f19fe069fff7d2c",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/execution_events.c": {
+      "sha256": "9f9527f23463b0dc0d3562f064b61adb22e41ee3bcd81067695b3251494615cb",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/execution_kernel.c": {
+      "sha256": "071595c7512fa14631ebcd2b70e0f5b1d6377a02cb1f3e127462770b325f6b2f",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/execution_layer.c": {
+      "sha256": "cf525554b3861c56797426baea94ee4e27282c01a74d7e28201df3bd45c25453",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/execution_recovery.c": {
+      "sha256": "2f43c6a5c9f02ff93fea8015b013018a2f8cc424d54ef36b09025216ac12f37d",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/hotplug.c": {
+      "sha256": "ed849cb39dba5085d1a427773f3e254d626a395f28997079a23511b2c22d0de8",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/json_util.c": {
+      "sha256": "ef230f6d5916e3a909f071244464b8d415c74deed56b4746b41ad55f74cc1064",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/learned_cost.c": {
+      "sha256": "de11cfd99c2cc9b85bf7e7d28db07ae324340813137ba5621fde4dec12345689",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/lingo_workflow.c": {
+      "sha256": "5be3be702fc0811fbe3b4fbb502561cd17d9504ee8e4bbaf81a15cad4fa9f9b5",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/math_fastpath.c": {
+      "sha256": "e8dc8140f8c6a0632f36ba6343a9c49f8ef2ab3b3e4154077b4a4e93eb4a2e1a",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/mcp.c": {
+      "sha256": "580879f0a5e188b250c1bb73a17c6f470544cbb8fdbb6883eda9f65a9716bbc7",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/mcp_server.c": {
+      "sha256": "190e9f9ecad44b0782f50c13d3d4f5d25ad0082098edd4018d4d878dd5c90f48",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/memory_tier.c": {
+      "sha256": "34559414e7f5ec3613e84817e674c6051c7ca3a34effcf6a2a26d9b2db4d2320",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/native_trace.c": {
+      "sha256": "ea858967e158d21269a903f078a51fad4cfa3a6f58d86c9d2fb1c968bc31af47",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/plan.c": {
+      "sha256": "1e6d31bea9a8f41c2c3a8451b9c12aec4647925f1b52b4da2fa9158c624dad60",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/plan_cache.c": {
+      "sha256": "a2e767307c4308a1a824ff71ea1b10c110783900c2c7c9a8aa9f0a6729b996bd",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/plan_dag.c": {
+      "sha256": "b094aa247ecd9f6b913f3676e1c91e40bcf88021a32e425398538042e1bf4835",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/plan_optimizer.c": {
+      "sha256": "b1bdb3fc242d027defa13cf23e826a8fb0fceda6ecfa6e55c413c7e37a9b100b",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/plugin.c": {
+      "sha256": "8bf10eeabfd0a3206751d1b6bc9fa2051ba0d66bb4644c1e3738b58041e44bb4",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/prompt_program.c": {
+      "sha256": "8322c2eb4714fb6e61be317dfaf8135a8d532a0149f337b0843a058253b27093",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/provider.c": {
+      "sha256": "381e809a4f1c34f805d1615b3d5543dce01fc79f792418a600ebb3ac1e08693c",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/provider_events.c": {
+      "sha256": "e334299c1a8d5023e260d22196a23fc3fe9db4f1f078901337f6f06c0a6c6014",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/provider_pool.c": {
+      "sha256": "5379581cab0e81ea755574bd92ce14de9db6045cb05d72364ca328eb6b83cd26",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/provider_profiles.c": {
+      "sha256": "4c3f8ea7b1b419a39586b5532f6a953567688691fb9b9e1ccd926838ead09924",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/pty_session.c": {
+      "sha256": "a3ccc6e6f4a4de2677364f27ef2751956835624786935687e76926a9c9194649",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/recovery.c": {
+      "sha256": "9ab7af3893731847da46edd4531944301a0507b70c8a0b6dbba2436cceb0ee70",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/router.c": {
+      "sha256": "16ede6dbae3c9986a78eff3d296936fe5239d61ba60dd83d74e904e017c48428",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/self_improve.c": {
+      "sha256": "da88d16d01315e153fa19465bb1e21511d2b8a7600237bccdc4d56d5e29abce3",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/semantic.c": {
+      "sha256": "1bf5344fad130a021f83ce6dd5082f3e0aac780f42b810da727ac9369798e2c1",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/session_memory.c": {
+      "sha256": "0f6504c7c32865919921976c7b5baee653b051cada6adb2c4ebd2bf24906ea72",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/skill_candidate.c": {
+      "sha256": "f4148d864c50e996c04e19dd8c85f101e8f4ae49683bfed3601ad5e995db65a8",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/skill_index.c": {
+      "sha256": "05a9c210b4f1915140ca63f2dccea5b5c144952c5261188f192ef7c98d356130",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/supervisor.c": {
+      "sha256": "2b870a126bd65a69a6c43535e6ccc1df68dc4a19fb400308e4fb122e7c6ea4d3",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/swarm.c": {
+      "sha256": "17191257b6caef8b8b79ae81850c021e093e1312581269924159f0ad2a6762ac",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/swarm_accounting.c": {
+      "sha256": "79091038099db97fd4f9791fe8a4556eb304366692ddca46ce30fc3aff7ea58f",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/swarm_reactor.c": {
+      "sha256": "610766c8b10c803fff27864e3b8552e771afeef24e32ec085fbe7024097bd6ba",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/swarm_scale.c": {
+      "sha256": "be7d0ecfb6a6d8a5ef63de2fdf72b53368bd87fda1fa39bac87432beebf375fc",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/tool_telemetry.c": {
+      "sha256": "4661c18f22e0cd1fab557398fa081486df774a6a2cf3c0aa52a898126d633a59",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/tools.c": {
+      "sha256": "ef2b5c871da7cffff26797f3a2d79293fe95083114cd3d530327f8dc2b04ab42",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/topology.c": {
+      "sha256": "7164770f246d5bde53e633c3f3e324000b609c40e1204d1fe1e775bfda9e1936",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/trace_kg.c": {
+      "sha256": "292ca6837d1b7d2f5aedfb365b5ca165421d5fd9e518996b28f41d163e747315",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/trace_kg_store.c": {
+      "sha256": "83d4bd7accb73dfafdbd3f6119616b11c27870d5506f0e8bf56bd619f056f04d",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/vecstore.c": {
+      "sha256": "3ca81e42826ef67a6b6d06effe8625315076558d279b18c30ba9f08be574c9e0",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/vfs.c": {
+      "sha256": "d7becdb749727f80a686522bfc1531924b40f67ba7bf46c212ab352788cc00e1",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/vm.c": {
+      "sha256": "f61d56c355e4da33f4e654d64bd4367310014022fb3485cf11000007bd4b8982",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-cli/src/wasm_core.c": {
+      "sha256": "d52eb3fba84a6d911764ef868b5a3e82cfb33f0d3649811704e8c08a36efcb68",
+      "kind": "current-dsco-source"
+    },
+    "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/cognitive_architecture.py": {
+      "sha256": "c643c48dbc84a46d69899458a58767cd85724f4ebc7f1dda392aca9a3672acda",
+      "kind": "donor-source",
+      "symbols": {
+        "CognitiveArchitecture._action_executor": 358,
+        "CognitiveArchitecture.stop": 306,
+        "ActionStack.pop_ready": 152,
+        "ActionStack.fail": 178,
+        "ActionStack": 126
+      }
+    },
+    "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/cognitive_integration.py": {
+      "sha256": "0d6d280cf52c25ecf7beb47981786bf8f3ea18b5e27382fb112e32c401b6714e",
+      "kind": "donor-source",
+      "symbols": {
+        "CognitiveHandlers._perceive_user_input": 105,
+        "CognitiveHandlers._plan_response": 121,
+        "CognitiveHandlers._reflect_on_response": 149,
+        "CognitiveHandlers.handle_user_input": 26
+      }
+    },
+    "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/metacognitive_engine.py": {
+      "sha256": "0c5a26fd6b657c758751ba93d6ec1efe5ca84a9ba745ce32826e6d80d0931082",
+      "kind": "donor-source",
+      "symbols": {
+        "MetacognitiveEngine._select_strategy": 582,
+        "MetacognitiveEngine._generate_strategies": 535,
+        "StrategyOption": 118,
+        "MetacognitiveEngine._evaluate_strategy_adjustment": 649,
+        "MetacognitiveEngine._plan_immediate_actions": 600,
+        "MetacognitiveEngine._plan_next_steps": 659
+      }
+    },
+    "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/universal_dspy_multihop.py": {
+      "sha256": "87bc746c381d67ce124c176aaf947dc08108bc98a0a0666988abe156c4ea5f8e",
+      "kind": "donor-source",
+      "symbols": {
+        "NotesExtractor": 159,
+        "UniversalMultiHopRAG.forward": 194,
+        "MultiHopQueryGenerator": 151,
+        "UniversalContentRetriever.retrieve": 61,
+        "UniversalContentRetriever.rerank": 120,
+        "RetrievalContext": 18,
+        "AnswerSynthesizer": 168
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/agent_system.py": {
+      "sha256": "9690f7350272e9353ce3c6bf370ce14c12100bf1237b2ec7e4907f884b83e74c",
+      "kind": "donor-source",
+      "symbols": {
+        "SelfInterrogation.interrogate": 898
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/analysis_cache.py": {
+      "sha256": "2817285b4c91378c2492575f11d70fda707a58cda6f1e9b333015d961980740f",
+      "kind": "donor-source",
+      "symbols": {
+        "AnalysisCache._get_cache_key": 23,
+        "AnalysisCache.get": 37,
+        "AnalysisCache.set": 57
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/chunked_analyzer.py": {
+      "sha256": "602ee67529287512e7c73589992157c3299cf25ecdbce87e9fd3424dab68d225",
+      "kind": "donor-source",
+      "symbols": {
+        "ChunkedDocumentAnalyzer.create_chunks": 127,
+        "ChunkedDocumentAnalyzer._aggregate_results": 261,
+        "KnowledgeExtractionSignature": 78,
+        "ChunkKnowledge": 31,
+        "ChunkedDocumentAnalyzer._extract_key_findings": 365,
+        "ChunkedDocumentAnalyzer.analyze_chunk": 157
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/core.py": {
+      "sha256": "27e71651daa972f447c0d0e4c72286ac4cc547fc8557e7fa9a3966d3c182f568",
+      "kind": "donor-source",
+      "symbols": {
+        "CognitiveAgentProgram": 105,
+        "select_lenses": 351,
+        "CognitiveAnalysisSignature": 72,
+        "format_history": 384
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/decomposition.py": {
+      "sha256": "b647f79ac579cae70601e49d7e31ede6af74ca6db706c9ea1c17287b084e6b92",
+      "kind": "donor-source",
+      "symbols": {
+        "_inference_receipt": 174
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/deep.py": {
+      "sha256": "07394f063147f682330c57da97f48500f5e633ebef5709c06335f17beb9dd895",
+      "kind": "donor-source",
+      "symbols": {
+        "REASONING_METHODOLOGIES": 51,
+        "MethodologySignature": 96,
+        "BiasScanSignature": 74,
+        "_dict_list": 485,
+        "DeepCognitiveAgent.stream": 347
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/executor.py": {
+      "sha256": "38a4ee5f3be49ad058a40ae75f179cea3184b122a0aa078ecbe161836aceb99a",
+      "kind": "donor-source",
+      "symbols": {
+        "execute_one": 45
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py": {
+      "sha256": "d530346c8c822c01ed6ea8de92df3475b17adfb235e64cb0c760aab602819a93",
+      "kind": "donor-source",
+      "symbols": {
+        "AbductiveReasoningSignature": 290,
+        "ScientificReasoningWorkflow.forward": 583,
+        "DeductiveReasoningSignature": 247,
+        "ProbabilisticReasoningSignature": 361,
+        "AnalogicalReasoningSignature": 313,
+        "HybridReasoningPipeline.forward": 508,
+        "InductiveReasoningSignature": 266,
+        "CausalReasoningSignature": 338,
+        "DebuggedReasoningSignature": 450
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/debiased_async.py": {
+      "sha256": "73266ec148dae54a37d3bc7cc4af21d8a6af79b42fac4215f7b4fc8df282982f",
+      "kind": "donor-source",
+      "symbols": {
+        "AsyncComprehensiveDebiasedReasoning.aforward": 214
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/debiased_reasoning_modules.py": {
+      "sha256": "b07ba77ca3eac73f04d288996807fc77421bf9026e57b0108382b2ffaba3c049",
+      "kind": "donor-source",
+      "symbols": {
+        "ReferenceClassForecasting.forward": 417,
+        "ReferenceClassIdentification": 77,
+        "PreMortemAnalysis": 273,
+        "ConsiderOpposite": 303,
+        "DualProcessReasoning": 366,
+        "ArgumentativeReasoning.forward": 456,
+        "ConstructCounterargument": 132,
+        "SynthesizeOpposingViews": 157,
+        "DualProcessReasoning.forward": 379,
+        "FastFrugalDecision.forward": 496
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/agents/duckdb.py": {
+      "sha256": "a95f6dd8f4a76c928912f295442bdafdc58eaf6d3a7284b3ae5e7aa391c8242c",
+      "kind": "donor-source",
+      "symbols": {
+        "DuckDBAgent.create_table": 20,
+        "DuckDBAgent.aggregate": 45
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/base.py": {
+      "sha256": "d32b66cf148c7151043a4afecbd85095d21d723fd62243e595d1240c94c5bbd9",
+      "kind": "donor-source",
+      "symbols": {
+        "AgentStats.record_call": 40,
+        "BaseAgent.execute": 152,
+        "BaseAgent._get_cache_key": 115,
+        "BaseAgent._check_cache": 120
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/decorators.py": {
+      "sha256": "722acd907f5a3d2a5aef8973fc4e046ef9ca68dcc8c9f6196bfb9fa958c44c64",
+      "kind": "donor-source",
+      "symbols": {
+        "operation": 71,
+        "agent": 31
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/hooks.py": {
+      "sha256": "afed95af238ebfd9d171a65e652fd3edfffc9f405f9b7aa27ae722b7c34af072",
+      "kind": "donor-source",
+      "symbols": {
+        "TelemetryHook.handle": 93,
+        "TelemetryHook.get_metrics": 103
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py": {
+      "sha256": "6355e7c6d7f59d0138975dc19bffcdea4b7d48fa4b89c7b49c3bcab39b1ad71c",
+      "kind": "donor-source",
+      "symbols": {
+        "MetaToolRegistry.register": 234,
+        "MetaToolRegistry.get_source": 302,
+        "MetaToolRegistry.get_ast": 305,
+        "MetaToolRegistry.register_code": 240,
+        "MetaToolRegistry.transform_tool": 319,
+        "ASTAnalyzer.parse": 137,
+        "ASTAnalyzer.transform": 187,
+        "MetaToolRegistry.compose": 276,
+        "ASTAnalyzer._extract_structure": 150,
+        "CodeSandbox.execute": 108,
+        "MetaToolExecutor._execute_composed": 435,
+        "define_tool": 347,
+        "MetaToolRegistry.list_tools": 308,
+        "ASTAnalyzer._rename_function": 200,
+        "MetaProgrammingAgent.run": 473
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_streaming_tools.py": {
+      "sha256": "811d04801919e0b6f21fb99c39ceeb49f1e82a93a1201fcde80a0805a06352bd",
+      "kind": "donor-source",
+      "symbols": {
+        "ToolExecutor._execute_structured": 251,
+        "ToolExecutor._execute_sequential": 213,
+        "ToolExecutor._execute_single": 158,
+        "ToolExecutor._execute_parallel": 236
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/eval_bias_reduction.py": {
+      "sha256": "77feee41bee38c14dd1a8667777d07453504ba8a242ab853f364876d3019dba9",
+      "kind": "donor-source",
+      "symbols": {
+        "evaluate_test_case": 437,
+        "calculate_aggregate_metrics": 558
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/integration_hooks.py": {
+      "sha256": "07f57feea1c75bd4d99397a0dfca62d8703012abb0585198de8e12c915900a11",
+      "kind": "donor-source",
+      "symbols": {
+        "HookEvent": 84,
+        "HookResult": 99,
+        "HookManager.emit": 1201
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/pdf_cache.py": {
+      "sha256": "ecb8a0b52f15822cf59b07a6b3d81cb48fc3b95887437918aabcb07936d48434",
+      "kind": "donor-source",
+      "symbols": {
+        "PDFTextCache._get_file_hash": 23,
+        "PDFTextCache.get": 36
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/pdf_processor.py": {
+      "sha256": "f8a0fb49a6042c12c59709ea0ba6ce155eca4d98c3e27f65cce24363af545a5c",
+      "kind": "donor-source",
+      "symbols": {
+        "PDFVisionAnalyzer._convert_pdf_to_images": 48,
+        "PDFVisionAnalyzer._analyze_image": 99,
+        "PDFVisionAnalyzer.process_pdf": 197
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py": {
+      "sha256": "b2b70a39eaa6145f2ebd2349b2db4645372fa06b7346769b3e4675ff25a01596",
+      "kind": "donor-source",
+      "symbols": {
+        "ReasoningToolkit.reduce_biases": 878,
+        "WorkflowToolkit.analyze_dependencies": 2152,
+        "WorkflowToolkit.validate_workflow": 2111,
+        "MathToolkit": 1970
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/config.py": {
+      "sha256": "ef268f0b2bfa7100338ea181fc69cfd4b7315a00754adf1e4042f65355583fe4",
+      "kind": "donor-source",
+      "symbols": {
+        "ModelSpec": 32,
+        "MODEL_SPECS": 55,
+        "SwarmSettings": 110,
+        "normalize_model_id": 27
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/optimize.py": {
+      "sha256": "d924c152c752030f1bf1ffbb0d5853f06f8a952615d9d3361cc0a6d8cd8d7f2d",
+      "kind": "donor-source",
+      "symbols": {
+        "compile_with_mipro": 24,
+        "compile_with_gepa": 34,
+        "swarm_metric": 10,
+        "evaluate": 45,
+        "save_program": 57,
+        "load_program": 61
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/pipeline.py": {
+      "sha256": "b6d3ec35f272843f049b9dbe842a656518e68b9f7ae619ff6d1cbf07f615e4da",
+      "kind": "donor-source",
+      "symbols": {
+        "FourModelHierarchicalSwarm._route": 271,
+        "FourModelHierarchicalSwarm._run_child": 321,
+        "FourModelHierarchicalSwarm": 160,
+        "LeafWorker": 71
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/scaling.py": {
+      "sha256": "e7ae00ba25c97b7278a86ad5fdb0817128996dcde5e72745cd91d482514d0e9d",
+      "kind": "donor-source",
+      "symbols": {
+        "ScaledSwarm._run_replica": 174,
+        "ScaledSwarm._select_best": 271
+      }
+    },
+    "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/signatures.py": {
+      "sha256": "c7cb1b7c8175966f4c547ffe277eee9a2990482aed9fdecaa999ac72d92058c0",
+      "kind": "donor-source",
+      "symbols": {
+        "Subtask": 16,
+        "ChildResult": 52,
+        "FinalSynthesis": 109
+      }
+    }
+  }
+}

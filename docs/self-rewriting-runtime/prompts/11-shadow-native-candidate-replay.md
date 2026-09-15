@@ -1,0 +1,13 @@
+# 11 — Shadow native candidates with replayed observations
+
+Evaluate a new native DSCO reasoning implementation against a running champion using the same real observations, without duplicating filesystem writes, network requests, or subprocess effects. Introduce a shadow invocation mode that supplies immutable input records and a bounded effect transcript to the candidate. The active champion performs authorized effects once; the shadow receives recorded responses through a replay adapter and cannot call ambient effectful services.
+
+Match observations by stable operation identity, canonical arguments, and dependency position, not merely call order. A candidate requesting a missing or changed observation must stop with an explicit divergence, or request a separately authorized experiment outside the shadow comparison. Never silently fabricate a tool result. Record exact champion and candidate code generations, input hashes, transcript hashes, outputs, and independently checked outcomes.
+
+Start with a native scoring pipeline that consumes a governed local observation. Enforce the replay-only service table at the candidate ABI and preserve ordinary capability checks on the champion path. Mutable state must be copied or version-pinned so shadow execution cannot alter champion state. Compare semantic outputs and resource use; a different answer is not automatically a regression, and model confidence is not an outcome oracle.
+
+Falsifying test: make the champion increment a fixture counter and read its value, then run two candidate generations against that transcript. The counter must increment exactly once across all three executions. A candidate requesting a different counter write must report divergence before any effect. A pure improved candidate must produce a verifiably better result from the same observations. Include transcript tampering and missing observations; reject both while the champion continues serving live requests in the same PID.
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Inspect `src/execution_kernel.c`, `src/execution_events.c`, `src/event_stream.c`, `src/lingo_workflow.c`, then `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_streaming_tools.py` symbols `ToolExecutor._execute_structured`, `ToolExecutor._execute_single`. Observed donor behavior: The donor forwards dependency results and caches call outputs; it has no native shadow-execution contract preventing duplicate effects.
+
+Preserve unrelated dirty work; add focused modules and small hooks. Govern every effectful tool call through `tools_execute_for_tier()`. Isolate state and build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

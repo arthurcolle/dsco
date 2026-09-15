@@ -1,0 +1,1253 @@
+{
+  "contract_status": "specified_target",
+  "description": "Each case replaces its matching record in the valid bundle, or appends when no matching identity exists. It must fail for the declared schema/consistency reason.",
+  "cases": [
+    {
+      "name": "address_cannot_pin_context",
+      "record": {
+        "kind": "ValueAddress",
+        "object": {
+          "tenant": "tenant-dsco",
+          "realm": "realm-lab",
+          "object_id": "task-1"
+        },
+        "field": "cost",
+        "args": {
+          "currency": "USD"
+        },
+        "context_id": "context-base"
+      },
+      "expected_error": "schema"
+    },
+    {
+      "name": "address_identity_cannot_pin_revision",
+      "record": {
+        "kind": "ValueAddress",
+        "object": {
+          "tenant": "tenant-dsco",
+          "realm": "realm-lab",
+          "object_id": "task-1",
+          "revision": "revision-7"
+        },
+        "field": "cost",
+        "args": {
+          "currency": "USD"
+        }
+      },
+      "expected_error": "schema"
+    },
+    {
+      "name": "successful_evaluation_requires_result",
+      "record": {
+        "kind": "EvaluationRecord",
+        "evaluation_id": "evaluation-1",
+        "context_id": "context-base",
+        "address": {
+          "kind": "ValueAddress",
+          "object": {
+            "tenant": "tenant-dsco",
+            "realm": "realm-lab",
+            "object_id": "task-1"
+          },
+          "field": "cost",
+          "args": {
+            "currency": "USD"
+          }
+        },
+        "source_manifest_id": "manifest-1",
+        "evaluator_profile": "lingo-interpreter-target-1",
+        "status": "succeeded",
+        "requested_at": "2026-09-09T20:00:00Z",
+        "started_at": "2026-09-09T20:00:00Z",
+        "finished_at": "2026-09-09T20:00:01Z",
+        "dependencies": [
+          {
+            "kind": "value",
+            "token": "dependency-1",
+            "ref": {
+              "kind": "ObjectRef",
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "object_id": "task-1",
+              "revision": "revision-7"
+            }
+          }
+        ],
+        "resource_use": {
+          "cpu_ms": 1,
+          "wall_ms": 1,
+          "graph_reads": 1,
+          "peak_bytes": 2048
+        },
+        "completeness": "complete"
+      },
+      "expected_error": "schema"
+    },
+    {
+      "name": "failed_evaluation_forbids_result",
+      "record": {
+        "kind": "EvaluationRecord",
+        "evaluation_id": "evaluation-failed",
+        "context_id": "context-base",
+        "address": {
+          "kind": "ValueAddress",
+          "object": {
+            "tenant": "tenant-dsco",
+            "realm": "realm-lab",
+            "object_id": "task-1"
+          },
+          "field": "cost",
+          "args": {
+            "currency": "USD"
+          }
+        },
+        "source_manifest_id": "manifest-1",
+        "evaluator_profile": "lingo-interpreter-target-1",
+        "status": "failed",
+        "requested_at": "2026-09-09T20:00:00Z",
+        "started_at": "2026-09-09T20:00:00Z",
+        "finished_at": "2026-09-09T20:00:01Z",
+        "dependencies": [
+          {
+            "kind": "value",
+            "token": "dependency-1",
+            "ref": {
+              "kind": "ObjectRef",
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "object_id": "task-1",
+              "revision": "revision-7"
+            }
+          }
+        ],
+        "resource_use": {
+          "cpu_ms": 1,
+          "wall_ms": 1,
+          "graph_reads": 1,
+          "peak_bytes": 2048
+        },
+        "error": {
+          "kind": "Error",
+          "code": "CALCULATION_FAILED",
+          "message": "Required input is unavailable.",
+          "origin": "evaluator",
+          "retry": "new_context",
+          "details": {}
+        },
+        "result": {
+          "state": "available",
+          "type": "decimal",
+          "value": {
+            "$type": "decimal",
+            "coefficient": "200",
+            "scale": 2,
+            "unit": "USD"
+          },
+          "unit": "USD"
+        }
+      },
+      "expected_error": "schema"
+    },
+    {
+      "name": "decimal_coefficient_is_exact_string",
+      "record": {
+        "kind": "EvaluationRecord",
+        "evaluation_id": "evaluation-1",
+        "context_id": "context-base",
+        "address": {
+          "kind": "ValueAddress",
+          "object": {
+            "tenant": "tenant-dsco",
+            "realm": "realm-lab",
+            "object_id": "task-1"
+          },
+          "field": "cost",
+          "args": {
+            "currency": "USD"
+          }
+        },
+        "source_manifest_id": "manifest-1",
+        "evaluator_profile": "lingo-interpreter-target-1",
+        "status": "succeeded",
+        "requested_at": "2026-09-09T20:00:00Z",
+        "started_at": "2026-09-09T20:00:00Z",
+        "finished_at": "2026-09-09T20:00:01Z",
+        "dependencies": [
+          {
+            "kind": "value",
+            "token": "dependency-1",
+            "ref": {
+              "kind": "ObjectRef",
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "object_id": "task-1",
+              "revision": "revision-7"
+            }
+          }
+        ],
+        "resource_use": {
+          "cpu_ms": 1,
+          "wall_ms": 1,
+          "graph_reads": 1,
+          "peak_bytes": 2048
+        },
+        "result": {
+          "state": "available",
+          "type": "decimal",
+          "value": {
+            "$type": "decimal",
+            "coefficient": 2.3,
+            "scale": 2,
+            "unit": "USD"
+          },
+          "unit": "USD"
+        },
+        "completeness": "complete"
+      },
+      "expected_error": "schema"
+    },
+    {
+      "name": "large_integer_requires_tag",
+      "record": {
+        "kind": "EvaluationRecord",
+        "evaluation_id": "evaluation-1",
+        "context_id": "context-base",
+        "address": {
+          "kind": "ValueAddress",
+          "object": {
+            "tenant": "tenant-dsco",
+            "realm": "realm-lab",
+            "object_id": "task-1"
+          },
+          "field": "cost",
+          "args": {
+            "currency": "USD"
+          }
+        },
+        "source_manifest_id": "manifest-1",
+        "evaluator_profile": "lingo-interpreter-target-1",
+        "status": "succeeded",
+        "requested_at": "2026-09-09T20:00:00Z",
+        "started_at": "2026-09-09T20:00:00Z",
+        "finished_at": "2026-09-09T20:00:01Z",
+        "dependencies": [
+          {
+            "kind": "value",
+            "token": "dependency-1",
+            "ref": {
+              "kind": "ObjectRef",
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "object_id": "task-1",
+              "revision": "revision-7"
+            }
+          }
+        ],
+        "resource_use": {
+          "cpu_ms": 1,
+          "wall_ms": 1,
+          "graph_reads": 1,
+          "peak_bytes": 2048
+        },
+        "result": {
+          "state": "available",
+          "type": "decimal",
+          "value": 9007199254740993,
+          "unit": "USD"
+        },
+        "completeness": "complete"
+      },
+      "expected_error": "schema"
+    },
+    {
+      "name": "unknown_effect_requires_reconciliation",
+      "record": {
+        "kind": "AttemptReceipt",
+        "attempt_id": "attempt-unknown",
+        "command_id": "command-1",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "run_id": "run-1",
+        "occurrence_id": "step-read:iteration-1",
+        "worker_id": "worker-a",
+        "dispatch_generation": "lease-generation-old",
+        "recorded_at": "2026-09-09T20:02:00Z",
+        "dispatched_at": "2026-09-09T20:00:02Z",
+        "outcome": "effect_unknown",
+        "postcondition": "unknown",
+        "evidence_artifact_ids": [
+          "artifact-readme"
+        ],
+        "receipt_digest": {
+          "algorithm": "sha256",
+          "value": "2222222222222222222222222222222222222222222222222222222222222222"
+        },
+        "error": {
+          "kind": "Error",
+          "code": "OUTCOME_UNKNOWN",
+          "message": "Response was lost after dispatch.",
+          "origin": "adapter",
+          "retry": "same_request",
+          "details": {}
+        }
+      },
+      "expected_error": "schema"
+    },
+    {
+      "name": "receipt_cannot_advance_run",
+      "record": {
+        "kind": "AttemptReceipt",
+        "attempt_id": "attempt-old-owner",
+        "command_id": "command-1",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "run_id": "run-1",
+        "occurrence_id": "step-read:iteration-1",
+        "worker_id": "worker-a",
+        "dispatch_generation": "lease-generation-old",
+        "recorded_at": "2026-09-09T20:02:00Z",
+        "dispatched_at": "2026-09-09T20:00:02Z",
+        "outcome": "succeeded",
+        "result": {
+          "state": "available",
+          "type": "artifact_ref",
+          "value": "artifact-readme"
+        },
+        "postcondition": "verified",
+        "evidence_artifact_ids": [
+          "artifact-readme"
+        ],
+        "receipt_digest": {
+          "algorithm": "sha256",
+          "value": "1111111111111111111111111111111111111111111111111111111111111111"
+        },
+        "advance_run": true
+      },
+      "expected_error": "schema"
+    },
+    {
+      "name": "cursor_is_opaque_string",
+      "record": {
+        "kind": "CommitReceipt",
+        "commit_id": "commit-1",
+        "changeset_id": "changeset-1",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "transaction_domain": "domain-lab",
+        "idempotency_key": "change-key-1",
+        "request_digest": {
+          "algorithm": "sha256",
+          "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "prior_workspace_head": "head-10",
+        "new_workspace_head": "head-11",
+        "changed_objects": [
+          {
+            "kind": "ObjectRef",
+            "tenant": "tenant-dsco",
+            "realm": "realm-lab",
+            "object_id": "task-1",
+            "revision": "revision-8"
+          }
+        ],
+        "durability": "wal_fsynced",
+        "durable_watermark": "watermark-101",
+        "change_cursor": 101,
+        "committed_at": "2026-09-09T20:01:00Z",
+        "status": "committed"
+      },
+      "expected_error": "schema"
+    },
+    {
+      "name": "success_cannot_have_pending_commands",
+      "record": {
+        "kind": "RunCheckpoint",
+        "checkpoint_id": "checkpoint-2",
+        "run_id": "run-1",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "context_id": "context-base",
+        "source_manifest_id": "manifest-1",
+        "run_revision": "run-revision-2",
+        "checkpoint_name": "await-reconciliation",
+        "status": "succeeded",
+        "next_steps": [
+          "reconcile-read"
+        ],
+        "state": {
+          "captured_count": {
+            "$type": "integer",
+            "value": "9007199254740993"
+          }
+        },
+        "current_lease": {
+          "owner": "worker-b",
+          "generation": "lease-generation-current",
+          "expires_at": "2026-09-09T21:00:00Z"
+        },
+        "pending_command_ids": [
+          "command-1"
+        ],
+        "evidence_receipt_ids": [
+          "attempt-old-owner",
+          "attempt-unknown"
+        ],
+        "last_transition": {
+          "transition_id": "transition-2",
+          "accepted_generation": "lease-generation-current",
+          "receipt_ids": [],
+          "reconciliation_ids": [],
+          "accepted_at": "2026-09-09T20:03:00Z"
+        },
+        "acceptance_evidence": [
+          "acceptance-1"
+        ]
+      },
+      "expected_error": "schema"
+    },
+    {
+      "name": "patch_requires_expected_revision",
+      "record": {
+        "kind": "Changeset",
+        "changeset_id": "changeset-1",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "transaction_domain": "domain-lab",
+        "base_context_id": "context-base",
+        "workspace_id": "workspace-lab",
+        "expected_workspace_head": "head-10",
+        "source_manifest_id": "manifest-1",
+        "request_digest": {
+          "algorithm": "sha256",
+          "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "idempotency_key": "change-key-1",
+        "changes": [
+          {
+            "op": "patch",
+            "target": {
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "object_id": "task-1"
+            },
+            "fields": {
+              "urgent": true
+            }
+          }
+        ],
+        "read_set": [
+          {
+            "kind": "value",
+            "token": "dependency-1",
+            "ref": {
+              "kind": "ObjectRef",
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "object_id": "task-1",
+              "revision": "revision-7"
+            }
+          }
+        ],
+        "validators": [
+          "TaskInvariant@1"
+        ],
+        "evidence_evaluation_ids": [
+          "evaluation-1"
+        ]
+      },
+      "expected_error": "schema"
+    },
+    {
+      "name": "evaluation_must_match_context_manifest",
+      "record": {
+        "kind": "EvaluationRecord",
+        "evaluation_id": "evaluation-1",
+        "context_id": "context-base",
+        "address": {
+          "kind": "ValueAddress",
+          "object": {
+            "tenant": "tenant-dsco",
+            "realm": "realm-lab",
+            "object_id": "task-1"
+          },
+          "field": "cost",
+          "args": {
+            "currency": "USD"
+          }
+        },
+        "source_manifest_id": "manifest-wrong",
+        "evaluator_profile": "lingo-interpreter-target-1",
+        "status": "succeeded",
+        "requested_at": "2026-09-09T20:00:00Z",
+        "started_at": "2026-09-09T20:00:00Z",
+        "finished_at": "2026-09-09T20:00:01Z",
+        "dependencies": [
+          {
+            "kind": "value",
+            "token": "dependency-1",
+            "ref": {
+              "kind": "ObjectRef",
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "object_id": "task-1",
+              "revision": "revision-7"
+            }
+          }
+        ],
+        "resource_use": {
+          "cpu_ms": 1,
+          "wall_ms": 1,
+          "graph_reads": 1,
+          "peak_bytes": 2048
+        },
+        "result": {
+          "state": "available",
+          "type": "decimal",
+          "value": {
+            "$type": "decimal",
+            "coefficient": "200",
+            "scale": 2,
+            "unit": "USD"
+          },
+          "unit": "USD"
+        },
+        "completeness": "complete"
+      },
+      "expected_error": "manifest_context_mismatch"
+    },
+    {
+      "name": "address_scope_must_match_context",
+      "record": {
+        "kind": "EvaluationRecord",
+        "evaluation_id": "evaluation-1",
+        "context_id": "context-base",
+        "address": {
+          "kind": "ValueAddress",
+          "object": {
+            "tenant": "tenant-other",
+            "realm": "realm-lab",
+            "object_id": "task-1"
+          },
+          "field": "cost",
+          "args": {
+            "currency": "USD"
+          }
+        },
+        "source_manifest_id": "manifest-1",
+        "evaluator_profile": "lingo-interpreter-target-1",
+        "status": "succeeded",
+        "requested_at": "2026-09-09T20:00:00Z",
+        "started_at": "2026-09-09T20:00:00Z",
+        "finished_at": "2026-09-09T20:00:01Z",
+        "dependencies": [
+          {
+            "kind": "value",
+            "token": "dependency-1",
+            "ref": {
+              "kind": "ObjectRef",
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "object_id": "task-1",
+              "revision": "revision-7"
+            }
+          }
+        ],
+        "resource_use": {
+          "cpu_ms": 1,
+          "wall_ms": 1,
+          "graph_reads": 1,
+          "peak_bytes": 2048
+        },
+        "result": {
+          "state": "available",
+          "type": "decimal",
+          "value": {
+            "$type": "decimal",
+            "coefficient": "200",
+            "scale": 2,
+            "unit": "USD"
+          },
+          "unit": "USD"
+        },
+        "completeness": "complete"
+      },
+      "expected_error": "reference_scope_mismatch"
+    },
+    {
+      "name": "scenario_cycle_rejected",
+      "record": {
+        "kind": "Scenario",
+        "scenario_id": "scenario-inner",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "baseline_context_id": "context-base",
+        "parent_scenario_id": "scenario-inner",
+        "author_id": "operator-arthur",
+        "digest": {
+          "algorithm": "sha256",
+          "value": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "overrides": [
+          {
+            "address": {
+              "kind": "ValueAddress",
+              "object": {
+                "tenant": "tenant-dsco",
+                "realm": "realm-lab",
+                "object_id": "task-1"
+              },
+              "field": "cost",
+              "args": {
+                "currency": "USD"
+              }
+            },
+            "value_type": "decimal",
+            "value": {
+              "$type": "decimal",
+              "coefficient": "300",
+              "scale": 2,
+              "unit": "USD"
+            }
+          }
+        ]
+      },
+      "expected_error": "scenario_cycle"
+    },
+    {
+      "name": "duplicate_override_address_rejected",
+      "record": {
+        "kind": "Scenario",
+        "scenario_id": "scenario-urgent",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "baseline_context_id": "context-base",
+        "parent_scenario_id": null,
+        "author_id": "operator-arthur",
+        "digest": {
+          "algorithm": "sha256",
+          "value": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "overrides": [
+          {
+            "address": {
+              "kind": "ValueAddress",
+              "object": {
+                "tenant": "tenant-dsco",
+                "realm": "realm-lab",
+                "object_id": "task-1"
+              },
+              "field": "cost",
+              "args": {
+                "currency": "USD"
+              }
+            },
+            "value_type": "decimal",
+            "value": {
+              "$type": "decimal",
+              "coefficient": "200",
+              "scale": 2,
+              "unit": "USD"
+            }
+          },
+          {
+            "address": {
+              "kind": "ValueAddress",
+              "object": {
+                "tenant": "tenant-dsco",
+                "realm": "realm-lab",
+                "object_id": "task-1"
+              },
+              "field": "cost",
+              "args": {
+                "currency": "USD"
+              }
+            },
+            "value_type": "decimal",
+            "value": {
+              "$type": "decimal",
+              "coefficient": "200",
+              "scale": 2,
+              "unit": "USD"
+            }
+          }
+        ]
+      },
+      "expected_error": "duplicate_override"
+    },
+    {
+      "name": "old_fence_receipt_does_not_advance_new_run",
+      "record": {
+        "kind": "RunCheckpoint",
+        "checkpoint_id": "checkpoint-2",
+        "run_id": "run-1",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "context_id": "context-base",
+        "source_manifest_id": "manifest-1",
+        "run_revision": "run-revision-2",
+        "checkpoint_name": "await-reconciliation",
+        "status": "reconciling",
+        "next_steps": [
+          "reconcile-read"
+        ],
+        "state": {
+          "captured_count": {
+            "$type": "integer",
+            "value": "9007199254740993"
+          }
+        },
+        "current_lease": {
+          "owner": "worker-b",
+          "generation": "lease-generation-current",
+          "expires_at": "2026-09-09T21:00:00Z"
+        },
+        "pending_command_ids": [
+          "command-1"
+        ],
+        "evidence_receipt_ids": [
+          "attempt-old-owner",
+          "attempt-unknown"
+        ],
+        "last_transition": {
+          "transition_id": "transition-2",
+          "accepted_generation": "lease-generation-current",
+          "receipt_ids": [
+            "attempt-old-owner"
+          ],
+          "reconciliation_ids": [],
+          "accepted_at": "2026-09-09T20:03:00Z"
+        }
+      },
+      "expected_error": "stale_receipt_transition"
+    },
+    {
+      "name": "watch_commit_cursor_must_match_receipt",
+      "record": {
+        "kind": "WatchEvent",
+        "event_id": "event-101",
+        "watch_id": "watch-1",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "transaction_domain": "domain-lab",
+        "backend_generation": "backend-generation-3",
+        "authorization_epoch": "authorization-4",
+        "cursor": "cursor-wrong",
+        "previous_cursor": "cursor-100",
+        "event_type": "committed_batch",
+        "commit_id": "commit-1",
+        "changes": [
+          {
+            "kind": "ObjectRef",
+            "tenant": "tenant-dsco",
+            "realm": "realm-lab",
+            "object_id": "task-1",
+            "revision": "revision-8"
+          }
+        ],
+        "observed_at": "2026-09-09T20:01:01Z"
+      },
+      "expected_error": "watch_commit_mismatch"
+    },
+    {
+      "name": "scenario_context_must_preserve_baseline",
+      "record": {
+        "kind": "WorldContext",
+        "context_id": "context-base",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "transaction_domain": "domain-lab",
+        "snapshot": "snapshot-other",
+        "snapshot_watermark": "watermark-100",
+        "schema_generation": "schema-generation-3",
+        "source_manifest_id": "manifest-1",
+        "roots": [
+          {
+            "root_id": "root-work",
+            "tenant": "tenant-dsco",
+            "realm": "realm-lab",
+            "snapshot": "snapshot-100",
+            "mode": "local"
+          }
+        ],
+        "observations": [
+          {
+            "name": "price-observation",
+            "ref": {
+              "kind": "ObjectRef",
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "object_id": "price-1",
+              "revision": "price-revision-2"
+            }
+          }
+        ],
+        "principal_id": "operator-arthur",
+        "visibility_scope": "visibility-1",
+        "authorization_epoch": "authorization-4",
+        "evaluator_profile": "lingo-interpreter-target-1",
+        "scenario_id": "scenario-urgent",
+        "workspace_id": "workspace-lab",
+        "workspace_head": "head-10",
+        "policy_versions": {
+          "dispatch": "policy-2"
+        }
+      },
+      "expected_error": "scenario_baseline_mismatch"
+    },
+    {
+      "name": "scenario_baseline_cannot_be_hypothetical",
+      "record": {
+        "kind": "Scenario",
+        "scenario_id": "scenario-inner",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "baseline_context_id": "context-scenario",
+        "parent_scenario_id": "scenario-urgent",
+        "author_id": "operator-arthur",
+        "digest": {
+          "algorithm": "sha256",
+          "value": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "overrides": [
+          {
+            "address": {
+              "kind": "ValueAddress",
+              "object": {
+                "tenant": "tenant-dsco",
+                "realm": "realm-lab",
+                "object_id": "task-1"
+              },
+              "field": "cost",
+              "args": {
+                "currency": "USD"
+              }
+            },
+            "value_type": "decimal",
+            "value": {
+              "$type": "decimal",
+              "coefficient": "300",
+              "scale": 2,
+              "unit": "USD"
+            }
+          }
+        ]
+      },
+      "expected_error": "scenario_baseline_is_scenario"
+    },
+    {
+      "name": "failed_evaluation_is_not_justification",
+      "record": {
+        "kind": "Changeset",
+        "changeset_id": "changeset-1",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "transaction_domain": "domain-lab",
+        "base_context_id": "context-base",
+        "workspace_id": "workspace-lab",
+        "expected_workspace_head": "head-10",
+        "source_manifest_id": "manifest-1",
+        "request_digest": {
+          "algorithm": "sha256",
+          "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "idempotency_key": "change-key-1",
+        "changes": [
+          {
+            "op": "patch",
+            "target": {
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "object_id": "task-1"
+            },
+            "expected_revision": "revision-7",
+            "fields": {
+              "urgent": true
+            }
+          }
+        ],
+        "read_set": [
+          {
+            "kind": "value",
+            "token": "dependency-1",
+            "ref": {
+              "kind": "ObjectRef",
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "object_id": "task-1",
+              "revision": "revision-7"
+            }
+          }
+        ],
+        "validators": [
+          "TaskInvariant@1"
+        ],
+        "evidence_evaluation_ids": [
+          "evaluation-failed"
+        ]
+      },
+      "expected_error": "evaluation_evidence_invalid"
+    },
+    {
+      "name": "commit_must_bind_changeset_digest",
+      "record": {
+        "kind": "CommitReceipt",
+        "commit_id": "commit-1",
+        "changeset_id": "changeset-1",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "transaction_domain": "domain-lab",
+        "idempotency_key": "change-key-1",
+        "request_digest": {
+          "algorithm": "sha256",
+          "value": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "prior_workspace_head": "head-10",
+        "new_workspace_head": "head-11",
+        "changed_objects": [
+          {
+            "kind": "ObjectRef",
+            "tenant": "tenant-dsco",
+            "realm": "realm-lab",
+            "object_id": "task-1",
+            "revision": "revision-8"
+          }
+        ],
+        "durability": "wal_fsynced",
+        "durable_watermark": "watermark-101",
+        "change_cursor": "cursor-101",
+        "committed_at": "2026-09-09T20:01:00Z",
+        "status": "committed"
+      },
+      "expected_error": "commit_changeset_mismatch"
+    },
+    {
+      "name": "receipt_must_bind_command_occurrence",
+      "record": {
+        "kind": "AttemptReceipt",
+        "attempt_id": "attempt-old-owner",
+        "command_id": "command-1",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "run_id": "run-1",
+        "occurrence_id": "different-occurrence",
+        "worker_id": "worker-a",
+        "dispatch_generation": "lease-generation-old",
+        "recorded_at": "2026-09-09T20:02:00Z",
+        "dispatched_at": "2026-09-09T20:00:02Z",
+        "outcome": "succeeded",
+        "result": {
+          "state": "available",
+          "type": "artifact_ref",
+          "value": "artifact-readme"
+        },
+        "postcondition": "verified",
+        "evidence_artifact_ids": [
+          "artifact-readme"
+        ],
+        "receipt_digest": {
+          "algorithm": "sha256",
+          "value": "1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      },
+      "expected_error": "receipt_command_mismatch"
+    },
+    {
+      "name": "class_export_must_exist",
+      "record": {
+        "kind": "SourceManifest",
+        "source_manifest_id": "manifest-1",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "manifest_digest": {
+          "algorithm": "sha256",
+          "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "runtime_abi": "luajit-2.1-cabi",
+        "standard_library": "lingo-operator-target-1",
+        "canonicalization_profile": "dsco-canonical-target-1",
+        "modules": [
+          {
+            "name": "task",
+            "artifact_id": "artifact-task",
+            "version": "source-1",
+            "digest": {
+              "algorithm": "sha256",
+              "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "exports": [
+              "Task"
+            ]
+          }
+        ],
+        "classes": [
+          {
+            "class_id": "Task",
+            "version": "schema-1",
+            "module": "task",
+            "export": "MissingExport"
+          }
+        ],
+        "native_kernels": []
+      },
+      "expected_error": "manifest_export_missing"
+    },
+    {
+      "name": "parent_child_baselines_must_match",
+      "record": {
+        "kind": "Scenario",
+        "scenario_id": "scenario-inner",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "baseline_context_id": "context-other",
+        "parent_scenario_id": "scenario-urgent",
+        "author_id": "operator-arthur",
+        "digest": {
+          "algorithm": "sha256",
+          "value": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        },
+        "overrides": [
+          {
+            "address": {
+              "kind": "ValueAddress",
+              "object": {
+                "tenant": "tenant-dsco",
+                "realm": "realm-lab",
+                "object_id": "task-1"
+              },
+              "field": "cost",
+              "args": {
+                "currency": "USD"
+              }
+            },
+            "value_type": "decimal",
+            "value": {
+              "$type": "decimal",
+              "coefficient": "300",
+              "scale": 2,
+              "unit": "USD"
+            }
+          }
+        ]
+      },
+      "additional_records": [
+        {
+          "kind": "WorldContext",
+          "context_id": "context-other",
+          "tenant": "tenant-dsco",
+          "realm": "realm-lab",
+          "transaction_domain": "domain-lab",
+          "snapshot": "snapshot-other",
+          "snapshot_watermark": "watermark-100",
+          "schema_generation": "schema-generation-3",
+          "source_manifest_id": "manifest-1",
+          "roots": [
+            {
+              "root_id": "root-work",
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "snapshot": "snapshot-100",
+              "mode": "local"
+            }
+          ],
+          "observations": [
+            {
+              "name": "price-observation",
+              "ref": {
+                "kind": "ObjectRef",
+                "tenant": "tenant-dsco",
+                "realm": "realm-lab",
+                "object_id": "price-1",
+                "revision": "price-revision-2"
+              }
+            }
+          ],
+          "principal_id": "operator-arthur",
+          "visibility_scope": "visibility-1",
+          "authorization_epoch": "authorization-4",
+          "evaluator_profile": "lingo-interpreter-target-1",
+          "scenario_id": null,
+          "workspace_id": "workspace-lab",
+          "workspace_head": "head-10",
+          "policy_versions": {
+            "dispatch": "policy-2"
+          }
+        }
+      ],
+      "expected_error": "scenario_baseline_mismatch"
+    },
+    {
+      "name": "partial_result_is_not_complete_justification",
+      "record": {
+        "kind": "Changeset",
+        "changeset_id": "changeset-1",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "transaction_domain": "domain-lab",
+        "base_context_id": "context-base",
+        "workspace_id": "workspace-lab",
+        "expected_workspace_head": "head-10",
+        "source_manifest_id": "manifest-1",
+        "request_digest": {
+          "algorithm": "sha256",
+          "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "idempotency_key": "change-key-1",
+        "changes": [
+          {
+            "op": "patch",
+            "target": {
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "object_id": "task-1"
+            },
+            "expected_revision": "revision-7",
+            "fields": {
+              "urgent": true
+            }
+          }
+        ],
+        "read_set": [
+          {
+            "kind": "value",
+            "token": "dependency-1",
+            "ref": {
+              "kind": "ObjectRef",
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "object_id": "task-1",
+              "revision": "revision-7"
+            }
+          }
+        ],
+        "validators": [
+          "TaskInvariant@1"
+        ],
+        "evidence_evaluation_ids": [
+          "evaluation-partial"
+        ]
+      },
+      "expected_error": "evaluation_evidence_invalid"
+    },
+    {
+      "name": "scenario_context_must_preserve_draft_baseline",
+      "record": {
+        "kind": "WorldContext",
+        "context_id": "context-scenario",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "transaction_domain": "domain-lab",
+        "snapshot": "snapshot-100",
+        "snapshot_watermark": "watermark-100",
+        "schema_generation": "schema-generation-3",
+        "source_manifest_id": "manifest-1",
+        "roots": [
+          {
+            "root_id": "root-work",
+            "tenant": "tenant-dsco",
+            "realm": "realm-lab",
+            "snapshot": "snapshot-100",
+            "mode": "local"
+          }
+        ],
+        "observations": [
+          {
+            "name": "price-observation",
+            "ref": {
+              "kind": "ObjectRef",
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "object_id": "price-1",
+              "revision": "price-revision-2"
+            }
+          }
+        ],
+        "principal_id": "operator-arthur",
+        "visibility_scope": "visibility-1",
+        "authorization_epoch": "authorization-4",
+        "evaluator_profile": "lingo-interpreter-target-1",
+        "scenario_id": "scenario-inner",
+        "workspace_id": "workspace-lab",
+        "workspace_head": "head-10",
+        "policy_versions": {
+          "dispatch": "policy-2"
+        },
+        "draft_digest": {
+          "algorithm": "sha256",
+          "value": "9999999999999999999999999999999999999999999999999999999999999999"
+        }
+      },
+      "expected_error": "scenario_baseline_mismatch"
+    },
+    {
+      "name": "unavailable_complete_result_is_not_justification",
+      "record": {
+        "kind": "Changeset",
+        "changeset_id": "changeset-1",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "transaction_domain": "domain-lab",
+        "base_context_id": "context-base",
+        "workspace_id": "workspace-lab",
+        "expected_workspace_head": "head-10",
+        "source_manifest_id": "manifest-1",
+        "request_digest": {
+          "algorithm": "sha256",
+          "value": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "idempotency_key": "change-key-1",
+        "changes": [
+          {
+            "op": "patch",
+            "target": {
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "object_id": "task-1"
+            },
+            "expected_revision": "revision-7",
+            "fields": {
+              "urgent": true
+            }
+          }
+        ],
+        "read_set": [
+          {
+            "kind": "value",
+            "token": "dependency-1",
+            "ref": {
+              "kind": "ObjectRef",
+              "tenant": "tenant-dsco",
+              "realm": "realm-lab",
+              "object_id": "task-1",
+              "revision": "revision-7"
+            }
+          }
+        ],
+        "validators": [
+          "TaskInvariant@1"
+        ],
+        "evidence_evaluation_ids": [
+          "evaluation-complete-unavailable"
+        ]
+      },
+      "expected_error": "evaluation_evidence_invalid"
+    },
+    {
+      "name": "gap_requires_error_without_snapshot_hint",
+      "record": {
+        "kind": "WatchEvent",
+        "event_id": "event-gap-no-hint",
+        "watch_id": "watch-1",
+        "tenant": "tenant-dsco",
+        "realm": "realm-lab",
+        "transaction_domain": "domain-lab",
+        "backend_generation": "backend-generation-3",
+        "authorization_epoch": "authorization-4",
+        "cursor": "cursor-gap",
+        "previous_cursor": "cursor-101",
+        "event_type": "cursor_gap",
+        "observed_at": "2026-09-09T20:01:01Z"
+      },
+      "expected_error": "schema"
+    }
+  ]
+}

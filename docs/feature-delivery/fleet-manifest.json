@@ -1,0 +1,448 @@
+[
+  {
+    "id": "41",
+    "title": "Durable retry schedules and poison-task inspection",
+    "slug": "durable-retry-schedules",
+    "prompt": "prompts/41-durable-retry-schedules.md",
+    "domain": "durable-execution",
+    "primary_paths": [
+      "src/ipc.c",
+      "src/durable_agents.c",
+      "include/ipc.h"
+    ],
+    "proposed_modules": [
+      "src/task_retry.c",
+      "include/task_retry.h"
+    ],
+    "hotspots": [
+      "src/ipc.c",
+      "Makefile"
+    ],
+    "acceptance": "Use two competing local processes against a temporary database, scripted failures, and an injectable test clock. Prove one claim per generation, no claim before eligibility, bounded attempts across restart, and stale completion rejection after requeue. Check malformed policies and clock rollback without long sleeps."
+  },
+  {
+    "id": "42",
+    "title": "Event-driven scheduling of accepted blackboard dependencies",
+    "slug": "blackboard-ready-scheduler",
+    "prompt": "prompts/42-blackboard-ready-scheduler.md",
+    "domain": "fleet-collaboration",
+    "primary_paths": [
+      "src/blackboard.c",
+      "src/durable_agents.c",
+      "src/ipc.c",
+      "src/plan_dag.c"
+    ],
+    "proposed_modules": [
+      "src/board_scheduler.c",
+      "include/board_scheduler.h"
+    ],
+    "hotspots": [
+      "src/blackboard.c",
+      "src/ipc.c",
+      "Makefile"
+    ],
+    "acceptance": "Run a diamond dependency graph using deterministic worker subprocesses. Verify parallel independent roots, no downstream launch until accepted inputs exist, bounded concurrency, restart after dispatch before cursor commit, and invalidation while a worker runs. Assert no duplicate accepted publication and no inference during idle observation."
+  },
+  {
+    "id": "43",
+    "title": "Actionable execution recovery plans with uncertainty preserved",
+    "slug": "execution-recovery-plans",
+    "prompt": "prompts/43-execution-recovery-plans.md",
+    "domain": "durable-execution",
+    "primary_paths": [
+      "src/execution_recovery.c",
+      "src/execution_kernel.c",
+      "include/execution_recovery.h"
+    ],
+    "proposed_modules": [
+      "src/recovery_plan.c",
+      "include/recovery_plan.h"
+    ],
+    "hotspots": [
+      "src/execution_kernel.c",
+      "Makefile"
+    ],
+    "acceptance": "Construct real journal fixtures by running bounded local governed operations, then truncate or corrupt copied journals at admission, start, and completion boundaries. Prove every uncertain started operation remains non-retryable by default, clean evidence remains stable, and generating the plan neither mutates journal bytes nor launches tools."
+  },
+  {
+    "id": "44",
+    "title": "Durable cancellation requests and deadline completion receipts",
+    "slug": "durable-cancellation-receipts",
+    "prompt": "prompts/44-durable-cancellation-receipts.md",
+    "domain": "durable-execution",
+    "primary_paths": [
+      "src/durable_agents.c",
+      "src/ipc.c",
+      "src/swarm.c",
+      "src/supervisor.c"
+    ],
+    "proposed_modules": [
+      "src/task_cancel.c",
+      "include/task_cancel.h"
+    ],
+    "hotspots": [
+      "src/ipc.c",
+      "src/swarm.c",
+      "Makefile"
+    ],
+    "acceptance": "Use local workers that finish normally, ignore TERM, fork an owned child, and exit during cancellation. Restart the coordinator after recording a request. Prove requests survive, unrelated PIDs are untouched, descendants are reaped within a measured bound, duplicate requests are idempotent, and a stale generation cannot cancel replacement work."
+  },
+  {
+    "id": "45",
+    "title": "Recipient-specific durable mailbox acknowledgements",
+    "slug": "recipient-mailbox-acks",
+    "prompt": "prompts/45-recipient-mailbox-acks.md",
+    "domain": "fleet-collaboration",
+    "primary_paths": [
+      "src/ipc.c",
+      "include/ipc.h",
+      "src/durable_agents.c"
+    ],
+    "proposed_modules": [
+      "src/mailbox_delivery.c",
+      "include/mailbox_delivery.h"
+    ],
+    "hotspots": [
+      "src/ipc.c",
+      "Makefile"
+    ],
+    "acceptance": "Run three receiver processes and publish directed and broadcast messages through the real CLI. Kill one after delivery but before acknowledgement, restart it, and verify redelivery only to the unfinished recipient. Check duplicate sender keys, acknowledgement by the wrong agent, expired delivery tokens, and legacy receive behavior against a temporary database."
+  },
+  {
+    "id": "46",
+    "title": "Content-addressed large artifacts for worker handoffs",
+    "slug": "large-artifact-handoffs",
+    "prompt": "prompts/46-large-artifact-handoffs.md",
+    "domain": "fleet-collaboration",
+    "primary_paths": [
+      "src/blackboard.c",
+      "src/swarm.c",
+      "include/swarm.h"
+    ],
+    "proposed_modules": [
+      "src/artifact_store.c",
+      "include/artifact_store.h"
+    ],
+    "hotspots": [
+      "src/blackboard.c",
+      "src/swarm.c",
+      "Makefile"
+    ],
+    "acceptance": "Publish an artifact larger than 32 KiB, consume it from a second worktree, and verify byte identity. Inject truncated writes, duplicate publication, symlink escape, digest mismatch, and missing objects. Existing text-only blackboard contracts and stale-generation checks must continue to work unchanged."
+  },
+  {
+    "id": "47",
+    "title": "Fair bounded admission across concurrent swarm groups",
+    "slug": "fair-swarm-admission",
+    "prompt": "prompts/47-fair-swarm-admission.md",
+    "domain": "fleet-collaboration",
+    "primary_paths": [
+      "src/swarm.c",
+      "src/swarm_scale.c",
+      "src/swarm_accounting.c",
+      "src/swarm_telemetry.c"
+    ],
+    "proposed_modules": [
+      "src/swarm_admission.c",
+      "include/swarm_admission.h"
+    ],
+    "hotspots": [
+      "src/swarm.c",
+      "Makefile"
+    ],
+    "acceptance": "Drive three deterministic groups with unequal weights, long and short local workers, and a small slot limit. Verify no physical oversubscription, bounded queue memory, progress for the smallest group, correct reservation reconciliation after launch failure and cancellation, and unchanged legacy admission when the policy is disabled. Report observed start order and wait distributions."
+  },
+  {
+    "id": "48",
+    "title": "Declared resource reservations for cooperative worker edits",
+    "slug": "worker-resource-reservations",
+    "prompt": "prompts/48-worker-resource-reservations.md",
+    "domain": "fleet-collaboration",
+    "primary_paths": [
+      "src/blackboard.c",
+      "src/ipc.c",
+      "src/swarm.c"
+    ],
+    "proposed_modules": [
+      "src/work_reservations.c",
+      "include/work_reservations.h"
+    ],
+    "hotspots": [
+      "src/blackboard.c",
+      "src/ipc.c",
+      "src/swarm.c",
+      "Makefile"
+    ],
+    "acceptance": "Use competing local processes to request overlapping and disjoint key sets. Verify atomic all-or-nothing acquisition, shared-read compatibility, expiry/reclaim fencing, and bounded wait reporting. Demonstrate that two isolated worktrees can proceed on disjoint modules while an overlapping interface reservation is reported accurately and underlying filesystem permissions remain unchanged."
+  },
+  {
+    "id": "49",
+    "title": "Evidence-based worker quarantine and controlled re-entry",
+    "slug": "worker-health-quarantine",
+    "prompt": "prompts/49-worker-health-quarantine.md",
+    "domain": "fleet-collaboration",
+    "primary_paths": [
+      "src/swarm_telemetry.c",
+      "src/swarm.c",
+      "src/durable_agents.c",
+      "src/ipc.c"
+    ],
+    "proposed_modules": [
+      "src/worker_quarantine.c",
+      "include/worker_quarantine.h"
+    ],
+    "hotspots": [
+      "src/swarm.c",
+      "src/ipc.c",
+      "Makefile"
+    ],
+    "acceptance": "Simulate repeated startup failures, intermittent recovery, malformed results, and a slow healthy worker. Verify the configured identity stops receiving new tasks at the threshold, unrelated workers continue, state survives coordinator restart, cooldown does not launch inference by itself, and one bounded successful diagnostic activation restores eligibility with an auditable transition."
+  },
+  {
+    "id": "50",
+    "title": "Verified map-reduce coverage and disagreement reports",
+    "slug": "verified-swarm-reduction",
+    "prompt": "prompts/50-verified-swarm-reduction.md",
+    "domain": "fleet-collaboration",
+    "primary_paths": [
+      "src/swarm.c",
+      "src/orchestrator.c",
+      "src/blackboard.c",
+      "src/swarm_scale.c"
+    ],
+    "proposed_modules": [
+      "src/swarm_reduction.c",
+      "include/swarm_reduction.h"
+    ],
+    "hotspots": [
+      "src/swarm.c",
+      "src/blackboard.c",
+      "Makefile"
+    ],
+    "acceptance": "Run deterministic workers producing matching, conflicting, duplicate, failed, and late shard outputs. Verify only current accepted artifacts enter the final input set, conflicting claims remain visible, missing required shards block complete status, and invalidation during reduction rejects stale acceptance. Record raw worker envelopes, the pinned manifest, coverage diagnostics, and final checker receipts."
+  },
+  {
+    "id": "51",
+    "title": "Checker-environment attestations for accepted worker evidence",
+    "slug": "checker-environment-attestations",
+    "prompt": "prompts/51-checker-environment-attestations.md",
+    "domain": "evaluation-proof",
+    "primary_paths": [
+      "src/blackboard.c",
+      "src/execution_layer.c",
+      "scripts/release_manifest_verify.py"
+    ],
+    "proposed_modules": [
+      "src/check_attestation.c",
+      "include/check_attestation.h"
+    ],
+    "hotspots": [
+      "src/blackboard.c",
+      "Makefile"
+    ],
+    "acceptance": "Verify the same candidate in two controlled worktrees, change the checker executable while retaining its path, and mutate a declared lockfile. Confirm attestations detect each difference, an incomplete required field blocks policy acceptance, and concurrent upstream invalidation still defeats a passing stale check. Validate receipts through a separate read-only verifier."
+  },
+  {
+    "id": "52",
+    "title": "Offline declarative runtime scenario runner",
+    "slug": "runtime-scenario-runner",
+    "prompt": "prompts/52-runtime-scenario-runner.md",
+    "domain": "evaluation-proof",
+    "primary_paths": [
+      "scripts/bench_sota.py",
+      "tests/test_execution_spine_mcp.py",
+      "src/main.c",
+      "src/event_stream.c"
+    ],
+    "proposed_modules": [
+      "src/scenario_runner.c",
+      "include/scenario_runner.h"
+    ],
+    "hotspots": [
+      "src/main.c",
+      "src/event_stream.c",
+      "Makefile"
+    ],
+    "acceptance": "Execute scenarios against the newly built binary for successful local work, rejected capability use, malformed input, a hung child, and incorrect terminal-event order. Verify deadlines include child cleanup, fixture cleanup cannot escape its directory, and a failing assertion yields a failing process status. Re-run a saved manifest and compare stable fields while retaining honest timing differences."
+  },
+  {
+    "id": "53",
+    "title": "Crash-boundary fault-injection corpus for durable work",
+    "slug": "durable-fault-corpus",
+    "prompt": "prompts/53-durable-fault-corpus.md",
+    "domain": "evaluation-proof",
+    "primary_paths": [
+      "src/execution_kernel.c",
+      "src/execution_recovery.c",
+      "src/event_stream.c",
+      "tests/test_durable_boot_fencing.py"
+    ],
+    "proposed_modules": [
+      "src/fault_scenarios.c",
+      "include/fault_scenarios.h"
+    ],
+    "hotspots": [
+      "src/execution_kernel.c",
+      "src/event_stream.c",
+      "Makefile"
+    ],
+    "acceptance": "For each supported boundary, run a real local fixture process, inject termination, restart against copied isolated state, and assert no stale completion becomes current, committed events remain replayable, and uncertain effects stay uncertain. Include one corrupted journal and one full storage failure. Report unsupported injection points honestly and retain minimized failing cases as standalone manifests."
+  },
+  {
+    "id": "54",
+    "title": "Matched run comparisons with outcome and cost provenance",
+    "slug": "matched-run-comparisons",
+    "prompt": "prompts/54-matched-run-comparisons.md",
+    "domain": "evaluation-proof",
+    "primary_paths": [
+      "scripts/bench_sota.py",
+      "scripts/matrix_router_bench.py",
+      "src/headless_accounting.c",
+      "src/swarm_accounting.c"
+    ],
+    "proposed_modules": [
+      "src/run_compare.c",
+      "include/run_compare.h"
+    ],
+    "hotspots": [
+      "Makefile"
+    ],
+    "acceptance": "Feed synthetic manifests with known paired outcomes, missing cases, duplicate IDs, changed fixtures, and unknown costs, then compare two actual local deterministic scenario runs. Verify mismatches cannot silently enter paired statistics, seeded intervals reproduce, medians handle empty inputs correctly, and raw cases remain traceable from every reported aggregate."
+  },
+  {
+    "id": "55",
+    "title": "Runtime responsiveness budgets with regression evidence",
+    "slug": "runtime-responsiveness-budgets",
+    "prompt": "prompts/55-runtime-responsiveness-budgets.md",
+    "domain": "observability",
+    "primary_paths": [
+      "scripts/bench_sota.py",
+      "src/event_loop.c",
+      "src/swarm_progress.c",
+      "src/tool_telemetry.c"
+    ],
+    "proposed_modules": [
+      "src/latency_budget.c",
+      "include/latency_budget.h"
+    ],
+    "hotspots": [
+      "Makefile"
+    ],
+    "acceptance": "Run local workers that stream heavily while timers and control requests continue. Inject a deliberate fixture-only service stall and prove the budget catches it; verify the healthy run meets a declared conservative threshold. Measure observer overhead with instrumentation enabled and disabled, check bounded memory under sustained output, and preserve raw samples for independent percentile recomputation."
+  },
+  {
+    "id": "56",
+    "title": "Read-only fleet event timeline and precise cursor queries",
+    "slug": "fleet-event-timeline",
+    "prompt": "prompts/56-fleet-event-timeline.md",
+    "domain": "observability",
+    "primary_paths": [
+      "src/event_stream.c",
+      "include/event_stream.h",
+      "src/execution_events.c",
+      "src/durable_agents.c"
+    ],
+    "proposed_modules": [
+      "src/event_query.c",
+      "include/event_query.h"
+    ],
+    "hotspots": [
+      "src/event_stream.c",
+      "Makefile"
+    ],
+    "acceptance": "Run concurrent local event producers while paging a query snapshot. Verify exact membership through the captured high-water mark, no duplicates after cursor resume, stable original order, bounded memory for a large database, and clear behavior for unknown schema versions. Compare queried event hashes with direct read-only database evidence and existing replay output."
+  },
+  {
+    "id": "57",
+    "title": "Causal lineage across tasks, attempts, and worker events",
+    "slug": "fleet-causal-lineage",
+    "prompt": "prompts/57-fleet-causal-lineage.md",
+    "domain": "observability",
+    "primary_paths": [
+      "src/execution_events.c",
+      "src/execution_kernel.c",
+      "src/event_stream.c",
+      "src/ipc.c",
+      "src/swarm.c"
+    ],
+    "proposed_modules": [
+      "src/causal_lineage.c",
+      "include/causal_lineage.h"
+    ],
+    "hotspots": [
+      "src/execution_kernel.c",
+      "src/event_stream.c",
+      "src/ipc.c",
+      "src/swarm.c",
+      "Makefile"
+    ],
+    "acceptance": "Execute a fork-and-join fixture with two workers, one retry, and one cancelled branch. Verify the reconstructed graph links each execution to the correct attempt, contains no fabricated cross-worker edges, survives restart, and handles intentionally omitted legacy metadata. Check identifier size limits and cycle diagnostics using malformed copied events without corrupting the live database."
+  },
+  {
+    "id": "58",
+    "title": "Offline fleet incident bundle with cross-worker evidence joins",
+    "slug": "fleet-incident-bundle",
+    "prompt": "prompts/58-fleet-incident-bundle.md",
+    "domain": "observability",
+    "primary_paths": [
+      "src/swarm_telemetry.c",
+      "src/event_stream.c",
+      "src/execution_recovery.c",
+      "src/blackboard.c"
+    ],
+    "proposed_modules": [
+      "src/fleet_incident.c",
+      "include/fleet_incident.h"
+    ],
+    "hotspots": [
+      "src/event_stream.c",
+      "src/blackboard.c",
+      "Makefile"
+    ],
+    "acceptance": "Create a local three-worker incident with one crash, one stale publication, and one successful task. Export while another worker continues writing, then inspect the bundle offline with original databases unavailable. Verify every included digest, cross-worker links, bounded export size, explicit snapshot boundaries, and absence of seeded secret canaries. No upload or external notification should occur."
+  },
+  {
+    "id": "59",
+    "title": "Release readiness from exact merged-artifact evidence",
+    "slug": "release-readiness-evidence",
+    "prompt": "prompts/59-release-readiness-evidence.md",
+    "domain": "release-delivery",
+    "primary_paths": [
+      "scripts/release_hardened.py",
+      "scripts/release_manifest_verify.py",
+      "src/blackboard.c",
+      "src/execution_layer.c"
+    ],
+    "proposed_modules": [
+      "src/release_readiness.c",
+      "include/release_readiness.h"
+    ],
+    "hotspots": [
+      "src/blackboard.c",
+      "Makefile"
+    ],
+    "acceptance": "Build a small isolated candidate and supply passing integration receipts, then replace its bytes, omit a required contract, invalidate an upstream artifact, and substitute receipts from another revision. Each case must become non-ready for the precise reason. Verify an intact complete packet succeeds through a separate verifier and retains all supporting hashes and commands."
+  },
+  {
+    "id": "60",
+    "title": "Deterministic local release staging with reproducibility reports",
+    "slug": "deterministic-release-staging",
+    "prompt": "prompts/60-deterministic-release-staging.md",
+    "domain": "release-delivery",
+    "primary_paths": [
+      "scripts/release_hardened.py",
+      "scripts/release_manifest_verify.py",
+      "Makefile",
+      "src/main.c"
+    ],
+    "proposed_modules": [
+      "src/release_stage.c",
+      "include/release_stage.h"
+    ],
+    "hotspots": [
+      "Makefile",
+      "src/main.c"
+    ],
+    "acceptance": "Stage the same fixture inputs twice under different directory names and compare payload hashes. Repeat after changing a source file and after introducing an unstable timestamp to prove differences are detected. Inject packaging failure before the final rename and verify no partial candidate appears complete. Validate archive paths, manifest hashes, and a local help smoke against the packaged binary."
+  }
+]

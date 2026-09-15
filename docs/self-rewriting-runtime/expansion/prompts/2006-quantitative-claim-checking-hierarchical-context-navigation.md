@@ -1,0 +1,15 @@
+# 2006 — Quantitative claim checker: Hierarchical context navigation
+
+Implement the hierarchical context navigation feature for the Quantitative claim checker RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Train a quantitative RLM to turn performance assertions into executable calculations with explicit populations and failure accounting.
+
+External CLAIMS and MEASUREMENTS preserve metric definitions, units, sample identities, denominators, censoring, and candidate revisions. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root programs checked estimators, recursively audits inclusion rules, and buffers reproducible calculations rather than generated numerical confidence. Role output: Return CHECKED_QUANTITATIVE_CLAIM with computation, included observations, exclusions, uncertainty, and support status. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Build lossless external indexes over task contexts and train the root to navigate coarse descriptors into exact evidence regions. Child RLMs inspect selected subtrees; summaries guide navigation but never replace authoritative content. Record access paths and evidence references for the final artifact.
+
+Training includes benchmark claims, altered denominators, misleading averages, mixed units, zero bases, and missing observations. Independent numerical implementations verify controlled results; statistical uncertainty remains separate from deterministic arithmetic correctness. Hold out metric compositions, workload distributions, and missing-data patterns. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: A candidate timing out on half its requests must not claim universal improvement from the faster completed half. A summary that omits a decisive exception must not erase the exception from the answer. Force a query requiring descent into a rarely accessed subtree and verify the exact underlying evidence is consumed.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/tool_telemetry.c`, `src/cost_model.c`, `src/context_fabric.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py` (`ProbabilisticReasoningSignature`, `ScientificReasoningWorkflow.forward`). Donor baseline: The workflow supplies a fixed neutral prior and placeholder likelihood rather than fitted evidence models. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

@@ -1,0 +1,15 @@
+# 1827 — Behavior-grounded algorithm retriever: Constrained Pareto policy distillation
+
+Implement the constrained pareto policy distillation feature for the Behavior-grounded algorithm retriever RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Train an algorithm RLM to retrieve reusable procedures using behavioral requirements and checked assumptions rather than vocabulary alone.
+
+External PROCEDURE_CORPUS and PROBE_RESULTS preserve input domains, effects, complexity observations, preconditions, and revision identities. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root programs typed retrieval, recursively checks promising mappings, and buffers applicable algorithms with remaining verification obligations. Role output: Return ALGORITHM_MATCHES with applicability evidence, counterexamples, ranked tradeoffs, and unresolved obligations. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Collect independently verified root trajectories with quality, latency, memory, and cost measurements. Construct a constrained frontier and distill policies conditioned on declared operating budgets. Keep correctness and capability rules as hard requirements rather than exchangeable score terms.
+
+Training contains renamed implementations, deceptive descriptions, pure and stateful variants, boundary differences, and controlled performance regimes. Independent contract probes validate fixture applicability; similarity never establishes full equivalence or automatic adoption. Hold out algorithm families, naming conventions, and workload combinations. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: A memoization algorithm for pure functions must not transfer to a counter with stateful side effects. A fast invalid trajectory must never enter the feasible frontier. Tightening a resource budget should produce a valid lower-cost policy or explicit infeasibility, not an unreported reduction in required task coverage.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/skill_index.c`, `src/semantic.c`, `src/context_fabric.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py` (`AnalogicalReasoningSignature`). Donor baseline: Analogical mappings and inferred features are generated text without executable applicability checks. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

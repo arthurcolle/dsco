@@ -1,0 +1,15 @@
+# 807 — Cooperative cancellation protocol designer: Constrained Pareto policy distillation
+
+Implement the constrained pareto policy distillation feature for the Cooperative cancellation protocol designer RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Learn executable cancellation protocols that terminate owned work at defined boundaries without cancelling replacements or losing completion truth.
+
+External `cancel_requests`, `ownership_epochs`, and `worker_states` variables preserve full completion races and descendant relationships. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root programs split lifecycle intervals, delegate terminal races, and construct generation-fenced delivery and acknowledgement transitions. Role output: Final `CancellationProtocol` handle includes native transitions, ownership predicates, supported stop boundaries, and race-reproduction receipts. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Collect independently verified root trajectories with quality, latency, memory, and cost measurements. Construct a constrained frontier and distill policies conditioned on declared operating budgets. Keep correctness and capability rules as hard requirements rather than exchangeable score terms.
+
+Train from controlled cancellation schedules, worker exits, escalation outcomes, and independently labeled ownership violations. A frozen lifecycle model checks permitted terminal outcomes, generation matching, bounded cooperative completion, and unaffected unrelated workers. Hold out descendant shapes, cancellation timing, ownership reuse, and completion-race families with shared schedules grouped. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: A delayed cancellation for an old task generation terminates a replacement worker that reused the same visible identifier. A fast invalid trajectory must never enter the feasible frontier. Tightening a resource budget should produce a valid lower-cost policy or explicit infeasibility, not an unreported reduction in required task coverage.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/scheduler.c`, `src/process_capture.c`, `src/swarm.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/agent_system.py` (`TickScheduler.stop`). Donor baseline: Cancels its scheduler task and awaits completion; native cancellation races and ownership proofs are absent. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

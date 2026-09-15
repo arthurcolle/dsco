@@ -1,0 +1,15 @@
+# 571 — Transactional state-write planner: Executable curriculum compiler
+
+Implement the executable curriculum compiler feature for the Transactional state-write planner RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Learn native write protocols that atomically publish owned state changes while preserving concurrent updates and failure recovery.
+
+REPL `write_intents`, `state_versions`, and `fault_schedules` retain complete transactions, ownership scopes, and interruption boundaries. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root programs identify conflict sets, delegate rollback paths, and synthesize prepare/validate/commit steps with version checks. Role output: Final `WriteProtocolCandidate` handle contains native transitions, commit predicates, conflict witnesses, and replayable atomicity receipts. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Compile a task grammar with explicit difficulty axes, valid transformations, and known failure labels. Generate positive and negative episodes, retaining their originating family identifiers. Train the role's root policy on a balanced development curriculum and expose a reproducible curriculum-build command.
+
+Train from controlled concurrent writes, injected storage failures, and independently labeled lost-update or atomicity violations. A fixed transactional reference model checks allowed serial outcomes, durability points, and rejection of stale write versions. Hold out conflict shapes, failure boundaries, concurrent-writer counts, and state-schema variations with transaction histories grouped. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: A late writer updates the old snapshot after validation, and publication silently overwrites that acknowledged change. Reject a generator that changes the answer without updating its reference or produces duplicate families under different seeds. Measure valid-case coverage and trained-root success separately.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/blackboard.c`, `src/buffer_store.c`, `src/execution_layer.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/agents/sqlite.py` (`SQLiteAgent.update`). Donor baseline: Updates dictionary-backed rows; it does not provide transactional native state publication. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

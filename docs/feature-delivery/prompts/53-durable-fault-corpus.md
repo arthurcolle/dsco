@@ -1,0 +1,11 @@
+# 53 — Crash-boundary fault-injection corpus for durable work
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or the isolated worktree assigned for this feature. Read applicable `AGENTS.md` instructions and inspect current code before editing. Start at `src/execution_kernel.c`, `src/execution_recovery.c`, `src/event_stream.c`, `tests/test_durable_boot_fencing.py`. If part already exists, ship the missing bounded extension and explain the observed gap; do not duplicate an existing subsystem. All interfaces named below are proposed until verified on disk.
+
+Durability claims need reproducible crash cases tied to real runtime boundaries. Add a bounded offline fault corpus and narrowly scoped test hooks for admission committed, process launched, output persisted, candidate published, and acceptance committed. Hooks must be inactive in normal builds or require an unmistakable dedicated test setting, and must never depend on timing sleeps to hit a boundary. A proposed `scenarios faults` suite records the chosen injection point, seed, child process status, journal hashes, and recovery classification. Reuse existing fencing and outbox logic; the feature is a replayable diagnostic workload that demonstrates which invariants survived each interruption, not a new execution engine.
+
+Implement new capability in proposed `src/fault_scenarios.c` and `include/fault_scenarios.h`, with small dispatch hooks and a Makefile entry where needed. Preserve unrelated dirty work. Coordinate shared-file changes; keep builds, databases, sockets, fixtures, and reports isolated. Build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install a worker binary. Every tool-call path must use `tools_execute_for_tier()` and preserve capability gates.
+
+For each supported boundary, run a real local fixture process, inject termination, restart against copied isolated state, and assert no stale completion becomes current, committed events remain replayable, and uncertain effects stay uncertain. Include one corrupted journal and one full storage failure. Report unsupported injection points honestly and retain minimized failing cases as standalone manifests.
+
+Finish with the implemented behavior, exact reproduction commands, binary and evidence paths, relevant regression results, and remaining limitations. Verify the real local runtime path; compilation alone is insufficient.

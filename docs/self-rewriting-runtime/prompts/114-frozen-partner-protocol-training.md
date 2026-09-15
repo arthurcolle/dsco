@@ -1,0 +1,13 @@
+# 114 — Train interrole protocols against frozen partners
+
+Role RLMs should learn to ask and answer useful subproblems without changing the communication contract or colluding with a moving partner. In `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree, use `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/signatures.py`'s `Subtask`, `ChildResult`, and `FinalSynthesis` as actual typed-message prior art. Extend them into weight training for programmatic role interactions under the [RLM execution model](https://arxiv.org/html/2512.24601v3).
+
+Choose two roles with complementary responsibilities, such as partition planner and local verifier. Freeze one role's checkpoint, prompt, and protocol implementation while updating the other's root adapter from complete interactions. Train on messages that preserve task identity, required evidence, uncertainty, and executable result references. Use terminal task correctness and protocol-validity checks as independent targets; do not reward a partner's praise. Alternate updates only at explicit generation boundaries, retaining old partner versions for cross-play evaluation. Hidden answer keys and grading metadata must never enter either role's observed messages.
+
+Implement the interaction-data and training adapter with small hooks in `src/swarm.c`, `src/agent_profile.c`, and `src/self_improve.c`. If no message transport supports these records, provide a minimal bounded request/result protocol and local two-role RLM harness. A proposed `dsco role-train protocol` operation declares the one trainable adapter, frozen partner revisions, and task split. The output is a real role parameter update, not a rewritten message template.
+
+Acceptance runs bounded actual training for one role, then reloads that adapter through the real DSCO binary. Verify the partner tensors remain identical. Test it against both the training partner and an unseen compatible partner on generated tasks with an exact oracle. Include malformed child replies, omitted uncertainty, a partner that repeats an incorrect answer, and a planted label-leak field. The trained role must not gain reward from blindly trusting or echoing its partner. Report cross-play correctness, schema violations, call cost, tensor deltas, and any negative transfer before considering another alternating update.
+
+The REPL holds external context; generated code invokes children and assigns the final output variable.
+
+Preserve dirty work; use new modules and small C hooks. Route dynamic tool effects through `tools_execute_for_tier()` and preserve denials. Build with `DSCO_NO_INSTALL=1 make -j2 dsco`; isolate state and never install worker binaries.

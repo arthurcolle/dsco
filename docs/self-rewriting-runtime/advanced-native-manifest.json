@@ -1,0 +1,613 @@
+[
+  {
+    "id": "61",
+    "title": "Train an RLM to reproduce decisive native schedules",
+    "slug": "schedule-replay-specialist-rlm",
+    "prompt": "prompts/61-schedule-replay-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/event_loop.c",
+      "src/event_stream.c",
+      "src/vm.c",
+      "src/swarm.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_streaming_tools.py",
+        "symbols": [
+          "ToolExecutor._execute_structured"
+        ],
+        "observation": "The donor dispatches dependency-ready waves but does not record thread interleavings or train a replay specialist."
+      }
+    ],
+    "mechanism": "An RLM learns trace decomposition and schedule selection against deterministic replay of cooperative native cells.",
+    "challenge": "Reproduce a failing interleaving after wall-clock delays change and reject a fabricated replay schedule.",
+    "hotspots": [
+      "src/event_loop.c",
+      "src/event_stream.c",
+      "src/vm.c",
+      "src/swarm.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "62",
+    "title": "Train an RLM to prove bounded executable equivalence",
+    "slug": "symbolic-equivalence-specialist-rlm",
+    "prompt": "prompts/62-symbolic-equivalence-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/vm.c",
+      "src/ast.c",
+      "src/autoresearch.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer.transform"
+        ],
+        "observation": "The donor transforms ASTs without proving output equivalence or training a proof-decomposition policy."
+      }
+    ],
+    "mechanism": "An RLM decomposes bounded bitvector equivalence obligations and learns from independent solver certificates or counterexamples.",
+    "challenge": "An overflow-sensitive rewrite must yield a concrete differing input instead of an unsupported equivalence claim.",
+    "hotspots": [
+      "src/vm.c",
+      "src/ast.c",
+      "src/autoresearch.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "63",
+    "title": "Train an RLM for reversible debugging of pure native cells",
+    "slug": "reversible-debugging-specialist-rlm",
+    "prompt": "prompts/63-reversible-debugging-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/vm.c",
+      "src/plugin.c",
+      "src/event_stream.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/hooks.py",
+        "symbols": [
+          "TelemetryHook.handle",
+          "TelemetryHook.get_metrics"
+        ],
+        "observation": "The donor collects operation telemetry but provides no instruction-state rewind or trained reversible-debugging policy."
+      }
+    ],
+    "mechanism": "An RLM learns where to checkpoint and rewind deterministic pure cells to isolate the first semantic divergence.",
+    "challenge": "Rewind across a branch and reproduce values exactly; attempting to rewind an external effect must be refused.",
+    "hotspots": [
+      "src/vm.c",
+      "src/plugin.c",
+      "src/event_stream.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "64",
+    "title": "Train an RLM to minimize native counterexamples structurally",
+    "slug": "counterexample-minimization-specialist-rlm",
+    "prompt": "prompts/64-counterexample-minimization-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/autoresearch.c",
+      "src/ast.c",
+      "src/execution_kernel.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer.parse",
+          "ASTAnalyzer._extract_structure"
+        ],
+        "observation": "The donor extracts code structure but does not minimize behavioral witnesses while preserving a failure predicate."
+      }
+    ],
+    "mechanism": "An RLM learns grammar-preserving reductions guided by an independent native failure-identity oracle.",
+    "challenge": "A smaller crashing input with a different defect must not replace the original counterexample.",
+    "hotspots": [
+      "src/autoresearch.c",
+      "src/ast.c",
+      "src/execution_kernel.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "65",
+    "title": "Train an RLM for executable change-impact slicing",
+    "slug": "change-impact-slicing-specialist-rlm",
+    "prompt": "prompts/65-change-impact-slicing-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/ast.c",
+      "src/vm.c",
+      "src/lingo_workflow.c",
+      "src/autoresearch.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py",
+        "symbols": [
+          "WorkflowToolkit.analyze_dependencies"
+        ],
+        "observation": "The donor analyzes workflow dependencies, not native data/control dependencies or learned change-impact slicing."
+      }
+    ],
+    "mechanism": "An RLM learns semantic impact slices that drive targeted recompilation and qualification without missing affected contracts.",
+    "challenge": "A changed branch predicate must invalidate a downstream result even when its direct call graph is unchanged.",
+    "hotspots": [
+      "src/ast.c",
+      "src/vm.c",
+      "src/lingo_workflow.c",
+      "src/autoresearch.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "66",
+    "title": "Train an RLM to construct checkable loop resource certificates",
+    "slug": "loop-certificate-specialist-rlm",
+    "prompt": "prompts/66-loop-certificate-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/vm.c",
+      "include/vm.h",
+      "src/prompt_program.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py",
+        "symbols": [
+          "WorkflowToolkit.validate_workflow"
+        ],
+        "observation": "The donor checks basic workflow structure but does not prove termination or train certificate synthesis."
+      }
+    ],
+    "mechanism": "An RLM proposes ranking functions and resource bounds that a small independent verifier checks for admitted loops.",
+    "challenge": "Reject a decreasing-looking loop whose counter wraps and exceeds its claimed bound.",
+    "hotspots": [
+      "src/vm.c",
+      "src/prompt_program.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "67",
+    "title": "Train an RLM to synthesize pointer-free native host bindings",
+    "slug": "typed-host-handle-specialist-rlm",
+    "prompt": "prompts/67-typed-host-handle-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/plugin.c",
+      "include/plugin.h",
+      "src/vm.c",
+      "src/capability.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/decorators.py",
+        "symbols": [
+          "operation",
+          "agent"
+        ],
+        "observation": "The donor derives operation metadata from Python signatures but does not generate checked native host-handle bindings."
+      }
+    ],
+    "mechanism": "An RLM learns typed handle interfaces and ownership adapters, qualified by adversarial lifetime and capability checks.",
+    "challenge": "A stale or cross-kind handle must never resolve after slot reuse or code replacement.",
+    "hotspots": [
+      "src/plugin.c",
+      "src/vm.c",
+      "src/capability.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "68",
+    "title": "Train an RLM to generate SIMD native batch kernels",
+    "slug": "simd-codegen-specialist-rlm",
+    "prompt": "prompts/68-simd-codegen-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "include/simd.h",
+      "src/vm.c",
+      "src/vecstore.c",
+      "src/plugin.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer.transform",
+          "MetaToolRegistry.register_code"
+        ],
+        "observation": "The donor transforms executable Python functions but does not generate vector instructions or establish scalar parity."
+      }
+    ],
+    "mechanism": "An RLM learns vectorization and tail-handling choices for native batch cells using scalar-oracle rewards.",
+    "challenge": "Tail lengths, misalignment, and unsupported ISA must preserve scalar semantics without out-of-bounds reads.",
+    "hotspots": [
+      "src/vm.c",
+      "src/vecstore.c",
+      "src/plugin.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "69",
+    "title": "Train an RLM to autotune resident data layouts",
+    "slug": "data-layout-autotuning-specialist-rlm",
+    "prompt": "prompts/69-data-layout-autotuning-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/arena_alloc.c",
+      "src/vecstore.c",
+      "src/plugin.c",
+      "src/vm.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/agents/duckdb.py",
+        "symbols": [
+          "DuckDBAgent.create_table",
+          "DuckDBAgent.aggregate"
+        ],
+        "observation": "The donor uses Python column dictionaries for simplified analytics, not a native layout optimizer or a real DuckDB engine."
+      }
+    ],
+    "mechanism": "An RLM learns array-of-structures, structure-of-arrays, and blocked layouts under exact semantics and migration constraints.",
+    "challenge": "A faster layout must not lose concurrent writes or break external schema access.",
+    "hotspots": [
+      "src/arena_alloc.c",
+      "src/vecstore.c",
+      "src/plugin.c",
+      "src/vm.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "70",
+    "title": "Train an RLM to remove allocations through escape analysis",
+    "slug": "escape-analysis-specialist-rlm",
+    "prompt": "prompts/70-escape-analysis-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/arena_alloc.c",
+      "include/arena_alloc.h",
+      "src/ast.c",
+      "src/vm.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer._extract_structure"
+        ],
+        "observation": "The donor identifies structural syntax but does not prove lifetimes or optimize allocation placement."
+      }
+    ],
+    "mechanism": "An RLM learns escape-analysis proposals whose independently checked ownership facts permit arena or stack rewrites.",
+    "challenge": "A callback-retained reference must prevent temporary allocation placement even if ordinary tests return early.",
+    "hotspots": [
+      "src/arena_alloc.c",
+      "src/ast.c",
+      "src/vm.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "71",
+    "title": "Train an RLM to adapt native algorithms to allocation pressure",
+    "slug": "allocation-pressure-specialist-rlm",
+    "prompt": "prompts/71-allocation-pressure-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/arena_alloc.c",
+      "src/cost_frontier.c",
+      "src/vm.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/base.py",
+        "symbols": [
+          "AgentStats.record_call"
+        ],
+        "observation": "The donor records operation timings and failures but does not learn native algorithm choices from memory-pressure feedback."
+      }
+    ],
+    "mechanism": "An RLM learns guarded selection between memory-intensive and streaming native variants using measured pressure and verified outcomes.",
+    "challenge": "Memory pressure must change the chosen algorithm without oscillation, lost results, or falsely claiming an allocation estimate is measured.",
+    "hotspots": [
+      "src/arena_alloc.c",
+      "src/cost_frontier.c",
+      "src/vm.c",
+      "src/self_improve.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "72",
+    "title": "Train an RLM to reconstruct deoptimization state",
+    "slug": "native-deoptimization-specialist-rlm",
+    "prompt": "prompts/72-native-deoptimization-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/vm.c",
+      "include/vm.h",
+      "src/plugin.c",
+      "src/lingo_workflow.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_streaming_tools.py",
+        "symbols": [
+          "ToolExecutor._execute_sequential"
+        ],
+        "observation": "The donor forwards prior results between calls, but cannot reconstruct a suspended native frame into an interpreter continuation."
+      }
+    ],
+    "mechanism": "An RLM learns precise native-to-IR state maps checked through forced deoptimization and suffix equivalence.",
+    "challenge": "Every supported safepoint must reconstruct logical values and resume without duplicating completed effects.",
+    "hotspots": [
+      "src/vm.c",
+      "src/plugin.c",
+      "src/lingo_workflow.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "73",
+    "title": "Train an RLM for semantic incremental native compilation",
+    "slug": "incremental-compilation-specialist-rlm",
+    "prompt": "prompts/73-incremental-compilation-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/ast.c",
+      "src/plugin.c",
+      "src/vm.c",
+      "src/autoresearch.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.get_ast",
+          "MetaToolRegistry.transform_tool"
+        ],
+        "observation": "The donor caches AST descriptions and transforms whole registered tools, not semantic native dependency units."
+      }
+    ],
+    "mechanism": "An RLM learns compilation-unit boundaries and reuse decisions checked against clean rebuilds of changed programs.",
+    "challenge": "A semantic change hidden behind an unchanged symbol name must rebuild its dependent specialized code.",
+    "hotspots": [
+      "src/ast.c",
+      "src/plugin.c",
+      "src/vm.c",
+      "src/autoresearch.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "74",
+    "title": "Train an RLM for generation-aware native source debugging",
+    "slug": "native-source-debugging-specialist-rlm",
+    "prompt": "prompts/74-native-source-debugging-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/ast.c",
+      "src/plugin.c",
+      "src/native_trace.c",
+      "src/vm.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer._extract_structure",
+          "MetaToolRegistry.get_source"
+        ],
+        "observation": "The donor stores source and line-oriented structure but has no live native breakpoint mapping or trained debugging policy."
+      }
+    ],
+    "mechanism": "An RLM learns generation-specific breakpoint and inspection actions using independently checked native failure localization.",
+    "challenge": "A breakpoint must inspect the source and locals of its pinned generation despite a concurrent replacement.",
+    "hotspots": [
+      "src/ast.c",
+      "src/plugin.c",
+      "src/native_trace.c",
+      "src/vm.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "75",
+    "title": "Train an RLM for cross-compiler native qualification",
+    "slug": "cross-compiler-specialist-rlm",
+    "prompt": "prompts/75-cross-compiler-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/autoresearch.c",
+      "src/plugin.c",
+      "src/ast.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/scaling.py",
+        "symbols": [
+          "ScaledSwarm._select_best"
+        ],
+        "observation": "The donor selects answer replicas by judge or heuristics, not native executable behavior across independent compilers."
+      }
+    ],
+    "mechanism": "An RLM learns compiler/configuration experiments that expose undefined behavior and qualify portable native rewrites.",
+    "challenge": "Compiler agreement cannot accept a candidate that independently violates the oracle, and disagreement must remain unresolved.",
+    "hotspots": [
+      "src/autoresearch.c",
+      "src/plugin.c",
+      "src/ast.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "76",
+    "title": "Train an RLM to search native optimization phase orders",
+    "slug": "optimization-phase-order-specialist-rlm",
+    "prompt": "prompts/76-optimization-phase-order-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/autoresearch.c",
+      "src/vm.c",
+      "src/ast.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer.transform"
+        ],
+        "observation": "The donor applies transformations in supplied list order without learning interactions or checking optimization outcomes."
+      }
+    ],
+    "mechanism": "An RLM learns sequences of known native rewrite passes while equivalence and whole-program cost constrain search.",
+    "challenge": "A phase order that wins microbenchmarks but regresses the complete executable must not be promoted.",
+    "hotspots": [
+      "src/autoresearch.c",
+      "src/vm.c",
+      "src/ast.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "77",
+    "title": "Train an RLM for checked speculative native parallelization",
+    "slug": "speculative-parallelization-specialist-rlm",
+    "prompt": "prompts/77-speculative-parallelization-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/vm.c",
+      "src/lingo_workflow.c",
+      "src/swarm.c",
+      "src/execution_kernel.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_streaming_tools.py",
+        "symbols": [
+          "ToolExecutor._execute_parallel",
+          "ToolExecutor._execute_structured"
+        ],
+        "observation": "The donor runs declared parallel or dependency-ready calls but does not speculate over unknown native data dependencies."
+      }
+    ],
+    "mechanism": "An RLM learns speculative partitions with transactional read/write validation and exact serial fallback.",
+    "challenge": "A hidden dependency conflict must discard speculative state and reproduce the serial result without duplicated effects.",
+    "hotspots": [
+      "src/vm.c",
+      "src/lingo_workflow.c",
+      "src/swarm.c",
+      "src/execution_kernel.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "78",
+    "title": "Train an RLM to optimize native precision under error contracts",
+    "slug": "precision-autotuning-specialist-rlm",
+    "prompt": "prompts/78-precision-autotuning-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/math_fastpath.c",
+      "src/vm.c",
+      "src/cost_frontier.c",
+      "include/simd.h"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py",
+        "symbols": [
+          "MathToolkit"
+        ],
+        "observation": "The donor supplies mathematical operations but does not learn native precision or reduction order under independently checked numerical-error limits."
+      }
+    ],
+    "mechanism": "An RLM learns precision, summation, and vector reduction choices subject to explicit numerical error and stability contracts.",
+    "challenge": "A fast reduction that fails catastrophic-cancellation or NaN behavior must be rejected despite ordinary-data gains.",
+    "hotspots": [
+      "src/math_fastpath.c",
+      "src/vm.c",
+      "src/cost_frontier.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "79",
+    "title": "Train an RLM for budgeted native compilation reuse",
+    "slug": "native-code-cache-specialist-rlm",
+    "prompt": "prompts/79-native-code-cache-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/plugin.c",
+      "src/vm.c",
+      "src/arena_alloc.c",
+      "src/autoresearch.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/base.py",
+        "symbols": [
+          "BaseAgent._get_cache_key",
+          "BaseAgent._check_cache"
+        ],
+        "observation": "The donor caches operation results by arguments and TTL, not executable artifacts with semantic identities and pinned generations."
+      }
+    ],
+    "mechanism": "An RLM learns compilation-cache admission and eviction from reuse trajectories while code lifetime remains mechanically enforced.",
+    "challenge": "An evicted artifact must never unmap active code; changed ABI or compiler semantics must prevent stale reuse.",
+    "hotspots": [
+      "src/plugin.c",
+      "src/vm.c",
+      "src/arena_alloc.c",
+      "src/autoresearch.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "80",
+    "title": "Train an RLM for lossless logical code-cell checkpoints",
+    "slug": "logical-checkpoint-specialist-rlm",
+    "prompt": "prompts/80-logical-checkpoint-specialist-rlm.md",
+    "domain": "advanced-native-specialist-rlm",
+    "primary_paths": [
+      "src/vm.c",
+      "src/recovery.c",
+      "src/execution_recovery.c",
+      "src/arena_alloc.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "CodeSandbox.execute"
+        ],
+        "observation": "The donor retains Python locals in memory but does not serialize typed executable continuations or validate their restoration."
+      }
+    ],
+    "mechanism": "An RLM learns logical-state checkpoint schemas and reconstruction programs checked by resumed execution equivalence.",
+    "challenge": "Restore into different addresses without raw pointers, repeated effects, or changed suffix outputs.",
+    "hotspots": [
+      "src/vm.c",
+      "src/recovery.c",
+      "src/execution_recovery.c",
+      "src/arena_alloc.c"
+    ],
+    "proposed_modules": []
+  }
+]

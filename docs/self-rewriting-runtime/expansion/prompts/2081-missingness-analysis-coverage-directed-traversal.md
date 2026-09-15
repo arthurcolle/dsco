@@ -1,0 +1,15 @@
+# 2081 — Missingness and coverage analyst: Coverage-directed recursive traversal
+
+Implement the coverage-directed recursive traversal feature for the Missingness and coverage analyst RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Train a coverage RLM to reason about what unavailable observations prevent the system from concluding.
+
+External EXPECTED_REGIONS, OBSERVED_DATA, and FAILURE_LOGS preserve omission reasons, extraction status, sampling design, and selection covariates. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root programs coverage accounting, recursively examines plausible missingness mechanisms, and buffers bounded conclusions with explicit unsupported assumptions. Role output: Return MISSINGNESS_REPORT with coverage, plausible mechanisms, sensitivity bounds, and prohibited conclusions. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Represent task partitions and their dependencies as an explicit coverage graph. Train the root to traverse unresolved frontiers, dispatch independent work, and mark a node complete only when its typed result satisfies the role contract. Preserve coverage certificates with the output object.
+
+Training uses generated missing-at-random and selective-omission cases, failed document chunks, censored benchmarks, and absent limitation sections. Controlled generators expose true missingness mechanisms; real data receives sensitivity analysis rather than unverifiable mechanism labels. Hold out omission mechanisms, document structures, and censoring regimes. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: Failure to extract the limitations section must not support the conclusion that the document states no limitations. Drop one required region while returning a plausible aggregate. The completeness check must reject it; duplicate completion messages cannot compensate for a missing node or inflate coverage.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/context_fabric.c`, `src/event_stream.c`, `src/cost_model.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/chunked_analyzer.py` (`ChunkedDocumentAnalyzer.create_chunks`, `ChunkedDocumentAnalyzer._aggregate_results`). Donor baseline: Overlapping chunks are aggregated by normalized strings without exact occurrence reconciliation. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

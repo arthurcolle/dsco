@@ -1,0 +1,13 @@
+# 15 — Effect-aware executable composition
+
+Let DSCO synthesize new executable functions by composing existing native cells and governed operations, then optimize the composition without changing its meaning. Define a composition graph with typed ports, explicit value bindings, ownership rules, and per-node effects. Distinguish pure computation, observations, writes, execution, secrets, untrusted input, and runtime control according to the existing capability model.
+
+A compiler validates port compatibility, dependency closure, bounded fan-out, and effect ordering before lowering the graph to an executable program. Pure nodes may be fused or scheduled concurrently; effectful nodes require explicit ordering or a demonstrated independence contract. An observed failure is a typed result that cannot silently become successful evidence for a downstream stage. Native imports must preserve these distinctions rather than hide a tool call behind a function pointer.
+
+Implement a minimal composition surface that builds and invokes a resident function with its own generation and source graph. Use explicit field mappings instead of the donor's implicit kwargs forwarding. Include at least one real optimization, such as fusing adjacent pure arithmetic stages, and show that the compiled function produces the same checked result with less dispatch overhead. Governance remains at every actual effect boundary, including newly synthesized functions.
+
+Falsifying test: compose a local counter write, a read, and a pure transform. A candidate rewrite that duplicates the write or moves the read before it must be rejected or fail independent equivalence testing before activation. Two independent pure stages should execute concurrently and join correctly. Deny the required write capability and confirm the composed native entrypoint cannot bypass that denial. Changing only a JSON plan without executing the resulting resident composition does not satisfy acceptance.
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Inspect `src/lingo_workflow.c`, `src/vm.c`, `src/execution_layer.c`, `src/capability.c`, then `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py` symbols `MetaToolRegistry.compose`, `MetaToolExecutor._execute_composed`. Observed donor behavior: The donor composes callables by forwarding values directly, without typed effect analysis or per-stage governance.
+
+Preserve unrelated dirty work; add focused modules and small hooks. Govern every effectful tool call through `tools_execute_for_tier()`. Isolate state and build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

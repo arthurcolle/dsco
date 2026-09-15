@@ -1,0 +1,15 @@
+# 679 — Branch-distribution native specialization designer: Role-specific counterexample adversary
+
+Implement the role-specific counterexample adversary feature for the Branch-distribution native specialization designer RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Learn native branch specialization choices from measured input distributions without eliminating rare but required semantic paths.
+
+External `branch_counts`, `input_features`, and `candidate_cfgs` variables retain profiling windows and complete control-flow alternatives. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root code compares conditional distributions, delegates cold-path checks, and proposes guarded ordering or duplication transformations. Role output: Final `BranchSpecialization` handle records executable CFG, applicability guard, profile identity, and rare-path counterexamples. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Train an auxiliary root policy to generate valid challenging inputs for the role's current candidate behavior. A fixed independent referee checks input validity and confirms violations. Retain diverse minimized witnesses, and evaluate the main role against non-adaptive sealed cases as well.
+
+Train from workload-shift episodes, compiled branch rewrites, independent correctness results, and whole-call timing measurements. A fixed reference program verifies all outcomes; deterministic profile accounting validates claimed branch frequencies and guard coverage. Hold out branch correlations, feature combinations, phase changes, and rare-path defects with source families grouped. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: A common-case rewrite removes a rare error path that becomes frequent after a workload distribution shift. A malformed input, altered reference, or induced harness failure cannot earn adversarial success. A genuine in-contract error must produce a reproducible witness tied to the exact candidate and environment revisions.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/vm.c`, `src/instrumenter.c`, `src/autoresearch.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py` (`CodeAnalysisToolkit.calculate_complexity`). Donor baseline: Counts source branch structure; it does not learn measured branch-distribution specializations. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

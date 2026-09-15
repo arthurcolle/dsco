@@ -1,0 +1,904 @@
+[
+  {
+    "id": "035",
+    "name": "Source provenance joiner",
+    "slug": "source-provenance-joins",
+    "brief": "Train an evidence RLM to join reported claims with originating executions rather than copied descriptions.",
+    "context": "External CLAIMS, SOURCE_OBJECTS, and EXECUTION_RECEIPTS retain content hashes, derivation edges, revisions, and collection boundaries.",
+    "program": "The root programs indexed joins, recursively delegates ambiguous ancestry checks, and buffers resolved or explicitly uncertain support paths.",
+    "data": "Training cases combine generated provenance graphs, real local execution receipts, copied reports, and missing parents.",
+    "oracle": "An independent fixture oracle checks graph ancestry and receipt identity; human adjudication handles genuinely ambiguous attribution.",
+    "failure": "A copied benchmark summary must not become an independent confirming experiment merely because its filename differs.",
+    "holdout": "Hold out derivation graph shapes and report-generation families.",
+    "artifact": "Return a typed PROVENANCE_JOIN containing origin edges, unresolved links, and evidence handles.",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/trace_kg_store.c",
+      "src/vfs.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/universal_dspy_multihop.py",
+        "symbols": [
+          "UniversalContentRetriever.retrieve",
+          "NotesExtractor"
+        ],
+        "observation": "Retrieval merges heterogeneous scores; extracted notes have no statement-level evidence references."
+      }
+    ]
+  },
+  {
+    "id": "036",
+    "name": "Quotation and modality interpreter",
+    "slug": "quotation-modality",
+    "brief": "Train a root RLM to preserve who asserted what, with negation, uncertainty, quotation, and endorsement intact.",
+    "context": "External DOCUMENT_SPANS and UTTERANCE_GRAPH store exact bytes, speaker candidates, nesting, modality, and local discourse context.",
+    "program": "Root code partitions discourse, recursively asks children for attribution alternatives, and verifies buffered quotations against original spans.",
+    "data": "Training includes controlled nested quotations, conditional statements, denials, satire labels, and expert-adjudicated ambiguous passages.",
+    "oracle": "Template-generated examples provide exact labels; independent blinded reviewers adjudicate natural examples with disagreement preserved.",
+    "failure": "A paper quoting an unsafe recommendation to refute it must not endorse that recommendation.",
+    "holdout": "Hold out discourse templates, speaker arrangements, and source genres.",
+    "artifact": "Return ATTRIBUTED_PROPOSITIONS with modal operators, endorsement relations, quote handles, and unresolved ambiguity.",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/session_memory.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/chunked_analyzer.py",
+        "symbols": [
+          "KnowledgeExtractionSignature",
+          "ChunkedDocumentAnalyzer._aggregate_results"
+        ],
+        "observation": "Extraction includes utterances and beliefs, but aggregation discards utterances and keeps only coarse chunk positions."
+      }
+    ]
+  },
+  {
+    "id": "037",
+    "name": "Temporal claim reasoner",
+    "slug": "temporal-claims",
+    "brief": "Train a temporal RLM to distinguish historical observations, current applicability, and forecasts about changing procedures.",
+    "context": "External CLAIM_TIMELINE carries assertion time, event intervals, revision scopes, configurations, and missing temporal qualifiers.",
+    "program": "Root programs interval comparisons, recursively resolves temporal references, and buffers compatible claims separately from genuine overlaps.",
+    "data": "Training uses generated timelines, revisioned local fixtures, delayed reports, timezone changes, and uncertain date ranges.",
+    "oracle": "A reference interval engine checks controlled cases; natural temporal interpretation receives independent annotated review.",
+    "failure": "A once-correct claim about revision A must not justify adopting incompatible revision B today.",
+    "holdout": "Hold out interval structures, date expressions, and revision histories.",
+    "artifact": "Return TEMPORAL_APPLICABILITY with valid intervals, revision bindings, conflicts, and uncertainty reasons.",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/vfs.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/chunked_analyzer.py",
+        "symbols": [
+          "KnowledgeExtractionSignature",
+          "ChunkedDocumentAnalyzer._aggregate_results"
+        ],
+        "observation": "Extraction includes utterances and beliefs, but aggregation discards utterances and keeps only coarse chunk positions."
+      }
+    ]
+  },
+  {
+    "id": "038",
+    "name": "Citation resolver",
+    "slug": "citation-resolution",
+    "brief": "Train a citation RLM to resolve each technical assertion to an actual retrievable supporting passage.",
+    "context": "External DOCUMENT_INDEX, CITATION_MARKERS, and PAGE_SPANS retain stable document identities, references, quotations, and extraction offsets.",
+    "program": "Root code follows reference chains, recursively searches candidate passages, and buffers exact matches plus unsupported citation claims.",
+    "data": "Training cases include synthetic bibliographies, local papers, shifted pagination, duplicate titles, and fabricated citations.",
+    "oracle": "Exact-byte and identifier checks establish resolution; independent reviewers judge whether resolved text substantively supports the assertion.",
+    "failure": "A real paper title paired with an invented quotation must fail support even when citation formatting is valid.",
+    "holdout": "Hold out citation styles, document families, and cross-reference layouts.",
+    "artifact": "Return RESOLVED_CITATIONS with passage handles, identity evidence, support labels, and unresolved references.",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/semantic.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/pdf_cache.py",
+        "symbols": [
+          "get_pdf_text_cached",
+          "PDFTextCache._get_file_hash"
+        ],
+        "observation": "PDF extraction is content-hashed but concatenates page text without retaining page-addressed provenance."
+      }
+    ]
+  },
+  {
+    "id": "039",
+    "name": "Tabular evidence reconciler",
+    "slug": "tabular-reconciliation",
+    "brief": "Train a table RLM to reconcile conflicting extracted cells before numerical evidence influences executable decisions.",
+    "context": "External TABLE_IMAGES, CELL_GRIDS, and HEADER_MAPS preserve page identity, coordinates, units, footnotes, and extraction alternatives.",
+    "program": "Root code aligns grids, recursively delegates disputed regions, and buffers verified corrections without overwriting original observations.",
+    "data": "Training combines generated tables with exact source values and annotated real tables featuring merged headers and footnotes.",
+    "oracle": "A separate renderer-generation oracle validates synthetic cells; independent transcription review judges ambiguous real images.",
+    "failure": "A shifted column must not turn baseline memory into candidate latency despite plausible numeric ranges.",
+    "holdout": "Hold out table layouts, header hierarchies, and visual degradation families.",
+    "artifact": "Return RECONCILED_TABLE with cell provenance, competing readings, units, and explicit unresolved regions.",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/pdf_processor.py",
+        "symbols": [
+          "PDFVisionAnalyzer._analyze_image",
+          "PDFVisionAnalyzer.process_pdf"
+        ],
+        "observation": "Vision produces page transcription text; there is no structured equation, table, or cross-modal verification."
+      }
+    ]
+  },
+  {
+    "id": "040",
+    "name": "Equation structure interpreter",
+    "slug": "equation-parsing",
+    "brief": "Train an equation RLM to turn page-level mathematical expressions into typed, checkable syntax trees.",
+    "context": "External EQUATION_REGIONS, SYMBOL_CONTEXT, and PARSE_CANDIDATES retain image hashes, textual alternatives, definitions, and operator ambiguity.",
+    "program": "Root code recursively delegates subexpressions, assembles bounded ASTs, and checks dimensional and syntactic constraints before buffering results.",
+    "data": "Training uses rendered formulas with known ASTs, notation variants, superscripts, piecewise conditions, and reviewed scientific examples.",
+    "oracle": "A reference parser and evaluation probes check generated formulas; specialists adjudicate unresolved notation in real documents.",
+    "failure": "A missing minus sign or exponent grouping must not silently produce an equivalent-looking but different formula.",
+    "holdout": "Hold out expression grammars, fonts, and scientific notation conventions.",
+    "artifact": "Return EQUATION_AST with symbol bindings, image-span provenance, alternatives, and validation status.",
+    "primary_paths": [
+      "src/ast.c",
+      "src/context_fabric.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/pdf_processor.py",
+        "symbols": [
+          "PDFVisionAnalyzer._analyze_image",
+          "PDFVisionAnalyzer.process_pdf"
+        ],
+        "observation": "Vision produces page transcription text; there is no structured equation, table, or cross-modal verification."
+      }
+    ]
+  },
+  {
+    "id": "041",
+    "name": "Unit and scale normalizer",
+    "slug": "unit-normalization",
+    "brief": "Train a unit RLM to normalize quantitative observations without losing dimensions, scales, or measurement conventions.",
+    "context": "External QUANTITIES and UNIT_DEFINITIONS preserve source values, prefixes, reference conditions, denominator units, and uncertainty intervals.",
+    "program": "Root programs exact conversions, recursively resolves ambiguous unit context, and buffers normalized values alongside untouched source quantities.",
+    "data": "Training contains generated dimensional expressions, mixed-scale benchmark tables, temperature offsets, currencies with dated rates, and unknown units.",
+    "oracle": "An independent dimensional algebra engine verifies supported conversions; unavailable conversion evidence must produce unresolved results.",
+    "failure": "Milliseconds and microseconds must not be compared directly, and affine temperatures cannot use multiplicative conversion alone.",
+    "holdout": "Hold out compound dimensions, unit aliases, and scale combinations.",
+    "artifact": "Return NORMALIZED_QUANTITIES with conversion derivations, assumptions, original references, and incompatibility errors.",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/cost_model.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/pdf_processor.py",
+        "symbols": [
+          "PDFVisionAnalyzer._analyze_image",
+          "PDFVisionAnalyzer.process_pdf"
+        ],
+        "observation": "Vision produces page transcription text; there is no structured equation, table, or cross-modal verification."
+      }
+    ]
+  },
+  {
+    "id": "042",
+    "name": "Document revision differ",
+    "slug": "document-revision-diffs",
+    "brief": "Train a revision RLM to identify substantive evidence changes across documents despite layout and wording churn.",
+    "context": "External OLD_DOCUMENT, NEW_DOCUMENT, and SPAN_ALIGNMENT preserve content hashes, structural sections, tables, and claim references.",
+    "program": "Root code aligns sections, recursively compares changed regions, and buffers changed propositions separately from formatting-only edits.",
+    "data": "Training includes generated revisions, real local source snapshots, moved paragraphs, corrected numbers, deletions, and renamed entities.",
+    "oracle": "Controlled edits supply exact ground truth; independently reviewed natural diffs retain uncertainty about semantic equivalence.",
+    "failure": "Replacing one denominator at an unchanged path must invalidate the derived comparison despite nearly identical text.",
+    "holdout": "Hold out edit operators, document structures, and paraphrase families.",
+    "artifact": "Return REVISION_DELTA with changed claim handles, preserved equivalences, deleted evidence, and affected dependencies.",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/vfs.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/analysis_cache.py",
+        "symbols": [
+          "AnalysisCache._get_cache_key"
+        ],
+        "observation": "Analysis keys contain path and configuration but omit content digests and derived dependency identities."
+      }
+    ]
+  },
+  {
+    "id": "043",
+    "name": "Contradiction localizer",
+    "slug": "contradiction-localization",
+    "brief": "Train a contradiction RLM to locate the smallest incompatible claim pair and the scope making it contradictory.",
+    "context": "External CLAIM_SET and SOURCE_SPANS carry revision, time, population, polarity, units, and conditional assumptions.",
+    "program": "Root code groups comparable claims, recursively checks candidate conflicts, and buffers exact supporting spans with scope explanations.",
+    "data": "Training contains generated incompatible propositions, conditionally compatible statements, and annotated disagreements in technical documents.",
+    "oracle": "Formal fixtures use a reference satisfiability checker; natural claims receive independent entailment review rather than assumed deterministic truth.",
+    "failure": "Different worker counts can explain different latency claims; equal-scope incompatible bounds must still be detected.",
+    "holdout": "Hold out predicate families, scope combinations, and contradiction wording.",
+    "artifact": "Return LOCALIZED_CONFLICTS with minimal evidence pairs, compatibility conditions, and unresolved interpretation.",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/semantic.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/universal_dspy_multihop.py",
+        "symbols": [
+          "UniversalContentRetriever.retrieve",
+          "NotesExtractor"
+        ],
+        "observation": "Retrieval merges heterogeneous scores; extracted notes have no statement-level evidence references."
+      }
+    ]
+  },
+  {
+    "id": "044",
+    "name": "Semantic occurrence deduplicator",
+    "slug": "semantic-deduplication",
+    "brief": "Train an evidence RLM to deduplicate repeated observations without merging genuinely distinct or contradictory occurrences.",
+    "context": "External CHUNK_OBSERVATIONS and PARENT_SPANS preserve document identity, absolute coordinates, normalized propositions, and extraction revisions.",
+    "program": "Root code clusters candidate duplicates, recursively tests semantic distinctions, and buffers canonical occurrences with all observation aliases.",
+    "data": "Training uses overlapping windows, controlled paraphrases, repeated real occurrences, negation changes, and quantity substitutions.",
+    "oracle": "Known span identities settle occurrence duplication; independent annotations judge paraphrase equivalence when exact identity is absent.",
+    "failure": "Two overlapping extractions count once, but a later identical assertion remains a separate occurrence.",
+    "holdout": "Hold out chunk configurations, paraphrase operators, and document domains.",
+    "artifact": "Return OCCURRENCE_INDEX with canonical IDs, alias edges, preserved disagreements, and uncertainty flags.",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/semantic.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/chunked_analyzer.py",
+        "symbols": [
+          "ChunkedDocumentAnalyzer.create_chunks",
+          "ChunkedDocumentAnalyzer._aggregate_results"
+        ],
+        "observation": "Overlapping chunks are aggregated by normalized strings without exact occurrence reconciliation."
+      }
+    ]
+  },
+  {
+    "id": "045",
+    "name": "Entity identity resolver",
+    "slug": "entity-resolution",
+    "brief": "Train an entity RLM to resolve identities across traces and documents without collapsing similar names.",
+    "context": "External ENTITY_MENTIONS, IDENTIFIERS, and RELATION_CONTEXT preserve namespaces, revisions, timestamps, aliases, and observed attributes.",
+    "program": "Root programs blocking and joins, recursively investigates ambiguous pairs, and buffers identity clusters with reversible merge evidence.",
+    "data": "Training combines generated entity registries, renamed functions, corporate aliases, same-name subjects, and incomplete identifiers.",
+    "oracle": "Controlled registries provide exact identities; blinded adjudicators label natural ambiguity and allow unresolved pairs.",
+    "failure": "Two functions with the same name in different libraries must not share behavioral evidence automatically.",
+    "holdout": "Hold out naming conventions, namespace structures, and alias histories.",
+    "artifact": "Return ENTITY_BINDINGS with namespace-qualified identities, evidence-backed aliases, rejected merges, and unresolved candidates.",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/semantic.c",
+      "src/vfs.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/chunked_analyzer.py",
+        "symbols": [
+          "KnowledgeExtractionSignature",
+          "ChunkedDocumentAnalyzer._aggregate_results"
+        ],
+        "observation": "Extraction includes utterances and beliefs, but aggregation discards utterances and keeps only coarse chunk positions."
+      }
+    ]
+  },
+  {
+    "id": "046",
+    "name": "Evidence graph path reasoner",
+    "slug": "graph-path-reasoning",
+    "brief": "Train a graph RLM to construct valid explanatory paths while respecting edge type, direction, and scope.",
+    "context": "External EVIDENCE_GRAPH and PATH_QUERIES contain typed nodes, revisioned edges, missing links, and permitted traversal rules.",
+    "program": "Root code partitions graph searches, recursively delegates frontier exploration, and buffers verified paths rather than textual associations.",
+    "data": "Training uses generated typed graphs, real local execution relations, cycles, distractor hubs, and disconnected observations.",
+    "oracle": "An independent graph engine checks reachability and edge constraints; semantic edge assertions require separately validated provenance.",
+    "failure": "A temporal-before edge must not be traversed as a causal-support edge to manufacture an explanation.",
+    "holdout": "Hold out graph topology, path length, and relation compositions.",
+    "artifact": "Return CHECKED_PATHS with exact edge identities, traversal contracts, missing links, and path validity.",
+    "primary_paths": [
+      "src/trace_kg_store.c",
+      "src/plan_dag.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/cognitive_architecture.py",
+        "symbols": [
+          "ActionStack.pop_ready",
+          "CognitiveArchitecture._action_executor"
+        ],
+        "observation": "Dependencies order actions, but outputs are not passed as typed prerequisite values."
+      }
+    ]
+  },
+  {
+    "id": "047",
+    "name": "Causal diagnostic investigator",
+    "slug": "causal-diagnostics",
+    "brief": "Train a diagnostic RLM to discriminate competing runtime fault mechanisms using controlled interventions and preserved counterevidence.",
+    "context": "External FAILURE_TRACES, HYPOTHESES, and INTERVENTION_RESULTS retain procedure revisions, workload controls, predicted outcomes, and uncertainties.",
+    "program": "Root programs intervention plans, recursively compares explanations, and buffers observed discriminants before emitting a scoped diagnosis.",
+    "data": "Training uses owned buggy C fixtures and causal simulators with confounders, interacting faults, and misleading stack frames.",
+    "oracle": "Independent fixture mechanisms determine causal effects; observational real incidents remain uncertain unless interventions establish distinctions.",
+    "failure": "The last function in a crash trace must not be blamed when earlier ownership transfer caused corruption.",
+    "holdout": "Hold out fault mechanisms, code lineages, and confounding structures.",
+    "artifact": "Return CAUSAL_DIAGNOSIS with competing causes, intervention receipts, ruled-out alternatives, and remaining ambiguity.",
+    "primary_paths": [
+      "src/execution_kernel.c",
+      "src/trace_kg_store.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "CausalReasoningSignature",
+          "ScientificReasoningWorkflow.forward"
+        ],
+        "observation": "Causal relationships are requested as text; the scientific workflow leaves causal analysis unimplemented."
+      }
+    ]
+  },
+  {
+    "id": "048",
+    "name": "Probabilistic evidence modeler",
+    "slug": "probability-models",
+    "brief": "Train a probabilistic RLM to build explicit evidence models and execute their arithmetic rather than invent confidence.",
+    "context": "External HYPOTHESES, OBSERVATIONS, and MODEL_PARAMETERS retain priors, likelihood families, selection mechanisms, and parameter uncertainty.",
+    "program": "Root code fits supported models, recursively challenges assumptions, and buffers posterior calculations with sensitivity diagnostics.",
+    "data": "Training contains generated distributions, likelihood misspecification, dependent observations, base-rate shifts, and limited local measurements.",
+    "oracle": "A separate numerical implementation verifies calculations; simulation truth evaluates coverage without asserting unknown real-world probabilities.",
+    "failure": "Ten copied observations must not be multiplied as independent evidence to create overwhelming posterior support.",
+    "holdout": "Hold out distribution families, dependency structures, and prior shifts.",
+    "artifact": "Return PROBABILITY_MODEL with executable likelihoods, fitted parameters, posterior summaries, and unsupported assumptions.",
+    "primary_paths": [
+      "src/cost_model.c",
+      "src/context_fabric.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "ProbabilisticReasoningSignature",
+          "ScientificReasoningWorkflow.forward"
+        ],
+        "observation": "The workflow supplies a fixed neutral prior and placeholder likelihood rather than fitted evidence models."
+      }
+    ]
+  },
+  {
+    "id": "049",
+    "name": "Empirical reference-cohort builder",
+    "slug": "reference-cohorts",
+    "brief": "Train a cohort RLM to select empirically comparable improvement attempts without excluding inconvenient failures or unsupported contexts.",
+    "context": "External EPISODES and ELIGIBILITY_RULES retain workloads, hardware, candidate families, failed outcomes, censoring, and selection history.",
+    "program": "Root programs eligibility joins, recursively inspects borderline comparators, and buffers cohort estimates with exclusion reasons.",
+    "data": "Training uses generated cohorts with known selection bias and actual local benchmark episodes including rejected candidates.",
+    "oracle": "Independent scripts verify membership and estimators; future development outcomes test predictive validity separately from final evaluation.",
+    "failure": "A survivor-only cohort must not portray three successes among ten attempts as a perfect success rate.",
+    "holdout": "Hold out algorithm families, hardware regimes, and selection mechanisms.",
+    "artifact": "Return REFERENCE_COHORT with member identities, exclusions, denominators, estimates, and transport limitations.",
+    "primary_paths": [
+      "src/learned_cost.c",
+      "src/cost_model.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/metacognitive_engine.py",
+        "symbols": [
+          "MetacognitiveEngine._select_strategy",
+          "MetacognitiveEngine._evaluate_strategy_adjustment"
+        ],
+        "observation": "Strategy selection uses fixed confidence weights and coarse success-rate thresholds."
+      }
+    ]
+  },
+  {
+    "id": "050",
+    "name": "Measurement comparability auditor",
+    "slug": "measurement-comparability",
+    "brief": "Train a measurement RLM to establish whether two observed performance results support a fair candidate comparison.",
+    "context": "External RUN_MANIFESTS and SAMPLE_SERIES contain workload identity, hardware, concurrency, warmup, stopping rules, and missing outcomes.",
+    "program": "Root code matches experimental conditions, recursively resolves metadata discrepancies, and buffers compatible comparisons or explicit rejection reasons.",
+    "data": "Training includes controlled benchmark perturbations, censored runs, changed denominators, clock differences, and asynchronous completion.",
+    "oracle": "An independent manifest checker and arithmetic reference validate controlled comparisons; missing metadata cannot be inferred as matching.",
+    "failure": "A candidate measured only on completed requests must not beat a baseline measured on the entire workload.",
+    "holdout": "Hold out benchmark harnesses, confound combinations, and timing regimes.",
+    "artifact": "Return COMPARABILITY_REPORT with matched factors, unresolved differences, usable metrics, and excluded conclusions.",
+    "primary_paths": [
+      "src/tool_telemetry.c",
+      "src/chronicle.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "ProbabilisticReasoningSignature",
+          "ScientificReasoningWorkflow.forward"
+        ],
+        "observation": "The workflow supplies a fixed neutral prior and placeholder likelihood rather than fitted evidence models."
+      }
+    ]
+  },
+  {
+    "id": "051",
+    "name": "Event sequence miner",
+    "slug": "event-sequence-mining",
+    "brief": "Train a sequence RLM to discover recurring runtime behavior patterns with explicit ordering and episode boundaries.",
+    "context": "External EVENT_STREAMS and SESSION_BOUNDARIES retain causal IDs, timestamps, dropped-event markers, revisions, and concurrency metadata.",
+    "program": "Root programs sequence segmentation, recursively compares recurring motifs, and buffers patterns with supporting and contradicting episodes.",
+    "data": "Training contains generated interleavings, repeated local execution traces, missing events, retries, and renamed action labels.",
+    "oracle": "A separate sequence matcher checks pattern support; controlled partial-order traces supply known admissible ordering relationships.",
+    "failure": "Interleaved events from two requests must not become a fictional single-request failure sequence.",
+    "holdout": "Hold out interleaving structures, motif lengths, and protocol families.",
+    "artifact": "Return SEQUENCE_PATTERNS with ordering constraints, episode provenance, support counts, and known exceptions.",
+    "primary_paths": [
+      "src/event_stream.c",
+      "src/trace_kg_store.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/cognitive_architecture.py",
+        "symbols": [
+          "ActionStack.pop_ready",
+          "CognitiveArchitecture._action_executor"
+        ],
+        "observation": "Dependencies order actions, but outputs are not passed as typed prerequisite values."
+      }
+    ]
+  },
+  {
+    "id": "052",
+    "name": "Executable specification extractor",
+    "slug": "specification-extraction",
+    "brief": "Train a specification RLM to extract executable obligations from implementations, schemas, examples, and explicit technical requirements.",
+    "context": "External SOURCE_UNITS, SCHEMAS, and EXAMPLES preserve revisions, positive cases, negative cases, and documented assumption scopes.",
+    "program": "Root programs predicate synthesis, recursively delegates contract clauses, and buffers independently checked obligations with source references.",
+    "data": "Training uses generated APIs, local pure transforms, intentionally inconsistent docs, error atomicity, and boundary constraints.",
+    "oracle": "An independent contract runner checks controlled tasks; inferred regularities remain labeled assumptions until independently established.",
+    "failure": "A nonempty successful response must not satisfy a contract requiring preserved request identity and sorted output.",
+    "holdout": "Hold out API families, schema compositions, and specification phrasing.",
+    "artifact": "Return EXECUTABLE_SPECIFICATION with typed predicates, applicability conditions, evidence links, and unresolved conflicts.",
+    "primary_paths": [
+      "src/ast.c",
+      "src/tools.c",
+      "src/execution_kernel.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer._extract_structure",
+          "MetaToolRegistry.register_code"
+        ],
+        "observation": "AST inspection extracts declarations and syntax metadata but does not validate behavioral contracts."
+      }
+    ]
+  },
+  {
+    "id": "053",
+    "name": "Dependency obligation auditor",
+    "slug": "dependency-obligation-audit",
+    "brief": "Train an obligation RLM to verify that prerequisite completion actually supplies the evidence needed by dependent work.",
+    "context": "External TASK_GRAPH, RESULT_OBJECTS, and REQUIRED_PREDICATES preserve dependency identities, result schemas, procedure revisions, and failure states.",
+    "program": "Root programs graph validation, recursively inspects evidence bindings, and buffers unsatisfied obligations rather than trusting completed labels.",
+    "data": "Training includes generated DAGs, local tool receipts, stale versions, missing outputs, cycles, and mismatched schemas.",
+    "oracle": "Independent graph and predicate checkers determine readiness on fixtures; unsupported semantic prerequisites require explicit review.",
+    "failure": "A completed predecessor returning the wrong revision must not unblock a candidate requiring current-revision evidence.",
+    "holdout": "Hold out DAG topology, schema combinations, and invalidation histories.",
+    "artifact": "Return OBLIGATION_AUDIT with ready nodes, failed bindings, blocking evidence, and exact dependency provenance.",
+    "primary_paths": [
+      "src/plan_dag.c",
+      "src/context_fabric.c",
+      "src/execution_kernel.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/cognitive_architecture.py",
+        "symbols": [
+          "ActionStack.pop_ready",
+          "CognitiveArchitecture._action_executor"
+        ],
+        "observation": "Dependencies order actions, but outputs are not passed as typed prerequisite values."
+      }
+    ]
+  },
+  {
+    "id": "054",
+    "name": "Error cluster discoverer",
+    "slug": "error-cluster-discovery",
+    "brief": "Train an error-analysis RLM to discover actionable failure clusters without letting duplicate wording overwhelm underlying mechanisms.",
+    "context": "External FAILURE_EPISODES and FEATURE_TABLES retain minimal inputs, symptoms, procedure identities, observed mechanisms, and uncertain labels.",
+    "program": "Root programs feature extraction, recursively challenges cluster boundaries, and buffers representatives with evidence-backed merge or split decisions.",
+    "data": "Training contains seeded C bugs, randomized messages, duplicate floods, interacting faults, and reviewed incident groups.",
+    "oracle": "Known fixture mechanisms validate controlled clusters; independent reviewers assess natural cluster usefulness with ambiguity preserved.",
+    "failure": "Thousands of duplicated timeout messages must not hide a small cluster caused by a distinct ownership defect.",
+    "holdout": "Hold out fault families, message templates, and duplication patterns.",
+    "artifact": "Return ERROR_PARTITION with representatives, mechanism hypotheses, uncertain memberships, and cluster-specific counterexamples.",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/trace_kg_store.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/metacognitive_engine.py",
+        "symbols": [
+          "MetacognitiveEngine._select_strategy",
+          "MetacognitiveEngine._evaluate_strategy_adjustment"
+        ],
+        "observation": "Strategy selection uses fixed confidence weights and coarse success-rate thresholds."
+      }
+    ]
+  },
+  {
+    "id": "055",
+    "name": "Task grammar inducer",
+    "slug": "task-grammar-induction",
+    "brief": "Train a grammar RLM to infer typed task-composition rules from verified examples rather than memorize surface templates.",
+    "context": "External TASK_PROGRAMS, TYPE_CONTRACTS, and EXECUTION_RESULTS preserve effects, resource limits, successful compositions, and invalid examples.",
+    "program": "Root programs structural factoring, recursively proposes productions, and buffers rules only after type and witness checks.",
+    "data": "Training uses generated compositional tasks, local capability fixtures, renamed primitives, nested combinations, and impossible postconditions.",
+    "oracle": "Independent type checking and reference execution establish solvability for controlled tasks; natural task ambiguity remains explicit.",
+    "failure": "A grammar must reject a read-only task production requiring writes even when its training wording seems familiar.",
+    "holdout": "Hold out production combinations, primitive names, and nesting depths.",
+    "artifact": "Return TASK_GRAMMAR with typed productions, effect constraints, witnesses, and rejected generalizations.",
+    "primary_paths": [
+      "src/prompt_program.c",
+      "src/plan_dag.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.compose"
+        ],
+        "observation": "Composition chains named callables without checked cross-tool type, effect, or semantic contracts."
+      }
+    ]
+  },
+  {
+    "id": "056",
+    "name": "Protocol state inferencer",
+    "slug": "protocol-state-inference",
+    "brief": "Train a protocol RLM to infer hidden interaction states through bounded probes and distinguishing response sequences.",
+    "context": "External OBSERVATION_TABLE and PROTOCOL_ORACLE retain reset receipts, action histories, outputs, counterexamples, and nondeterminism markers.",
+    "program": "Root programs membership queries, recursively delegates distinguishing suffixes, and buffers refined transition models with uncertainty.",
+    "data": "Training uses owned resettable protocol fixtures containing authentication, token consumption, retries, cancellation, and delayed failures.",
+    "oracle": "A separate conformance oracle checks withheld action sequences against the controlled service; uncertain resets block deterministic claims.",
+    "failure": "Identical retry responses must remain distinct when one consumes a token needed for a later commit.",
+    "holdout": "Hold out protocol topologies, alphabets, and delayed-error structures.",
+    "artifact": "Return PROTOCOL_MODEL with executable transitions, query receipts, unsupported states, and reset assumptions.",
+    "primary_paths": [
+      "src/mcp.c",
+      "src/pty_session.c",
+      "src/execution_kernel.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "InductiveReasoningSignature"
+        ],
+        "observation": "Induction requests generalizations and possible counterexamples without constructing an executable learned model."
+      }
+    ]
+  },
+  {
+    "id": "057",
+    "name": "Behavior-grounded algorithm retriever",
+    "slug": "algorithm-retrieval",
+    "brief": "Train an algorithm RLM to retrieve reusable procedures using behavioral requirements and checked assumptions rather than vocabulary alone.",
+    "context": "External PROCEDURE_CORPUS and PROBE_RESULTS preserve input domains, effects, complexity observations, preconditions, and revision identities.",
+    "program": "Root programs typed retrieval, recursively checks promising mappings, and buffers applicable algorithms with remaining verification obligations.",
+    "data": "Training contains renamed implementations, deceptive descriptions, pure and stateful variants, boundary differences, and controlled performance regimes.",
+    "oracle": "Independent contract probes validate fixture applicability; similarity never establishes full equivalence or automatic adoption.",
+    "failure": "A memoization algorithm for pure functions must not transfer to a counter with stateful side effects.",
+    "holdout": "Hold out algorithm families, naming conventions, and workload combinations.",
+    "artifact": "Return ALGORITHM_MATCHES with applicability evidence, counterexamples, ranked tradeoffs, and unresolved obligations.",
+    "primary_paths": [
+      "src/skill_index.c",
+      "src/semantic.c",
+      "src/context_fabric.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "AnalogicalReasoningSignature"
+        ],
+        "observation": "Analogical mappings and inferred features are generated text without executable applicability checks."
+      }
+    ]
+  },
+  {
+    "id": "058",
+    "name": "Cross-language symbol mapper",
+    "slug": "cross-language-symbol-matching",
+    "brief": "Train a symbol RLM to map corresponding program entities across languages while preserving ABI and behavioral distinctions.",
+    "context": "External SOURCE_TREES and INTERFACE_SCHEMAS retain namespaces, signatures, ownership, numeric widths, call relations, and candidate aliases.",
+    "program": "Root programs structural matching, recursively resolves ambiguous bindings, and buffers mappings with explicit unsupported semantic differences.",
+    "data": "Training uses paired generated Python and C programs, translated local fixtures, overloads, renamed symbols, and divergent integer semantics.",
+    "oracle": "Independent parser metadata and executable differential tests validate controlled correspondences; natural ports require reviewed mapping evidence.",
+    "failure": "A Python integer operation must not map unconditionally to overflowing fixed-width C arithmetic.",
+    "holdout": "Hold out translation templates, namespace structures, and type combinations.",
+    "artifact": "Return SYMBOL_MAPPING with qualified bindings, ABI constraints, behavioral tests, and rejected equivalences.",
+    "primary_paths": [
+      "src/ast.c",
+      "src/context_fabric.c",
+      "src/semantic.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer._extract_structure",
+          "MetaToolRegistry.register_code"
+        ],
+        "observation": "AST inspection extracts declarations and syntax metadata but does not validate behavioral contracts."
+      }
+    ]
+  },
+  {
+    "id": "059",
+    "name": "Evidence set minimizer",
+    "slug": "evidence-minimization",
+    "brief": "Train an evidence RLM to find small sufficient support sets without deleting decisive counterexamples or required conditions.",
+    "context": "External CLAIM_OBLIGATIONS and EVIDENCE_SETS preserve proof dependencies, source independence, contradictions, costs, and scope restrictions.",
+    "program": "Root programs deletion tests, recursively checks obligation coverage, and buffers minimal validated supports with indispensability witnesses.",
+    "data": "Training uses generated proof graphs, controlled contract evidence, redundant observations, conditional conclusions, and adversarial distractors.",
+    "oracle": "Independent obligation predicates check sufficiency on formal fixtures; natural support judgments use blinded review and allow uncertainty.",
+    "failure": "Removing the only cancellation counterexample must not make a smaller evidence packet falsely endorse an unsafe rewrite.",
+    "holdout": "Hold out dependency structures, redundancy ratios, and claim families.",
+    "artifact": "Return MINIMAL_EVIDENCE with retained handles, removal justifications, blocking dissent, and unresolved sufficiency.",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/plan_dag.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/universal_dspy_multihop.py",
+        "symbols": [
+          "UniversalContentRetriever.retrieve",
+          "NotesExtractor"
+        ],
+        "observation": "Retrieval merges heterogeneous scores; extracted notes have no statement-level evidence references."
+      }
+    ]
+  },
+  {
+    "id": "060",
+    "name": "Change-point discoverer",
+    "slug": "changepoint-discovery",
+    "brief": "Train a drift RLM to segment changing runtime behavior without mistaking single incidents for new operating regimes.",
+    "context": "External OBSERVATION_STREAM and SEGMENT_STATE retain time order, covariates, missingness, policy revisions, and prior detections.",
+    "program": "Root programs sequential tests, recursively compares segment explanations, and buffers causal decisions using only observations available then.",
+    "data": "Training streams contain abrupt drift, gradual drift, recurring regimes, seasonal variation, isolated spikes, and workload shifts.",
+    "oracle": "Known simulated change schedules and independent predictive scoring validate controlled detection; real change attribution remains provisional.",
+    "failure": "One latency spike must not trigger permanent relearning, while persistent conditional degradation must not be averaged away.",
+    "holdout": "Hold out drift generators, time scales, and regime recurrence patterns.",
+    "artifact": "Return REGIME_SEGMENTS with detection times, evidence windows, uncertainty, and scoped adaptation recommendations.",
+    "primary_paths": [
+      "src/event_stream.c",
+      "src/cost_model.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/metacognitive_engine.py",
+        "symbols": [
+          "MetacognitiveEngine._select_strategy",
+          "MetacognitiveEngine._evaluate_strategy_adjustment"
+        ],
+        "observation": "Strategy selection uses fixed confidence weights and coarse success-rate thresholds."
+      }
+    ]
+  },
+  {
+    "id": "061",
+    "name": "Discriminating experiment designer",
+    "slug": "experiment-design",
+    "brief": "Train an experiment RLM to choose permitted probes that distinguish current hypotheses under realistic costs and controls.",
+    "context": "External HYPOTHESES, PROBE_MENU, and OBSERVATIONS preserve predicted outcomes, costs, confounders, constraints, and uncertainty.",
+    "program": "Root programs design comparisons, recursively inspects discriminants, and buffers preregistered predictions before any governed probe executes.",
+    "data": "Training uses causal simulators and owned diagnostic fixtures with irrelevant tests, expensive discriminants, and interacting mechanisms.",
+    "oracle": "Independent environment outcomes score final diagnosis and cost; generated prediction prose cannot serve as experimental truth.",
+    "failure": "A historically useful cheap test must be rejected when both current hypotheses predict the same result.",
+    "holdout": "Hold out fault mechanisms, probe names, and cost schedules.",
+    "artifact": "Return EXPERIMENT_DESIGN with controls, predicted branches, stopping rules, required permissions, and actual observation bindings.",
+    "primary_paths": [
+      "src/execution_kernel.c",
+      "src/plan_optimizer.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "CausalReasoningSignature",
+          "ScientificReasoningWorkflow.forward"
+        ],
+        "observation": "Causal relationships are requested as text; the scientific workflow leaves causal analysis unimplemented."
+      }
+    ]
+  },
+  {
+    "id": "062",
+    "name": "Critical-path evidence analyst",
+    "slug": "critical-path-analysis",
+    "brief": "Train a critical-path RLM to identify which dependency delays actually constrain end-to-end completion rather than summing durations.",
+    "context": "External EXECUTION_DAG and TIMING_INTERVALS retain dependency edges, overlap, queueing, clock domains, and missing spans.",
+    "program": "Root programs DAG timing calculations, recursively resolves uncertain edges, and buffers path alternatives with sensitivity to assumptions.",
+    "data": "Training uses generated schedules and owned concurrent fixtures with overlap, contention, delayed readiness, and incomplete instrumentation.",
+    "oracle": "An independent scheduler oracle checks controlled makespans and critical paths; uncertain clocks require interval bounds.",
+    "failure": "The longest individual task need not be critical when another dependency chain determines completion.",
+    "holdout": "Hold out DAG shapes, concurrency limits, and clock-error regimes.",
+    "artifact": "Return CRITICAL_PATH_REPORT with checked edges, delay attribution, uncertainty bounds, and measurable optimization opportunities.",
+    "primary_paths": [
+      "src/plan_dag.c",
+      "src/event_stream.c",
+      "src/chronicle.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/cognitive_architecture.py",
+        "symbols": [
+          "ActionStack.pop_ready",
+          "CognitiveArchitecture._action_executor"
+        ],
+        "observation": "Dependencies order actions, but outputs are not passed as typed prerequisite values."
+      }
+    ]
+  },
+  {
+    "id": "063",
+    "name": "Quantitative claim checker",
+    "slug": "quantitative-claim-checking",
+    "brief": "Train a quantitative RLM to turn performance assertions into executable calculations with explicit populations and failure accounting.",
+    "context": "External CLAIMS and MEASUREMENTS preserve metric definitions, units, sample identities, denominators, censoring, and candidate revisions.",
+    "program": "Root programs checked estimators, recursively audits inclusion rules, and buffers reproducible calculations rather than generated numerical confidence.",
+    "data": "Training includes benchmark claims, altered denominators, misleading averages, mixed units, zero bases, and missing observations.",
+    "oracle": "Independent numerical implementations verify controlled results; statistical uncertainty remains separate from deterministic arithmetic correctness.",
+    "failure": "A candidate timing out on half its requests must not claim universal improvement from the faster completed half.",
+    "holdout": "Hold out metric compositions, workload distributions, and missing-data patterns.",
+    "artifact": "Return CHECKED_QUANTITATIVE_CLAIM with computation, included observations, exclusions, uncertainty, and support status.",
+    "primary_paths": [
+      "src/tool_telemetry.c",
+      "src/cost_model.c",
+      "src/context_fabric.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "ProbabilisticReasoningSignature",
+          "ScientificReasoningWorkflow.forward"
+        ],
+        "observation": "The workflow supplies a fixed neutral prior and placeholder likelihood rather than fitted evidence models."
+      }
+    ]
+  },
+  {
+    "id": "064",
+    "name": "Complete long-output enumerator",
+    "slug": "long-output-enumeration",
+    "brief": "Train an enumeration RLM to extract every qualifying item from large corpora without truncation, duplicates, or invented completeness.",
+    "context": "External CORPUS_PARTITIONS, MATCH_RULES, and OUTPUT_BUFFER preserve partition boundaries, item identities, progress receipts, and ambiguity.",
+    "program": "Root programs partitioned scans, recursively delegates bounded extraction, and buffers deduplicated results with coverage checks before finalization.",
+    "data": "Training uses generated inventories, long local symbol lists, scattered matches, repeated entries, negative cases, and interrupted scans.",
+    "oracle": "Exact controlled predicates provide reference sets; semantic inclusion tasks use independently labeled corpora and explicit unresolved items.",
+    "failure": "Retrieving several relevant examples must not become a claim that all matching functions were enumerated.",
+    "holdout": "Hold out corpus size regimes, partition layouts, and predicate combinations.",
+    "artifact": "Return COMPLETE_ENUMERATION with result handle, counts, partition coverage, duplicates resolved, and unresolved membership.",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/vfs.c",
+      "src/semantic.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/universal_dspy_multihop.py",
+        "symbols": [
+          "UniversalContentRetriever.retrieve",
+          "NotesExtractor"
+        ],
+        "observation": "Retrieval merges heterogeneous scores; extracted notes have no statement-level evidence references."
+      }
+    ]
+  },
+  {
+    "id": "065",
+    "name": "Multimodal evidence aligner",
+    "slug": "multimodal-alignment",
+    "brief": "Train an alignment RLM to connect textual claims with the correct visual regions and preserve cross-modal disagreements.",
+    "context": "External PAGE_IMAGES, TEXT_SPANS, and REGION_CANDIDATES retain page hashes, coordinates, labels, captions, and extraction variants.",
+    "program": "Root programs cross-reference alignment, recursively inspects disputed regions, and buffers verified links plus inconsistent readings.",
+    "data": "Training combines generated charts and diagrams with known layouts, annotated papers, displaced captions, rotations, and extraction errors.",
+    "oracle": "Renderer metadata establishes synthetic alignment; independent visual annotation judges natural examples without pretending exact semantic ground truth.",
+    "failure": "A nearby caption must not attach the claim to the wrong panel when panel labels contradict proximity.",
+    "holdout": "Hold out figure layouts, modality combinations, and visual degradation families.",
+    "artifact": "Return MULTIMODAL_ALIGNMENT with region handles, textual anchors, alternatives, disagreement records, and validation provenance.",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/tools.c",
+      "src/execution_kernel.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/pdf_processor.py",
+        "symbols": [
+          "PDFVisionAnalyzer._analyze_image",
+          "PDFVisionAnalyzer.process_pdf"
+        ],
+        "observation": "Vision produces page transcription text; there is no structured equation, table, or cross-modal verification."
+      }
+    ]
+  },
+  {
+    "id": "066",
+    "name": "Missingness and coverage analyst",
+    "slug": "missingness-analysis",
+    "brief": "Train a coverage RLM to reason about what unavailable observations prevent the system from concluding.",
+    "context": "External EXPECTED_REGIONS, OBSERVED_DATA, and FAILURE_LOGS preserve omission reasons, extraction status, sampling design, and selection covariates.",
+    "program": "Root programs coverage accounting, recursively examines plausible missingness mechanisms, and buffers bounded conclusions with explicit unsupported assumptions.",
+    "data": "Training uses generated missing-at-random and selective-omission cases, failed document chunks, censored benchmarks, and absent limitation sections.",
+    "oracle": "Controlled generators expose true missingness mechanisms; real data receives sensitivity analysis rather than unverifiable mechanism labels.",
+    "failure": "Failure to extract the limitations section must not support the conclusion that the document states no limitations.",
+    "holdout": "Hold out omission mechanisms, document structures, and censoring regimes.",
+    "artifact": "Return MISSINGNESS_REPORT with coverage, plausible mechanisms, sensitivity bounds, and prohibited conclusions.",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/event_stream.c",
+      "src/cost_model.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/chunked_analyzer.py",
+        "symbols": [
+          "ChunkedDocumentAnalyzer.create_chunks",
+          "ChunkedDocumentAnalyzer._aggregate_results"
+        ],
+        "observation": "Overlapping chunks are aggregated by normalized strings without exact occurrence reconciliation."
+      }
+    ]
+  },
+  {
+    "id": "067",
+    "name": "Cross-repository contract discoverer",
+    "slug": "cross-repo-contract-discovery",
+    "brief": "Train a contract-discovery RLM to locate and check semantic boundaries between services maintained in separate repositories.",
+    "context": "External REPOSITORY_SNAPSHOTS and CALL_RECEIPTS retain API schemas, client payloads, server handlers, versions, and integration tests.",
+    "program": "Root programs producer-consumer joins, recursively delegates repository-local inspection, and buffers boundary contracts with executable mismatch witnesses.",
+    "data": "Training includes paired local services, renamed fields, nesting mismatches, status semantics, version skew, and incomplete documentation.",
+    "oracle": "Owned client-server fixtures and independent schema checks verify controlled contracts; inferred real-service behavior remains explicitly unverified.",
+    "failure": "A client emitting flat tool_id must not satisfy a handler expecting request.tool_id merely because both names appear.",
+    "holdout": "Hold out service families, schema evolution patterns, and repository layouts.",
+    "artifact": "Return CROSS_REPO_CONTRACTS with producer-consumer bindings, version constraints, mismatch tests, and unresolved assumptions.",
+    "primary_paths": [
+      "src/mcp.c",
+      "src/tools.c",
+      "src/context_fabric.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/integration_hooks.py",
+        "symbols": [
+          "HookEvent",
+          "HookManager.emit"
+        ],
+        "observation": "Ordered hook events carry request IDs but do not establish cross-service semantic evidence contracts."
+      }
+    ]
+  }
+]

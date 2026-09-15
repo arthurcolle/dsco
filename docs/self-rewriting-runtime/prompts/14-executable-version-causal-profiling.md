@@ -1,0 +1,13 @@
+# 14 — Causal profiling mapped to executable versions
+
+Give DSCO's self-improvement loop an accurate view of which resident executable generation caused each observed result and resource cost. Instrument mutable-cell entry and exit with generation identity, parent invocation, workload features, elapsed monotonic time, allocation deltas where available, and independently evaluated outcome references. Preserve a bounded trace of native calls and VM transitions that can be joined to source or IR locations for the exact code version.
+
+Calls must capture their generation at acquisition and retain it through completion, even when the active registry changes meanwhile. Distinguish inclusive time, exclusive time, provider wait, governed effect time, and local computation so the optimizer does not optimize an irrelevant timer. Attribute shared work explicitly rather than counting it once per child. Record missing measurements as unknown.
+
+Add a small profiler-facing API and an inspection report focused on actionable rewrite sites: expensive repeated pure subexpressions, branch distributions, and failures tied to input classes. This is more than a dashboard: feed one measured hotspot into a candidate-selection hook that proposes a bounded executable transformation, while keeping outcome evaluation independent. Avoid tracing sensitive input bodies unless explicitly required; hashes and declared features often suffice.
+
+Falsifying test: pause an A invocation, switch to B, finish A, and prove its samples still identify A. Create a fixture with a slow external observation and a cheap native scorer; the profiler must attribute the wait to the effect, not recommend rewriting the scorer for the entire delay. Compare instrumented and uninstrumented throughput, reproduce per-generation totals from raw samples, and reject any improvement claim based only on lower logging overhead or changed self-reported scores.
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Inspect `src/event_stream.c`, `src/execution_events.c`, `src/tool_telemetry.c`, `src/vm.c`, then `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/base.py` symbols `AgentStats.record_call`, `BaseAgent.execute`. Observed donor behavior: The donor records per-operation calls, timing, and errors, but has no attribution to live native code generations or causal improvement experiments.
+
+Preserve unrelated dirty work; add focused modules and small hooks. Govern every effectful tool call through `tools_execute_for_tier()`. Isolate state and build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

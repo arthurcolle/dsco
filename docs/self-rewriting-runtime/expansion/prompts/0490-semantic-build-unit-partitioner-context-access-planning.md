@@ -1,0 +1,15 @@
+# 490 — Semantic build-unit partitioner: Learned context-access planning
+
+Implement the learned context-access planning feature for the Semantic build-unit partitioner RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Learn compilation-unit partitions and reuse decisions that reduce native rebuild work without missing changed semantic dependencies.
+
+External `source_versions`, `semantic_edges`, and `build_units` variables retain edit histories, contracts, and compiled artifacts. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root programs slice changed definitions, delegate dependency closures, and assemble a minimal independently justified rebuild set. Role output: Final `RebuildPlan` handle lists semantic unit hashes, reused artifacts, required recompilations, and clean-build comparison receipts. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Expose context-region descriptors and bounded reads while keeping the full input outside the root window. Train the root to generate access programs that retrieve discriminating regions and recursively examine relevant slices. Log coverage, read amplification, and every region supporting the final artifact.
+
+Train from edit/build trajectories labeled by clean-build comparison, actual compilation cost, and discovered stale-object failures. A frozen clean rebuild plus executable oracle verifies behavior and dependency coverage of each incremental candidate. Hold out edit classes, module topologies, compiler configurations, and specialization dependencies with repository lineage grouped. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: An inline constant changes while its symbol name remains identical, leaving a dependent specialization incorrectly cached. Plant decisive information outside the usual prefix and supply a plausible distractor near the beginning. A policy that answers from previews alone must fail the oracle, and an unbounded full-context copy must be detected.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/ast.c`, `src/plugin.c`, `src/autoresearch.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py` (`MetaToolRegistry.get_ast`, `MetaToolRegistry.transform_tool`). Donor baseline: Caches AST descriptions and transforms registered source; semantic incremental build partitioning is absent. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

@@ -1,0 +1,11 @@
+# 42 — Event-driven scheduling of accepted blackboard dependencies
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or the isolated worktree assigned for this feature. Read applicable `AGENTS.md` instructions and inspect current code before editing. Start at `src/blackboard.c`, `src/durable_agents.c`, `src/ipc.c`, `src/plan_dag.c`. If part already exists, ship the missing bounded extension and explain the observed gap; do not duplicate an existing subsystem. All interfaces named below are proposed until verified on disk.
+
+The blackboard already derives readiness from accepted dependencies; it does not automatically activate workers. Implement a bounded, opt-in local scheduler that consumes its durable event cursor and dispatches newly ready contracts to configured durable identities. Keep blackboard acceptance authoritative and IPC responsible for activation routing. Persist the task-to-activation mapping and reconcile it after restart before creating another activation. A worker must acquire a fresh blackboard claim before doing work, and dispatch itself must not imply ownership or acceptance. Proposed `agents schedule-board` options should name the board, roster, maximum concurrent activations, idle exit, and state directory. Quiescence must wait outside inference, with bounded event batching and useful blocked-dependency diagnostics.
+
+Implement new capability in proposed `src/board_scheduler.c` and `include/board_scheduler.h`, with small dispatch hooks and a Makefile entry where needed. Preserve unrelated dirty work. Coordinate shared-file changes; keep builds, databases, sockets, fixtures, and reports isolated. Build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install a worker binary. Every tool-call path must use `tools_execute_for_tier()` and preserve capability gates.
+
+Run a diamond dependency graph using deterministic worker subprocesses. Verify parallel independent roots, no downstream launch until accepted inputs exist, bounded concurrency, restart after dispatch before cursor commit, and invalidation while a worker runs. Assert no duplicate accepted publication and no inference during idle observation.
+
+Finish with the implemented behavior, exact reproduction commands, binary and evidence paths, relevant regression results, and remaining limitations. Verify the real local runtime path; compilation alone is insufficient.

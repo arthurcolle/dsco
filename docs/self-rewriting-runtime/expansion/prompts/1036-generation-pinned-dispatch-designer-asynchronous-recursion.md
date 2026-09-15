@@ -1,0 +1,15 @@
+# 1036 — Generation-pinned dispatch designer: Learned asynchronous recursion
+
+Implement the learned asynchronous recursion feature for the Generation-pinned dispatch designer RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Learn dispatch procedures that route nested native calls through one compatible generation while allowing later calls to use replacements.
+
+External `dispatch_maps`, `call_trees`, and `activation_events` variables retain complete binding and nested-invocation histories. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root programs partition call trees, delegate compatibility checks, and synthesize pinned lookup plus compare-and-swap transitions. Role output: Final `DispatchPolicyCandidate` handle contains native lookup code, generation rules, compatibility contracts, and mixed-version witnesses. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Expose bounded futures for recursive calls and train submit, await, batch, and cancel decisions on controlled completion distributions. Reservations span all descendants. Keep completed result identities stable and ensure training and inference scheduling never block the terminal input handler.
+
+Train from generated replacement races, nested calls, stale activations, and fixed-reference dispatch outcome labels. A frozen generation model verifies entrypoint identity, bundle consistency, activation winners, and uninterrupted old-frame completion. Hold out nesting depths, bundle dependency patterns, activation interleavings, and stale-caller families grouped by call graph. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: An outer call acquires generation A but its nested lookup rereads the global map and enters incompatible generation B. Delay a required child indefinitely while delivering other results out of order. The system must remain responsive, preserve partial work, and report unresolved completeness; dropping the slow child cannot manufacture a successful fast result.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/vm.c`, `src/plugin.c`, `src/lingo_workflow.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py` (`MetaToolRegistry.get`, `MetaToolRegistry.compose`). Donor baseline: Resolves named Python callables; generation-pinned concurrent native dispatch is not provided. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

@@ -1,0 +1,15 @@
+# 819 — Dependency-aware execution scheduler designer: Evidence-based stopping policy
+
+Implement the evidence-based stopping policy feature for the Dependency-aware execution scheduler designer RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Learn native execution schedules that exploit dependency parallelism while respecting resource limits and failed-prerequisite semantics.
+
+REPL variables `task_dag`, `runtime_costs`, and `resource_slots` retain full graphs, observations, and admission constraints. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root code computes frontiers, recursively analyzes independent subgraphs, and synthesizes bounded schedule decisions with explicit joins. Role output: Final `ExecutionSchedulePolicy` handle contains native admission code, dependency rules, resource assumptions, and blocked-frontier witnesses. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Train a root decision among continue, return a verified environment result, and terminate unresolved. Development episodes include misleading high confidence, repetitive verification, and unresolved obligations. Optimize task completion with explicit observation requirements and costs, using oracle results rather than self-reported confidence.
+
+Train from generated DAG executions, critical-path variations, task failures, and fixed-oracle schedule-validity outcomes. An immutable DAG simulator checks precedence, capacity, failure propagation, completed outputs, and measured makespan. Hold out graph motifs, resource bottlenecks, duration correlations, and failure placements with DAG ancestry grouped. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: A prerequisite produces a terminal failure record and the scheduler wrongly treats record existence as successful readiness. Repeated identical child opinions cannot satisfy a missing obligation. A complete verified result should survive the stop decision unchanged; exhausted budgets must produce unresolved status instead of fabricated success.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/scheduler.c`, `src/plan_dag.c`, `src/swarm_reactor.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_streaming_tools.py` (`ToolExecutor._execute_structured`). Donor baseline: Schedules dependency-ready call waves; resource-aware native scheduling and failure semantics are proposed extensions. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

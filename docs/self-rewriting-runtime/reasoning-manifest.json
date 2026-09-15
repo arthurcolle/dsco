@@ -1,0 +1,648 @@
+[
+  {
+    "id": "41",
+    "title": "Compile reasoning methods into executable obligations",
+    "slug": "reasoning-method-compiler",
+    "prompt": "prompts/41-reasoning-method-compiler.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/prompt_program.c",
+      "src/self_improve.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/core.py",
+        "symbols": [
+          "CognitiveAgentProgram",
+          "select_lenses"
+        ],
+        "observation": "One ChainOfThought receives all lenses; automatic selection uses substring rules."
+      }
+    ],
+    "mechanism": "Typed method DAG with applicability predicates, required inputs, checked operations, and obligations.",
+    "challenge": "Missing competing likelihood prevents Bayesian execution; a quoted keyword does not select a method.",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/reason_reasoning_method_compiler.c",
+      "include/reason_reasoning_method_compiler.h"
+    ]
+  },
+  {
+    "id": "42",
+    "title": "Compete causal fault hypotheses before rewriting",
+    "slug": "abductive-fault-competition",
+    "prompt": "prompts/42-abductive-fault-competition.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/agent.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "AbductiveReasoningSignature",
+          "ScientificReasoningWorkflow.forward"
+        ],
+        "observation": "Abduction is an LM signature; scientific deduction and causal execution remain commented steps."
+      }
+    ],
+    "mechanism": "Competing fault hypotheses predict probe outcomes and are eliminated by observed counterexamples.",
+    "challenge": "A probe equally predicted by both hypotheses earns no discriminating credit.",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/agent.c",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/reason_abductive_fault_competition.c",
+      "include/reason_abductive_fault_competition.h"
+    ]
+  },
+  {
+    "id": "43",
+    "title": "Check deductive fragments for candidate preconditions",
+    "slug": "deductive-proof-fragments",
+    "prompt": "prompts/43-deductive-proof-fragments.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/eval.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "DeductiveReasoningSignature"
+        ],
+        "observation": "A model emits validity and inference prose; there is no formal proof checker."
+      }
+    ],
+    "mechanism": "Small proof kernel checks bounded predicates and inference rules tied to candidate preconditions.",
+    "challenge": "Affirming the consequent, integer overflow, and unsupported generalization fail independently of persuasive text.",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/reason_deductive_proof_fragments.c",
+      "include/reason_deductive_proof_fragments.h"
+    ]
+  },
+  {
+    "id": "44",
+    "title": "Perform fully specified Bayesian candidate revision",
+    "slug": "deterministic-bayesian-revision",
+    "prompt": "prompts/44-deterministic-bayesian-revision.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/eval.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "ProbabilisticReasoningSignature",
+          "ScientificReasoningWorkflow.forward"
+        ],
+        "observation": "The signature lacks an alternative likelihood; scientific workflow supplies fixed prior .5 and placeholder likelihood .8."
+      }
+    ],
+    "mechanism": "Deterministic posterior calculation with competing likelihoods, dependence groups, and sensitivity intervals.",
+    "challenge": "One-percent prior with .99 sensitivity and .05 false-positive rate yields about16.67%, not99%.",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/reason_deterministic_bayesian_revision.c",
+      "include/reason_deterministic_bayesian_revision.h"
+    ]
+  },
+  {
+    "id": "45",
+    "title": "Identify causal benefit of runtime interventions",
+    "slug": "runtime-causal-interventions",
+    "prompt": "prompts/45-runtime-causal-interventions.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/hotplug.c",
+      "src/baseline.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/deep.py",
+        "symbols": [
+          "REASONING_METHODOLOGIES",
+          "MethodologySignature"
+        ],
+        "observation": "causal_graph is a natural-language methodology instruction; no intervention evaluator exists."
+      }
+    ],
+    "mechanism": "Typed causal graph and controlled change comparison separate intervention effects from confounding.",
+    "challenge": "A warm cache improves both old and new code; sequential benchmark timing must not credit the patch.",
+    "hotspots": [
+      "src/self_improve.c"
+    ],
+    "proposed_modules": [
+      "src/reason_runtime_causal_interventions.c",
+      "include/reason_runtime_causal_interventions.h"
+    ]
+  },
+  {
+    "id": "46",
+    "title": "Forecast candidate performance from comparable episodes",
+    "slug": "reference-class-code-forecast",
+    "prompt": "prompts/46-reference-class-code-forecast.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/learned_cost.c",
+      "src/cost_model.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/debiased_reasoning_modules.py",
+        "symbols": [
+          "ReferenceClassForecasting.forward",
+          "ReferenceClassIdentification"
+        ],
+        "observation": "Reference-class statistics are supplied by a model rather than retrieved empirical cohorts."
+      }
+    ],
+    "mechanism": "Eligibility-defined comparable cohorts produce performance distributions and transport warnings.",
+    "challenge": "Removing failed candidates or mixing hardware generations changes apparent benefit and must be exposed.",
+    "hotspots": [
+      "src/self_improve.c"
+    ],
+    "proposed_modules": [
+      "src/reason_reference_class_code_forecast.c",
+      "include/reason_reference_class_code_forecast.h"
+    ]
+  },
+  {
+    "id": "47",
+    "title": "Choose code changes on robust constrained frontiers",
+    "slug": "robust-code-decision-frontier",
+    "prompt": "prompts/47-robust-code-decision-frontier.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/plan_optimizer.c",
+      "src/cost_frontier.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/deep.py",
+        "symbols": [
+          "REASONING_METHODOLOGIES",
+          "MethodologySignature"
+        ],
+        "observation": "decision_theory requests prose expected-value comparisons without constraint-solving implementation."
+      }
+    ],
+    "mechanism": "Hard feasibility gates precede Pareto and robust-regret comparisons across uncertain candidate outcomes.",
+    "challenge": "A faster candidate with one correctness violation cannot buy admission with any speed score.",
+    "hotspots": [
+      "src/self_improve.c"
+    ],
+    "proposed_modules": [
+      "src/reason_robust_code_decision_frontier.c",
+      "include/reason_robust_code_decision_frontier.h"
+    ]
+  },
+  {
+    "id": "48",
+    "title": "Select the next experiment by decision value",
+    "slug": "value-of-information-experiments",
+    "prompt": "prompts/48-value-of-information-experiments.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/plan_optimizer.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/core.py",
+        "symbols": [
+          "CognitiveAnalysisSignature"
+        ],
+        "observation": "cruxes and next_steps are generated text with no expected decision-value calculation."
+      }
+    ],
+    "mechanism": "Enumerate experiment outcomes and calculate expected decision improvement minus resource cost.",
+    "challenge": "A high-entropy unknown that cannot change the selected implementation has zero decision value.",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/reason_value_of_information_experiments.c",
+      "include/reason_value_of_information_experiments.h"
+    ]
+  },
+  {
+    "id": "49",
+    "title": "Turn rewrite premortems into executable conditions",
+    "slug": "candidate-premortem-triggers",
+    "prompt": "prompts/49-candidate-premortem-triggers.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/baseline.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/debiased_reasoning_modules.py",
+        "symbols": [
+          "PreMortemAnalysis"
+        ],
+        "observation": "Premortem outputs failure scenarios and mitigations as model-generated text."
+      }
+    ],
+    "mechanism": "Candidate-specific failure models compile to bounded predicates and corresponding decision transitions.",
+    "challenge": "Missing telemetry is unknown and counter reset cannot satisfy a safety trigger.",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/reason_candidate_premortem_triggers.c",
+      "include/reason_candidate_premortem_triggers.h"
+    ]
+  },
+  {
+    "id": "50",
+    "title": "Transfer algorithms through structural analogy checks",
+    "slug": "structural-algorithm-transfer",
+    "prompt": "prompts/50-structural-algorithm-transfer.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/skill_index.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "AnalogicalReasoningSignature"
+        ],
+        "observation": "Analogy mapping, disanalogies and confidence are emitted by a model without an applicability checker."
+      }
+    ],
+    "mechanism": "Typed relational mappings transfer algorithmic templates only when required semantic boundaries hold.",
+    "challenge": "A cache strategy valid for idempotent reads must not transfer to exactly-once mutations.",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/reason_structural_algorithm_transfer.c",
+      "include/reason_structural_algorithm_transfer.h"
+    ]
+  },
+  {
+    "id": "51",
+    "title": "Ground decision-bias audits in source spans",
+    "slug": "grounded-self-modification-audit",
+    "prompt": "prompts/51-grounded-self-modification-audit.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/tools.c",
+      "src/json_util.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/deep.py",
+        "symbols": [
+          "BiasScanSignature",
+          "_dict_list"
+        ],
+        "observation": "The signature requests evidence spans but permissive assembly accepts incomplete or malformed bias records."
+      }
+    ],
+    "mechanism": "Audit decision dependencies using exact spans and executable relevance checks without forcing bias labels.",
+    "challenge": "Mentioning past investment as historical context alone must not count as sunk-cost reasoning.",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/reason_grounded_self_modification_audit.c",
+      "include/reason_grounded_self_modification_audit.h"
+    ]
+  },
+  {
+    "id": "52",
+    "title": "Test code decisions for framing invariance",
+    "slug": "decision-framing-invariance",
+    "prompt": "prompts/52-decision-framing-invariance.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/prompt_program.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/debiased_reasoning_modules.py",
+        "symbols": [
+          "ConsiderOpposite",
+          "DualProcessReasoning"
+        ],
+        "observation": "Counterpositions and deliberate reconsideration are generated prose without controlled invariance tests."
+      }
+    ],
+    "mechanism": "Meaning-preserving decision transformations reveal unjustified recommendation shifts across wording and anchors.",
+    "challenge": "Equivalent ninety-percent success versus ten-percent failure records should not reverse identical code choices.",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/reason_decision_framing_invariance.c",
+      "include/reason_decision_framing_invariance.h"
+    ]
+  },
+  {
+    "id": "53",
+    "title": "Propagate critique into code decisions",
+    "slug": "critique-correction-propagation",
+    "prompt": "prompts/53-critique-correction-propagation.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/prompt_program.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "HybridReasoningPipeline.forward"
+        ],
+        "observation": "Corrected analyses are produced but final_synthesis still returns the original multi.synthesis."
+      }
+    ],
+    "mechanism": "Material critiques invalidate dependent decisions until accepted, rebutted, or explicitly unresolved.",
+    "challenge": "A disproven bounds premise cannot survive into the final choice through an unchanged original synthesis.",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/reason_critique_correction_propagation.c",
+      "include/reason_critique_correction_propagation.h"
+    ]
+  },
+  {
+    "id": "54",
+    "title": "Investigate rewrite candidates with independent dissent",
+    "slug": "independent-adversarial-investigation",
+    "prompt": "prompts/54-independent-adversarial-investigation.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/topology.c",
+      "src/swarm.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/debiased_reasoning_modules.py",
+        "symbols": [
+          "ArgumentativeReasoning.forward",
+          "ConstructCounterargument",
+          "SynthesizeOpposingViews"
+        ],
+        "observation": "One pipeline generates counterarguments then asks a model to synthesize a balanced view."
+      }
+    ],
+    "mechanism": "Blind independent investigations adjudicate disagreement with reproducible witnesses rather than majority votes.",
+    "challenge": "Three agreeing investigators citing one erroneous measurement cannot outvote a concrete failing input.",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/topology.c",
+      "src/swarm.c"
+    ],
+    "proposed_modules": [
+      "src/reason_independent_adversarial_investigation.c",
+      "include/reason_independent_adversarial_investigation.h"
+    ]
+  },
+  {
+    "id": "55",
+    "title": "Calibrate rewrite confidence against actual outcomes",
+    "slug": "outcome-calibration-abstention",
+    "prompt": "prompts/55-outcome-calibration-abstention.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/learned_cost.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/eval_bias_reduction.py",
+        "symbols": [
+          "evaluate_test_case",
+          "calculate_aggregate_metrics"
+        ],
+        "observation": "Evaluation uses model score strings; absent post-analysis can yield verification_success=True."
+      },
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py",
+        "symbols": [
+          "ReasoningToolkit.reduce_biases"
+        ],
+        "observation": "A failed verification bias detector sets biases_after to zero while the reduction operation still reports success."
+      }
+    ],
+    "mechanism": "Proper scoring and calibrated decision bins distinguish predicted success, observed success, failure, and unknown.",
+    "challenge": "Verification timeout must remain unknown and never improve a candidate success statistic.",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/reason_outcome_calibration_abstention.c",
+      "include/reason_outcome_calibration_abstention.h"
+    ]
+  },
+  {
+    "id": "56",
+    "title": "Bound rewrite resources with dimensional estimates",
+    "slug": "units-aware-resource-estimation",
+    "prompt": "prompts/56-units-aware-resource-estimation.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/eval.c",
+      "src/cost_model.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/deep.py",
+        "symbols": [
+          "REASONING_METHODOLOGIES",
+          "MethodologySignature"
+        ],
+        "observation": "fermi_estimation is a textual instruction, with no units or interval arithmetic implementation."
+      }
+    ],
+    "mechanism": "Dimensioned interval expressions estimate candidate resource demand and expose dominant uncertainties.",
+    "challenge": "Requests per second times bytes per request is bandwidth, not total memory without a retention duration.",
+    "hotspots": [
+      "src/self_improve.c"
+    ],
+    "proposed_modules": [
+      "src/reason_units_aware_resource_estimation.c",
+      "include/reason_units_aware_resource_estimation.h"
+    ]
+  },
+  {
+    "id": "57",
+    "title": "Escalate reasoning only when observed risk warrants it",
+    "slug": "selective-dual-process-escalation",
+    "prompt": "prompts/57-selective-dual-process-escalation.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/router.c",
+      "src/self_improve.c",
+      "src/agent.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/debiased_reasoning_modules.py",
+        "symbols": [
+          "DualProcessReasoning.forward",
+          "FastFrugalDecision.forward"
+        ],
+        "observation": "Dual process always runs two model stages; weak recognition can still become the final heuristic decision."
+      }
+    ],
+    "mechanism": "Risk features and unresolved obligations trigger deeper reasoning while exact easy cases stay deterministic.",
+    "challenge": "Confident cheap-model output cannot suppress escalation for a patch changing ownership or bounds.",
+    "hotspots": [
+      "src/router.c",
+      "src/self_improve.c",
+      "src/agent.c"
+    ],
+    "proposed_modules": [
+      "src/reason_selective_dual_process_escalation.c",
+      "include/reason_selective_dual_process_escalation.h"
+    ]
+  },
+  {
+    "id": "58",
+    "title": "Allocate reasoning portfolios by complementary error",
+    "slug": "complementary-reasoning-portfolios",
+    "prompt": "prompts/58-complementary-reasoning-portfolios.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/router.c",
+      "src/topology.c",
+      "src/plan_optimizer.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/debiased_async.py",
+        "symbols": [
+          "AsyncComprehensiveDebiasedReasoning.aforward"
+        ],
+        "observation": "Independent stages run in two fixed waves; activation is based on simple query substrings."
+      }
+    ],
+    "mechanism": "Select bounded method/model sets by measured marginal error coverage and resource cost.",
+    "challenge": "Two highly accurate agents making the same errors can add less value than a weaker complementary verifier.",
+    "hotspots": [
+      "src/router.c",
+      "src/topology.c",
+      "src/self_improve.c"
+    ],
+    "proposed_modules": [
+      "src/reason_complementary_reasoning_portfolios.c",
+      "include/reason_complementary_reasoning_portfolios.h"
+    ]
+  },
+  {
+    "id": "59",
+    "title": "Distill runtime lessons into typed executable procedures",
+    "slug": "typed-procedure-distillation",
+    "prompt": "prompts/59-typed-procedure-distillation.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/skill_candidate.c",
+      "src/bg_learn.c",
+      "src/prompt_program.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/deep.py",
+        "symbols": [
+          "REASONING_METHODOLOGIES",
+          "MethodologySignature"
+        ],
+        "observation": "Reusable methods are textual procedure descriptions and generated findings, not checked executable recipes."
+      }
+    ],
+    "mechanism": "Successful episodes yield parameterized procedures with preconditions, governed operations, and transfer tests.",
+    "challenge": "A lesson that hardcodes one example path or repeats a failed action cannot pass transfer acceptance.",
+    "hotspots": [
+      "src/self_improve.c"
+    ],
+    "proposed_modules": [
+      "src/reason_typed_procedure_distillation.c",
+      "include/reason_typed_procedure_distillation.h"
+    ]
+  },
+  {
+    "id": "60",
+    "title": "Optimize prompts programs and topology under one oracle",
+    "slug": "joint-runtime-policy-optimization",
+    "prompt": "prompts/60-joint-runtime-policy-optimization.md",
+    "domain": "reasoning-self-improvement",
+    "primary_paths": [
+      "src/prompt_program.c",
+      "src/topology.c",
+      "src/plan_optimizer.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/optimize.py",
+        "symbols": [
+          "swarm_metric",
+          "compile_with_mipro",
+          "compile_with_gepa",
+          "evaluate"
+        ],
+        "observation": "MIPROv2/GEPA wrappers exist; default metric rewards nonempty output or expected-answer substring."
+      }
+    ],
+    "mechanism": "Bounded joint search mutates prompt instructions, typed procedure choices, and reasoning topology against independent validation.",
+    "challenge": "Expected-answer text embedded in a wrong output and altered grader code must never earn promotion.",
+    "hotspots": [
+      "src/topology.c",
+      "src/self_improve.c"
+    ],
+    "proposed_modules": [
+      "src/reason_joint_runtime_policy_optimization.c",
+      "include/reason_joint_runtime_policy_optimization.h"
+    ]
+  }
+]

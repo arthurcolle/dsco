@@ -1,0 +1,15 @@
+# 2080 — Missingness and coverage analyst: Learned context-access planning
+
+Implement the learned context-access planning feature for the Missingness and coverage analyst RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Train a coverage RLM to reason about what unavailable observations prevent the system from concluding.
+
+External EXPECTED_REGIONS, OBSERVED_DATA, and FAILURE_LOGS preserve omission reasons, extraction status, sampling design, and selection covariates. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root programs coverage accounting, recursively examines plausible missingness mechanisms, and buffers bounded conclusions with explicit unsupported assumptions. Role output: Return MISSINGNESS_REPORT with coverage, plausible mechanisms, sensitivity bounds, and prohibited conclusions. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Expose context-region descriptors and bounded reads while keeping the full input outside the root window. Train the root to generate access programs that retrieve discriminating regions and recursively examine relevant slices. Log coverage, read amplification, and every region supporting the final artifact.
+
+Training uses generated missing-at-random and selective-omission cases, failed document chunks, censored benchmarks, and absent limitation sections. Controlled generators expose true missingness mechanisms; real data receives sensitivity analysis rather than unverifiable mechanism labels. Hold out omission mechanisms, document structures, and censoring regimes. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: Failure to extract the limitations section must not support the conclusion that the document states no limitations. Plant decisive information outside the usual prefix and supply a plausible distractor near the beginning. A policy that answers from previews alone must fail the oracle, and an unbounded full-context copy must be detected.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/context_fabric.c`, `src/event_stream.c`, `src/cost_model.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/chunked_analyzer.py` (`ChunkedDocumentAnalyzer.create_chunks`, `ChunkedDocumentAnalyzer._aggregate_results`). Donor baseline: Overlapping chunks are aggregated by normalized strings without exact occurrence reconciliation. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

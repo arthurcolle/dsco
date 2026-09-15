@@ -1,0 +1,612 @@
+[
+  {
+    "id": "81",
+    "title": "Train a trace-to-state-machine induction RLM",
+    "slug": "rlm-state-machine-induction",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "InductiveReasoningSignature"
+        ],
+        "observation": "Induction requests a textual generalization and possible counterexamples; it does not infer executable state machines from traces."
+      }
+    ],
+    "primary_paths": [
+      "src/trace_kg_store.c",
+      "src/event_stream.c",
+      "src/vm.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_state_induction.c",
+      "include/rlm_state_induction.h"
+    ],
+    "mechanism": "Learn root programs that partition traces, infer executable transition systems, and validate them on unseen sequences.",
+    "challenge": "Identical output prefixes followed by different legal continuations must not be merged into one state.",
+    "prompt": "prompts/81-rlm-state-machine-induction.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": []
+  },
+  {
+    "id": "82",
+    "title": "Train an active protocol-learning RLM",
+    "slug": "rlm-active-protocol-learning",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/universal_dspy_multihop.py",
+        "symbols": [
+          "MultiHopQueryGenerator",
+          "UniversalMultiHopRAG.forward"
+        ],
+        "observation": "The donor generates retrieval queries over notes; it has no membership-query or equivalence-counterexample protocol-learning loop."
+      }
+    ],
+    "primary_paths": [
+      "src/mcp.c",
+      "src/execution_kernel.c",
+      "src/pty_session.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_protocol_learning.c",
+      "include/rlm_protocol_learning.h"
+    ],
+    "mechanism": "Learn economical root query programs that identify an opaque resettable tool protocol.",
+    "challenge": "A retry that consumes a token changes protocol state even though its visible response matches a harmless retry.",
+    "prompt": "prompts/82-rlm-active-protocol-learning.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": [
+      "src/execution_kernel.c"
+    ]
+  },
+  {
+    "id": "83",
+    "title": "Train an executable API-contract mining RLM",
+    "slug": "rlm-api-contract-mining",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer._extract_structure",
+          "MetaToolRegistry.register_code"
+        ],
+        "observation": "AST inspection extracts declarations and arguments; registration validates syntax but does not infer behavioral preconditions or postconditions."
+      }
+    ],
+    "primary_paths": [
+      "src/ast.c",
+      "src/tools.c",
+      "src/execution_kernel.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_contract_mining.c",
+      "include/rlm_contract_mining.h"
+    ],
+    "mechanism": "Learn root decompositions that turn implementations and examples into executable, falsifiable API contracts.",
+    "challenge": "A nonempty output is not success when the API contract requires a matching request identity and sorted records.",
+    "prompt": "prompts/83-rlm-api-contract-mining.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": [
+      "src/tools.c",
+      "src/execution_kernel.c"
+    ]
+  },
+  {
+    "id": "84",
+    "title": "Train minimal causal-feature discovery for failures",
+    "slug": "rlm-causal-feature-discovery",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "CausalReasoningSignature",
+          "ScientificReasoningWorkflow.forward"
+        ],
+        "observation": "Causality is requested as generated text; the workflow leaves causal analysis unimplemented rather than discovering causal features through interventions."
+      }
+    ],
+    "primary_paths": [
+      "src/trace_kg_store.c",
+      "src/self_improve.c",
+      "src/execution_kernel.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_causal_features.c",
+      "include/rlm_causal_features.h"
+    ],
+    "mechanism": "Learn root programs that isolate small intervention-supported feature sets explaining procedure failures.",
+    "challenge": "A timestamp correlated with crashes must lose to the actual ownership-state feature when interventions separate them.",
+    "prompt": "prompts/84-rlm-causal-feature-discovery.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/execution_kernel.c"
+    ]
+  },
+  {
+    "id": "85",
+    "title": "Train quality-diversity search over rewrite behaviors",
+    "slug": "rlm-quality-diversity-search",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer.transform",
+          "MetaProgrammingAgent.run"
+        ],
+        "observation": "The donor selects individual define, compose, inspect or transform actions; it maintains no behavior-space archive or learned diversity-seeking search policy."
+      }
+    ],
+    "primary_paths": [
+      "src/autoresearch.c",
+      "src/cost_frontier.c",
+      "src/ast.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_diversity_search.c",
+      "include/rlm_diversity_search.h"
+    ],
+    "mechanism": "Learn root search programs that maintain independently qualified behavioral niches instead of one brittle champion.",
+    "challenge": "An extremely fast candidate on uniform inputs must not erase a robust candidate needed for skewed workloads.",
+    "prompt": "prompts/85-rlm-quality-diversity-search.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": [
+      "src/autoresearch.c"
+    ]
+  },
+  {
+    "id": "86",
+    "title": "Train constrained Bayesian compiler-search programs",
+    "slug": "rlm-bayesian-compiler-search",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/metacognitive_engine.py",
+        "symbols": [
+          "MetacognitiveEngine._select_strategy"
+        ],
+        "observation": "Strategy selection multiplies fixed confidence values by hand-written mode weights; it does not learn acquisition decisions from compiler measurements."
+      }
+    ],
+    "primary_paths": [
+      "src/autoresearch.c",
+      "src/cost_model.c",
+      "src/cost_frontier.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_compiler_search.c",
+      "include/rlm_compiler_search.h"
+    ],
+    "mechanism": "Learn root orchestration of fitted surrogate models and constrained acquisitions over compiler settings.",
+    "challenge": "An aggressive flag combination with excellent speed but incorrect overflow behavior must remain infeasible.",
+    "prompt": "prompts/86-rlm-bayesian-compiler-search.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": [
+      "src/autoresearch.c"
+    ]
+  },
+  {
+    "id": "87",
+    "title": "Train propensity-aware contextual exploration",
+    "slug": "rlm-contextual-bandit-learning",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/metacognitive_engine.py",
+        "symbols": [
+          "MetacognitiveEngine._generate_strategies",
+          "MetacognitiveEngine._select_strategy"
+        ],
+        "observation": "Strategies use hand-assigned confidences and fixed weights; there are no logged action propensities or counterfactual policy estimates."
+      }
+    ],
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/cost_model.c",
+      "src/event_stream.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_bandit_policy.c",
+      "include/rlm_bandit_policy.h"
+    ],
+    "mechanism": "Learn root programs for constrained contextual exploration with valid propensity logs and off-policy evaluation.",
+    "challenge": "A policy favored only because easy tasks received its actions must fail a properly weighted comparison.",
+    "prompt": "prompts/87-rlm-contextual-bandit-learning.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": [
+      "src/self_improve.c"
+    ]
+  },
+  {
+    "id": "88",
+    "title": "Train pairwise ranking of rewrite candidates",
+    "slug": "rlm-pairwise-rewrite-ranking",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/metacognitive_engine.py",
+        "symbols": [
+          "StrategyOption",
+          "MetacognitiveEngine._select_strategy"
+        ],
+        "observation": "The selector sorts fixed confidence-weight products rather than learning rankings from controlled pairwise outcomes."
+      }
+    ],
+    "primary_paths": [
+      "src/cost_frontier.c",
+      "src/plan_optimizer.c",
+      "src/self_improve.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_rewrite_ranker.c",
+      "include/rlm_rewrite_ranker.h"
+    ],
+    "mechanism": "Learn root comparison programs and candidate rankings from independent paired outcomes with ties and incompatibility.",
+    "challenge": "A verbose candidate rationale cannot beat a concise candidate with stronger matched-workload evidence.",
+    "prompt": "prompts/88-rlm-pairwise-rewrite-ranking.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": [
+      "src/self_improve.c"
+    ]
+  },
+  {
+    "id": "89",
+    "title": "Train compositional task generation from capability grammars",
+    "slug": "rlm-capability-task-generation",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.compose"
+        ],
+        "observation": "Composition chains named callables but does not generate typed challenge distributions or verify task solvability from capability grammars."
+      }
+    ],
+    "primary_paths": [
+      "src/prompt_program.c",
+      "src/plan_dag.c",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_task_grammar.c",
+      "include/rlm_task_grammar.h"
+    ],
+    "mechanism": "Learn root programs that generate solvable, oracle-backed compositions testing new runtime capabilities.",
+    "challenge": "A generated challenge must not require an unavailable capability or hide an impossible postcondition behind fluent wording.",
+    "prompt": "prompts/89-rlm-capability-task-generation.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": [
+      "src/tools.c"
+    ]
+  },
+  {
+    "id": "90",
+    "title": "Train adversarial coevolution with a protected referee",
+    "slug": "rlm-adversarial-coevolution",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "DebuggedReasoningSignature",
+          "HybridReasoningPipeline.forward"
+        ],
+        "observation": "Bias critique is generated text and final synthesis remains the original multi-strategy synthesis; no adversary learns tests against an independent executable referee."
+      }
+    ],
+    "primary_paths": [
+      "src/autoresearch.c",
+      "src/blackboard.c",
+      "src/execution_kernel.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_adversary.c",
+      "include/rlm_adversary.h"
+    ],
+    "mechanism": "Train a root adversary to generate valid counterexamples while preserving a separate immutable referee.",
+    "challenge": "A test that merely changes the specification or crashes the harness must not earn credit for defeating a candidate.",
+    "prompt": "prompts/90-rlm-adversarial-coevolution.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": [
+      "src/autoresearch.c",
+      "src/execution_kernel.c"
+    ]
+  },
+  {
+    "id": "91",
+    "title": "Train executable invariant discovery with held-out checking",
+    "slug": "rlm-invariant-discovery",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "InductiveReasoningSignature",
+          "DeductiveReasoningSignature"
+        ],
+        "observation": "The signatures request laws and validity labels from an LM; they do not discover executable predicates and verify them against unseen transitions."
+      }
+    ],
+    "primary_paths": [
+      "src/ast.c",
+      "src/vm.c",
+      "src/execution_kernel.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_invariant_discovery.c",
+      "include/rlm_invariant_discovery.h"
+    ],
+    "mechanism": "Learn root programs that propose bounded invariants and refine them with executable counterexamples.",
+    "challenge": "An invariant learned from positive counters must fail when a hidden wraparound transition violates it.",
+    "prompt": "prompts/91-rlm-invariant-discovery.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": [
+      "src/execution_kernel.c"
+    ]
+  },
+  {
+    "id": "92",
+    "title": "Train error-cluster curriculum scheduling",
+    "slug": "rlm-error-curriculum",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/metacognitive_engine.py",
+        "symbols": [
+          "MetacognitiveEngine._evaluate_strategy_adjustment"
+        ],
+        "observation": "Adjustment checks a tool success-rate threshold and emits generic alternatives; it does not learn curriculum choices from structured error clusters."
+      }
+    ],
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/trace_kg_store.c",
+      "src/autoresearch.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_error_curriculum.c",
+      "include/rlm_error_curriculum.h"
+    ],
+    "mechanism": "Learn root programs that choose training episodes from error structure and measured learning progress.",
+    "challenge": "A huge duplicate cluster of easy failures must not consume all training while a small catastrophic class is forgotten.",
+    "prompt": "prompts/92-rlm-error-curriculum.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/autoresearch.c"
+    ]
+  },
+  {
+    "id": "93",
+    "title": "Train abstract-interpretation-guided candidate bounding",
+    "slug": "rlm-abstract-interpretation",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer.parse",
+          "ASTAnalyzer._extract_structure"
+        ],
+        "observation": "The AST analyzer extracts declarations and syntax structure; it does not compute abstract states or bound candidate execution."
+      }
+    ],
+    "primary_paths": [
+      "src/ast.c",
+      "src/vm.c",
+      "src/wasm_core.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_abstract_bounds.c",
+      "include/rlm_abstract_bounds.h"
+    ],
+    "mechanism": "Learn root programs that select sound abstract domains and refinement steps around a trusted analysis engine.",
+    "challenge": "A rare loop-growth path must not be certified bounded because sampled traces terminate.",
+    "prompt": "prompts/93-rlm-abstract-interpretation.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": []
+  },
+  {
+    "id": "94",
+    "title": "Train semantic indexing by executable behavior",
+    "slug": "rlm-behavioral-indexing",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.list_tools",
+          "MetaToolRegistry.get_ast"
+        ],
+        "observation": "Registry discovery exposes names, descriptions and AST metadata; it does not index procedures by independently observed input/output behavior."
+      }
+    ],
+    "primary_paths": [
+      "src/skill_index.c",
+      "src/semantic.c",
+      "src/context_fabric.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_behavior_index.c",
+      "include/rlm_behavior_index.h"
+    ],
+    "mechanism": "Learn root probing and retrieval programs that identify procedures by behavioral signatures and counterexamples.",
+    "challenge": "Two similarly named functions differing only on empty input must remain distinguishable in retrieval.",
+    "prompt": "prompts/94-rlm-behavioral-indexing.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": []
+  },
+  {
+    "id": "95",
+    "title": "Train uncertainty-aware surrogate performance reasoning",
+    "slug": "rlm-performance-surrogates",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "ProbabilisticReasoningSignature",
+          "ScientificReasoningWorkflow.forward"
+        ],
+        "observation": "The workflow passes fixed prior 0.5 and placeholder likelihood 0.8; it does not fit performance-response models or evaluate their uncertainty on observations."
+      }
+    ],
+    "primary_paths": [
+      "src/cost_model.c",
+      "src/learned_cost.c",
+      "src/cost_frontier.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_performance_surrogate.c",
+      "include/rlm_performance_surrogate.h"
+    ],
+    "mechanism": "Learn root programs that fit and challenge real conditional performance surrogates for novel candidates.",
+    "challenge": "A surrogate trained on small arrays must flag unsupported extrapolation to cache-thrashing sizes.",
+    "prompt": "prompts/95-rlm-performance-surrogates.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": []
+  },
+  {
+    "id": "96",
+    "title": "Train amortized experiment-selection policies",
+    "slug": "rlm-amortized-experiment-selection",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/metacognitive_engine.py",
+        "symbols": [
+          "MetacognitiveEngine._plan_immediate_actions",
+          "MetacognitiveEngine._plan_next_steps"
+        ],
+        "observation": "Immediate actions take the first few selected tools and next steps are generic strings; no policy is learned from experiment outcomes."
+      }
+    ],
+    "primary_paths": [
+      "src/plan_optimizer.c",
+      "src/self_improve.c",
+      "src/execution_kernel.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_probe_policy.c",
+      "include/rlm_probe_policy.h"
+    ],
+    "mechanism": "Learn root experiment-selection programs across tasks instead of recomputing only a supplied analytic value table.",
+    "challenge": "A memorized cheap probe must be rejected when its result cannot distinguish the current hypotheses.",
+    "prompt": "prompts/96-rlm-amortized-experiment-selection.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/execution_kernel.c"
+    ]
+  },
+  {
+    "id": "97",
+    "title": "Train hierarchical skill-option induction",
+    "slug": "rlm-option-induction",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/cognitive_architecture.py",
+        "symbols": [
+          "ActionStack",
+          "CognitiveArchitecture._action_executor"
+        ],
+        "observation": "Actions have dependencies and completion status, but there is no learned initiation set, reusable subpolicy or termination condition for a temporal option."
+      }
+    ],
+    "primary_paths": [
+      "src/plan.c",
+      "src/plan_dag.c",
+      "src/skill_candidate.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_skill_options.c",
+      "include/rlm_skill_options.h"
+    ],
+    "mechanism": "Learn root segmentation and synthesis of reusable options with checked initiation and termination behavior.",
+    "challenge": "A retry-until-success fragment must not become an unbounded skill that runs after its preconditions stop holding.",
+    "prompt": "prompts/97-rlm-option-induction.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": [
+      "src/plan.c"
+    ]
+  },
+  {
+    "id": "98",
+    "title": "Train online concept-drift segmentation",
+    "slug": "rlm-concept-drift-segmentation",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/metacognitive_engine.py",
+        "symbols": [
+          "MetacognitiveEngine._evaluate_strategy_adjustment"
+        ],
+        "observation": "Strategy adjustment uses aggregate tool success-rate thresholds; it does not infer changing regimes or distinguish drift from isolated failures."
+      }
+    ],
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/cost_model.c",
+      "src/event_stream.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_drift_segmentation.c",
+      "include/rlm_drift_segmentation.h"
+    ],
+    "mechanism": "Learn root programs that detect latent operating-regime changes and select scoped relearning actions.",
+    "challenge": "A single outlier must not trigger a new regime, while a persistent shifted workload must not be averaged away.",
+    "prompt": "prompts/98-rlm-concept-drift-segmentation.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": [
+      "src/self_improve.c"
+    ]
+  },
+  {
+    "id": "99",
+    "title": "Train compression-driven reusable procedure libraries",
+    "slug": "rlm-library-compression",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.compose",
+          "ASTAnalyzer.transform"
+        ],
+        "observation": "Composition joins named callables and transformations are hand-authored; the donor does not extract a reusable library by jointly compressing many programs."
+      }
+    ],
+    "primary_paths": [
+      "src/ast.c",
+      "src/prompt_program.c",
+      "src/skill_index.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_library_compression.c",
+      "include/rlm_library_compression.h"
+    ],
+    "mechanism": "Learn root programs that discover shared abstractions minimizing checked description length across a corpus.",
+    "challenge": "A short library that memorizes training constants or changes effect order must lose despite excellent apparent compression.",
+    "prompt": "prompts/99-rlm-library-compression.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": []
+  },
+  {
+    "id": "100",
+    "title": "Train transfer attribution and negative-transfer prevention",
+    "slug": "rlm-transfer-attribution",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "AnalogicalReasoningSignature"
+        ],
+        "observation": "Analogy requests similarities and inferred features from an LM; it does not measure whether transferred learning improves independent target tasks."
+      }
+    ],
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/skill_index.c",
+      "src/autoresearch.c"
+    ],
+    "proposed_modules": [
+      "src/rlm_transfer_attribution.c",
+      "include/rlm_transfer_attribution.h"
+    ],
+    "mechanism": "Learn root programs that design transfer ablations and reject source knowledge causing target regressions.",
+    "challenge": "A transferred caching skill that helps pure transforms but corrupts stateful counters must be rejected for the latter target.",
+    "prompt": "prompts/100-rlm-transfer-attribution.md",
+    "domain": "trained-learning-specialist-rlm",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/autoresearch.c"
+    ]
+  }
+]

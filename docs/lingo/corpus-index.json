@@ -1,0 +1,2137 @@
+{
+  "count": 206,
+  "method": "Original file hashes; readable text inspected after excluding embedded images and very long base64-like lines. Review status does not claim authenticated documentation.",
+  "files": [
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2128.md",
+      "sha256": "81eacb805fb75dd2cc3f84cf59493224eb45b64c6421b986a6af9dcd1d45c067",
+      "original_lines": 35,
+      "readable_chars": 1953,
+      "headings": [
+        "## What SecDb and Slang Are",
+        "## What SecDb Is",
+        "## Note:"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2129.md",
+      "sha256": "aaa976fd4526776095d31f478f2ab78e1806cd32eff779a1b6312da34c3e5dae",
+      "original_lines": 37,
+      "readable_chars": 3369,
+      "headings": [
+        "## SecDb Databases",
+        "## Object Database",
+        "## Source Database"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2130.md",
+      "sha256": "b77f33e11028b00de11d9b94118f50d1d8d57a40d1396f53e8a470032c7aa5f7",
+      "original_lines": 23,
+      "readable_chars": 2430,
+      "headings": [
+        "## User Database",
+        "## Database Synchronization",
+        "## Figure 1-1 Organization of the Prod database ring"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2131.md",
+      "sha256": "b4a16aa147aa333dbdaa8b639b8c45524e341598bbec934d1c9a8224b26ede7f",
+      "original_lines": 27,
+      "readable_chars": 3219,
+      "headings": [
+        "## What Slang Is",
+        "## Tools for Using SecDb and Slang",
+        "## The SecView Environment",
+        "## The SecExpr Command-Line Utility",
+        "## SecDb and Slang Usage Models"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2132.md",
+      "sha256": "2de00682d3421b0a71aa376a328d47b7af845a9899b91727c09849729f1941d8",
+      "original_lines": 19,
+      "readable_chars": 2382,
+      "headings": [
+        "## Figure 1-2 The world of SecDb",
+        "## Value Types and Nodes"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2133.md",
+      "sha256": "821d0cb6e16751b51506e54caac0106efee8e81a3ac8f77b7b2595e5444f6aa5",
+      "original_lines": 47,
+      "readable_chars": 2793,
+      "headings": [
+        "## Figure 1-3 An illustration of how VT dependencies work",
+        "## Messages and Data Management"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2134.md",
+      "sha256": "33937738b233c2ca83ea2a40ecc8a4f865e4285b1a6665311ba9bc06f7545e42",
+      "original_lines": 29,
+      "readable_chars": 2212,
+      "headings": [
+        "## Securities and Objects",
+        "## Introduction to Security Types and Object Classes",
+        "## The Gob Interface",
+        "## The UFO Interface"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2135.md",
+      "sha256": "458eeff72fade6664594a5100456bd6a0d2c6d4829ae3efc361405d28d95a201",
+      "original_lines": 26,
+      "readable_chars": 5770,
+      "headings": [
+        "## Creating New Securities",
+        "## To Create a New Security Type and Instance"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2136.md",
+      "sha256": "b148cd6a9dd637d4d83ac3c23cacd5138d71107ea61f166aba66d3ec76c7d404",
+      "original_lines": 41,
+      "readable_chars": 2440,
+      "headings": [
+        "## Security Type Registration",
+        "## To Add an Entry to \\_LIB Class Declarations"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2137.md",
+      "sha256": "9576fb1eabe48780f89420c0d6c79a6d3077042ae9e7bd01ec2466efab92b129",
+      "original_lines": 43,
+      "readable_chars": 3064,
+      "headings": [
+        "## To Retire a Class",
+        "## Object Naming Conventions"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2138.md",
+      "sha256": "d25d15e8722e9d6bac245fe938091877d2b9de0105e9264153e2f9a78ad68622",
+      "original_lines": 109,
+      "readable_chars": 2515,
+      "headings": [
+        "## Type of Object It Denotes"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2139.md",
+      "sha256": "bc10004501c8e68b7e49bfdcdd87b7be2864617c135144d1b35e04a8ea952c67",
+      "original_lines": 135,
+      "readable_chars": 1851,
+      "headings": [],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2140.md",
+      "sha256": "5a43f3c1692448b77b42b03b545d62b0059a0a11037f2575c11d89476989610a",
+      "original_lines": 113,
+      "readable_chars": 1603,
+      "headings": [
+        "## Forward"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2141.md",
+      "sha256": "b58ca917d8e2404f1374bffa7a9452d162d46966661a25a9bfb98050c769a78b",
+      "original_lines": 71,
+      "readable_chars": 1493,
+      "headings": [],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2142.md",
+      "sha256": "ccc8aacd75b20ae2c83b6df30c1a4fb272998257f78a6fd99117407d5ddd6b0d",
+      "original_lines": 139,
+      "readable_chars": 1931,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2143.md",
+      "sha256": "bb1be55db75b22eccfee157d95e50888ed2e81b32c1998b31485db1d6c3db3b2",
+      "original_lines": 137,
+      "readable_chars": 1727,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2144.md",
+      "sha256": "9a5cf09bd64a15cf51f7738c7c077d2d503c193abeffcd4e5cdcd5be89c2eba7",
+      "original_lines": 131,
+      "readable_chars": 2035,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2145.md",
+      "sha256": "14942450b5f19c319f8ab2c552a5e8f9b8ced93e3d0076a023cb0706b0c798a3",
+      "original_lines": 137,
+      "readable_chars": 1811,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2146.md",
+      "sha256": "8c2c1a8a65b9fb38b88ffd8cd8a46294a7941f2935e2205db8093269311b67f9",
+      "original_lines": 2,
+      "readable_chars": 549,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2147.md",
+      "sha256": "9839ddc25e6be8ee0b8a33e1d83016610e670fcab543cbd3a6d16ec33233fd33",
+      "original_lines": 7,
+      "readable_chars": 2185,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2148.md",
+      "sha256": "314e3d0fbcc9ef2d8937b4fdc9e2cd2cb103667f24ed9de14c7d098c8e6a8dd9",
+      "original_lines": 141,
+      "readable_chars": 1820,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2149.md",
+      "sha256": "94a1e1457c7e85005056a6a109a2894ae7fc7f113220655ed4422aee573cbdbc",
+      "original_lines": 121,
+      "readable_chars": 1568,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2150.md",
+      "sha256": "136999654733e0b19b04695d6a429819e2c8a35fd7ddd724da58f81c3b2002de",
+      "original_lines": 127,
+      "readable_chars": 1937,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2151.md",
+      "sha256": "4e71721a80054ad8ca0b8c1d2c85ea0be0c2c6d0315e7fd6f3cc73d5242000d5",
+      "original_lines": 1,
+      "readable_chars": 0,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2152.md",
+      "sha256": "2c4d5ef32088d133c8c74a7ed7a3c227f407570b7e6a73055b5bd926ba9f7b56",
+      "original_lines": 45,
+      "readable_chars": 728,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2153.md",
+      "sha256": "f6fa8a68e60fa8eaa4317c4e5cade9683b03e2530ed059eb819ee8e149b163ce",
+      "original_lines": 33,
+      "readable_chars": 1208,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2154.md",
+      "sha256": "b8f473c7d9624836783e893a2ee96e68eab929653b651fbd919b79bf393f3f9e",
+      "original_lines": 15,
+      "readable_chars": 2655,
+      "headings": [
+        "## Evaluation and Invalidation"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2155.md",
+      "sha256": "f4f4b4dc6dfdbff93f48594a660d393c9b3adf9eee9b8befbcc9d55dfbeb3d2f",
+      "original_lines": 9,
+      "readable_chars": 1632,
+      "headings": [
+        "## Setting and Diddling Values"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2156.md",
+      "sha256": "f9e483ecb4af9a857ce52b9988591270ace57ced1bb3533731fe34cd589e5d09",
+      "original_lines": 31,
+      "readable_chars": 1774,
+      "headings": [
+        "## Introduction to SecView",
+        "## Using SecView"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2157.md",
+      "sha256": "ea911522ef7eb855817c7c0b7aed72b59bdfd9c94315b2e7c965119bb2e96684",
+      "original_lines": 35,
+      "readable_chars": 2664,
+      "headings": [
+        "## To Launch SecView on UNIX"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2158.md",
+      "sha256": "018c41d4b58a818f9b59b6402ff2e10c602118c0698c02fe089db1c4aca15bc1",
+      "original_lines": 17,
+      "readable_chars": 442,
+      "headings": [
+        "## To Navigate Through Lists and Windows"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2159.md",
+      "sha256": "6100f69079f6379917f2120237485b04f0f40f396d3917d284277fb7ac159a5f",
+      "original_lines": 51,
+      "readable_chars": 2444,
+      "headings": [
+        "## To Move and Resize SecView Windows on UNIX",
+        "## To Change Window Colors and Palettes",
+        "## To Switch Databases From Within SecView"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2160.md",
+      "sha256": "ad2e5516a62ddf4d243bab4338833fb1bc949a77821296cf57c6f1866d00db6a",
+      "original_lines": 41,
+      "readable_chars": 1390,
+      "headings": [
+        "## Working With SecDb Objects in SecView",
+        "## To Examine Object Instances"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2161.md",
+      "sha256": "9cfed15c7cd2c292497364b56682c4138e132bfb690bea116a052bd8d33aef32",
+      "original_lines": 25,
+      "readable_chars": 1578,
+      "headings": [
+        "## To Create New Object Instances",
+        "## 4. Press F9 to save your new instance."
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2162.md",
+      "sha256": "15e4c5f370493b0702ad8ca1a01451d177cfcf2c1d8189f4c4b237a89e8d6059",
+      "original_lines": 53,
+      "readable_chars": 2295,
+      "headings": [
+        "## To Set, Change, or Remove a Diddle",
+        "## To Remove an Object Instance"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2163.md",
+      "sha256": "9e47bff631ac2b495d59323ccb78c692f3d382fe5ebdae0b8873ab5ad07a1229",
+      "original_lines": 45,
+      "readable_chars": 2514,
+      "headings": [
+        "## Editing and Evaluating Slang With the SecView Editor"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2164.md",
+      "sha256": "980a148aa1d78ad246db6edc78f6348e8fab2d0974a13858fb2e187679bcb111",
+      "original_lines": 65,
+      "readable_chars": 1968,
+      "headings": [
+        "## Toggling Between Emacs and SecView Mode",
+        "## To Switch Between Emacs and SecView Mode",
+        "## What the Command Does",
+        "## SecView Command",
+        "## Marks a region of text",
+        "## Meta/Alt+A"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2165.md",
+      "sha256": "550748220c1efa4728887e9bfb2ce694f744a37b3ce1e3fbae82a1111481800c",
+      "original_lines": 69,
+      "readable_chars": 2469,
+      "headings": [
+        "## Changing the Source Database",
+        "## To Change the Source Database From Within the SecView Editor",
+        "## 1. Open the Sec View Editor and then press Alt+Z.",
+        "## A dialog box appears:"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2166.md",
+      "sha256": "2ce627446564afada6f45b6eac6db6dbe26a765b0153dff87857fa9959b2d09d",
+      "original_lines": 33,
+      "readable_chars": 2388,
+      "headings": [
+        "## Working With Buffers",
+        "## To Create a New Buffer",
+        "## A now buffer window appears."
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2167.md",
+      "sha256": "efcfa066897ef2bfb05fbb0163a1a54e904615953802df6f705c366ee459786d",
+      "original_lines": 47,
+      "readable_chars": 1745,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2168.md",
+      "sha256": "10ef325071454bd826e08f6defc2aed213c95eb7e909ff7445db0c1a8299a64f",
+      "original_lines": 39,
+      "readable_chars": 1729,
+      "headings": [
+        "## To Save Multiple Buffers",
+        "## To Close a Buffer"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2169.md",
+      "sha256": "8dd28a9947d0fc97b5563669340aa0593c123a770b662b85ecf38bc57a096816",
+      "original_lines": 45,
+      "readable_chars": 1530,
+      "headings": [
+        "## To Copy a Script To a Different Database"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2170.md",
+      "sha256": "1f5cae8e9b4fb58828463c9df9c6bb53367460593125f4ae11c5a53ea491d228",
+      "original_lines": 45,
+      "readable_chars": 1585,
+      "headings": [
+        "## \u2022 F3 for Snap"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2171.md",
+      "sha256": "96ffd681d9e6c5c24c44bc827d6f3ec9802d9b477ae4a9e7e197b40f21d79206",
+      "original_lines": 63,
+      "readable_chars": 2138,
+      "headings": [
+        "## Using Lint and CVS",
+        "## To Use CVS in the SVE"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2172.md",
+      "sha256": "07c12f5defda73bdc7d01f8cf86b3cee64f92dc964833c01fd5cff36e8b4f877",
+      "original_lines": 43,
+      "readable_chars": 2597,
+      "headings": [
+        "## Evaluating Slang",
+        "## Working With User Databases and SubDatabases"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2173.md",
+      "sha256": "db2e7344dc9bfde13b9ff2db5558f6a01d7af22a03866830721440683e3ea50b",
+      "original_lines": 47,
+      "readable_chars": 2365,
+      "headings": [
+        "## To Create a User Database",
+        "## To Create a SubDatabase Beneath Your User Database",
+        "## When and How to Use Your User Database"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2174.md",
+      "sha256": "5fd4e1adc2c7dbe3cd37b4551d14924a53efc2de8ddb9f8641e3fef63c9c4a58",
+      "original_lines": 35,
+      "readable_chars": 3176,
+      "headings": [
+        "## Developing Scripts",
+        "## Step 1: Develop and Test",
+        "## Step 2: Update and Commit to CVS",
+        "## Step 3: Move to Dev"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2175.md",
+      "sha256": "679e7b0b923883e1241a11d81ec78956f6d2a21a13cde5b60187537e38d53117",
+      "original_lines": 53,
+      "readable_chars": 2204,
+      "headings": [
+        "## Adding an Index to Your User Database",
+        "## Finding Objects in SecDb"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2176.md",
+      "sha256": "585f3c2e29c90ef81a0e3ab7e018d5cc674ce82564d88bf3831ff9ec81eb8787",
+      "original_lines": 47,
+      "readable_chars": 2299,
+      "headings": [
+        "## To Conduct a Search Using Find"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2177.md",
+      "sha256": "fd43cb155b154ea3594c2590bacdf04542e0594af683334db616e1c84b8b1059",
+      "original_lines": 47,
+      "readable_chars": 3112,
+      "headings": [
+        "## To Conduct a Search Using a Utility Script",
+        "## To Replace a String in Multiple Scripts",
+        "## 1. Locate the scripts in which you want to replace a string."
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2178.md",
+      "sha256": "a9b96f84a241c166826353c2bf30a7f32c17122a3bf0067578b146c7b74ae1df",
+      "original_lines": 23,
+      "readable_chars": 831,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2179.md",
+      "sha256": "c0a0aa7fb5168d08c6505778bf592785d4e230735fc6f68a2568c0b2dd4ce589",
+      "original_lines": 9,
+      "readable_chars": 233,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2180.md",
+      "sha256": "586b4b331208942e1e895855d5b4b09aefba910a15ffd33a6f4e93226ced2756",
+      "original_lines": 37,
+      "readable_chars": 1836,
+      "headings": [
+        "## Introduction to Slang",
+        "## Some Preliminary Thoughts",
+        "## Slang at a Glance",
+        "## Key Slang Features"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2181.md",
+      "sha256": "0909ee816a26837d6fe34f566c35ec9ffa02893c3104512e4cd79e53b900f7f8",
+      "original_lines": 45,
+      "readable_chars": 3184,
+      "headings": [
+        "## Slang Syntax",
+        "## Code Example 5-1 Slang's syntax in 25 lines or less!"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2182.md",
+      "sha256": "d07c373a0e133fadaf6aae13885758d40efe16071ec250284a1513b5aea90a0b",
+      "original_lines": 65,
+      "readable_chars": 1735,
+      "headings": [
+        "## Operators",
+        "## Arithmetic Operators",
+        "## What It Means",
+        "## Arithmetic Operator Precedence"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2183.md",
+      "sha256": "66052f41d450756d88bc5f48c24241b64b37e8e4871133270e0f3f81ab03d410",
+      "original_lines": 69,
+      "readable_chars": 1688,
+      "headings": [
+        "## 4. Addition/Subtraction",
+        "## Unary Operators",
+        "## What It Means",
+        "## Assignment Operators",
+        "## What It Means",
+        "## Comparison Operators",
+        "## What It Means"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2184.md",
+      "sha256": "d1d3fd9e68b5998edcf18735b2953cccd18a7d8499900c2b7c07d2103140e094",
+      "original_lines": 57,
+      "readable_chars": 2130,
+      "headings": [
+        "## What It Means",
+        "## Greater Than Or Equal To",
+        "## Logical Operators",
+        "## What It Means",
+        "## Logical And",
+        "## Special Operators",
+        "## Table 5-6 Special Slang operators",
+        "## What It's Used For",
+        "## Operator"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2185.md",
+      "sha256": "efaad5d45a6bc87938cc0a9438f5452a04ad1e19a98afc52936b3e7d72dd055b",
+      "original_lines": 73,
+      "readable_chars": 2185,
+      "headings": [
+        "## Data Types",
+        "## Intrinsic Data Types"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2186.md",
+      "sha256": "45c59da186814a9bd4603feb98e54f84398a9baeaae8e9e301c02dcf37d16c3e",
+      "original_lines": 49,
+      "readable_chars": 2615,
+      "headings": [
+        "## Creating Values of Specific Data Types",
+        "## Adding a New Data Type to SecDb/Slang",
+        "## To Add a New Intrinsic Data Type"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2187.md",
+      "sha256": "ed3bea8bbafafc72e05bb0c39139c1b7f9d987a6d18ee98a0fd89f36210b6893",
+      "original_lines": 5,
+      "readable_chars": 512,
+      "headings": [
+        "## To Add an External Data Type"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2188.md",
+      "sha256": "3cb3d8de76e2e212d404ca14140ade0447e45ff2afc29ff1d935bcaca0b78387",
+      "original_lines": 37,
+      "readable_chars": 1903,
+      "headings": [
+        "## Functions",
+        "## Built-In Functions"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2189.md",
+      "sha256": "7bf11a0995bb469daad33cc738047e3e98e8396fb3c20605f5791dff1c232400",
+      "original_lines": 39,
+      "readable_chars": 2594,
+      "headings": [
+        "## To View a List of Slang Functions"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2190.md",
+      "sha256": "f9fbf1d29ef4177f3f429c319e1f60ce957861ab7710edb30a30e5b0acb7af1e",
+      "original_lines": 39,
+      "readable_chars": 2379,
+      "headings": [
+        "## User-Defined Functions",
+        "## Return Values",
+        "## Arguments",
+        "## Casting",
+        "## Default Values"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2191.md",
+      "sha256": "332e6ffd085b68bee85fbfdca7c132a6e803e6f5f00920d7364fe90d9e8ffc9a",
+      "original_lines": 77,
+      "readable_chars": 2429,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2192.md",
+      "sha256": "82871f28bf4722e3cc692bb89f4b97bb101fa9afccff26cc8580232776675742",
+      "original_lines": 49,
+      "readable_chars": 2349,
+      "headings": [
+        "## Code Example 6-1",
+        "## Return ( Numberl + Number2 );",
+        "## Code Example 6-2 Code for AddIwoNumbers using named arguments",
+        "## Return ( Numberl + Number2 );",
+        "## Function Comment Blocks"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2193.txt",
+      "sha256": "a38f8c8a1e48f33014a095ff0ac7e23c768b9078e5109187878e8e3bf167b266",
+      "original_lines": 69,
+      "readable_chars": 2569,
+      "headings": [
+        "## Figure 6-1 The function information dialog box",
+        "## Code Example 6-3 The comment and code inserted from the function information dialog box",
+        "## Variables",
+        "## Code Example 6-4 Creating a function within a function"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2194.txt",
+      "sha256": "b9e01e4a08206dd093511b5455e823311e04436deb2f734e2336dc8ed2e1b244",
+      "original_lines": 48,
+      "readable_chars": 2367,
+      "headings": [
+        "## Constants",
+        "## To View a List of Built-In Constants"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2195.txt",
+      "sha256": "425742eea9ece21aedb5ee34947813a1a0e2e91658afb1b7008845839ff9dffd",
+      "original_lines": 39,
+      "readable_chars": 1921,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2196.txt",
+      "sha256": "07531145fa22d80692a6a84718eb62b9f7f53b62c4742aa4f9cf4e9b6302cb66",
+      "original_lines": 59,
+      "readable_chars": 3301,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2197.txt",
+      "sha256": "280efc085c8e1fb277de273168f0ab914d9ecdbea4d60a50cef09826f8549c07",
+      "original_lines": 61,
+      "readable_chars": 3448,
+      "headings": [
+        "## How Slang Evaluates Constants"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2198.txt",
+      "sha256": "9df3c5d25607648feb505f04d3c57080ff23c646af52159de3222a74a2f5dfa0",
+      "original_lines": 74,
+      "readable_chars": 2398,
+      "headings": [
+        "## Testing for Constants",
+        "# Inclusion"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2199.txt",
+      "sha256": "79d2c95141701c643b3be2a4dfd0142d1caadb25b8b825542f0cdd01aec7d304",
+      "original_lines": 50,
+      "readable_chars": 1877,
+      "headings": [],
+      "review": "excluded_unrelated_content"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2200.txt",
+      "sha256": "171957f033fddf8ac65af2878d5a14bc19a3bf0db918bf107d14065961adfded",
+      "original_lines": 51,
+      "readable_chars": 3994,
+      "headings": [
+        "## Available Scopes"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2201.txt",
+      "sha256": "b8adedee52fd357667f52e82c0b4b996c21fb27c9ea2d144819e9a4ef7e27c85",
+      "original_lines": 80,
+      "readable_chars": 2289,
+      "headings": [
+        "## Code Block (Gray Box)",
+        "## Main Body Text",
+        "### Heading",
+        "### Paragraph",
+        "### Numbered List"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2202.txt",
+      "sha256": "146aa87152220df1f4f9b7af0e9f5bac9418d7b4b4a79653d4d85125c8251fb2",
+      "original_lines": 73,
+      "readable_chars": 2152,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2203.txt",
+      "sha256": "b9bfcf48d2254c2c61cdbeb8781e5a2910c7e08bc8891dfbaec236d24d090a39",
+      "original_lines": 82,
+      "readable_chars": 2388,
+      "headings": [
+        "## Lambda Closures"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2204.txt",
+      "sha256": "a3e4cd629602c9745c5326a3cbdace8aa626a9bd346d9bdffb4fb2e4cef7a600",
+      "original_lines": 60,
+      "readable_chars": 3184,
+      "headings": [
+        "## Control Flow",
+        "## If-Else Statements"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2205.txt",
+      "sha256": "f16c5c4a1ef647cc42bd6d41704bb0681d9a68fe6b61b7af922a65ff5dba6324",
+      "original_lines": 72,
+      "readable_chars": 2647,
+      "headings": [
+        "## While Loops",
+        "## For Loops",
+        "## Other Types of For Loops"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2206.txt",
+      "sha256": "4216e70131523af7012a5cfd258922f35e7c1c2ff0ff3d2c4cf5a3063040e26e",
+      "original_lines": 58,
+      "readable_chars": 2717,
+      "headings": [
+        "## Program Structure",
+        "## Why Slang Scripts Start With Function Definitions"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2207.txt",
+      "sha256": "6a1c756982ea173c9a63c95335afcddb9fd3de2c59b115e74123eda9c43fed9d",
+      "original_lines": 53,
+      "readable_chars": 2353,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2208.txt",
+      "sha256": "7dc0b280c67e2940bd8e6b38102d48a714ca4cebc3b198f5d5260e27ab36baa6",
+      "original_lines": 68,
+      "readable_chars": 2062,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2209.txt",
+      "sha256": "773e212f771cef16cc0cb2f4510226f1fe30bd785e8238a08cd2831f899ed580",
+      "original_lines": 54,
+      "readable_chars": 1672,
+      "headings": [
+        "## Creating Arrays and Structures",
+        "## Creating an Array or Structure By Casting"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2210.txt",
+      "sha256": "a8fdf1fcf4d64016df959eea40eaa348760ceaa486d99b734c4d809eff378f5a",
+      "original_lines": 61,
+      "readable_chars": 2148,
+      "headings": [
+        "## Referencing Arrays and Structures",
+        "### Occupation Programmer",
+        "## Creating an Array or Structure Using New",
+        "## Creating an Array Using [ ]",
+        "# Referencing Arrays and Structures"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2211.txt",
+      "sha256": "72c2a33462aacddb6da7963d0c8feda9e843c6e4312689669314eda5982ea95c",
+      "original_lines": 69,
+      "readable_chars": 3149,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2212.txt",
+      "sha256": "2fc2c5920a1596d0f864ee1230901ab874d40f3c1a0ab2470055e55a5670265b",
+      "original_lines": 73,
+      "readable_chars": 2526,
+      "headings": [
+        "### ArrayInsert",
+        "### ArrayDelete",
+        "### Sort"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2213.txt",
+      "sha256": "fdd2a630c7ed911090412af798f9f8732953be087ed4471412c0af4cf2dfb060",
+      "original_lines": 70,
+      "readable_chars": 9112,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2214.txt",
+      "sha256": "dfbba45c0c973adf9cbd151044fa7b6f5abb0a745474f50f703f101bf306e1db",
+      "original_lines": 72,
+      "readable_chars": 3550,
+      "headings": [
+        "# Using SortTable"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2215.txt",
+      "sha256": "db4ee746c71a6a3fc69bb745c80858d6213662b7da25e138445f98f26a8fecdd",
+      "original_lines": 90,
+      "readable_chars": 2471,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2216.txt",
+      "sha256": "400b95ec32855ffa8ba4a07ac641f734f9d0881672076b91d7fc389496c5440f",
+      "original_lines": 51,
+      "readable_chars": 2790,
+      "headings": [
+        "# PETITION FOR WRIT OF MANDATE",
+        "## PARTIES",
+        "## JURISDICTION AND VENUE",
+        "## EXHAUSTION OF ADMINISTRATIVE REMEDIES",
+        "## GENERAL ALLEGATIONS"
+      ],
+      "review": "excluded_unrelated_content"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2217.txt",
+      "sha256": "24352049d6cea6a8ad0ac663d42a530ffe0a565bbde060b3388ecb8cf5be5c6c",
+      "original_lines": 51,
+      "readable_chars": 2135,
+      "headings": [
+        "## Obtaining Input",
+        "## Types of Dialog Boxes",
+        "## Creating Yes-Or-No Dialogs"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2218.txt",
+      "sha256": "84ab505283ab610d870f6122832f3e0a6dd190ca2538d5b741c6650047cfecbe",
+      "original_lines": 64,
+      "readable_chars": 2325,
+      "headings": [
+        "# Creating A Security Selector Dialog Box"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2219.txt",
+      "sha256": "a2bc3a6e2814a014b44cb18dea5a133db15a81bf02fe6ca62d8a301b5207b541",
+      "original_lines": 77,
+      "readable_chars": 2910,
+      "headings": [
+        "### Creating a String Table Dialog Box",
+        "## Creating Other Types of Dialog Boxes"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2220.txt",
+      "sha256": "65f91eb0e0256922a688f05c62164dced4451893debc197a79bb0dcc668d983f",
+      "original_lines": 301,
+      "readable_chars": 16505,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2221.txt",
+      "sha256": "8ad02703e80124e998f9c6bfbe9af0d1b678214a040ad101c3fb88671d9fdf11",
+      "original_lines": 67,
+      "readable_chars": 4105,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2222.txt",
+      "sha256": "686808d736d7f74043e79f8dfd71f3617d3226016ace742e06df53befe2da5e7",
+      "original_lines": 69,
+      "readable_chars": 2909,
+      "headings": [
+        "## Table Section 1",
+        "## Narrative Text",
+        "## Table 8-2: Additional fields for dialog box TableInit arrays",
+        "## Narrative Text (continued)",
+        "## Code Example 8-2: Customized dialog box code"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2223.txt",
+      "sha256": "494c0721475a4f45451ef131d8f3eca49765d4ad759c8709dfb3a1f5c84cde97",
+      "original_lines": 81,
+      "readable_chars": 2667,
+      "headings": [
+        "## *Writing the Callback Function*"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2224.txt",
+      "sha256": "2ffe09bb13bb08b14473d0ac595ef51c0178fc2523222765f31d8d9fdf42acfe",
+      "original_lines": 51,
+      "readable_chars": 2567,
+      "headings": [
+        "## Outputting Information",
+        "## Formatting Numeric Information"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2225.txt",
+      "sha256": "edbc349fa7f96aa65ec8ff7222fc219401017135ee3d0a91a7c3df1c68b31179",
+      "original_lines": 70,
+      "readable_chars": 3081,
+      "headings": [
+        "## The Print Function"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2226.txt",
+      "sha256": "af8c38a01a4c7bddc6584dd7079ca35eb496944bb6dd5855baaff6cfceb39692",
+      "original_lines": 42,
+      "readable_chars": 2589,
+      "headings": [
+        "## The Printf Function"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2227.txt",
+      "sha256": "1eccdab21fb72db085578ec9d81d14633197cddef8377f1f86fec0a73f4c4357",
+      "original_lines": 69,
+      "readable_chars": 2634,
+      "headings": [
+        "## The Sprint and Sprintf Functions"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2228.txt",
+      "sha256": "f7ae8845a263d77c91e8f103610cd94ab1feb37f430fe0210232ddbca1cbb6a7",
+      "original_lines": 83,
+      "readable_chars": 2866,
+      "headings": [
+        "## Main Body Text"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2229.txt",
+      "sha256": "fc876414402b284d5b1fb9a8fc8990e2b2070af25bb08b2d55375cbe1582f666",
+      "original_lines": 73,
+      "readable_chars": 2618,
+      "headings": [
+        "## PrintToFile",
+        "## TeePrintToFile",
+        "## Printing to an Object"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2230.txt",
+      "sha256": "350179d62cc678e62e7cb9d014fed17abb6e6ef07224c518d54033ffb6b7b980",
+      "original_lines": 38,
+      "readable_chars": 2158,
+      "headings": [
+        "## Script Names and Coding Style",
+        "## How to Name Your Scripts"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2231.txt",
+      "sha256": "9e7e20e1b02f13a0c5413fb61ea5c5c51b9fbe39f77aadbf684b66f8e6b3ba8a",
+      "original_lines": 58,
+      "readable_chars": 3116,
+      "headings": [
+        "## FICC Research and Strategies Coding Style",
+        "## General Guidelines",
+        "## Slang Script Basics"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2232.txt",
+      "sha256": "58bf6cd20d5f8994199ba8c0d67ca4e2fcb2db43867faca55de9874aa77cf53f",
+      "original_lines": 75,
+      "readable_chars": 3210,
+      "headings": [
+        "# Functions",
+        "## Writing Functions"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2233.txt",
+      "sha256": "ef23b954f931f1fe010995f235970c8765d4f7f0f89828384fe98b84f1c4e308",
+      "original_lines": 77,
+      "readable_chars": 2270,
+      "headings": [
+        "## Calling Functions",
+        "## Control Flow"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2234.txt",
+      "sha256": "d0ab686ad9641c82a4236269bb65081c12e1891351d9517cc746626a509b930d",
+      "original_lines": 85,
+      "readable_chars": 1806,
+      "headings": [
+        "## If Statements",
+        "## For and While Statements"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2235.txt",
+      "sha256": "5fb8269035f88a1f6a2169b6ad8ddcca74404a5ddfa9119c8571d085ddf14b9b",
+      "original_lines": 43,
+      "readable_chars": 2905,
+      "headings": [
+        "## Using Variables in Named Scopes",
+        "## Guidelines for Storing Data in SecDb"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2236.txt",
+      "sha256": "80d1c2cb90d163589a094c11bf2dcb5430b584cc8d4221ef172e2569ca31a24f",
+      "original_lines": 43,
+      "readable_chars": 1118,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2237.txt",
+      "sha256": "9d77d0f68c8fc54d477dcbf78060ff0490786a63ff13ccda477f444b3d579cdc",
+      "original_lines": 51,
+      "readable_chars": 3451,
+      "headings": [],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2238.txt",
+      "sha256": "e3023422ffd8ed8ce02016523f81109722e1090eb63785dd79ac9398e2e79b04",
+      "original_lines": 51,
+      "readable_chars": 3357,
+      "headings": [
+        "## Writing Slang Scripts That Define Your UFO",
+        "## Step 1: Calling the DefineClass Function",
+        "## Step 2: Adding a Link to \"UFO Functions\""
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2239.txt",
+      "sha256": "5d7a521c51861461da31821a129730f42c15c73d9dd33ce33594a5af9c114359",
+      "original_lines": 57,
+      "readable_chars": 2917,
+      "headings": [
+        "## Step 3: Writing Necessary Routines",
+        "## Step 4: Calling the TableInit Function",
+        "## Value Type Prototypes",
+        "## InheritClass Statements"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2240.txt",
+      "sha256": "2e20e934fb2e579cc3029ec1635c1fdd95d618c24ec4da2f198e453b9f02692b",
+      "original_lines": 67,
+      "readable_chars": 3039,
+      "headings": [
+        "### Step 3: Writing Necessary Routines",
+        "### Step 4: Calling the TableInit Function",
+        "### Value Type Prototypes",
+        "### InheritClass Statements"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2241.txt",
+      "sha256": "829450017438752a99a000b053a02016310170c5a3cdf5c2f601d0e0a3c7420a",
+      "original_lines": 54,
+      "readable_chars": 2886,
+      "headings": [
+        "### InheritValue Statements",
+        "### InheritAs Statements",
+        "### DisInheritClass and DisInheritValue Statements",
+        "### Value Types"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2242.txt",
+      "sha256": "11440990f42b0ea74d2e9dbd440b7d30f4518bb22c83be1e1ba76347089aa697",
+      "original_lines": 48,
+      "readable_chars": 3794,
+      "headings": [],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2243.txt",
+      "sha256": "1a4b24e0766694b6b040b17723d60d6cd0ed5b407b5d7c7093dad7cdb2a72884",
+      "original_lines": 48,
+      "readable_chars": 2858,
+      "headings": [
+        "## Writing Slang Scripts That Define Your UFO",
+        "## ImplementInterface and DisInheritInterface Statements"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2244.txt",
+      "sha256": "5f221b4499dd1a61792d1cd9e83c7fb67f9de4582f82268e7af78f9d1eb8d71b",
+      "original_lines": 57,
+      "readable_chars": 2008,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2245.txt",
+      "sha256": "b85d68ac2624be189f8aa455d99c7b245b8f27a3c42a75eb43d6c0714f914dc7",
+      "original_lines": 59,
+      "readable_chars": 3260,
+      "headings": [
+        "## Examples",
+        "## Initializer Script"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2246.txt",
+      "sha256": "1a6bdc27be6eebec5b023e03492f0a965eb420f75be97a84be6b332381c8f8df",
+      "original_lines": 74,
+      "readable_chars": 2699,
+      "headings": [
+        "## VT Script"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2247.txt",
+      "sha256": "689dd5b065f61afc0b0288e935cb087b843c5661bbfe11ea933a20b522d86d56",
+      "original_lines": 84,
+      "readable_chars": 2776,
+      "headings": [
+        "# Creating and Using Abstract Classes",
+        "## Creating an Abstract Class"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2249.txt",
+      "sha256": "88e4a1094179c0a7b502243479a2f809a98aff12e1f5d139ff026842bf86dd6a",
+      "original_lines": 69,
+      "readable_chars": 3177,
+      "headings": [
+        "# Inheriting and Extending an Abstract Class",
+        "# Creating and Using Interfaces",
+        "## Creating an Interface",
+        "# Inheriting and Implementing an Interface",
+        "## Example"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2250.txt",
+      "sha256": "41ddc80847f495b7382993802dd5126140e06b518ab60d510bf57a234a7bd5e4",
+      "original_lines": 55,
+      "readable_chars": 2005,
+      "headings": [
+        "## DisInheriting Interfaces"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2251.txt",
+      "sha256": "5dca42c648bac7febe39d613dbf4f407392ede03e4dae9ecc200956431189496",
+      "original_lines": 51,
+      "readable_chars": 1950,
+      "headings": [
+        "# Working With SecDb Objects and Outside Information",
+        "## Creating New Object Instances",
+        "## Using NewSecurity and SetValue"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2252.txt",
+      "sha256": "7d1d0937bd9fa3be4e396df67d58371e093cc656565fae8cc1cb82e870476577",
+      "original_lines": 69,
+      "readable_chars": 2656,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2253.txt",
+      "sha256": "b37bac054eb6771a4b140e54ae5910de71fe4de9a4bf079b36cdc0bf9425746e",
+      "original_lines": 61,
+      "readable_chars": 3341,
+      "headings": [
+        "## Using SecurityAdd",
+        "## To Create an Instance Using SecurityAdd",
+        "## Using SecurityAddByInference"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2254.txt",
+      "sha256": "a8507e9f602cb6b4567c0204948d3cd6562556eccbbbf4d3fb33a2b249c710fa",
+      "original_lines": 44,
+      "readable_chars": 2510,
+      "headings": [
+        "## Main Text Body"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2255.txt",
+      "sha256": "601c80b5ec8c00c3ef1650b10976525560237c2a361340a6f2c6c58ba82ffee3",
+      "original_lines": 42,
+      "readable_chars": 2865,
+      "headings": [
+        "## To Create an Instance Using SecurityAddByInference"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2256.txt",
+      "sha256": "4aecc969ab1732a5c3d05350bb6ccd66b62c5ffe1d96bdb69355037dd0e816cf",
+      "original_lines": 83,
+      "readable_chars": 2763,
+      "headings": [
+        "## Main Body Text"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2257.txt",
+      "sha256": "c41784f489d2a969c967db33ef2b5591af72427cfc51c8f9b4649cda75dc3882",
+      "original_lines": 48,
+      "readable_chars": 3473,
+      "headings": [
+        "## Setting Values and Updating Objects",
+        "### Changing Value Type Contents and Updating Objects",
+        "### To Change Values Using SetValue and UpdateSecurity"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2258.txt",
+      "sha256": "dd3a0dfafc45540c6def97b237829e546e0a107700238cf72f3760483cf28b1c",
+      "original_lines": 45,
+      "readable_chars": 3311,
+      "headings": [
+        "## To Change Values Using SecurityUpdate",
+        "## Renaming Objects",
+        "## Copying Objects Between Databases"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2259.txt",
+      "sha256": "c67a199ce599471f0b176c5510fa3cbe65e4caa4d94d1514943e1c9579ab8037",
+      "original_lines": 59,
+      "readable_chars": 3457,
+      "headings": [
+        "## Connecting to Databases With DbAttach"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2260.txt",
+      "sha256": "4544be7e2930499418dc2bfc560653383b85608cf4ba3bb8e3945ad8ce1f0765",
+      "original_lines": 46,
+      "readable_chars": 2752,
+      "headings": [
+        "## Working With Outside Information",
+        "## Text and Binary Files",
+        "## Sybase"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2261.txt",
+      "sha256": "253d61e0e3d23a126092b6bc7344582a801d1e43fd554e966ae942296cbc01ef",
+      "original_lines": 77,
+      "readable_chars": 2853,
+      "headings": [
+        "## Opening a Connection",
+        "## Performing an SQL Query",
+        "## Example",
+        "## OLE"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2262.txt",
+      "sha256": "1f168ebd6a5c943084a4bdea7e8367e0b65e5e8b4a8070c2f07e1fc7037c384c",
+      "original_lines": 47,
+      "readable_chars": 2775,
+      "headings": [
+        "## Excel",
+        "### Accessing Excel Spreadsheets as OLE Objects",
+        "### Accessing Excel Data Through Comma-Separated Text Files",
+        "### Accessing Excel Data Through Slang's Excel Functions",
+        "#### *ExcelGet*",
+        "#### *ExcelSet*"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2263.txt",
+      "sha256": "a4c2d3a3a78d1cae9ac43a32b4436e1112e9a521a6b8758f7ddb6458869a9a29",
+      "original_lines": 59,
+      "readable_chars": 2668,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2264.txt",
+      "sha256": "27fae8bccd2f9dd53b9658223d4e8161fa8324a0d6e1a4db6e3d1362940764c8",
+      "original_lines": 63,
+      "readable_chars": 2636,
+      "headings": [
+        "## RegKeyValueQuery",
+        "## RegKeyValueSet",
+        "## RegKeyCreate",
+        "## RegKeyClose",
+        "# Transferring Files Using Slang"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2265.txt",
+      "sha256": "bb4b7cbf6104cbe9211f211180ca2bd18a254ec60bf060d80268b23b1edb99b8",
+      "original_lines": 75,
+      "readable_chars": 2399,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2266.txt",
+      "sha256": "dd2c2d9b6651552952f2808e05592e9020c143276907193a3c0592bacf24d060",
+      "original_lines": 27,
+      "readable_chars": 2454,
+      "headings": [
+        "# Trades, Positions, and Books",
+        "## Introduction to Trades, Positions, and Books"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2267.txt",
+      "sha256": "1f009904af9a8a9d7948e6c27cc703a1c82623eb74c8f872113f0ecadcee3fc3",
+      "original_lines": 61,
+      "readable_chars": 3170,
+      "headings": [
+        "# Adding a Trade to SecDb",
+        "## To Add a Trade to SecDb Using SecView"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2268.txt",
+      "sha256": "35bfa489e3b05707ec83794cde80f29e308479b39b3915edd207f0c3acb6be71",
+      "original_lines": 75,
+      "readable_chars": 3330,
+      "headings": [
+        "## To Add a Trade to SecDb Using Slang",
+        "# Creating a Book",
+        "## To Add a Book to SecDb Using SecView"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2269.txt",
+      "sha256": "18224fd2f8d1c43efbd505be4bebfd3496926994c616515c2477d713ff5e04f7",
+      "original_lines": 37,
+      "readable_chars": 1374,
+      "headings": [
+        "# Position Effects and Books"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2270.txt",
+      "sha256": "d913ae9ca8f0203449a499ed0a0801f137d538ebbc8817e8bafc70c689eba400",
+      "original_lines": 53,
+      "readable_chars": 2435,
+      "headings": [
+        "### MAIN TEXT CONTENT",
+        "## Portfolios",
+        "### To Create a Portfolio Object Using SecView"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2271.txt",
+      "sha256": "e86346ea1b15afae7a6a0785bfe87c32b45e46e8451132200159e209d9560e5c",
+      "original_lines": 80,
+      "readable_chars": 3884,
+      "headings": [
+        "## Code Examples",
+        "## Code Examples",
+        "### Defining the Dollar Price VT",
+        "### Defining the Next Transaction Date VT"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2272.txt",
+      "sha256": "d0701220417ce622969f10695fe8000b16a55c53a553ac254d7f021800c4e312",
+      "original_lines": 44,
+      "readable_chars": 1378,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2273.txt",
+      "sha256": "ff5e6c7a48db486e21036646be6dcbd1606bcb51ba590839175fb44d515f2e7d",
+      "original_lines": 57,
+      "readable_chars": 2176,
+      "headings": [
+        "## Setting, Changing, and Removing Diddles",
+        "### Setting and Changing Diddles"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2274.txt",
+      "sha256": "e4ba5b738bfdb3ca0ed040cdbe84254f052dc7de465c3d4f2ef8ed00bebf9913",
+      "original_lines": 78,
+      "readable_chars": 3241,
+      "headings": [
+        "## Listing Diddles"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2275.txt",
+      "sha256": "ecff5d75feb7617a9ac87d72b6802dfab98ab535eeb27ed1599bab4b26772b1e",
+      "original_lines": 75,
+      "readable_chars": 2881,
+      "headings": [
+        "## Removing Diddles",
+        "## Setting Scope For Diddles"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2276.txt",
+      "sha256": "5e7db411506778efcbd799e7b7315e64878e5c799e8998bc72aabf193a6507b8",
+      "original_lines": 73,
+      "readable_chars": 3232,
+      "headings": [
+        "## Code Block (Top of Page - Gray Background)",
+        "## Main Body Text",
+        "### Title: Working With Diddle Scopes"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2277.txt",
+      "sha256": "bc1ddb1c496fda2ff4b02e5fd13df0234700c892a4094a59c30a30c0061b8ca7",
+      "original_lines": 58,
+      "readable_chars": 3357,
+      "headings": [
+        "# Setting vs. Diddling Values",
+        "# Effects of Diddles on Calculated Value Types"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2278.txt",
+      "sha256": "bb628d5264040dcc4527175f2e57891df919de601df2a8ce122621ee7fc9c806",
+      "original_lines": 22,
+      "readable_chars": 1398,
+      "headings": [],
+      "review": "read_but_not_relied_on_faded_transcription"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2279.txt",
+      "sha256": "6a9e5615e04c497654d422a3559fc07da61d662ec9141880123944d5a0753f1f",
+      "original_lines": 39,
+      "readable_chars": 1966,
+      "headings": [
+        "## *Introduction to Error Handling*",
+        "## *Throwing an Error in an Ordinary Function*"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2280.txt",
+      "sha256": "2c20902ef0cfdb9c2bb18837d4147202daae341421461d4315cc899ba7860c05",
+      "original_lines": 59,
+      "readable_chars": 3033,
+      "headings": [
+        "## Throwing Errors in Value Functions"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2281.txt",
+      "sha256": "539d61bb88f768e8427a8c309a855a5fcdbe6cb0617d86c99da201bd547b60d7",
+      "original_lines": 73,
+      "readable_chars": 2679,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2282.txt",
+      "sha256": "08f1b4576ce8a3c05b0caddbfa304722177c9dc0579df56161a31b0c3c288fbe",
+      "original_lines": 61,
+      "readable_chars": 3538,
+      "headings": [
+        "## Main Content",
+        "### Exceptions",
+        "### Code Example 14-3 A simple exception example"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2283.txt",
+      "sha256": "1a03ee2cdfb925cbaf6d60a5aa2ac8251707df046062de02a2f871fa332d745d",
+      "original_lines": 29,
+      "readable_chars": 1429,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2284.txt",
+      "sha256": "ee45412c9b3fe8b43909ae084bab66859d8e11d0ae1cd8794f0323d6cdf8a610",
+      "original_lines": 58,
+      "readable_chars": 2437,
+      "headings": [
+        "## Debugging Techniques"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2285.txt",
+      "sha256": "7884b1bcc63b49199c90d4435193072c03f7d9f573980c6ff98c167759bde742",
+      "original_lines": 67,
+      "readable_chars": 2687,
+      "headings": [
+        "# Debug, Trace, and Break Statements"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2286.txt",
+      "sha256": "f1119d506816b500cc5152019143a456b6184a4745179fc2629fd901197eeb4e",
+      "original_lines": 62,
+      "readable_chars": 2251,
+      "headings": [
+        "## Debug",
+        "## TraceOn"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2287.txt",
+      "sha256": "96069411a0d3f4d744c1a2c7f19e567cb395a33ac7942a2270e7e0fb4454201a",
+      "original_lines": 78,
+      "readable_chars": 2590,
+      "headings": [
+        "## SecDbTrace",
+        "## Break",
+        "## UfoBreakpoint"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2288.txt",
+      "sha256": "3d8afd585aa09e7ecb5a06b2c73a7b3862d69462323aaffb1bdb662663586368",
+      "original_lines": 41,
+      "readable_chars": 2141,
+      "headings": [
+        "## TraceBreak"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2289.txt",
+      "sha256": "9e0eefeba275bfc28c9c63ecf17cd145eeff1f50aa6af5a454f9ad54014bb50e",
+      "original_lines": 63,
+      "readable_chars": 2064,
+      "headings": [
+        "# Exploring the Dependency Graph",
+        "## Examining Terminal Nodes in SecView"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2290.txt",
+      "sha256": "361d451d2035037bbd1403463d06bef63b7717eed383ebd22a34a0e94f7ba29b",
+      "original_lines": 70,
+      "readable_chars": 3650,
+      "headings": [
+        "# Working With the Dependency Graph in Slang",
+        "## Obtaining Node Graph Statistics"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2291.txt",
+      "sha256": "b2a69c2984ed7fa41d049cdccb829c823c90fc9c988dc7cd2fe07b44aa814723",
+      "original_lines": 62,
+      "readable_chars": 2327,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2292.txt",
+      "sha256": "8813f6f95cfa02dbf5f80c50704fd733a563c5dc749dc7e315e01aaf27bf2dc3",
+      "original_lines": 67,
+      "readable_chars": 3427,
+      "headings": [
+        "## _UT Node Stats Single Security"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2293.txt",
+      "sha256": "cba887565681297cda92073b623c0b461fec1b36642a55e9689a652450dfdf81",
+      "original_lines": 51,
+      "readable_chars": 3099,
+      "headings": [
+        "## _UT Node Stats Entire World",
+        "## _UT Node Stats Show Difference",
+        "## Releasing Values of Intermediate Nodes",
+        "## Releasing Values for a Branch of Nodes"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2294.txt",
+      "sha256": "3f92f2edf1a5209ca67cb68f77aa3c128bd462ac337b04fc2e0016abe9735717",
+      "original_lines": 25,
+      "readable_chars": 1528,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2295.txt",
+      "sha256": "28deccb245d48d99347cc34916dd6b4f8f22ab82d7e487c1b085ee5f80dca902",
+      "original_lines": 45,
+      "readable_chars": 2581,
+      "headings": [
+        "# Regression Testing",
+        "# How Regression Testing Works in SecDb"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2296.txt",
+      "sha256": "385124aeeeaaba4ad31f2164536bb3be0827d18880d85812303dc11e4ce3c3ce",
+      "original_lines": 48,
+      "readable_chars": 2363,
+      "headings": [
+        "## How Regression Testing Works in SecDb"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2297.txt",
+      "sha256": "f738a7f57f2163bb3d92443910902fd49cd06cdcdf7e71da3281de59871a2f0b",
+      "original_lines": 75,
+      "readable_chars": 2606,
+      "headings": [
+        "# Creating RegTest Entry Objects",
+        "## To Create a RegTE Object"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2298.txt",
+      "sha256": "ff1f3fc505bad9921447bb7d1570117912db70d0d07b269207341829f5665bce",
+      "original_lines": 43,
+      "readable_chars": 3966,
+      "headings": [
+        "## Examining Test Results",
+        "# Examining Test Results"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2299.txt",
+      "sha256": "68978ad9ea0f720045d6d3d05309ba49e0de20e034de5fc840d9941ca51176e4",
+      "original_lines": 63,
+      "readable_chars": 2818,
+      "headings": [
+        "# Working With Regression Tests In SecView",
+        "## Launching _UT RegTest",
+        "## To Launch _UT RegTest From Within SecView"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2300.txt",
+      "sha256": "cc3c685539741e6fb20fce88f524dac9d685cb97d35c4c99e0a2c3ce129ddb3b",
+      "original_lines": 71,
+      "readable_chars": 2771,
+      "headings": [
+        "## To Launch _UT RegTest From an E-mail Report",
+        "## To Initiate Operations Using _UT RegTest"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2301.txt",
+      "sha256": "b5ba45c94cef5aeb28df97473c14a819d01a1832774dcd2dd8276e70a7077988",
+      "original_lines": 73,
+      "readable_chars": 2927,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2302.txt",
+      "sha256": "31c1ceac5a57312cb3cacffb06cec72c7337761053992621d36c7950a70786f3",
+      "original_lines": 78,
+      "readable_chars": 2505,
+      "headings": [
+        "## To Create a Batch Process"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2303.txt",
+      "sha256": "8c9ce133f32ce3b324dc0a3548420dd6010671c4616de64e54c62f0d7d27d2ff",
+      "original_lines": 80,
+      "readable_chars": 2641,
+      "headings": [
+        "### To Run Tests On Demand",
+        "### To Run Batch Processes On Demand",
+        "## Quality Assurance Summary"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2304.txt",
+      "sha256": "2edaf562b460b71c84fd6025bdfef0318061b942a15b92b63cc8853396e9b407",
+      "original_lines": 67,
+      "readable_chars": 2488,
+      "headings": [
+        "## To Print Reports About a Test or Batch Process"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2305.txt",
+      "sha256": "c648168da25395b46d2bb747d13355a18cae29b5a319d97814040558b2dff7d5",
+      "original_lines": 75,
+      "readable_chars": 2246,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2306.txt",
+      "sha256": "d3758f10b916afb204b3ad037089fddf0c085ca14e51c5e240eb679b7c5c1542",
+      "original_lines": 79,
+      "readable_chars": 2479,
+      "headings": [
+        "# Examining Regression Test Output on the Web",
+        "## To View Regression Test Output"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2307.txt",
+      "sha256": "53ae45d33fb8b58eac00ead5768b329ce1f3963746c5792e029576d6232bb3f5",
+      "original_lines": 79,
+      "readable_chars": 1954,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2308.txt",
+      "sha256": "0ca3917d2d11508d7c8f4b3064399af684d5420480bd9c5a89f0fcd74609aee1",
+      "original_lines": 84,
+      "readable_chars": 2749,
+      "headings": [
+        "### Left Panel - Commands and Information",
+        "### Right Panel - Commands and Information"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2309.txt",
+      "sha256": "b40db0b097204f9eff5dc2670b5e91ec1895919a0d6f1ab27d240ebcb486b3e5",
+      "original_lines": 43,
+      "readable_chars": 2063,
+      "headings": [
+        "## Overview",
+        "## Designing Test Scripts"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2310.txt",
+      "sha256": "611bfc2e10caf308a1e206f0fbafeb6d306b605c5f16d2d89c7490cb814477f7",
+      "original_lines": 51,
+      "readable_chars": 3553,
+      "headings": [
+        "## Naming and Overall Structure",
+        "## Library Links and Test Registration Information",
+        "## Individual Test Modules"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2311.txt",
+      "sha256": "0d76901f6dd850ec14a52ae6cc6598ce1450afbc26386a93a1641030a72d4712",
+      "original_lines": 41,
+      "readable_chars": 3927,
+      "headings": [
+        "## The Main Routine"
+      ],
+      "review": "substantive_read"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2312.txt",
+      "sha256": "3d6aed0147dd1681194f02a92250d4d2f4c20b0c3e2f0221276b2f8fc865eec0",
+      "original_lines": 37,
+      "readable_chars": 3832,
+      "headings": [
+        "## Pricing Tests"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2313.txt",
+      "sha256": "ac4c61bb1dffbc4f2d249fb13300f5bb9ea0deddef71931dd5e981c5297e71d7",
+      "original_lines": 56,
+      "readable_chars": 2517,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2314.txt",
+      "sha256": "ce10e0584b7359a81df3df5aebee3bc99e3f4783f8e631e2cfd322397f62304a",
+      "original_lines": 60,
+      "readable_chars": 3040,
+      "headings": [
+        "## Main Body Text"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2315.txt",
+      "sha256": "bab51862f8a61a3a5bba5a26d8551b33159bb5f1263aaaf479cd3a80a0485e05",
+      "original_lines": 49,
+      "readable_chars": 2998,
+      "headings": [
+        "## Creating a Trade Test With _UT Create Trade Test New",
+        "### To Create a Trade Test With _UT Create Trade Test New",
+        "## Greek Tests"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2316.txt",
+      "sha256": "95fbcef850433a972eef14c892f1f4d5e68a1e525e9b12ad45ca4f9ff02717c1",
+      "original_lines": 77,
+      "readable_chars": 2718,
+      "headings": [
+        "## Table: Function Names and Descriptions"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2317.txt",
+      "sha256": "a6ce2d37566a55db027cf2ef7820a429061914ba55beeb0fcf695b31fef7cd6f",
+      "original_lines": 45,
+      "readable_chars": 914,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2318.txt",
+      "sha256": "4bccf852539b377f2a91635111767dafaeb3fca4c5bbf67cff4041ea7ad3a924",
+      "original_lines": 42,
+      "readable_chars": 1986,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2319.txt",
+      "sha256": "cdd27b9b2f57c9e191319355e4eb31a31b8207e1b8569c2d28de131b7866ee4c",
+      "original_lines": 26,
+      "readable_chars": 2098,
+      "headings": [
+        "## Link"
+      ],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2320.txt",
+      "sha256": "e8cf94b6232a2c01c710f10a2dedd0c5809ec90a6a635abcb15590174e098a0b",
+      "original_lines": 24,
+      "readable_chars": 1152,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2321.txt",
+      "sha256": "e9837292139e2b0d6d798a8baa70ddff7f186d9b2564e39800ca0793e6551e88",
+      "original_lines": 42,
+      "readable_chars": 1766,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2322.txt",
+      "sha256": "bb57963b9fde944b49e5494cde7a2590090761fb935a4f40badc4fc4b9a61d26",
+      "original_lines": 58,
+      "readable_chars": 2372,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2323.txt",
+      "sha256": "ea3edbc137ee899d3283d201454d69167dd9737b444e4cb471fe4605e319be5a",
+      "original_lines": 29,
+      "readable_chars": 1491,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2324.txt",
+      "sha256": "e25af30bdf2345b5a3846452b4ecc0be799de206bb4728de64c3ce9e0858ca4d",
+      "original_lines": 25,
+      "readable_chars": 1431,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2325.txt",
+      "sha256": "7f032b770c7994de67147f5f70178fb58d10814d111986a58c4fdd8b301c4793",
+      "original_lines": 30,
+      "readable_chars": 1138,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2326.txt",
+      "sha256": "60030ab8e7da7a113f5b5ba8c5d15c0e3ce784e355037ec9f360ee1e4ad7fcb4",
+      "original_lines": 27,
+      "readable_chars": 1330,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2327.txt",
+      "sha256": "60e212c1803d3aa48e271f46f8b9f193f0c6ad430ee982b687411d41add9e9bd",
+      "original_lines": 26,
+      "readable_chars": 1242,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2328.txt",
+      "sha256": "78cf3052fbeec4e3f80dac3da8399f690ab14a676921bcc7c4ee29ede05e9e68",
+      "original_lines": 47,
+      "readable_chars": 1737,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2329.txt",
+      "sha256": "37d7e3d0d63815448b8736e19d1cef0c9fa4b6656f427626a18e869893539060",
+      "original_lines": 25,
+      "readable_chars": 1121,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2330.txt",
+      "sha256": "25f76b5271b71cc5c04cd56aa6a08add492384e4205f03d02531d6630cbe5062",
+      "original_lines": 38,
+      "readable_chars": 1728,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2331.txt",
+      "sha256": "f2b197248fb6a697b6b3dde1efb24aa4b85b2e64f6144dd9cc9b76216bc26057",
+      "original_lines": 22,
+      "readable_chars": 1054,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2332.txt",
+      "sha256": "044536fc5a055e4dcbf81ba07e1996b136c5f7a6f027b98f1efa5e36f8ba0b1b",
+      "original_lines": 27,
+      "readable_chars": 1364,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/IMG_2333.txt",
+      "sha256": "74114bba0dd400046a506457d239ece22615789f7f315aeaf3ddcce76c4173d5",
+      "original_lines": 34,
+      "readable_chars": 1184,
+      "headings": [],
+      "review": "inventoried_and_heading_scanned"
+    },
+    {
+      "path": "/Users/arthurcolle/Downloads/idaes/SECDB_INSTRUMENTS.md",
+      "sha256": "84ad87468276334ddffec849060a69e0db56a81624f446c9fd3a40e9d2d13890",
+      "original_lines": 399,
+      "review": "substantive_read"
+    }
+  ]
+}

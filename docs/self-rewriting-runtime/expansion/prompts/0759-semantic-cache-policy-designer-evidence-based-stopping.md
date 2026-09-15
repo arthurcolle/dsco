@@ -1,0 +1,15 @@
+# 759 — Semantic cache admission and eviction designer: Evidence-based stopping policy
+
+Implement the evidence-based stopping policy feature for the Semantic cache admission and eviction designer RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Learn native cache policies that preserve semantic key validity while choosing useful admission and eviction under bounded storage.
+
+REPL `access_history`, `dependency_versions`, and `cache_objects` retain reuse sequences, object costs, and validity relationships. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root code identifies reuse phases, delegates invalidation clusters, and proposes admission/eviction rules over verified keys. Role output: Final `CachePolicyCandidate` handle specifies native policy code, semantic key fields, capacity bounds, and stale-hit counterexamples. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Train a root decision among continue, return a verified environment result, and terminate unresolved. Development episodes include misleading high confidence, repetitive verification, and unresolved obligations. Optimize task completion with explicit observation requirements and costs, using oracle results rather than self-reported confidence.
+
+Train from workload replay, version changes, expensive misses, and independently measured hit validity plus total recomputation cost. A frozen uncached reference checks outputs while a deterministic accounting model verifies capacity and actual avoided work. Hold out reuse phases, object-size mixtures, dependency invalidations, and cold-start workloads with trace lineage grouped. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: A frequently reused entry survives eviction decisions but its imported schema changed, making every hit semantically stale. Repeated identical child opinions cannot satisfy a missing obligation. A complete verified result should survive the stop decision unchanged; exhausted budgets must produce unresolved status instead of fabricated success.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/plan_cache.c`, `src/openrouter_cache.c`, `src/codex_cache.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/base.py` (`BaseAgent._check_cache`, `BaseAgent._set_cache`). Donor baseline: Caches operation results with expiration; native semantic cache-policy learning is proposed. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

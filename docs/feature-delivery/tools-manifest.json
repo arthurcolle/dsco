@@ -1,0 +1,437 @@
+[
+  {
+    "id": "21",
+    "title": "Account-scoped offline tool catalog",
+    "slug": "account-scoped-tool-cache",
+    "prompt": "prompts/21-account-scoped-tool-cache.md",
+    "domain": "tool-management",
+    "primary_paths": [
+      "src/toolmgmt.c",
+      "include/toolmgmt.h",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/tool_catalog_cache.c",
+      "include/tool_catalog_cache.h"
+    ],
+    "hotspots": [
+      "src/toolmgmt.c",
+      "src/tools.c"
+    ],
+    "acceptance": "Verify the worktree binary against a controlled HTTP catalog: populate account A, restart offline and discover its tools, then switch to account B and prove A's entries are absent. Interrupt publication and corrupt one snapshot; the previous valid generation must remain usable. Stall refresh while submitting terminal input and record response latency. Include a bounded cache-size fixture and show that secret headers never enter persisted files."
+  },
+  {
+    "id": "22",
+    "title": "Generation-pinned external tool schemas",
+    "slug": "generation-pinned-tool-schemas",
+    "prompt": "prompts/22-generation-pinned-tool-schemas.md",
+    "domain": "tool-management",
+    "primary_paths": [
+      "src/toolmgmt.c",
+      "src/tools.c",
+      "include/tools.h"
+    ],
+    "proposed_modules": [
+      "src/tool_catalog_generation.c",
+      "include/tool_catalog_generation.h"
+    ],
+    "hotspots": [
+      "src/toolmgmt.c",
+      "src/tools.c"
+    ],
+    "acceptance": "Exercise the real binary with a local catalog service that changes a required field while a call is queued. Prove the stale contract is rejected before the execution endpoint is contacted, an unchanged schema survives a generation refresh, and a fresh rediscovery succeeds. Include removal, duplicate remote IDs, and refresh failure cases. Use a repeatable concurrent fixture to demonstrate no use-after-free, lost callback, or mixed-generation result."
+  },
+  {
+    "id": "23",
+    "title": "Explicit schema capacity and hydration errors",
+    "slug": "schema-capacity-reporting",
+    "prompt": "prompts/23-schema-capacity-reporting.md",
+    "domain": "tool-management",
+    "primary_paths": [
+      "src/mcp.c",
+      "include/mcp.h",
+      "src/toolmgmt.c",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/tool_schema_capacity.c",
+      "include/tool_schema_capacity.h"
+    ],
+    "hotspots": [
+      "src/mcp.c",
+      "src/toolmgmt.c",
+      "src/tools.c"
+    ],
+    "acceptance": "Drive the worktree binary against local HTTP and stdio fixtures advertising schemas just below and above current capacities, deeply nested JSON, malformed schema text, and a valid neighboring tool. Prove the valid tool remains usable, oversized contracts never reach execution with partial arguments, and inspection identifies the actual failure. Measure memory growth under repeated rejected refreshes and ensure startup and unrelated input stay responsive."
+  },
+  {
+    "id": "24",
+    "title": "Retry-After-aware Tool Management admission",
+    "slug": "tool-api-retry-after",
+    "prompt": "prompts/24-tool-api-retry-after.md",
+    "domain": "tool-management",
+    "primary_paths": [
+      "src/toolmgmt.c",
+      "include/toolmgmt.h"
+    ],
+    "proposed_modules": [
+      "src/toolmgmt_admission.c",
+      "include/toolmgmt_admission.h"
+    ],
+    "hotspots": [
+      "src/toolmgmt.c"
+    ],
+    "acceptance": "Use the real `dsco tools` path against a controlled HTTP server returning a sequence of 429, 503, and success responses. Verify minimum retry timing with tolerance, maximum caller deadline, bounded concurrent retries, malformed and expired header handling, and an unaffected second endpoint. Include a mutation with unknown outcome and prove that admission logic does not create another execution. Capture server request timestamps and the terminal-visible error so acceptance proves actual transport behavior."
+  },
+  {
+    "id": "25",
+    "title": "Remote mutation outcome reconciliation",
+    "slug": "remote-mutation-reconcile",
+    "prompt": "prompts/25-remote-mutation-reconcile.md",
+    "domain": "tool-management",
+    "primary_paths": [
+      "src/toolmgmt.c",
+      "include/toolmgmt.h",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/toolmgmt_reconcile.c",
+      "include/toolmgmt_reconcile.h"
+    ],
+    "hotspots": [
+      "src/toolmgmt.c",
+      "src/tools.c"
+    ],
+    "acceptance": "Verify the worktree binary against a local server that commits a mutation, drops the response, and exposes a read-only status result. Show exactly one side effect, an initial unknown outcome, and later confirmed success. Add unknown identifier, unsupported lookup, expired reconciliation metadata, endpoint mismatch, and denied network cases. Prove reconciliation cannot call the execution route accidentally. Include request counts and redacted machine-readable output in the closeout."
+  },
+  {
+    "id": "26",
+    "title": "Per-call MCP cancellation",
+    "slug": "mcp-per-call-cancellation",
+    "prompt": "prompts/26-mcp-per-call-cancellation.md",
+    "domain": "mcp",
+    "primary_paths": [
+      "src/mcp.c",
+      "include/mcp.h",
+      "src/mcp_response.c"
+    ],
+    "proposed_modules": [
+      "src/mcp_call_control.c",
+      "include/mcp_call_control.h"
+    ],
+    "hotspots": [
+      "src/mcp.c"
+    ],
+    "acceptance": "Run the worktree binary through local stdio and HTTP fixtures: one call stalls, another succeeds, the stalled call is cancelled, and its response arrives late. Prove subsequent calls receive their own results and shutdown reaps owned subprocesses. Measure cancellation latency against a documented threshold. Include a server ignoring cancellation, fragmented JSON, and concurrent server activity, plus the normal capability-gate checks."
+  },
+  {
+    "id": "27",
+    "title": "Capability-gated MCP resource reads",
+    "slug": "mcp-resource-reader",
+    "prompt": "prompts/27-mcp-resource-reader.md",
+    "domain": "mcp",
+    "primary_paths": [
+      "src/mcp.c",
+      "include/mcp.h",
+      "src/mcp_server.c",
+      "src/tools.c",
+      "src/capability.c"
+    ],
+    "proposed_modules": [
+      "src/mcp_resources.c",
+      "include/mcp_resources.h"
+    ],
+    "hotspots": [
+      "src/mcp.c",
+      "src/tools.c"
+    ],
+    "acceptance": "Exercise the real binary through `dsco mcp serve` with a local fixture advertising a text resource, a parameterized template, a binary response, and multiple pages. Prove the read result retains server, URI, and MIME information; reject oversized and malformed responses without destabilizing tool calls. Include a resource containing hostile instructions and verify untrusted taint is recorded before later egress is gated. Demonstrate that resource reads never bypass `tools_execute_for_tier()` and cannot directly open host paths."
+  },
+  {
+    "id": "28",
+    "title": "Scoped MCP catalog-change refresh",
+    "slug": "mcp-catalog-change-refresh",
+    "prompt": "prompts/28-mcp-catalog-change-refresh.md",
+    "domain": "mcp",
+    "primary_paths": [
+      "src/mcp.c",
+      "include/mcp.h",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/mcp_catalog_refresh.c",
+      "include/mcp_catalog_refresh.h"
+    ],
+    "hotspots": [
+      "src/mcp.c",
+      "src/tools.c"
+    ],
+    "acceptance": "Run the worktree binary against two controlled stdio servers. Change the first server's list while its tool call is active; demonstrate that a new tool becomes discoverable, a removed tool stops being offered, and the second server remains uninterrupted. Add repeated notifications, invalid replacement schemas, failed pagination, and shutdown during refresh. Show that no partial catalog is published and input remains responsive throughout. Capture server-side list request counts to demonstrate bounded coalescing, and verify all newly discovered tools retain ordinary capability classification."
+  },
+  {
+    "id": "29",
+    "title": "Structured tool-output contract validation",
+    "slug": "tool-output-validation",
+    "prompt": "prompts/29-tool-output-validation.md",
+    "domain": "tool-contracts",
+    "primary_paths": [
+      "src/tools.c",
+      "include/tools.h",
+      "src/mcp_response.c",
+      "src/mcp_server.c"
+    ],
+    "proposed_modules": [
+      "src/tool_output_validate.c",
+      "include/tool_output_validate.h"
+    ],
+    "hotspots": [
+      "src/tools.c"
+    ],
+    "acceptance": "Exercise the real binary via MCP JSON-RPC with a local tool fixture returning valid structured content, a wrong required type, missing fields, oversized output, and an error response. Verify advertised and enforced schemas agree, valid results retain their content, and invalid results include stable error categories and paths. Confirm a mutating fixture runs exactly once despite output validation failure. Add a native tool regression and default-schema compatibility case, then run capability-gate claims so the validator cannot create a parallel dispatch route."
+  },
+  {
+    "id": "30",
+    "title": "Read-only capability decision preview",
+    "slug": "capability-decision-preview",
+    "prompt": "prompts/30-capability-decision-preview.md",
+    "domain": "governance",
+    "primary_paths": [
+      "src/capability.c",
+      "include/capability.h",
+      "src/tools.c",
+      "include/tools.h",
+      "src/mcp_server.c"
+    ],
+    "proposed_modules": [
+      "src/capability_explain.c",
+      "include/capability_explain.h"
+    ],
+    "hotspots": [
+      "src/tools.c"
+    ],
+    "acceptance": "Use the actual binary and `dsco mcp serve` to compare preview and execution for ordinary reads, explicit write opt-out, denied control mutation, permitted control status, and lethal-trifecta egress. Establish taint through controlled fixtures and prove preview leaves it unchanged. Check that `DSCO_ALLOW_EXFIL=1` and explicit capability opt-outs retain their current semantics. Include an argument-dependent tool verb so classification cannot be replaced with filename or tool-name heuristics. Record matching decisions and zero side effects from preview."
+  },
+  {
+    "id": "31",
+    "title": "External tool origin pinning",
+    "slug": "external-tool-origin-pinning",
+    "prompt": "prompts/31-external-tool-origin-pinning.md",
+    "domain": "tool-contracts",
+    "primary_paths": [
+      "src/toolmgmt.c",
+      "src/mcp.c",
+      "src/mcp_names.c",
+      "src/tools.c",
+      "include/tools.h"
+    ],
+    "proposed_modules": [
+      "src/tool_origin.c",
+      "include/tool_origin.h"
+    ],
+    "hotspots": [
+      "src/toolmgmt.c",
+      "src/mcp.c",
+      "src/tools.c"
+    ],
+    "acceptance": "Test the worktree binary with two local servers advertising identical names and schemas. Discover on A, change configuration to B, and prove a pending selection does not execute on B. Fresh discovery should produce the documented result while exact remote names remain intact. Include endpoint normalization, a cross-origin redirect, duplicate display names, and stdio command changes. Show inspection contains no headers or environment secrets, and demonstrate that origin mismatch reporting still passes through the normal governed call path."
+  },
+  {
+    "id": "32",
+    "title": "External tool concurrency policies",
+    "slug": "external-tool-concurrency-policy",
+    "prompt": "prompts/32-external-tool-concurrency-policy.md",
+    "domain": "tool-contracts",
+    "primary_paths": [
+      "src/tools.c",
+      "include/tools.h",
+      "src/toolmgmt.c",
+      "src/capability.c"
+    ],
+    "proposed_modules": [
+      "src/tool_concurrency_policy.c",
+      "include/tool_concurrency_policy.h"
+    ],
+    "hotspots": [
+      "src/tools.c",
+      "src/toolmgmt.c"
+    ],
+    "acceptance": "Run the real binary against a controlled integration whose mutation handler records overlapping calls. Show that calls for the same serialized resource never overlap, independent resources can proceed when policy allows, and denied calls never reach the server. Cover timeout while queued, cancellation, malformed keys, and bounded queue capacity. Exercise direct invocation and batch invocation with equivalent policy. Record maximum observed concurrency and prove the policy cannot turn a control-plane or lethal-trifecta denial into a scheduling-only warning."
+  },
+  {
+    "id": "33",
+    "title": "Capability-constrained provider selection",
+    "slug": "provider-capability-constraints",
+    "prompt": "prompts/33-provider-capability-constraints.md",
+    "domain": "provider-routing",
+    "primary_paths": [
+      "src/router.c",
+      "include/router.h",
+      "src/provider.c",
+      "src/provider_profiles.c",
+      "src/llm.c"
+    ],
+    "proposed_modules": [
+      "src/route_constraints.c",
+      "include/route_constraints.h"
+    ],
+    "hotspots": [
+      "src/router.c",
+      "src/provider.c",
+      "src/llm.c"
+    ],
+    "acceptance": "Verify the worktree binary with controlled provider endpoints offering different capability sets. Submit requests requiring tools and structured output, force the preferred endpoint to fail, and prove fallback stays inside the constraint set. Include an unknown capability, explicit provider pin, local-only requirement, and no eligible candidate. Use endpoint request logs to prove excluded providers were never called. Add a regression showing unconstrained requests keep their prior routing behavior, and report the actual chosen provider identity rather than only the model alias."
+  },
+  {
+    "id": "34",
+    "title": "Billing-lane-preserving fallback policy",
+    "slug": "billing-lane-fallback-policy",
+    "prompt": "prompts/34-billing-lane-fallback-policy.md",
+    "domain": "provider-routing",
+    "primary_paths": [
+      "src/provider.c",
+      "src/provider_pool.c",
+      "src/auth_lanes.c",
+      "src/router.c"
+    ],
+    "proposed_modules": [
+      "src/billing_lane_policy.c",
+      "include/billing_lane_policy.h"
+    ],
+    "hotspots": [
+      "src/provider.c",
+      "src/router.c"
+    ],
+    "acceptance": "Exercise the actual binary against fake subscription executors and local API endpoints using isolated credential references. Force subscription exhaustion, missing credentials, and transport failure. Prove a disallowed paid endpoint receives zero requests, an explicitly allowed API lane works, and provider identity remains accurate in the response. Include two account profiles and verify one profile's policy does not bleed into the other. Capture the exact invocation and redacted route result; do not launch paid inference or use real account credentials for acceptance."
+  },
+  {
+    "id": "35",
+    "title": "Safe streamed-provider failover boundary",
+    "slug": "streamed-failover-boundary",
+    "prompt": "prompts/35-streamed-failover-boundary.md",
+    "domain": "provider-reliability",
+    "primary_paths": [
+      "src/provider.c",
+      "src/llm.c",
+      "src/provider_pool.c",
+      "src/agent.c"
+    ],
+    "proposed_modules": [
+      "src/provider_failover_state.c",
+      "include/provider_failover_state.h"
+    ],
+    "hotspots": [
+      "src/provider.c",
+      "src/llm.c",
+      "src/agent.c"
+    ],
+    "acceptance": "Run the worktree binary against controlled streaming endpoints that disconnect before headers, before visible content, mid-text, mid-tool arguments, and after a tool result is accepted. Prove early failures can fail over, later failures do not duplicate text or dispatch the tool twice, and incomplete calls never execute. Include user cancellation and a second healthy turn after failure. Record endpoint attempt counts, emitted content, and tool side-effect counts. Restrict edits to small hooks around the existing stream lifecycle; do not rewrite the agent loop."
+  },
+  {
+    "id": "36",
+    "title": "Explicit local-provider capability probes",
+    "slug": "local-provider-capability-probes",
+    "prompt": "prompts/36-local-provider-capability-probes.md",
+    "domain": "provider-routing",
+    "primary_paths": [
+      "src/local_llm.c",
+      "include/local_llm.h",
+      "src/provider.c",
+      "src/provider_profiles.c"
+    ],
+    "proposed_modules": [
+      "src/local_provider_probe.c",
+      "include/local_provider_probe.h"
+    ],
+    "hotspots": [
+      "src/provider.c"
+    ],
+    "acceptance": "Test the real binary against local fixtures that correctly implement one feature, falsely advertise another, omit usage, and hang. Verify bounded completion, accurate per-feature status, cache invalidation, and zero probe requests during normal help or startup. Demonstrate that routing can consume a fresh verified result without treating stale evidence as current. Include malformed model metadata and a configured nonlocal URL, which must be rejected before a probe is sent. Use only controlled endpoints for development acceptance."
+  },
+  {
+    "id": "37",
+    "title": "Account-scoped quota reset handling",
+    "slug": "provider-quota-reset",
+    "prompt": "prompts/37-provider-quota-reset.md",
+    "domain": "provider-reliability",
+    "primary_paths": [
+      "src/provider_pool.c",
+      "include/provider_pool.h",
+      "src/provider.c",
+      "src/llm.c",
+      "src/auth_lanes.c"
+    ],
+    "proposed_modules": [
+      "src/provider_quota.c",
+      "include/provider_quota.h"
+    ],
+    "hotspots": [
+      "src/provider.c",
+      "src/llm.c"
+    ],
+    "acceptance": "Exercise the actual binary with two isolated account profiles and a local provider fixture returning epoch, duration, absent, malformed, and past reset values. Exhaust one profile and prove the other remains selectable. Advance a controllable test clock to demonstrate correct re-entry without real waiting, then make a successful request to clear the appropriate state. Test restart persistence, corrupt state, and authentication failure separately from quota exhaustion. Capture real route decisions and endpoint counts, preserving subscription versus direct API identity throughout."
+  },
+  {
+    "id": "38",
+    "title": "Conservative inference cost admission",
+    "slug": "inference-cost-admission",
+    "prompt": "prompts/38-inference-cost-admission.md",
+    "domain": "resource-cost",
+    "primary_paths": [
+      "include/cost_budget.h",
+      "src/inference_cost.c",
+      "src/cost_model.c",
+      "src/model_pricing.c",
+      "src/router.c"
+    ],
+    "proposed_modules": [
+      "src/inference_admission.c",
+      "include/inference_admission.h"
+    ],
+    "hotspots": [
+      "src/router.c"
+    ],
+    "acceptance": "Verify the real binary against a local endpoint with a fixed test pricing table. Cover a request just within budget, one exceeding the bound, unknown pricing, cached input assumptions, and zero reported cost. Prove rejected requests produce zero HTTP calls and accepted requests use the admitted output limit. Add a retry case showing its projected spend remains covered. Reconcile reported usage after completion and explain unavoidable estimate uncertainty without claiming the client can guarantee an external provider's final invoice."
+  },
+  {
+    "id": "39",
+    "title": "Process-local concurrent spend reservations",
+    "slug": "concurrent-spend-reservations",
+    "prompt": "prompts/39-concurrent-spend-reservations.md",
+    "domain": "resource-cost",
+    "primary_paths": [
+      "include/cost_budget.h",
+      "src/inference_cost.c",
+      "src/agent.c",
+      "src/router.c"
+    ],
+    "proposed_modules": [
+      "src/cost_reservation.c",
+      "include/cost_reservation.h"
+    ],
+    "hotspots": [
+      "src/agent.c",
+      "src/router.c"
+    ],
+    "acceptance": "Exercise the worktree binary with two concurrent controlled requests whose estimates individually fit but jointly exceed a small cap. Prove only the admissible request reaches the endpoint and that released capacity becomes available after settlement. Include early cancellation, disconnect after submission, duplicate settlement, and a lower-than-estimated reported cost. Use a deterministic barrier in the fixture to force the race rather than relying on timing luck. Confirm single-request behavior remains unchanged and document that the guarantee applies only to one process's budget authority."
+  },
+  {
+    "id": "40",
+    "title": "Versioned pricing evidence for decisions",
+    "slug": "versioned-pricing-evidence",
+    "prompt": "prompts/40-versioned-pricing-evidence.md",
+    "domain": "resource-cost",
+    "primary_paths": [
+      "src/model_pricing.c",
+      "include/model_pricing.h",
+      "src/inference_cost.c",
+      "src/cost_frontier.c",
+      "src/model_catalog_refresh.c"
+    ],
+    "proposed_modules": [
+      "src/pricing_snapshot.c",
+      "include/pricing_snapshot.h"
+    ],
+    "hotspots": [],
+    "acceptance": "Use the actual binary with controlled pricing fixtures that change between admission and completion. Prove the original estimate retains its generation while a later request uses the new one. Test malformed prices, negative values, currency mismatch, truncated cache writes, and offline restart. Confirm a failed refresh preserves the prior valid snapshot and does not delay terminal input. Compare reported usage settlement against the preserved estimate, showing both sources in machine-readable evidence without claiming estimated totals are the provider's final bill."
+  }
+]

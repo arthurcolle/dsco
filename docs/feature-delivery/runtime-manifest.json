@@ -1,0 +1,432 @@
+[
+  {
+    "id": "01",
+    "title": "Recover unsent drafts after interruption",
+    "slug": "draft-recovery",
+    "prompt": "prompts/01-draft-recovery.md",
+    "domain": "interactive-ux",
+    "primary_paths": [
+      "src/tui.c",
+      "src/agent.c",
+      "src/native_composer.c"
+    ],
+    "proposed_modules": [
+      "src/draft_store.c",
+      "include/draft_store.h"
+    ],
+    "hotspots": [
+      "src/tui.c",
+      "src/agent.c"
+    ],
+    "acceptance": "Use owned PTYs to type multiline UTF-8 text, kill the process, restart with isolated state, and restore identical bytes and cursor position. Verify a submitted draft does not reappear, two sessions do not overwrite each other, corrupt state degrades visibly, and slow persistence leaves typing responsive."
+  },
+  {
+    "id": "02",
+    "title": "Edit queued follow-up messages",
+    "slug": "editable-followups",
+    "prompt": "prompts/02-editable-followups.md",
+    "domain": "interactive-ux",
+    "primary_paths": [
+      "src/agent.c",
+      "src/tui.c",
+      "src/native_composer.c"
+    ],
+    "proposed_modules": [
+      "src/followup_editor.c",
+      "include/followup_editor.h"
+    ],
+    "hotspots": [
+      "src/agent.c",
+      "src/tui.c"
+    ],
+    "acceptance": "Drive the live binary through an owned PTY with a deterministic stalled response fixture. Enqueue three messages, edit the middle message, remove the first, and verify exactly-once delivery in the resulting order. Cover full capacity, stale edits, UTF-8, and simultaneous completion while typing."
+  },
+  {
+    "id": "03",
+    "title": "Stage large pasted input before submission",
+    "slug": "paste-staging",
+    "prompt": "prompts/03-paste-staging.md",
+    "domain": "interactive-ux",
+    "primary_paths": [
+      "src/tui.c",
+      "src/native_composer.c",
+      "src/input_budget.c"
+    ],
+    "proposed_modules": [
+      "src/paste_staging.c",
+      "include/paste_staging.h"
+    ],
+    "hotspots": [
+      "src/tui.c"
+    ],
+    "acceptance": "Use PTYs for multiline pastes, split delimiters, embedded terminal controls, Unicode, and a paste beyond the configured maximum. Verify preview counts against original bytes, explicit submission sends exactly one turn, discard preserves surrounding text, and asynchronous status output does not corrupt the draft."
+  },
+  {
+    "id": "04",
+    "title": "Bookmark and revisit terminal evidence",
+    "slug": "scrollback-bookmarks",
+    "prompt": "prompts/04-scrollback-bookmarks.md",
+    "domain": "interactive-ux",
+    "primary_paths": [
+      "src/tui.c",
+      "src/project.c",
+      "src/buffer_store.c"
+    ],
+    "proposed_modules": [
+      "src/transcript_bookmarks.c",
+      "include/transcript_bookmarks.h"
+    ],
+    "hotspots": [
+      "src/tui.c",
+      "src/project.c",
+      "src/buffer_store.c"
+    ],
+    "acceptance": "Generate enough local fixture output to wrap the project ring, bookmark before and after wrapping, and verify navigation resolves the intended content. Restart with isolated storage and confirm labels persist. Test duplicate labels, missing archives, ANSI-rich results, and a PTY jump that preserves the active composer draft."
+  },
+  {
+    "id": "05",
+    "title": "Search prompt history without losing the draft",
+    "slug": "prompt-history-search",
+    "prompt": "prompts/05-prompt-history-search.md",
+    "domain": "interactive-ux",
+    "primary_paths": [
+      "src/tui.c",
+      "src/agent.c",
+      "src/session_memory.c"
+    ],
+    "proposed_modules": [
+      "src/history_search.c",
+      "include/history_search.h"
+    ],
+    "hotspots": [
+      "src/tui.c",
+      "src/agent.c",
+      "src/session_memory.c"
+    ],
+    "acceptance": "Use an isolated history fixture containing repeated prompts, long Unicode entries, and two workspaces. In a live PTY search, select, edit, cancel, and submit, checking exact bytes and workspace isolation. Measure responsiveness with at least ten thousand history records and verify history-disabled mode creates no index."
+  },
+  {
+    "id": "06",
+    "title": "Provide an accessible linear terminal mode",
+    "slug": "accessible-terminal",
+    "prompt": "prompts/06-accessible-terminal.md",
+    "domain": "interactive-ux",
+    "primary_paths": [
+      "src/tui.c",
+      "src/native_composer.c",
+      "src/main.c"
+    ],
+    "proposed_modules": [
+      "src/terminal_accessibility.c",
+      "include/terminal_accessibility.h"
+    ],
+    "hotspots": [
+      "src/tui.c",
+      "src/main.c"
+    ],
+    "acceptance": "Run the built binary in an owned PTY and with redirected output under TERM=dumb and NO_COLOR. Assert no cursor movement or image protocol sequences in linear mode, one announcement per state transition, readable error text, and working input while background services load. Include a keyboard-only transcript documenting navigation and draft preservation."
+  },
+  {
+    "id": "07",
+    "title": "Freeze attachment content at submission",
+    "slug": "attachment-snapshots",
+    "prompt": "prompts/07-attachment-snapshots.md",
+    "domain": "context-knowledge",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/agent.c",
+      "src/tui.c"
+    ],
+    "proposed_modules": [
+      "src/attachment_snapshot.c",
+      "include/attachment_snapshot.h"
+    ],
+    "hotspots": [
+      "src/context_fabric.c",
+      "src/agent.c",
+      "src/tui.c"
+    ],
+    "acceptance": "Test with a temporary repository where an attached file changes before and after submission. Inspect the captured request and persisted snapshot to prove exact version identity. Cover UTF-8 ranges, spaces in paths, deletion, an oversize file, and a live PTY preview that does not block typing or make an inference request."
+  },
+  {
+    "id": "08",
+    "title": "Fork a session from a chosen turn",
+    "slug": "session-fork",
+    "prompt": "prompts/08-session-fork.md",
+    "domain": "session-continuity",
+    "primary_paths": [
+      "src/session_memory.c",
+      "src/agent.c",
+      "src/main.c"
+    ],
+    "proposed_modules": [
+      "src/session_branch.c",
+      "include/session_branch.h"
+    ],
+    "hotspots": [
+      "src/session_memory.c",
+      "src/agent.c",
+      "src/main.c"
+    ],
+    "acceptance": "Construct a deterministic three-turn session with one tool exchange, fork after the second turn, and verify exact prefix, unique identity, lineage, and untouched original storage. Confirm no tool is reexecuted and no third-turn content leaks. Restart both sessions, test invalid boundaries and damaged archives, and exercise the proposed command against the built binary."
+  },
+  {
+    "id": "09",
+    "title": "Preview workspace drift before resuming",
+    "slug": "resume-drift-preview",
+    "prompt": "prompts/09-resume-drift-preview.md",
+    "domain": "session-continuity",
+    "primary_paths": [
+      "src/main.c",
+      "src/agent.c",
+      "src/session_memory.c",
+      "src/project.c"
+    ],
+    "proposed_modules": [
+      "src/resume_preview.c",
+      "include/resume_preview.h"
+    ],
+    "hotspots": [
+      "src/main.c",
+      "src/agent.c",
+      "src/session_memory.c",
+      "src/project.c"
+    ],
+    "acceptance": "Create isolated saved sessions, then modify, delete, and recreate recorded files and move the checkout. Verify exact drift categories and clear unavailable-state reporting. Resume through the live binary and inspect the resulting context to confirm historical claims are qualified. Confirm inspecting the preview changes neither files nor the saved session and performs no network request."
+  },
+  {
+    "id": "10",
+    "title": "Export a structured session handoff capsule",
+    "slug": "session-handoff",
+    "prompt": "prompts/10-session-handoff.md",
+    "domain": "session-continuity",
+    "primary_paths": [
+      "src/session_memory.c",
+      "src/context_fabric.c",
+      "src/main.c"
+    ],
+    "proposed_modules": [
+      "src/session_capsule.c",
+      "include/session_capsule.h"
+    ],
+    "hotspots": [
+      "src/session_memory.c",
+      "src/context_fabric.c",
+      "src/main.c"
+    ],
+    "acceptance": "Export a fixture session with conflicting outdated and current decisions, edit an allowed field, and import into a fresh isolated session. Verify schema validation, provenance, deterministic rendering, size bounds, and that malicious instruction text stays ordinary context. Exercise actual binary export/import and demonstrate a clear error for an unsupported version without modifying existing state."
+  },
+  {
+    "id": "11",
+    "title": "Inspect and recover compacted context",
+    "slug": "compaction-inspector",
+    "prompt": "prompts/11-compaction-inspector.md",
+    "domain": "context-knowledge",
+    "primary_paths": [
+      "src/context_eviction.c",
+      "src/context_fabric.c",
+      "src/agent.c"
+    ],
+    "proposed_modules": [
+      "src/compaction_inspector.c",
+      "include/compaction_inspector.h"
+    ],
+    "hotspots": [
+      "src/context_fabric.c",
+      "src/agent.c"
+    ],
+    "acceptance": "Force compaction with deterministic local exchanges including large tool results, then inspect and rehydrate a selected exchange through the live binary. Verify content hashes, exact call/result pairing, budget rejection, missing-archive handling, and immutable history. Confirm protected user messages remain intact and viewing an archive never starts inference or executes its recorded tool."
+  },
+  {
+    "id": "12",
+    "title": "Preview the assembled context budget",
+    "slug": "context-budget-preview",
+    "prompt": "prompts/12-context-budget-preview.md",
+    "domain": "context-knowledge",
+    "primary_paths": [
+      "src/input_budget.c",
+      "src/context_fabric.c",
+      "src/agent.c"
+    ],
+    "proposed_modules": [
+      "src/context_budget_view.c",
+      "include/context_budget_view.h"
+    ],
+    "hotspots": [
+      "src/context_fabric.c",
+      "src/agent.c"
+    ],
+    "acceptance": "Capture deterministic assembled requests with mixed instructions, tool schemas, attachments, and history. Compare preview totals to the current estimator, verify reported reductions match the transmitted payload, and cover rejection where only protected content remains. Exercise a live preview with a stalled Tool Management endpoint and prove typing and preview completion remain responsive."
+  },
+  {
+    "id": "13",
+    "title": "Expose source freshness for recalled context",
+    "slug": "context-source-freshness",
+    "prompt": "prompts/13-context-source-freshness.md",
+    "domain": "context-knowledge",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/session_memory.c",
+      "src/context_eviction.c"
+    ],
+    "proposed_modules": [
+      "src/context_freshness.c",
+      "include/context_freshness.h"
+    ],
+    "hotspots": [
+      "src/context_fabric.c",
+      "src/session_memory.c"
+    ],
+    "acceptance": "Store a file, edit it without changing its size, restore its timestamp, and confirm digest-based drift detection. Cover deletion, symlink target changes, permission errors, and older records. Refresh through the built binary and prove both versions remain retrievable by their original keys and no check modifies the source file."
+  },
+  {
+    "id": "14",
+    "title": "Explain active workspace instructions",
+    "slug": "instruction-explainer",
+    "prompt": "prompts/14-instruction-explainer.md",
+    "domain": "context-knowledge",
+    "primary_paths": [
+      "src/setup.c",
+      "src/project.c",
+      "src/agent.c"
+    ],
+    "proposed_modules": [
+      "src/instruction_explain.c",
+      "include/instruction_explain.h"
+    ],
+    "hotspots": [
+      "src/project.c",
+      "src/agent.c"
+    ],
+    "acceptance": "Use a temporary repository with root, nested, sibling, missing, and symlinked instruction files. Compare explanation output with the actual captured request for each cwd and target. Cover edited files between runs, excluded oversized content, and a non-repository directory. Exercise the built binary without inference and verify the command changes no instruction files or runtime policy."
+  },
+  {
+    "id": "15",
+    "title": "Track explicit project decisions and supersession",
+    "slug": "decision-ledger",
+    "prompt": "prompts/15-decision-ledger.md",
+    "domain": "context-knowledge",
+    "primary_paths": [
+      "src/session_memory.c",
+      "src/context_fabric.c",
+      "src/project.c"
+    ],
+    "proposed_modules": [
+      "src/decision_ledger.c",
+      "include/decision_ledger.h"
+    ],
+    "hotspots": [
+      "src/session_memory.c",
+      "src/context_fabric.c",
+      "src/project.c"
+    ],
+    "acceptance": "Record two decisions in one project, supersede one, reopen storage, and verify active retrieval and full lineage. Test two separate projects, invalid supersession IDs, cycles, truncated writes, and concurrent read/update behavior. Exercise the live CLI and inspect resulting context to ensure an outdated decision is labeled historical and an unaccepted assistant suggestion never becomes an active entry."
+  },
+  {
+    "id": "16",
+    "title": "Assemble local evidence bundles for completed work",
+    "slug": "evidence-bundles",
+    "prompt": "prompts/16-evidence-bundles.md",
+    "domain": "developer-workflow",
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/chronicle.c",
+      "src/session_memory.c"
+    ],
+    "proposed_modules": [
+      "src/evidence_bundle.c",
+      "include/evidence_bundle.h"
+    ],
+    "hotspots": [
+      "src/context_fabric.c",
+      "src/session_memory.c"
+    ],
+    "acceptance": "Create a bundle from isolated deterministic test receipts and a small generated artifact, verify it through the live binary, then tamper with and remove entries to prove verification fails precisely. Cover paths with spaces, duplicate basenames, missing sources, and oversized selection limits. Confirm the manifest cannot escape its root and creating a bundle leaves source artifacts unchanged."
+  },
+  {
+    "id": "17",
+    "title": "Show workspace changes since a session checkpoint",
+    "slug": "workspace-change-digest",
+    "prompt": "prompts/17-workspace-change-digest.md",
+    "domain": "developer-workflow",
+    "primary_paths": [
+      "src/project.c",
+      "src/session_memory.c",
+      "src/context_fabric.c"
+    ],
+    "proposed_modules": [
+      "src/workspace_digest.c",
+      "include/workspace_digest.h"
+    ],
+    "hotspots": [
+      "src/project.c",
+      "src/session_memory.c",
+      "src/context_fabric.c"
+    ],
+    "acceptance": "Create a temporary dirty Git repository before checkpointing, then modify selected tracked and untracked files, delete one, and leave another unchanged. Compare digest output to actual bytes and prove preexisting dirty work is not misattributed. Exercise the binary across restart, missing baselines, binary files, and size caps, confirming the index and working files remain byte-identical."
+  },
+  {
+    "id": "18",
+    "title": "Navigate compiler diagnostics from build output",
+    "slug": "build-diagnostics",
+    "prompt": "prompts/18-build-diagnostics.md",
+    "domain": "developer-workflow",
+    "primary_paths": [
+      "src/pty_session.c",
+      "src/buffer_store.c",
+      "src/buffer_cli.c"
+    ],
+    "proposed_modules": [
+      "src/build_diagnostics.c",
+      "include/build_diagnostics.h"
+    ],
+    "hotspots": [
+      "src/pty_session.c",
+      "src/buffer_store.c"
+    ],
+    "acceptance": "Run a small intentionally failing C build through the live binary's actual process surface in a temporary project. Verify detected locations, note relationships, original output references, and exit status. Cover split UTF-8 chunks, colored diagnostics, successful builds, malformed lines, and deleted sources. Demonstrate navigation preserves the composer draft and invokes no editor or command automatically."
+  },
+  {
+    "id": "19",
+    "title": "Save and launch explicit local terminal recipes",
+    "slug": "terminal-recipes",
+    "prompt": "prompts/19-terminal-recipes.md",
+    "domain": "developer-workflow",
+    "primary_paths": [
+      "src/pty_session.c",
+      "src/project.c",
+      "src/main.c"
+    ],
+    "proposed_modules": [
+      "src/terminal_recipes.c",
+      "include/terminal_recipes.h"
+    ],
+    "hotspots": [
+      "src/pty_session.c",
+      "src/project.c",
+      "src/main.c"
+    ],
+    "acceptance": "Create an isolated recipe for a tiny local program, run it through the live binary, read output, resize, and close using the returned session ID. Verify argv containing spaces and shell metacharacters arrives literally, capabilities are enforced, and shutdown owns cleanup. Test invalid cwd, excessive lifetime, concurrent recipe launches, and that listing recipes spawns no process."
+  },
+  {
+    "id": "20",
+    "title": "Capture reproducible local bug-report packets",
+    "slug": "repro-packets",
+    "prompt": "prompts/20-repro-packets.md",
+    "domain": "developer-workflow",
+    "primary_paths": [
+      "src/chronicle.c",
+      "src/pty_session.c",
+      "src/project.c"
+    ],
+    "proposed_modules": [
+      "src/repro_packet.c",
+      "include/repro_packet.h"
+    ],
+    "hotspots": [
+      "src/pty_session.c",
+      "src/project.c"
+    ],
+    "acceptance": "Capture a deterministic failing program with spaces, quotes, Unicode, and shell metacharacters in arguments. Verify the packet's structured invocation reproduces the same failure when explicitly executed in an isolated test directory. Cover signal exit, missing executable metadata, output truncation, excluded credential values, and packet tampering. Exercise live binary capture and inspection while proving neither action reruns the recorded command."
+  }
+]

@@ -1,0 +1,11 @@
+# 47 — Fair bounded admission across concurrent swarm groups
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or the isolated worktree assigned for this feature. Read applicable `AGENTS.md` instructions and inspect current code before editing. Start at `src/swarm.c`, `src/swarm_scale.c`, `src/swarm_accounting.c`, `src/swarm_telemetry.c`. If part already exists, ship the missing bounded extension and explain the observed gap; do not duplicate an existing subsystem. All interfaces named below are proposed until verified on disk.
+
+Swarm capacity and cost reservation already exist; multiple groups also need predictable admission when one group floods the queue. Add an opt-in weighted fair admission policy over existing physical worker slots, with per-group concurrency ceilings, a global queued-task cap, and aging to prevent starvation. Preserve existing budget accounting and never reinterpret unknown costs as free capacity. Admission receipts should identify queued versus launched work, the limiting resource, and queue age. Proposed policy configuration is local and immutable for a running scheduling epoch; changing it takes effect at a documented boundary. Cancellation releases reservations exactly once, and group slot reclamation remains separate from task acceptance.
+
+Implement new capability in proposed `src/swarm_admission.c` and `include/swarm_admission.h`, with small dispatch hooks and a Makefile entry where needed. Preserve unrelated dirty work. Coordinate shared-file changes; keep builds, databases, sockets, fixtures, and reports isolated. Build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install a worker binary. Every tool-call path must use `tools_execute_for_tier()` and preserve capability gates.
+
+Drive three deterministic groups with unequal weights, long and short local workers, and a small slot limit. Verify no physical oversubscription, bounded queue memory, progress for the smallest group, correct reservation reconciliation after launch failure and cancellation, and unchanged legacy admission when the policy is disabled. Report observed start order and wait distributions.
+
+Finish with the implemented behavior, exact reproduction commands, binary and evidence paths, relevant regression results, and remaining limitations. Verify the real local runtime path; compilation alone is insufficient.

@@ -1,0 +1,13 @@
+# 16 — Profile-driven native specialization
+
+Make DSCO turn a frequently executed general function into a faster specialized native implementation while remaining resident. Choose a bounded pure scorer or record transform with measured repeated constants, common schema, or a dominant branch. Gather profile evidence, identify an explicit specialization predicate, partially evaluate only the proven invariant expressions, compile or emit the candidate, and install a guarded dispatch entry.
+
+Every specialized entry includes its guard, source-generation dependency, ABI, assumed constants, and independent equivalence evidence. Guard failure immediately chooses the generic implementation; it must not approximate or silently accept an unsupported input. If the generic source generation changes, retire or requalify dependent specializations. Define arithmetic overflow, floating-point behavior if supported, aliasing, and record bounds so an optimization cannot change semantics accidentally.
+
+Use a small transformation set rather than an unrestricted compiler project. Constant folding, branch elimination under a schema guard, and fused field loads are sufficient if actual native instructions change and measured work decreases. Preserve the generic function as a deoptimization target and keep guard evaluation bounded. Prevent a candidate from reporting its own speed or correctness; collect both outside its body on matched workloads.
+
+Falsifying test: train the profile on one record schema, qualify a specialization, and show lower dispatch or instruction cost on unseen matching inputs with identical outputs. Then supply a record with a different schema, an out-of-range field, and a changed constant; each must fall back to the generic path and return its exact reference result. Replace the generic generation and require invalidation of the old specialization. Report end-to-end timings as well as guard overhead; a faster isolated candidate that slows the full guarded call fails the performance objective.
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Inspect `src/vm.c`, `src/ast.c`, `src/cost_frontier.c`, `src/autoresearch.c`, then `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py` symbols `ASTAnalyzer.transform`, `MetaToolRegistry.compose`. Observed donor behavior: The donor rewrites Python ASTs and chains functions but does not specialize native executable paths from measured runtime invariants.
+
+Preserve unrelated dirty work; add focused modules and small hooks. Govern every effectful tool call through `tools_execute_for_tier()`. Isolate state and build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

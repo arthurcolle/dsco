@@ -1,0 +1,13 @@
+# 17 — Verified ephemeral tools synthesized as native code
+
+Let DSCO create a genuinely new executable tool during a session, qualify it against a declared contract, and use it immediately without rebuilding or restarting the host. Start with bounded pure data transformations such as a domain-specific parser or scoring function. The synthesis request names input/output schemas, examples, independent hidden checks, resource limits, and permitted effects; the resulting candidate is native code with a versioned tool descriptor.
+
+Separate proposed tools from qualified tools in discovery. Only exact candidate bytes that passed the independent contract may become callable. Define a session-scoped namespace, collision behavior, replacement generations, and cleanup lifetime. A generated name cannot shadow a privileged built-in or silently widen its capability contract. Include source and executable provenance so the resident system can inspect the actual implementation it created.
+
+Route calls through the ordinary tool execution gate even when the native implementation is dynamically registered. Do not attach candidate callbacks directly to the current VM's unchecked dispatch path. The tool's ABI receives a bounded typed input and controlled host services; pure tools receive no effect imports. If future effectful tools are supported, every leaf effect must reenter the existing gate with the correct tier and taint context.
+
+Falsifying test: ask the implementation loop to synthesize a parser for a small record format, compile it, reject a visible-example memorizer on hidden malformed records, and register a surviving native candidate. A later invocation in the same PID must use that newly generated tool and return independently verified outputs. Attempt a colliding built-in name, an undeclared filesystem effect, and a capability-denied nested effect; all must fail without changing existing tools or exposing an unqualified candidate as ready.
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Inspect `src/plugin.c`, `src/tools.c`, `src/execution_kernel.c`, `src/capability.c`, then `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py` symbols `MetaToolRegistry.register_code`, `define_tool`, `MetaToolRegistry.list_tools`. Observed donor behavior: The donor defines executable tools from source and lists them, but lacks independently verified native admission and DSCO capability enforcement.
+
+Preserve unrelated dirty work; add focused modules and small hooks. Govern every effectful tool call through `tools_execute_for_tier()`. Isolate state and build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

@@ -107,11 +107,26 @@ physical backing pixels, logical layout pixels, cell dimensions, and backing sca
 as separate values. Density breakpoints always consume logical dimensions. This is
 essential on Retina displays: a 1120-point window backed by 2240 pixels remains a
 1120-pixel semantic viewport instead of becoming a fake expanded desktop with
-half-size typography. `DSCO_PIXEL_TUI_DPR=1..4` is the explicit override for unusual
-font or display configurations. The live RGB surface is allocated at the exact
-physical backing dimensions while every layout coordinate and type size remains
-logical; Kitty therefore places pixels 1:1 instead of stretching a half-resolution
-frame and resampling glyph edges.
+half-size typography. The default `DSCO_PIXEL_TUI_ZOOM=auto` uses a gentle
+125% zoom on reported 1× displays and 100% on HiDPI displays. Set any positive multiplier
+(for example `0.05`, `0.75`, `1.25`, or `3`), or a percentage such as `150%`.
+Use `/zoom 1.25`, `/zoom +`, `/zoom -`, or `/zoom auto` inside a native session;
+`/zoom` reports the current setting. Changes reflow the retained surface without
+restarting the session. An explicit DPR disables automatic enlargement.
+
+Zoom rasterizes directly at its fractional device scale into the terminal's
+physical framebuffer. At 5% on a 1920×1080 display, the logical viewport is
+38400×21600 but the image remains 1920×1080. Explicit zoom bypasses the old
+logical canvas size limits. Fractional scales use full-frame raster plus bounded
+damage uploads to avoid translated-region rounding errors. Integer scales keep
+the regional composer and activity fast paths. Mouse coordinates use the same
+logical viewport. `/zoom +` and `/zoom -` multiply and divide by 1.1, so neither
+imposes a 100% floor. Zero, negative, and non-finite values are invalid.
+
+The transcript uses 14px body text and the composer 15px input text before zoom.
+The default palette keeps secondary text and tool outcomes legible at 1×. Tool
+completion IDs are authoritative, and tool events preserve scrollback mode and
+unsent input while updating each call's durable transcript row.
 
 During reasoning and response streaming, the shell becomes transcript-first: the
 optional inspector rail yields its width, activity stays in the retained masthead,

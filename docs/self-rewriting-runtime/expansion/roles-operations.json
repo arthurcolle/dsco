@@ -1,0 +1,863 @@
+[
+  {
+    "id": "068",
+    "name": "Integration conflict resolver",
+    "slug": "integration-conflict-resolver",
+    "brief": "Propose conflict resolutions that preserve independently established behavior from concurrent agents rather than accepting whichever patch applies.",
+    "context": "Keep base, branch diffs, interface contracts, and failing integration traces in external REPL variables.",
+    "program": "Programmatically partition intersecting changes, recursively compare semantic obligations, and assemble a minimal resolution with explicit unresolved conflicts.",
+    "data": "Use root episodes from competing patches, verified merged implementations, rejected textual merges, and independently replayed counterexamples.",
+    "oracle": "An isolated build and behavioral test oracle scores retained branch obligations, not merge cleanliness or author agreement.",
+    "failure": "A clean textual merge that reverses one branch's bounds check must fail despite compiling.",
+    "holdout": "Hold out repository families, conflict structures, and interacting function pairs from training.",
+    "artifact": "Produce a conflict-resolution root adapter plus a candidate merge, obligation matrix, and executable verification receipt.",
+    "primary_paths": [
+      "src/blackboard.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/decomposition.py",
+        "symbols": [
+          "validate_decomposition"
+        ],
+        "observation": "Validates bounded goal hierarchies and combined completion dependencies before importing work."
+      }
+    ]
+  },
+  {
+    "id": "069",
+    "name": "Behavioral test selector",
+    "slug": "behavioral-test-selector",
+    "brief": "Select the smallest informative test set that can reject a proposed runtime change without hiding untested obligations.",
+    "context": "Store changed functions, dependency graphs, historical failures, test costs, and contract coverage in REPL variables.",
+    "program": "Decompose affected obligations recursively, compare test discrimination, and emit an ordered selection with residual coverage gaps.",
+    "data": "Train root trajectories on seeded regressions, observed test outcomes, coverage relationships, and counterfactual omitted-test failures.",
+    "oracle": "A withheld full suite and independent mutation matrix determine whether selected tests detect material defects.",
+    "failure": "Selecting only fast passing tests while omitting the unique overflow detector must score failure.",
+    "holdout": "Hold out defect classes, dependency shapes, and repositories rather than merely test names.",
+    "artifact": "Produce a test-selection root adapter, executable test plan, projected cost, and explicit uncovered obligations.",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/plan_optimizer.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/pipeline.py",
+        "symbols": [
+          "FourModelHierarchicalSwarm._coerce_subtasks"
+        ],
+        "observation": "Bounds and normalizes subtask objects, supplying a fallback task when none remain."
+      }
+    ]
+  },
+  {
+    "id": "070",
+    "name": "Flaky test diagnostician",
+    "slug": "flaky-test-diagnostician",
+    "brief": "Distinguish nondeterministic product defects from unreliable test infrastructure before proposing code changes or quarantining tests.",
+    "context": "Expose repeated executions, seeds, timing, environment fingerprints, and pass/fail traces as external REPL objects.",
+    "program": "Recursively compare failure clusters, generate discriminating reruns, and estimate which environmental factors actually change outcomes.",
+    "data": "Use controlled race, clock, network, order-dependence, and faulty-assertion episodes with known injected causes.",
+    "oracle": "A fixture controller independently verifies causal classification and whether the proposed intervention removes the underlying failure.",
+    "failure": "A real race that disappears under slower instrumentation must not be dismissed as harmless flakiness.",
+    "holdout": "Hold out scheduling patterns, infrastructure perturbations, and test frameworks from training.",
+    "artifact": "Produce a flakiness-diagnosis root adapter, cause ranking, reproducible witness, and justified repair or quarantine proposal.",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/execution_events.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/deep.py",
+        "symbols": [
+          "DeepReasoningProgram._run_stages"
+        ],
+        "observation": "Runs sequential scan, methodology, lens, and critique model calls before synthesis."
+      }
+    ]
+  },
+  {
+    "id": "071",
+    "name": "Mutation test designer",
+    "slug": "mutation-test-designer",
+    "brief": "Construct targeted mutations that reveal whether tests protect semantic obligations rather than superficial output formatting.",
+    "context": "Place candidate source, contracts, existing assertions, and baseline execution results in external REPL variables.",
+    "program": "Generate bounded semantic mutants by obligation, recursively seek distinguishing inputs, and separate equivalent from surviving mutants.",
+    "data": "Train root episodes on known faulty transformations, oracle-killed mutants, equivalence cases, and unsuccessful test proposals.",
+    "oracle": "Independent reference implementations establish whether each mutation changes required behavior and whether the generated test detects it.",
+    "failure": "A mutant that only renames a variable cannot inflate the score as an undetected semantic defect.",
+    "holdout": "Hold out operator families, numeric boundaries, and source structures when evaluating transfer.",
+    "artifact": "Produce a mutation-design root adapter, executable mutants, distinguishing tests, and an equivalence-aware coverage report.",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py",
+        "symbols": [
+          "DeductiveReasoningSignature"
+        ],
+        "observation": "A DSPy signature asks a model for logical validity and inference explanations."
+      }
+    ]
+  },
+  {
+    "id": "072",
+    "name": "Tool argument repairer",
+    "slug": "tool-argument-repairer",
+    "brief": "Repair malformed tool arguments while preserving the user's requested operation and the existing capability boundary.",
+    "context": "Keep original intent, exact schema, rejected payload, validation errors, and prior effects in REPL variables.",
+    "program": "Recursively align schema fields with intent, propose minimal corrections, and validate without dispatching speculative mutations.",
+    "data": "Train root examples from recoverable type errors, ambiguous inputs, schema changes, and irreversible-action counterexamples.",
+    "oracle": "A deterministic schema checker and fixture backend independently score validity, semantic preservation, and execution count.",
+    "failure": "Changing a denied read request into an allowed destructive verb must fail even with valid JSON.",
+    "holdout": "Hold out tool families, nested schema shapes, and previously unseen validation diagnostics.",
+    "artifact": "Produce an argument-repair root adapter, corrected payload or abstention, intent mapping, and governed dispatch evidence.",
+    "primary_paths": [
+      "src/tools.c",
+      "src/toolmgmt.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/router_client.py",
+        "symbols": [
+          "ToolRouterClient._check_allowed"
+        ],
+        "observation": "Rejects tool names outside an explicitly configured allowlist."
+      }
+    ]
+  },
+  {
+    "id": "073",
+    "name": "API version migrator",
+    "slug": "api-version-migrator",
+    "brief": "Migrate integration calls across explicit API contracts while identifying semantic changes that require caller decisions.",
+    "context": "Load old and new schemas, recorded requests, responses, and compatibility requirements into external REPL variables.",
+    "program": "Recursively map endpoints and fields, generate translation candidates, and test changed pagination, error, and idempotency behavior.",
+    "data": "Use paired API fixtures, migration patches, replayed requests, and known silent semantic incompatibilities as role data.",
+    "oracle": "A reference compatibility harness compares actual observable effects and responses under both versions.",
+    "failure": "Renaming an identifier field while dropping its account scope must fail despite successful HTTP responses.",
+    "holdout": "Hold out version transitions, service families, and combinations of backward-incompatible changes.",
+    "artifact": "Produce an API-migration root adapter, translation patch, compatibility matrix, and explicit unsupported-operation report.",
+    "primary_paths": [
+      "src/mcp.c",
+      "src/toolmgmt.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/router_client.py",
+        "symbols": [
+          "anthropic_tool_schema_from_router"
+        ],
+        "observation": "Converts router tool definitions into Anthropic-compatible tool schema records."
+      }
+    ]
+  },
+  {
+    "id": "074",
+    "name": "Capability request planner",
+    "slug": "capability-request-planner",
+    "brief": "Find a least-authority execution plan that satisfies the objective or explains the precise missing permission.",
+    "context": "Expose task requirements, available tools, argument-sensitive capability classifications, and current grants as REPL data.",
+    "program": "Recursively decompose effects, compare lower-authority alternatives, and construct a plan whose permissions can be checked before execution.",
+    "data": "Train role roots on authorized plans, denied requests, read-only alternatives, and misleading tool descriptions.",
+    "oracle": "The unchanged capability gate independently validates every proposed effect and a task oracle checks objective completion.",
+    "failure": "A nested execution helper must not conceal denied network access or grant itself control authority.",
+    "holdout": "Hold out tool combinations, trust tiers, and session-taint sequences from training.",
+    "artifact": "Produce a capability-planning root adapter, minimal effect plan, unmet-grant explanation, and actual gate-decision trace.",
+    "primary_paths": [
+      "src/capability.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/router_client.py",
+        "symbols": [
+          "ToolRouterClient.set_allowed_tools"
+        ],
+        "observation": "Stores a frozen set of permitted tool names used by subsequent allowlist checks."
+      }
+    ]
+  },
+  {
+    "id": "075",
+    "name": "Session recovery strategist",
+    "slug": "session-recovery-strategist",
+    "brief": "Reconstruct the next valid action after interruption without replaying effects whose outcomes are already committed or uncertain.",
+    "context": "Keep session records, checkpoints, pending operations, effect receipts, and interrupted call trees in external REPL variables.",
+    "program": "Recursively reconcile each branch against durable receipts, identify resumable state, and isolate unknown remote outcomes.",
+    "data": "Use crash-injected episodes spanning pre-dispatch, post-effect, partial-stream, and checkpoint-publication boundaries as role training data.",
+    "oracle": "A deterministic effect ledger and replay controller score state continuity and absence of duplicated side effects.",
+    "failure": "A crash after remote commit but before acknowledgement must not trigger another non-idempotent execution.",
+    "holdout": "Hold out interruption boundaries, operation mixtures, and checkpoint formats from training.",
+    "artifact": "Produce a recovery root adapter, resumable action plan, unresolved-outcome set, and independently verified replay receipt.",
+    "primary_paths": [
+      "src/execution_recovery.c",
+      "src/agent.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/planning.py",
+        "symbols": [
+          "PlannerStore._recover"
+        ],
+        "observation": "Recovers expired running goals or cancels them when ancestor goals are cancelled or failed."
+      }
+    ]
+  },
+  {
+    "id": "076",
+    "name": "Runaway recursion triager",
+    "slug": "runaway-recursion-triager",
+    "brief": "Locate recursive branches that consume resources without advancing the task and stop only work proven redundant or invalid.",
+    "context": "Expose call-tree lineage, repeated subproblems, progress measures, reservations, and remaining obligations in REPL variables.",
+    "program": "Recursively classify cycles and productive expansion, compare state hashes, and propose bounded cancellation or decomposition repairs.",
+    "data": "Train roots on genuine recursive algorithms, accidental self-delegation loops, repeated failures, and misleading progress messages.",
+    "oracle": "An independent task oracle and scheduler trace verify preserved required work and reduced unproductive resource consumption.",
+    "failure": "A large but necessary pairwise computation must not be cancelled merely because its call count is high.",
+    "holdout": "Hold out recursion shapes, workload sizes, and delayed-progress patterns from training.",
+    "artifact": "Produce a recursion-triage root adapter, branch dispositions, repaired recursive program, and complete obligation accounting.",
+    "primary_paths": [
+      "src/swarm_reactor.c",
+      "src/swarm_scale.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/budget.py",
+        "symbols": [
+          "UsageMeter.check"
+        ],
+        "observation": "Raises BudgetExceededError when accumulated token usage reaches the configured ceiling."
+      }
+    ]
+  },
+  {
+    "id": "077",
+    "name": "Provider failure classifier",
+    "slug": "provider-failure-classifier",
+    "brief": "Classify inference failures precisely enough to choose retry, credential repair, alternate routing, or abstention without duplicate effects.",
+    "context": "Store redacted status codes, headers, stream milestones, provider identity, and request deadlines as external REPL objects.",
+    "program": "Recursively compare transport and protocol evidence, distinguish accepted requests from pre-dispatch failures, and propose bounded remedies.",
+    "data": "Train role roots on controlled disconnects, quota resets, authentication failures, malformed streams, and incompatible-model responses.",
+    "oracle": "A local provider fixture independently labels causes and counts actual retry attempts and duplicate downstream actions.",
+    "failure": "A stream interrupted after a committed tool call must not be classified safe for complete replay.",
+    "holdout": "Hold out provider families, error phrasings, and combinations of transport and application failures.",
+    "artifact": "Produce a provider-triage root adapter, typed failure diagnosis, permitted next action, and request-level outcome evidence.",
+    "primary_paths": [
+      "src/provider.c",
+      "src/provider_pool.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/pipeline.py",
+        "symbols": [
+          "_sanitize_child_error"
+        ],
+        "observation": "Sanitizes child exception details before exposing errors to parent results."
+      }
+    ]
+  },
+  {
+    "id": "078",
+    "name": "Rate allocation strategist",
+    "slug": "rate-allocation-strategist",
+    "brief": "Allocate limited provider request capacity among role workloads without starving critical tasks or violating endpoint quotas.",
+    "context": "Keep queue deadlines, token estimates, quota windows, cooldowns, and role priorities as external REPL variables.",
+    "program": "Recursively partition competing demands, simulate admissible schedules, and choose allocations robust to uncertain completion times.",
+    "data": "Train roots on throttled endpoint episodes, burst arrivals, heterogeneous token sizes, and known fair-scheduling outcomes.",
+    "oracle": "An independent quota simulator scores hard-limit compliance, completed task value, lateness, and starvation.",
+    "failure": "An allocation that achieves high throughput by permanently postponing low-volume urgent work must fail.",
+    "holdout": "Hold out arrival distributions, quota-reset patterns, and previously unseen role mixes.",
+    "artifact": "Produce a rate-allocation root adapter, bounded admission schedule, rejected-demand reasons, and measured fairness/performance receipt.",
+    "primary_paths": [
+      "src/provider_pool.c",
+      "src/swarm_reactor.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/budget.py",
+        "symbols": [
+          "UsageMeter.snapshot"
+        ],
+        "observation": "Returns aggregate and per-model token accounting in a structured snapshot."
+      }
+    ]
+  },
+  {
+    "id": "079",
+    "name": "Spend reservation reconciler",
+    "slug": "spend-reservation-reconciler",
+    "brief": "Reconcile estimated, reserved, settled, and uncertain spend so concurrent role calls cannot reuse the same remaining budget.",
+    "context": "Expose request reservations, provider usage receipts, completion states, pricing revisions, and budget limits in REPL variables.",
+    "program": "Recursively match receipts to reservations, identify duplicate settlements, and propose releases only when liability is resolved.",
+    "data": "Train roots on concurrent admissions, lower final costs, missing usage, retries, and delayed billing events.",
+    "oracle": "An independent accounting state machine checks conservation of available funds and exactly-once settlement.",
+    "failure": "A timed-out request that may have incurred charges must not release its entire reservation as free capacity.",
+    "holdout": "Hold out settlement orderings, currency configurations, and provider usage-field variants.",
+    "artifact": "Produce a reservation-reconciliation root adapter, settlement proposals, unresolved liabilities, and a balanced budget ledger report.",
+    "primary_paths": [
+      "src/inference_cost.c",
+      "src/swarm_accounting.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/budget.py",
+        "symbols": [
+          "UsageMeter.add"
+        ],
+        "observation": "Accumulates input, output, cache, and per-model token usage under a lock."
+      }
+    ]
+  },
+  {
+    "id": "080",
+    "name": "Workload placement planner",
+    "slug": "workload-placement-planner",
+    "brief": "Place role inference and training workloads where hardware, authority, latency, and data locality jointly satisfy their contracts.",
+    "context": "Keep task graphs, device capacities, adapter residency, transport costs, and placement restrictions in external REPL variables.",
+    "program": "Recursively partition placement choices, estimate transfer overhead, and verify feasible schedules before suggesting workload movement.",
+    "data": "Train roots on measured placement episodes, out-of-memory failures, locality restrictions, and resource-contention counterexamples.",
+    "oracle": "A deterministic capacity simulator plus executable task oracle scores feasibility and end-to-end useful completion.",
+    "failure": "A faster remote device cannot win when the role's required local-only data policy forbids that transfer.",
+    "holdout": "Hold out hardware mixes, model sizes, and topology/workload combinations from training.",
+    "artifact": "Produce a placement root adapter, feasible device assignment, rejected alternatives, and predicted-versus-observed resource report.",
+    "primary_paths": [
+      "src/plan_optimizer.c",
+      "src/provider_profiles.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/pipeline.py",
+        "symbols": [
+          "FourModelHierarchicalSwarm._route"
+        ],
+        "observation": "Selects leaf or fresh tool-worker modules from requested tiers, tools, and task hints."
+      }
+    ]
+  },
+  {
+    "id": "081",
+    "name": "Lease fencing examiner",
+    "slug": "lease-fencing-examiner",
+    "brief": "Detect stale worker authority before results or code candidates can alter shared runtime state after reassignment.",
+    "context": "Expose lease epochs, worker identities, renewal receipts, candidate versions, and reordered events through REPL variables.",
+    "program": "Recursively reconstruct authority intervals, compare each mutation with its fencing token, and derive minimal rejection witnesses.",
+    "data": "Train roots on partitioned workers, expired attempts, delayed completions, renewal races, and valid ownership transfers.",
+    "oracle": "An independent lease state machine determines which transitions and writes are authorized at each epoch.",
+    "failure": "An old worker completing successfully after a replacement receives the lease must still be fenced out.",
+    "holdout": "Hold out event interleavings, clock-skew patterns, and worker failure combinations.",
+    "artifact": "Produce a lease-audit root adapter, authority timeline, stale-write counterexample, and concrete fencing correction proposal.",
+    "primary_paths": [
+      "src/activation_lease.c",
+      "src/blackboard.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/planning.py",
+        "symbols": [
+          "PlannerStore._lease"
+        ],
+        "observation": "Rejects nonrunning, mismatched, expired, or dependency-blocked goal attempts."
+      }
+    ]
+  },
+  {
+    "id": "082",
+    "name": "Artifact provenance investigator",
+    "slug": "artifact-provenance-investigator",
+    "brief": "Explain which exact source, dataset, model, and execution produced an artifact without treating labels as proof.",
+    "context": "Store artifact digests, parent references, build recipes, tensor manifests, and execution receipts in external REPL objects.",
+    "program": "Recursively traverse lineage, verify transformations, and isolate missing or contradictory provenance edges before recommending reuse.",
+    "data": "Train roots on reproducible artifact chains, forged metadata, substituted checkpoints, and interrupted publication episodes.",
+    "oracle": "Independent digest verification and recipe replay determine whether claimed ancestry and production steps are supported.",
+    "failure": "A renamed unchanged checkpoint claiming a trained role update must fail even with a plausible training report.",
+    "holdout": "Hold out artifact formats, transformation chains, and provenance-forgery strategies.",
+    "artifact": "Produce a provenance root adapter, verified lineage explanation, unsupported claims, and a replayable artifact qualification report.",
+    "primary_paths": [
+      "src/skill_trace.c",
+      "src/trace_kg_store.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/decomposition.py",
+        "symbols": [
+          "_inference_receipt"
+        ],
+        "observation": "Builds inference receipts using prediction and language-model usage information."
+      }
+    ]
+  },
+  {
+    "id": "083",
+    "name": "Training dataset curator",
+    "slug": "training-dataset-curator",
+    "brief": "Choose role-training episodes that provide valid executable supervision without leaking holdout answers or amplifying duplicated failures.",
+    "context": "Expose root trajectories, oracle outcomes, source ancestry, duplicate clusters, and licensing constraints as external REPL variables.",
+    "program": "Recursively classify sample eligibility, group related episodes, and construct balanced curricula with explicit exclusion reasons.",
+    "data": "Train roots on curated-versus-contaminated corpora, mislabeled success traces, duplicate families, and independently audited split decisions.",
+    "oracle": "A separate leakage checker and executable replay oracle score accepted samples and train/evaluation separation.",
+    "failure": "A successful-looking trajectory containing future tool observations in an earlier input must be excluded.",
+    "holdout": "Hold out repository ancestry groups, contamination mechanisms, and task-generation families.",
+    "artifact": "Produce a dataset-curation root adapter, immutable split manifest, accepted root samples, and a quantified contamination audit.",
+    "primary_paths": [
+      "src/chronicle.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/optimize.py",
+        "symbols": [
+          "compile_with_gepa"
+        ],
+        "observation": "Passes a caller-provided training set to DSPy GEPA without repository-aware data partitioning."
+      }
+    ]
+  },
+  {
+    "id": "084",
+    "name": "Renderer loss-mask inspector",
+    "slug": "renderer-loss-mask-inspector",
+    "brief": "Check whether role-root SFT trains exactly the intended generated tokens under the selected model renderer.",
+    "context": "Keep raw messages, ownership labels, rendered token IDs, masks, and tokenizer revisions in external REPL variables.",
+    "program": "Recursively align root targets with renderer segments, inspect boundary cases, and explain unintended supervised spans.",
+    "data": "Train roots on independently labeled masks, Unicode templates, nested child messages, and injected boundary shifts.",
+    "oracle": "A reference renderer and gradient attribution probe independently verify target ownership and zero loss elsewhere.",
+    "failure": "Literal assistant delimiters inside tool output must not turn that output into supervised root tokens.",
+    "holdout": "Hold out renderer families, template revisions, and adversarial message-boundary encodings.",
+    "artifact": "Produce a mask-inspection root adapter, token-level error map, corrected serialization proposal, and gradient-check evidence.",
+    "primary_paths": [
+      "src/provider_events.c",
+      "src/agent_interop.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/optimize.py",
+        "symbols": [
+          "save_program"
+        ],
+        "observation": "Serializes DSPy program artifacts but does not create tokenizer-aligned neural loss masks."
+      }
+    ]
+  },
+  {
+    "id": "085",
+    "name": "Checkpoint integrity examiner",
+    "slug": "checkpoint-integrity-examiner",
+    "brief": "Qualify trained role artifacts by actual tensor integrity and compatibility before any runtime serves them.",
+    "context": "Expose checkpoint shards, tensor metadata, base revisions, optimizer receipts, and adapter configuration through external REPL handles.",
+    "program": "Recursively inspect shard consistency, compare declared and actual parameter changes, and diagnose compatibility violations.",
+    "data": "Train roots on complete updates, truncated shards, stale indexes, nonfinite tensors, and incompatible adapter examples.",
+    "oracle": "Independent tensor loaders and fixed-input numerical checks decide whether artifacts are complete, changed, and reloadable.",
+    "failure": "A zero-byte or metadata-only checkpoint must not count as a completed neural update after trainer exit zero.",
+    "holdout": "Hold out checkpoint layouts, adapter ranks, and corruption combinations from training.",
+    "artifact": "Produce a checkpoint-integrity root adapter, tensor qualification report, compatibility verdict, and concrete recovery requirements.",
+    "primary_paths": [
+      "src/provider.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/optimize.py",
+        "symbols": [
+          "load_program"
+        ],
+        "observation": "Loads a serialized DSPy program through dspy.load rather than validating neural checkpoint tensors."
+      }
+    ]
+  },
+  {
+    "id": "086",
+    "name": "Adapter route verifier",
+    "slug": "adapter-route-verifier",
+    "brief": "Ensure each role and recursive tree receives its intended immutable adapter rather than a similarly named model.",
+    "context": "Keep admission identities, serving receipts, cache keys, adapter digests, and in-flight generations in REPL variables.",
+    "program": "Recursively trace root and child routing, compare actual loaded identities, and isolate cross-role contamination.",
+    "data": "Train roots on concurrent adapter reloads, alias collisions, stale caches, and misreported backend model names.",
+    "oracle": "A controlled serving backend and independent artifact checker verify the exact tensors used for each request.",
+    "failure": "A backend echoing the requested role name while serving another adapter must be rejected.",
+    "holdout": "Hold out provider protocols, reload timings, and role-to-adapter assignment patterns.",
+    "artifact": "Produce an adapter-routing root policy, mismatched-request witnesses, corrected route bindings, and verified serving identity receipts.",
+    "primary_paths": [
+      "src/provider.c",
+      "src/provider_pool.c",
+      "src/agent_profile.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/config.py",
+        "symbols": [
+          "normalize_model_id"
+        ],
+        "observation": "Maps configured aliases to canonical model strings without validating loaded adapter identity."
+      }
+    ]
+  },
+  {
+    "id": "087",
+    "name": "Model drift diagnostician",
+    "slug": "model-drift-diagnostician",
+    "brief": "Distinguish learned-policy regression from workload drift, serving substitution, and changes in the evaluation instrument.",
+    "context": "Expose longitudinal outcomes, task features, frozen probe results, serving identities, and scoring revisions in REPL variables.",
+    "program": "Recursively compare matched cohorts, isolate changed components, and propose discriminating replay experiments before retraining.",
+    "data": "Train roots on controlled model swaps, shifted input distributions, grader changes, and genuine capability regressions.",
+    "oracle": "An independent change-injection controller checks diagnosis against the known causal intervention and probe outcomes.",
+    "failure": "A new difficult task mixture must not be mislabeled model degradation when matched-task accuracy stays constant.",
+    "holdout": "Hold out drift types, domain transitions, and interacting model/environment changes.",
+    "artifact": "Produce a drift-diagnosis root adapter, attribution report, matched replay plan, and justified retrain or rollback recommendation.",
+    "primary_paths": [
+      "src/provider_profiles.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/optimize.py",
+        "symbols": [
+          "evaluate"
+        ],
+        "observation": "Runs a DSPy evaluator over caller-supplied development examples and a metric."
+      }
+    ]
+  },
+  {
+    "id": "088",
+    "name": "Reward exploit investigator",
+    "slug": "reward-exploit-investigator",
+    "brief": "Find behaviors that increase a role's training reward while violating the actual executable objective.",
+    "context": "Store reward definitions, sampled programs, environment access rules, scores, and development-oracle outcomes in REPL variables. Sealed evaluator inputs and outcomes stay unavailable during evaluated episodes.",
+    "program": "Recursively attack scoring assumptions, construct exploit trajectories, and separate legitimate shortcuts from objective violations.",
+    "data": "Train roots on substring hacks, grader contamination, selective episode dropping, and correct efficient solutions.",
+    "oracle": "An immutable semantic oracle determines whether reward improvements correspond to genuine task completion.",
+    "failure": "Printing the expected answer inside an incorrect program must not survive as a positive training example.",
+    "holdout": "Hold out reward implementations, exploit families, and task domains from training.",
+    "artifact": "Produce a reward-audit root adapter, executable exploit witnesses, bounded scorer fixes, and post-fix independent validation.",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/optimize.py",
+        "symbols": [
+          "swarm_metric"
+        ],
+        "observation": "Rewards nonempty answers or expected-answer substrings when no blocking issue is present."
+      }
+    ]
+  },
+  {
+    "id": "089",
+    "name": "Training failure recovery planner",
+    "slug": "training-failure-recovery-planner",
+    "brief": "Recover failed role training without mixing checkpoints, repeating committed updates, or claiming configuration validation as training progress.",
+    "context": "Expose optimizer steps, shard publication states, device errors, run manifests, and resume metadata in external REPL variables.",
+    "program": "Recursively reconcile durable training state, identify the last coherent boundary, and construct a bounded restart plan.",
+    "data": "Train roots on device exhaustion, interrupted saves, corrupt optimizer states, preemption, and incompatible resume attempts.",
+    "oracle": "An independent deterministic training fixture compares resumed parameters with an uninterrupted reference within declared tolerances.",
+    "failure": "Resuming model weights from one step with optimizer state from another must fail before further updates.",
+    "holdout": "Hold out failure timings, trainer layouts, and device-error combinations.",
+    "artifact": "Produce a training-recovery root adapter, coherent resume specification, rejected recovery paths, and verified parameter-continuity report.",
+    "primary_paths": [
+      "src/agent_interop.c",
+      "src/execution_recovery.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/executor.py",
+        "symbols": [
+          "execute_one"
+        ],
+        "observation": "Claims bounded work, launches a binary, and records attempt-specific execution artifacts."
+      }
+    ]
+  },
+  {
+    "id": "090",
+    "name": "Rollout staleness manager",
+    "slug": "rollout-staleness-manager",
+    "brief": "Admit asynchronous training rollouts only when their behavior-policy versions and statistical assumptions remain valid.",
+    "context": "Keep sampling versions, optimizer versions, queue delays, log probabilities, and grouped episode identities in REPL variables.",
+    "program": "Recursively reconcile rollout groups, calculate version age, and propose retain, reweight, or discard decisions under fixed policy.",
+    "data": "Train roots on delayed batches, missing behavior probabilities, mixed-version groups, and valid asynchronous trajectories.",
+    "oracle": "A deterministic admission oracle checks version bounds, group consistency, and required importance-weight inputs.",
+    "failure": "An old rollout relabeled with the current model version must not pass merely because its task succeeded.",
+    "holdout": "Hold out queue-delay distributions, update rates, and mixed-version failure patterns.",
+    "artifact": "Produce a staleness-management root adapter, batch admission report, rejected samples, and exact policy-version accounting.",
+    "primary_paths": [
+      "src/swarm_accounting.c",
+      "src/provider_events.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/budget.py",
+        "symbols": [
+          "UsageMeter.snapshot"
+        ],
+        "observation": "Reports aggregate usage but does not associate rollouts with optimizer-policy staleness."
+      }
+    ]
+  },
+  {
+    "id": "091",
+    "name": "Evaluator calibration analyst",
+    "slug": "evaluator-calibration-analyst",
+    "brief": "Measure whether a role evaluator's confidence and labels predict independently verified outcomes instead of reinforcing self-assessment.",
+    "context": "Expose predictions, rubric versions, adjudicated outcomes, abstentions, and failure dispositions as external REPL variables.",
+    "program": "Recursively stratify error patterns, compute calibration diagnostics, and propose thresholds using only designated fitting data.",
+    "data": "Train roots on confident mistakes, valid abstentions, unavailable verification, and independently scored evaluation episodes.",
+    "oracle": "A fixed executable scorer calculates proper scoring rules and held-out false-acceptance rates from resolved outcomes.",
+    "failure": "A verifier timeout must remain unknown and cannot improve accuracy by becoming zero remaining defects.",
+    "holdout": "Hold out task families, rubric shifts, and confidence-distribution changes.",
+    "artifact": "Produce an evaluator-calibration root adapter, calibrated decision thresholds, uncertainty report, and untouched-holdout scoring receipt.",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/chronicle.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/eval_bias_reduction.py",
+        "symbols": [
+          "evaluate_test_case"
+        ],
+        "observation": "Computes heuristic coherence and can treat absent post-analysis as no newly detected biases."
+      }
+    ]
+  },
+  {
+    "id": "092",
+    "name": "Multiagent handoff planner",
+    "slug": "multiagent-handoff-planner",
+    "brief": "Transfer unfinished role work with enough executable state for another agent to continue without repeating settled actions.",
+    "context": "Keep context handles, completed obligations, pending effects, candidate identities, and unresolved questions in external REPL variables.",
+    "program": "Recursively summarize branch state by dependency, preserve exact references, and construct a minimal resumable handoff contract.",
+    "data": "Train roots on interrupted collaborations, complete handoffs, missing state, and duplicated-action counterexamples.",
+    "oracle": "An independent continuation runner checks whether the receiver completes the original task with no lost obligations.",
+    "failure": "A fluent handoff omitting an uncertain remote mutation must fail if the receiver blindly repeats it.",
+    "holdout": "Hold out agent pairings, task-tree shapes, and interruption locations.",
+    "artifact": "Produce a handoff root adapter, receiver-ready state artifact, unresolved-action ledger, and successful independent continuation evidence.",
+    "primary_paths": [
+      "src/swarm.c",
+      "src/blackboard.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/signatures.py",
+        "symbols": [
+          "ChildResult"
+        ],
+        "observation": "Defines structured child answers, evidence, uncertainties, and tool-call evidence."
+      }
+    ]
+  },
+  {
+    "id": "093",
+    "name": "Shared contract negotiator",
+    "slug": "shared-contract-negotiator",
+    "brief": "Resolve incompatible interface assumptions between role implementations before their independently correct components are integrated.",
+    "context": "Expose proposed schemas, callers, callee behaviors, invariants, and version constraints in external REPL variables.",
+    "program": "Recursively compare obligations, generate compatible alternatives, and derive executable counterexamples for unresolved contract disagreements.",
+    "data": "Train roots on interface negotiations, compatible refinements, conflicting ownership assumptions, and silently weakened invariants.",
+    "oracle": "Independent consumer/provider contract tests score compatibility while preserving each party's nonnegotiable requirements.",
+    "failure": "Resolving a conflict by dropping a required error case must fail even if both components compile.",
+    "holdout": "Hold out interface families, ownership models, and version-skew combinations.",
+    "artifact": "Produce a contract-negotiation root adapter, agreed schema proposal, remaining disagreements, and bidirectional compatibility test artifacts.",
+    "primary_paths": [
+      "src/blackboard.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/signatures.py",
+        "symbols": [
+          "Subtask"
+        ],
+        "observation": "Defines subtask identity, assigned tier, requested tools, and success criteria."
+      }
+    ]
+  },
+  {
+    "id": "094",
+    "name": "Asynchronous result reconciler",
+    "slug": "async-result-reconciler",
+    "brief": "Assemble asynchronous role outputs into a coherent decision without losing completed work or accepting stale results.",
+    "context": "Store future identities, candidate generations, result fragments, cancellations, and dependency requirements in external REPL variables.",
+    "program": "Recursively match results to requested obligations, deduplicate completions, and isolate missing or incompatible branches.",
+    "data": "Train roots on reordered replies, duplicate deliveries, partial successes, cancelled calls, and stale candidate evaluations.",
+    "oracle": "A deterministic event-replay oracle checks exact result ownership, completion status, and final aggregate correctness.",
+    "failure": "A late answer from an earlier candidate generation must not satisfy the current candidate's verification obligation.",
+    "holdout": "Hold out completion permutations, failure mixtures, and aggregation structures.",
+    "artifact": "Produce a result-reconciliation root adapter, coherent aggregate artifact, unresolved branch list, and replayable ownership proof.",
+    "primary_paths": [
+      "src/swarm_reactor.c",
+      "src/execution_events.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/pipeline.py",
+        "symbols": [
+          "FourModelHierarchicalSwarm._degraded"
+        ],
+        "observation": "Returns completed child results and usage in a structured degraded response."
+      }
+    ]
+  },
+  {
+    "id": "095",
+    "name": "User correction prioritizer",
+    "slug": "user-correction-prioritizer",
+    "brief": "Convert user corrections into precise objective changes while retaining authorized work that the correction does not supersede.",
+    "context": "Keep task hierarchy, original requirements, chronological corrections, current outputs, and authority boundaries in external REPL variables.",
+    "program": "Recursively identify affected obligations, update priorities, and invalidate only decisions contradicted by the new instruction.",
+    "data": "Train roots on narrow clarifications, cancellations, incompatible objective changes, and messages containing mere status questions.",
+    "oracle": "An independently authored requirement-state oracle checks intended scope changes and preservation of unaffected commitments.",
+    "failure": "Asking for a progress update must not cancel ongoing work or authorize unrelated deployment.",
+    "holdout": "Hold out paraphrase families, correction orderings, and ambiguous references requiring abstention.",
+    "artifact": "Produce a correction-prioritization root adapter, revised obligation graph, preserved commitments, and an explicit scope-change explanation.",
+    "primary_paths": [
+      "src/agent.c",
+      "src/blackboard.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/planning.py",
+        "symbols": [
+          "PlannerStore._apply_steering"
+        ],
+        "observation": "Applies queued cancellation or reprioritization to eligible goals and records resulting state changes."
+      }
+    ]
+  },
+  {
+    "id": "096",
+    "name": "Input latency investigator",
+    "slug": "input-latency-investigator",
+    "brief": "Find why terminal input stalls during tool discovery, training, or recursive execution without confusing rendering delay with admission delay.",
+    "context": "Expose PTY timestamps, event-loop spans, lock waits, network stalls, and input-buffer states in external REPL variables.",
+    "program": "Recursively isolate latency intervals, compare controlled interventions, and propose the smallest change removing the blocking dependency.",
+    "data": "Train roots on stalled catalogs, mutex contention, rendering bursts, background training, and healthy slow-output cases.",
+    "oracle": "An independent PTY harness measures keystroke admission, command response, and preservation of partially typed input.",
+    "failure": "A cosmetic spinner that appears responsive while input remains blocked must fail the actual latency check.",
+    "holdout": "Hold out stall durations, terminal sizes, and concurrent background-task combinations.",
+    "artifact": "Produce an input-latency root adapter, causal blocking diagnosis, focused patch candidate, and measured PTY regression evidence.",
+    "primary_paths": [
+      "src/agent.c",
+      "src/tui.c",
+      "src/mcp.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/streaming.py",
+        "symbols": [
+          "stream_swarm"
+        ],
+        "observation": "Exposes asynchronous swarm status, token, and prediction events to callers."
+      }
+    ]
+  },
+  {
+    "id": "097",
+    "name": "Release admission examiner",
+    "slug": "release-admission-examiner",
+    "brief": "Decide whether a tested code/model pair satisfies release obligations without confusing recorded assertions with verified evidence.",
+    "context": "Keep candidate bytes, role adapter identity, compatibility results, acceptance contracts, and unresolved failures in REPL variables.",
+    "program": "Recursively evaluate each obligation, challenge unsupported claims, and distinguish promotable, rejected, and incomplete candidate pairs.",
+    "data": "Train roots on valid releases, forged receipts, mismatched binaries, failed hidden tests, and unsupported activation claims.",
+    "oracle": "An independent release harness checks actual instruction changes, retained state, contract behavior, and serving identity.",
+    "failure": "A process retaining its PID after exec must not count as uninterrupted in-memory code replacement.",
+    "holdout": "Hold out native/model pairings, release failure combinations, and ABI transitions.",
+    "artifact": "Produce a release-admission root adapter, obligation verdict, rejected claims, and reproducible qualification or rollback instructions.",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/hotplug.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/planning.py",
+        "symbols": [
+          "PlannerStore._evidence"
+        ],
+        "observation": "Requires nonempty evidence strings for every declared acceptance criterion before completion."
+      }
+    ]
+  },
+  {
+    "id": "098",
+    "name": "Resource forecast analyst",
+    "slug": "resource-forecast-analyst",
+    "brief": "Forecast role training and recursive execution resources using measured cohorts, uncertainty, and correct dimensional relationships.",
+    "context": "Expose workload features, observed tokens, peak memory, device time, pricing units, and comparable episodes in REPL variables.",
+    "program": "Recursively decompose demand, estimate intervals from eligible cohorts, and identify measurements dominating forecast uncertainty.",
+    "data": "Train roots on actual resource receipts, capacity failures, censored runs, and misleading average-only summaries.",
+    "oracle": "A held-out execution meter scores forecast error, interval coverage, and violations of declared hard limits.",
+    "failure": "Bytes per request multiplied by requests per second is bandwidth, not memory without a retention duration.",
+    "holdout": "Hold out device types, input-length regimes, and recursion-topology combinations.",
+    "artifact": "Produce a resource-forecast root adapter, units-checked bounds, cohort qualification report, and predicted-versus-observed resource receipt.",
+    "primary_paths": [
+      "src/learned_cost.c",
+      "src/cost_model.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/budget.py",
+        "symbols": [
+          "UsageMeter.total_tokens"
+        ],
+        "observation": "Computes total usage including input, output, cache-read, and cache-write tokens."
+      }
+    ]
+  },
+  {
+    "id": "099",
+    "name": "Synthetic fixture author",
+    "slug": "synthetic-fixture-author",
+    "brief": "Generate adversarial executable fixtures with known answers that teach role procedures rather than memorized superficial cues.",
+    "context": "Keep task grammars, semantic rules, seeds, required edge cases, and independent reference implementations in REPL variables.",
+    "program": "Recursively compose cases, derive answers through separate reference code, and reject fixtures whose labels depend on the candidate.",
+    "data": "Train roots on validated fixture generators, ambiguous cases, accidental answer leaks, and independently discovered missing boundaries.",
+    "oracle": "A second implementation verifies answer consistency, mutation sensitivity, determinism, and absence of hidden label channels.",
+    "failure": "A generated fixture placing its expected answer inside the visible filename must fail leakage validation.",
+    "holdout": "Hold out grammar productions, semantic combinations, and generator seed families.",
+    "artifact": "Produce a fixture-authoring root adapter, deterministic task generator, sealed oracle outputs, and independent generator-validation report.",
+    "primary_paths": [
+      "src/tools.c",
+      "src/agent_interop.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/eval_bias_reduction.py",
+        "symbols": [
+          "calculate_detection_metrics"
+        ],
+        "observation": "Computes exact normalized-label precision, recall, and F1 without generating independent task fixtures."
+      }
+    ]
+  },
+  {
+    "id": "100",
+    "name": "Interoperability conformance examiner",
+    "slug": "interoperability-conformance-examiner",
+    "brief": "Check that role runtimes honor negotiated protocol contracts across clients without mistaking permissive parsing for compatibility.",
+    "context": "Expose protocol versions, message traces, capability negotiations, transport framing, and expected state transitions in REPL variables.",
+    "program": "Recursively enumerate boundary cases, generate protocol probes, and compare actual behavior against explicit conformance rules.",
+    "data": "Train roots on valid exchanges, malformed envelopes, reordered notifications, cancellation races, and unsupported-version responses.",
+    "oracle": "An independent state-machine harness scores framing, identity, lifecycle, and effect semantics against controlled clients.",
+    "failure": "A successful initialization followed by tool calls using another session's identity must fail conformance.",
+    "holdout": "Hold out client implementations, transport fragmentation patterns, and version-transition combinations.",
+    "artifact": "Produce an interoperability root adapter, executable conformance suite, minimal failing traces, and supported-contract matrix.",
+    "primary_paths": [
+      "src/agent_interop.c",
+      "src/mcp_server.c",
+      "src/mcp_response.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/router_client.py",
+        "symbols": [
+          "ToolRouterClient._unwrap_tools"
+        ],
+        "observation": "Normalizes tool lists from supported response-envelope shapes."
+      }
+    ]
+  }
+]

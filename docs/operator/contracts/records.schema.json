@@ -1,0 +1,2120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:dsco:operator:records:1.0",
+  "title": "DSCO operator central record contracts",
+  "description": "Specified target structural records. This schema is not a runtime API implementation and does not establish authorization, snapshot validity, transaction atomicity, canonical hashes, effect truth or backend conformance. Inspect validate.py for bounded fixture-only cross-record checks.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/ObjectRef"
+    },
+    {
+      "$ref": "#/$defs/ValueAddress"
+    },
+    {
+      "$ref": "#/$defs/WorldContext"
+    },
+    {
+      "$ref": "#/$defs/EvaluationRecord"
+    },
+    {
+      "$ref": "#/$defs/Scenario"
+    },
+    {
+      "$ref": "#/$defs/Changeset"
+    },
+    {
+      "$ref": "#/$defs/CommitReceipt"
+    },
+    {
+      "$ref": "#/$defs/CommandIntent"
+    },
+    {
+      "$ref": "#/$defs/AttemptReceipt"
+    },
+    {
+      "$ref": "#/$defs/RunCheckpoint"
+    },
+    {
+      "$ref": "#/$defs/WatchEvent"
+    },
+    {
+      "$ref": "#/$defs/SourceManifest"
+    },
+    {
+      "$ref": "#/$defs/Error"
+    }
+  ],
+  "$defs": {
+    "Opaque": {
+      "type": "string",
+      "minLength": 1
+    },
+    "Digest": {
+      "type": "object",
+      "properties": {
+        "algorithm": {
+          "const": "sha256"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "algorithm",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "Time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "Identity": {
+      "type": "object",
+      "properties": {
+        "tenant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "realm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "object_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "tenant",
+        "realm",
+        "object_id"
+      ],
+      "additionalProperties": false
+    },
+    "ObjectRef": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "ObjectRef"
+        },
+        "tenant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "realm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "object_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "tenant",
+        "realm",
+        "object_id"
+      ],
+      "additionalProperties": false
+    },
+    "PinnedRef": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/ObjectRef"
+        },
+        {
+          "required": [
+            "revision"
+          ]
+        }
+      ]
+    },
+    "Decimal": {
+      "type": "object",
+      "properties": {
+        "$type": {
+          "const": "decimal"
+        },
+        "coefficient": {
+          "type": "string",
+          "pattern": "^(0|-?[1-9][0-9]*)$"
+        },
+        "scale": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "$type",
+        "coefficient",
+        "scale",
+        "unit"
+      ],
+      "additionalProperties": false
+    },
+    "ExactInteger": {
+      "type": "object",
+      "properties": {
+        "$type": {
+          "const": "integer"
+        },
+        "value": {
+          "type": "string",
+          "pattern": "^(0|-?[1-9][0-9]*)$"
+        }
+      },
+      "required": [
+        "$type",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "ReferenceValue": {
+      "type": "object",
+      "properties": {
+        "$type": {
+          "const": "object_ref"
+        },
+        "ref": {
+          "$ref": "#/$defs/ObjectRef"
+        }
+      },
+      "required": [
+        "$type",
+        "ref"
+      ],
+      "additionalProperties": false
+    },
+    "DataValue": {
+      "description": "JSON/domain value. $type is reserved for declared tagged scalars; large exact integers use the integer tag. Hashing/canonicalization remains a separate versioned semantic contract.",
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        {
+          "type": "number",
+          "not": {
+            "type": "integer"
+          }
+        },
+        {
+          "$ref": "#/$defs/Decimal"
+        },
+        {
+          "$ref": "#/$defs/ExactInteger"
+        },
+        {
+          "$ref": "#/$defs/ReferenceValue"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DataValue"
+          },
+          "minItems": 0
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "not": {
+              "const": "$type"
+            }
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/DataValue"
+          }
+        }
+      ]
+    },
+    "Arguments": {
+      "type": "object",
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/DataValue"
+      }
+    },
+    "ValueAddress": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "ValueAddress"
+        },
+        "object": {
+          "$ref": "#/$defs/Identity"
+        },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "args": {
+          "$ref": "#/$defs/Arguments"
+        }
+      },
+      "required": [
+        "kind",
+        "object",
+        "field",
+        "args"
+      ],
+      "additionalProperties": false
+    },
+    "Error": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "Error"
+        },
+        "code": {
+          "enum": [
+            "UNSUPPORTED_FEATURE",
+            "UNAUTHORIZED",
+            "TENANT_MISMATCH",
+            "NOT_FOUND",
+            "TOMBSTONED",
+            "SCHEMA_MISMATCH",
+            "SNAPSHOT_EXPIRED",
+            "SOURCE_UNAVAILABLE",
+            "VALIDATION_FAILED",
+            "CONFLICT",
+            "IDEMPOTENCY_CONFLICT",
+            "OUTCOME_UNKNOWN",
+            "LEASE_EXPIRED",
+            "STALE_FENCE",
+            "CURSOR_GAP",
+            "BACKPRESSURE",
+            "CALCULATION_FAILED",
+            "DEPENDENCY_CYCLE",
+            "BUDGET_EXHAUSTED",
+            "CANCELLED"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "origin": {
+          "enum": [
+            "local_validation",
+            "dsco_admission",
+            "world_service",
+            "evaluator",
+            "adapter",
+            "external_target"
+          ]
+        },
+        "retry": {
+          "enum": [
+            "never",
+            "same_request",
+            "new_context",
+            "after_reconciliation",
+            "after_authorization",
+            "after_backoff"
+          ]
+        },
+        "details": {
+          "$ref": "#/$defs/Arguments"
+        },
+        "request_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "command_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evaluation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trace_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "code",
+        "message",
+        "origin",
+        "retry",
+        "details"
+      ],
+      "additionalProperties": false
+    },
+    "SourceModule": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "artifact_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "exports": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        }
+      },
+      "required": [
+        "name",
+        "artifact_id",
+        "version",
+        "digest",
+        "exports"
+      ],
+      "additionalProperties": false
+    },
+    "SourceManifest": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "SourceManifest"
+        },
+        "source_manifest_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tenant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "realm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifest_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "runtime_abi": {
+          "type": "string",
+          "minLength": 1
+        },
+        "standard_library": {
+          "type": "string",
+          "minLength": 1
+        },
+        "canonicalization_profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "modules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceModule"
+          },
+          "minItems": 1
+        },
+        "classes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "class_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "module": {
+                "type": "string",
+                "minLength": 1
+              },
+              "export": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "class_id",
+              "version",
+              "module",
+              "export"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0
+        },
+        "native_kernels": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "digest": {
+                "$ref": "#/$defs/Digest"
+              },
+              "effect": {
+                "enum": [
+                  "pure",
+                  "command"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "version",
+              "digest",
+              "effect"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0
+        }
+      },
+      "required": [
+        "kind",
+        "source_manifest_id",
+        "tenant",
+        "realm",
+        "manifest_digest",
+        "runtime_abi",
+        "standard_library",
+        "canonicalization_profile",
+        "modules",
+        "classes",
+        "native_kernels"
+      ],
+      "additionalProperties": false
+    },
+    "RootPin": {
+      "type": "object",
+      "properties": {
+        "root_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tenant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "realm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "snapshot": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mode": {
+          "enum": [
+            "local",
+            "imported_read_only"
+          ]
+        }
+      },
+      "required": [
+        "root_id",
+        "tenant",
+        "realm",
+        "snapshot",
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "ObservationPin": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ref": {
+          "$ref": "#/$defs/PinnedRef"
+        }
+      },
+      "required": [
+        "name",
+        "ref"
+      ],
+      "additionalProperties": false
+    },
+    "WorldContext": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "WorldContext"
+        },
+        "context_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tenant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "realm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "transaction_domain": {
+          "type": "string",
+          "minLength": 1
+        },
+        "snapshot": {
+          "type": "string",
+          "minLength": 1
+        },
+        "snapshot_watermark": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema_generation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_manifest_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "roots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RootPin"
+          },
+          "minItems": 1
+        },
+        "observations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ObservationPin"
+          },
+          "minItems": 0
+        },
+        "principal_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "visibility_scope": {
+          "type": "string",
+          "minLength": 1
+        },
+        "authorization_epoch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evaluator_profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scenario_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "workspace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workspace_head": {
+          "type": "string",
+          "minLength": 1
+        },
+        "draft_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "policy_versions": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "context_id",
+        "tenant",
+        "realm",
+        "transaction_domain",
+        "snapshot",
+        "snapshot_watermark",
+        "schema_generation",
+        "source_manifest_id",
+        "roots",
+        "observations",
+        "principal_id",
+        "visibility_scope",
+        "authorization_epoch",
+        "evaluator_profile",
+        "scenario_id",
+        "policy_versions"
+      ],
+      "additionalProperties": false,
+      "dependentRequired": {
+        "workspace_id": [
+          "workspace_head"
+        ],
+        "workspace_head": [
+          "workspace_id"
+        ]
+      }
+    },
+    "Override": {
+      "type": "object",
+      "properties": {
+        "address": {
+          "$ref": "#/$defs/ValueAddress"
+        },
+        "value_type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "$ref": "#/$defs/DataValue"
+        }
+      },
+      "required": [
+        "address",
+        "value_type",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "Scenario": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "Scenario"
+        },
+        "scenario_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tenant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "realm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "baseline_context_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parent_scenario_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "author_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "overrides": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Override"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "kind",
+        "scenario_id",
+        "tenant",
+        "realm",
+        "baseline_context_id",
+        "parent_scenario_id",
+        "author_id",
+        "digest",
+        "overrides"
+      ],
+      "additionalProperties": false
+    },
+    "Dependency": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "value",
+            "binding",
+            "existence",
+            "predicate",
+            "observation",
+            "source"
+          ]
+        },
+        "token": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ref": {
+          "$ref": "#/$defs/ObjectRef"
+        },
+        "address": {
+          "$ref": "#/$defs/ValueAddress"
+        },
+        "query_digest": {
+          "$ref": "#/$defs/Digest"
+        }
+      },
+      "required": [
+        "kind",
+        "token"
+      ],
+      "additionalProperties": false
+    },
+    "Result": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "available",
+            "missing",
+            "unavailable",
+            "redacted"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "$ref": "#/$defs/DataValue"
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "state",
+        "type"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "available"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "value"
+            ],
+            "properties": {
+              "reason": false
+            }
+          },
+          "else": {
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "value": false
+            }
+          }
+        }
+      ]
+    },
+    "EvaluationRecord": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "EvaluationRecord"
+        },
+        "evaluation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "context_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "address": {
+          "$ref": "#/$defs/ValueAddress"
+        },
+        "source_manifest_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "evaluator_profile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "succeeded",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "requested_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "started_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "finished_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Dependency"
+          },
+          "minItems": 0
+        },
+        "resource_use": {
+          "type": "object",
+          "properties": {
+            "cpu_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "wall_ms": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "graph_reads": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "peak_bytes": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "cpu_ms",
+            "wall_ms",
+            "graph_reads",
+            "peak_bytes"
+          ],
+          "additionalProperties": false
+        },
+        "result": {
+          "$ref": "#/$defs/Result"
+        },
+        "completeness": {
+          "enum": [
+            "complete",
+            "partial"
+          ]
+        },
+        "error": {
+          "$ref": "#/$defs/Error"
+        }
+      },
+      "required": [
+        "kind",
+        "evaluation_id",
+        "context_id",
+        "address",
+        "source_manifest_id",
+        "evaluator_profile",
+        "status",
+        "requested_at",
+        "dependencies"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "succeeded"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "started_at",
+              "finished_at",
+              "result",
+              "completeness",
+              "resource_use"
+            ],
+            "properties": {
+              "error": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "failed",
+                  "cancelled"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "finished_at",
+              "error"
+            ],
+            "properties": {
+              "result": false,
+              "completeness": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "queued",
+                  "running"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "result": false,
+              "error": false,
+              "finished_at": false,
+              "completeness": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "running"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "started_at"
+            ]
+          }
+        }
+      ]
+    },
+    "Change": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "enum": [
+            "create",
+            "patch",
+            "tombstone",
+            "link",
+            "unlink",
+            "alias",
+            "source_binding"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/Identity"
+        },
+        "expected_revision": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fields": {
+          "$ref": "#/$defs/Arguments"
+        },
+        "related": {
+          "$ref": "#/$defs/Identity"
+        },
+        "binding": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_binding_token": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "op",
+        "target",
+        "expected_revision"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "const": "create"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "fields"
+            ],
+            "properties": {
+              "expected_revision": {
+                "type": "null"
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "expected_revision": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "const": "patch"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "fields"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "enum": [
+                  "link",
+                  "unlink"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "related"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "enum": [
+                  "alias",
+                  "source_binding"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "binding",
+              "expected_binding_token"
+            ]
+          }
+        }
+      ]
+    },
+    "Changeset": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "Changeset"
+        },
+        "changeset_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tenant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "realm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "transaction_domain": {
+          "type": "string",
+          "minLength": 1
+        },
+        "base_context_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "workspace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_workspace_head": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_manifest_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "request_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Change"
+          },
+          "minItems": 1
+        },
+        "read_set": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Dependency"
+          },
+          "minItems": 0
+        },
+        "validators": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        },
+        "evidence_evaluation_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        },
+        "scenario_id": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "changeset_id",
+        "tenant",
+        "realm",
+        "transaction_domain",
+        "base_context_id",
+        "workspace_id",
+        "expected_workspace_head",
+        "source_manifest_id",
+        "request_digest",
+        "idempotency_key",
+        "changes",
+        "read_set",
+        "validators",
+        "evidence_evaluation_ids"
+      ],
+      "additionalProperties": false
+    },
+    "CommitReceipt": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "CommitReceipt"
+        },
+        "commit_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "changeset_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tenant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "realm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "transaction_domain": {
+          "type": "string",
+          "minLength": 1
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "request_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "prior_workspace_head": {
+          "type": "string",
+          "minLength": 1
+        },
+        "new_workspace_head": {
+          "type": "string",
+          "minLength": 1
+        },
+        "changed_objects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PinnedRef"
+          },
+          "minItems": 1
+        },
+        "durability": {
+          "enum": [
+            "wal_fsynced",
+            "quorum_durable"
+          ]
+        },
+        "durable_watermark": {
+          "type": "string",
+          "minLength": 1
+        },
+        "change_cursor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "status": {
+          "const": "committed"
+        }
+      },
+      "required": [
+        "kind",
+        "commit_id",
+        "changeset_id",
+        "tenant",
+        "realm",
+        "transaction_domain",
+        "idempotency_key",
+        "request_digest",
+        "prior_workspace_head",
+        "new_workspace_head",
+        "changed_objects",
+        "durability",
+        "durable_watermark",
+        "change_cursor",
+        "committed_at",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "CommandIntent": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "CommandIntent"
+        },
+        "command_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tenant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "realm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "context_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_manifest_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments": {
+          "$ref": "#/$defs/Arguments"
+        },
+        "arguments_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "principal_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "authority_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required_capabilities": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "fs_read",
+              "fs_write",
+              "net",
+              "exec",
+              "secrets",
+              "untrusted_in",
+              "control"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "retry_class": {
+          "enum": [
+            "never_automatic",
+            "target_idempotent",
+            "reconcile_before_retry"
+          ]
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_postcondition": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "occurrence_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "budget": {
+          "type": "object",
+          "properties": {
+            "max_attempts": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "deadline": {
+              "$ref": "#/$defs/Time"
+            }
+          },
+          "required": [
+            "max_attempts",
+            "deadline"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "kind",
+        "command_id",
+        "tenant",
+        "realm",
+        "context_id",
+        "source_manifest_id",
+        "operation",
+        "arguments",
+        "arguments_digest",
+        "principal_id",
+        "authority_refs",
+        "target",
+        "required_capabilities",
+        "retry_class",
+        "idempotency_key",
+        "expected_postcondition",
+        "budget"
+      ],
+      "additionalProperties": false,
+      "dependentRequired": {
+        "run_id": [
+          "occurrence_id"
+        ],
+        "occurrence_id": [
+          "run_id"
+        ]
+      }
+    },
+    "AttemptReceipt": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "AttemptReceipt"
+        },
+        "attempt_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "command_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tenant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "realm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "occurrence_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "worker_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dispatch_generation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "recorded_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "dispatched_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "outcome": {
+          "enum": [
+            "succeeded",
+            "failed",
+            "cancelled",
+            "effect_unknown"
+          ]
+        },
+        "result": {
+          "$ref": "#/$defs/Result"
+        },
+        "error": {
+          "$ref": "#/$defs/Error"
+        },
+        "postcondition": {
+          "enum": [
+            "verified",
+            "not_verified",
+            "unknown"
+          ]
+        },
+        "evidence_artifact_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        },
+        "receipt_digest": {
+          "$ref": "#/$defs/Digest"
+        }
+      },
+      "required": [
+        "kind",
+        "attempt_id",
+        "command_id",
+        "tenant",
+        "realm",
+        "worker_id",
+        "dispatch_generation",
+        "recorded_at",
+        "outcome",
+        "postcondition",
+        "evidence_artifact_ids",
+        "receipt_digest"
+      ],
+      "additionalProperties": false,
+      "dependentRequired": {
+        "run_id": [
+          "occurrence_id"
+        ],
+        "occurrence_id": [
+          "run_id"
+        ]
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "succeeded"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "result",
+              "dispatched_at"
+            ],
+            "properties": {
+              "error": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "failed",
+                  "cancelled"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "error"
+            ],
+            "properties": {
+              "result": false,
+              "postcondition": {
+                "enum": [
+                  "not_verified",
+                  "unknown"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "effect_unknown"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "error"
+            ],
+            "properties": {
+              "result": false,
+              "postcondition": {
+                "const": "unknown"
+              },
+              "error": {
+                "properties": {
+                  "code": {
+                    "const": "OUTCOME_UNKNOWN"
+                  },
+                  "retry": {
+                    "const": "after_reconciliation"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TransitionEvidence": {
+      "type": "object",
+      "properties": {
+        "transition_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accepted_generation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "receipt_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        },
+        "reconciliation_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        },
+        "accepted_at": {
+          "$ref": "#/$defs/Time"
+        }
+      },
+      "required": [
+        "transition_id",
+        "accepted_generation",
+        "receipt_ids",
+        "reconciliation_ids",
+        "accepted_at"
+      ],
+      "additionalProperties": false
+    },
+    "RunCheckpoint": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "RunCheckpoint"
+        },
+        "checkpoint_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tenant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "realm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "context_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_manifest_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_revision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "checkpoint_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "running",
+            "waiting",
+            "paused",
+            "reconciling",
+            "succeeded",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "next_steps": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        },
+        "state": {
+          "$ref": "#/$defs/Arguments"
+        },
+        "current_lease": {
+          "type": "object",
+          "properties": {
+            "owner": {
+              "type": "string",
+              "minLength": 1
+            },
+            "generation": {
+              "type": "string",
+              "minLength": 1
+            },
+            "expires_at": {
+              "$ref": "#/$defs/Time"
+            }
+          },
+          "required": [
+            "owner",
+            "generation",
+            "expires_at"
+          ],
+          "additionalProperties": false
+        },
+        "pending_command_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        },
+        "evidence_receipt_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        },
+        "last_transition": {
+          "$ref": "#/$defs/TransitionEvidence"
+        },
+        "acceptance_evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        },
+        "error": {
+          "$ref": "#/$defs/Error"
+        }
+      },
+      "required": [
+        "kind",
+        "checkpoint_id",
+        "run_id",
+        "tenant",
+        "realm",
+        "context_id",
+        "source_manifest_id",
+        "run_revision",
+        "checkpoint_name",
+        "status",
+        "next_steps",
+        "state",
+        "current_lease",
+        "pending_command_ids",
+        "evidence_receipt_ids",
+        "last_transition"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "succeeded"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "acceptance_evidence"
+            ],
+            "properties": {
+              "next_steps": {
+                "maxItems": 0
+              },
+              "pending_command_ids": {
+                "maxItems": 0
+              },
+              "acceptance_evidence": {
+                "minItems": 1
+              },
+              "error": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "failed",
+                  "cancelled"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "error"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "running",
+                  "waiting",
+                  "paused",
+                  "reconciling"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "acceptance_evidence": false
+            }
+          }
+        }
+      ]
+    },
+    "WatchEvent": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "WatchEvent"
+        },
+        "event_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "watch_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tenant": {
+          "type": "string",
+          "minLength": 1
+        },
+        "realm": {
+          "type": "string",
+          "minLength": 1
+        },
+        "transaction_domain": {
+          "type": "string",
+          "minLength": 1
+        },
+        "backend_generation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "authorization_epoch": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cursor": {
+          "type": "string",
+          "minLength": 1
+        },
+        "previous_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event_type": {
+          "enum": [
+            "committed_batch",
+            "cursor_gap",
+            "authority_revoked",
+            "keepalive"
+          ]
+        },
+        "commit_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "changes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PinnedRef"
+          },
+          "minItems": 1
+        },
+        "error": {
+          "$ref": "#/$defs/Error"
+        },
+        "reset_snapshot": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional advisory identifier of a possible replacement snapshot. It is not a new context or lease, does not guarantee availability, and must not advance a pinned view."
+        },
+        "observed_at": {
+          "$ref": "#/$defs/Time"
+        }
+      },
+      "required": [
+        "kind",
+        "event_id",
+        "watch_id",
+        "tenant",
+        "realm",
+        "transaction_domain",
+        "backend_generation",
+        "authorization_epoch",
+        "cursor",
+        "previous_cursor",
+        "event_type",
+        "observed_at"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "const": "committed_batch"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "commit_id",
+              "changes"
+            ],
+            "properties": {
+              "error": false,
+              "reset_snapshot": false
+            }
+          },
+          "else": {
+            "properties": {
+              "commit_id": false,
+              "changes": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "const": "cursor_gap"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "error"
+            ],
+            "properties": {
+              "error": {
+                "properties": {
+                  "code": {
+                    "const": "CURSOR_GAP"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "const": "authority_revoked"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "error"
+            ],
+            "properties": {
+              "error": {
+                "properties": {
+                  "code": {
+                    "const": "UNAUTHORIZED"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "const": "keepalive"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error": false,
+              "reset_snapshot": false
+            }
+          }
+        }
+      ]
+    }
+  }
+}

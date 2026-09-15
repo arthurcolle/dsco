@@ -1,0 +1,1564 @@
+{
+  "schema": "dsco.feature-catalog/v1",
+  "status": "proposed-features",
+  "source_checkout": "/Users/arthurcolle/Dsco/dsco-cli",
+  "prompt_count": 60,
+  "word_count_method": "UTF-8 text split on whitespace; includes title",
+  "min_words": 294,
+  "max_words": 349,
+  "total_words": 19445,
+  "batch_semantics": "Suggested selection order only; no dependency or conflict-free guarantee",
+  "features": [
+    {
+      "id": "01",
+      "title": "Recover unsent drafts after interruption",
+      "slug": "draft-recovery",
+      "prompt": "prompts/01-draft-recovery.md",
+      "domain": "interactive-ux",
+      "primary_paths": [
+        "src/tui.c",
+        "src/agent.c",
+        "src/native_composer.c"
+      ],
+      "proposed_modules": [
+        "src/draft_store.c",
+        "include/draft_store.h"
+      ],
+      "hotspots": [
+        "src/tui.c",
+        "src/agent.c"
+      ],
+      "acceptance": "Use owned PTYs to type multiline UTF-8 text, kill the process, restart with isolated state, and restore identical bytes and cursor position. Verify a submitted draft does not reappear, two sessions do not overwrite each other, corrupt state degrades visibly, and slow persistence leaves typing responsive.",
+      "word_count": 331,
+      "sha256": "fb3e33545e4427098cfaa2a411bde3c03173199f43d29eda8716f0c3df1d7628",
+      "dependencies": [],
+      "suggested_batch": 1
+    },
+    {
+      "id": "02",
+      "title": "Edit queued follow-up messages",
+      "slug": "editable-followups",
+      "prompt": "prompts/02-editable-followups.md",
+      "domain": "interactive-ux",
+      "primary_paths": [
+        "src/agent.c",
+        "src/tui.c",
+        "src/native_composer.c"
+      ],
+      "proposed_modules": [
+        "src/followup_editor.c",
+        "include/followup_editor.h"
+      ],
+      "hotspots": [
+        "src/agent.c",
+        "src/tui.c"
+      ],
+      "acceptance": "Drive the live binary through an owned PTY with a deterministic stalled response fixture. Enqueue three messages, edit the middle message, remove the first, and verify exactly-once delivery in the resulting order. Cover full capacity, stale edits, UTF-8, and simultaneous completion while typing.",
+      "word_count": 326,
+      "sha256": "cd8f9c034d5b3f259eaa9049e0ce5ef673c3d1291ab9a070f3f6b39033bd1f75",
+      "dependencies": [],
+      "suggested_batch": 2
+    },
+    {
+      "id": "03",
+      "title": "Stage large pasted input before submission",
+      "slug": "paste-staging",
+      "prompt": "prompts/03-paste-staging.md",
+      "domain": "interactive-ux",
+      "primary_paths": [
+        "src/tui.c",
+        "src/native_composer.c",
+        "src/input_budget.c"
+      ],
+      "proposed_modules": [
+        "src/paste_staging.c",
+        "include/paste_staging.h"
+      ],
+      "hotspots": [
+        "src/tui.c"
+      ],
+      "acceptance": "Use PTYs for multiline pastes, split delimiters, embedded terminal controls, Unicode, and a paste beyond the configured maximum. Verify preview counts against original bytes, explicit submission sends exactly one turn, discard preserves surrounding text, and asynchronous status output does not corrupt the draft.",
+      "word_count": 342,
+      "sha256": "d3a423c35b8795605dbd182f3e454ce2e8d4e1f5760506674aa5f8aaed589d74",
+      "dependencies": [],
+      "suggested_batch": 3
+    },
+    {
+      "id": "04",
+      "title": "Bookmark and revisit terminal evidence",
+      "slug": "scrollback-bookmarks",
+      "prompt": "prompts/04-scrollback-bookmarks.md",
+      "domain": "interactive-ux",
+      "primary_paths": [
+        "src/tui.c",
+        "src/project.c",
+        "src/buffer_store.c"
+      ],
+      "proposed_modules": [
+        "src/transcript_bookmarks.c",
+        "include/transcript_bookmarks.h"
+      ],
+      "hotspots": [
+        "src/tui.c",
+        "src/project.c",
+        "src/buffer_store.c"
+      ],
+      "acceptance": "Generate enough local fixture output to wrap the project ring, bookmark before and after wrapping, and verify navigation resolves the intended content. Restart with isolated storage and confirm labels persist. Test duplicate labels, missing archives, ANSI-rich results, and a PTY jump that preserves the active composer draft.",
+      "word_count": 336,
+      "sha256": "eedd21e1a5f8cee0d59032ab38fb97571a92735885ef8c6ad86c172976e1ed52",
+      "dependencies": [],
+      "suggested_batch": 4
+    },
+    {
+      "id": "05",
+      "title": "Search prompt history without losing the draft",
+      "slug": "prompt-history-search",
+      "prompt": "prompts/05-prompt-history-search.md",
+      "domain": "interactive-ux",
+      "primary_paths": [
+        "src/tui.c",
+        "src/agent.c",
+        "src/session_memory.c"
+      ],
+      "proposed_modules": [
+        "src/history_search.c",
+        "include/history_search.h"
+      ],
+      "hotspots": [
+        "src/tui.c",
+        "src/agent.c",
+        "src/session_memory.c"
+      ],
+      "acceptance": "Use an isolated history fixture containing repeated prompts, long Unicode entries, and two workspaces. In a live PTY search, select, edit, cancel, and submit, checking exact bytes and workspace isolation. Measure responsiveness with at least ten thousand history records and verify history-disabled mode creates no index.",
+      "word_count": 342,
+      "sha256": "99b2dcdc0a8ef550986460d0d724425ecdc1ebb80eba77015df1b1b0c99852dd",
+      "dependencies": [],
+      "suggested_batch": 5
+    },
+    {
+      "id": "06",
+      "title": "Provide an accessible linear terminal mode",
+      "slug": "accessible-terminal",
+      "prompt": "prompts/06-accessible-terminal.md",
+      "domain": "interactive-ux",
+      "primary_paths": [
+        "src/tui.c",
+        "src/native_composer.c",
+        "src/main.c"
+      ],
+      "proposed_modules": [
+        "src/terminal_accessibility.c",
+        "include/terminal_accessibility.h"
+      ],
+      "hotspots": [
+        "src/tui.c",
+        "src/main.c"
+      ],
+      "acceptance": "Run the built binary in an owned PTY and with redirected output under TERM=dumb and NO_COLOR. Assert no cursor movement or image protocol sequences in linear mode, one announcement per state transition, readable error text, and working input while background services load. Include a keyboard-only transcript documenting navigation and draft preservation.",
+      "word_count": 340,
+      "sha256": "70853b17426965f750d5c049530f926bfb5371a46f8c28c6d736342523b15b9d",
+      "dependencies": [],
+      "suggested_batch": 6
+    },
+    {
+      "id": "07",
+      "title": "Freeze attachment content at submission",
+      "slug": "attachment-snapshots",
+      "prompt": "prompts/07-attachment-snapshots.md",
+      "domain": "context-knowledge",
+      "primary_paths": [
+        "src/context_fabric.c",
+        "src/agent.c",
+        "src/tui.c"
+      ],
+      "proposed_modules": [
+        "src/attachment_snapshot.c",
+        "include/attachment_snapshot.h"
+      ],
+      "hotspots": [
+        "src/context_fabric.c",
+        "src/agent.c",
+        "src/tui.c"
+      ],
+      "acceptance": "Test with a temporary repository where an attached file changes before and after submission. Inspect the captured request and persisted snapshot to prove exact version identity. Cover UTF-8 ranges, spaces in paths, deletion, an oversize file, and a live PTY preview that does not block typing or make an inference request.",
+      "word_count": 343,
+      "sha256": "9d781bdddb3d8e0d9b90e113c53eae798eb2097b88cd337b8a3f7c1fda558efa",
+      "dependencies": [],
+      "suggested_batch": 7
+    },
+    {
+      "id": "08",
+      "title": "Fork a session from a chosen turn",
+      "slug": "session-fork",
+      "prompt": "prompts/08-session-fork.md",
+      "domain": "session-continuity",
+      "primary_paths": [
+        "src/session_memory.c",
+        "src/agent.c",
+        "src/main.c"
+      ],
+      "proposed_modules": [
+        "src/session_branch.c",
+        "include/session_branch.h"
+      ],
+      "hotspots": [
+        "src/session_memory.c",
+        "src/agent.c",
+        "src/main.c"
+      ],
+      "acceptance": "Construct a deterministic three-turn session with one tool exchange, fork after the second turn, and verify exact prefix, unique identity, lineage, and untouched original storage. Confirm no tool is reexecuted and no third-turn content leaks. Restart both sessions, test invalid boundaries and damaged archives, and exercise the proposed command against the built binary.",
+      "word_count": 343,
+      "sha256": "a7e3803b2ff9ed50abf0d8d638763c403b7c958c8305020d983450448422a2c5",
+      "dependencies": [],
+      "suggested_batch": 8
+    },
+    {
+      "id": "09",
+      "title": "Preview workspace drift before resuming",
+      "slug": "resume-drift-preview",
+      "prompt": "prompts/09-resume-drift-preview.md",
+      "domain": "session-continuity",
+      "primary_paths": [
+        "src/main.c",
+        "src/agent.c",
+        "src/session_memory.c",
+        "src/project.c"
+      ],
+      "proposed_modules": [
+        "src/resume_preview.c",
+        "include/resume_preview.h"
+      ],
+      "hotspots": [
+        "src/main.c",
+        "src/agent.c",
+        "src/session_memory.c",
+        "src/project.c"
+      ],
+      "acceptance": "Create isolated saved sessions, then modify, delete, and recreate recorded files and move the checkout. Verify exact drift categories and clear unavailable-state reporting. Resume through the live binary and inspect the resulting context to confirm historical claims are qualified. Confirm inspecting the preview changes neither files nor the saved session and performs no network request.",
+      "word_count": 338,
+      "sha256": "7832a70443143bec0866672973b1d9efe183bd8871ebe1db693bb3632c6e05c2",
+      "dependencies": [],
+      "suggested_batch": 9
+    },
+    {
+      "id": "10",
+      "title": "Export a structured session handoff capsule",
+      "slug": "session-handoff",
+      "prompt": "prompts/10-session-handoff.md",
+      "domain": "session-continuity",
+      "primary_paths": [
+        "src/session_memory.c",
+        "src/context_fabric.c",
+        "src/main.c"
+      ],
+      "proposed_modules": [
+        "src/session_capsule.c",
+        "include/session_capsule.h"
+      ],
+      "hotspots": [
+        "src/session_memory.c",
+        "src/context_fabric.c",
+        "src/main.c"
+      ],
+      "acceptance": "Export a fixture session with conflicting outdated and current decisions, edit an allowed field, and import into a fresh isolated session. Verify schema validation, provenance, deterministic rendering, size bounds, and that malicious instruction text stays ordinary context. Exercise actual binary export/import and demonstrate a clear error for an unsupported version without modifying existing state.",
+      "word_count": 346,
+      "sha256": "b1618791f46b6a521cc360c6844cb5eff63fe3db575e31f13407d3f373564763",
+      "dependencies": [],
+      "suggested_batch": 10
+    },
+    {
+      "id": "11",
+      "title": "Inspect and recover compacted context",
+      "slug": "compaction-inspector",
+      "prompt": "prompts/11-compaction-inspector.md",
+      "domain": "context-knowledge",
+      "primary_paths": [
+        "src/context_eviction.c",
+        "src/context_fabric.c",
+        "src/agent.c"
+      ],
+      "proposed_modules": [
+        "src/compaction_inspector.c",
+        "include/compaction_inspector.h"
+      ],
+      "hotspots": [
+        "src/context_fabric.c",
+        "src/agent.c"
+      ],
+      "acceptance": "Force compaction with deterministic local exchanges including large tool results, then inspect and rehydrate a selected exchange through the live binary. Verify content hashes, exact call/result pairing, budget rejection, missing-archive handling, and immutable history. Confirm protected user messages remain intact and viewing an archive never starts inference or executes its recorded tool.",
+      "word_count": 340,
+      "sha256": "a3f7e3b967cf952f8a58f55d2d34fe9d1d317b17a8824501057ff4f48069cd13",
+      "dependencies": [],
+      "suggested_batch": 11
+    },
+    {
+      "id": "12",
+      "title": "Preview the assembled context budget",
+      "slug": "context-budget-preview",
+      "prompt": "prompts/12-context-budget-preview.md",
+      "domain": "context-knowledge",
+      "primary_paths": [
+        "src/input_budget.c",
+        "src/context_fabric.c",
+        "src/agent.c"
+      ],
+      "proposed_modules": [
+        "src/context_budget_view.c",
+        "include/context_budget_view.h"
+      ],
+      "hotspots": [
+        "src/context_fabric.c",
+        "src/agent.c"
+      ],
+      "acceptance": "Capture deterministic assembled requests with mixed instructions, tool schemas, attachments, and history. Compare preview totals to the current estimator, verify reported reductions match the transmitted payload, and cover rejection where only protected content remains. Exercise a live preview with a stalled Tool Management endpoint and prove typing and preview completion remain responsive.",
+      "word_count": 349,
+      "sha256": "d3833de0c8c152352ff6695c9137a13cc980aeb6b17ad65eb200089fbb6f2191",
+      "dependencies": [],
+      "suggested_batch": 12
+    },
+    {
+      "id": "13",
+      "title": "Expose source freshness for recalled context",
+      "slug": "context-source-freshness",
+      "prompt": "prompts/13-context-source-freshness.md",
+      "domain": "context-knowledge",
+      "primary_paths": [
+        "src/context_fabric.c",
+        "src/session_memory.c",
+        "src/context_eviction.c"
+      ],
+      "proposed_modules": [
+        "src/context_freshness.c",
+        "include/context_freshness.h"
+      ],
+      "hotspots": [
+        "src/context_fabric.c",
+        "src/session_memory.c"
+      ],
+      "acceptance": "Store a file, edit it without changing its size, restore its timestamp, and confirm digest-based drift detection. Cover deletion, symlink target changes, permission errors, and older records. Refresh through the built binary and prove both versions remain retrievable by their original keys and no check modifies the source file.",
+      "word_count": 344,
+      "sha256": "faee856ddb6164295de9979ddfa4024dd0b18937df2177ab90ffd83cc696531b",
+      "dependencies": [],
+      "suggested_batch": 13
+    },
+    {
+      "id": "14",
+      "title": "Explain active workspace instructions",
+      "slug": "instruction-explainer",
+      "prompt": "prompts/14-instruction-explainer.md",
+      "domain": "context-knowledge",
+      "primary_paths": [
+        "src/setup.c",
+        "src/project.c",
+        "src/agent.c"
+      ],
+      "proposed_modules": [
+        "src/instruction_explain.c",
+        "include/instruction_explain.h"
+      ],
+      "hotspots": [
+        "src/project.c",
+        "src/agent.c"
+      ],
+      "acceptance": "Use a temporary repository with root, nested, sibling, missing, and symlinked instruction files. Compare explanation output with the actual captured request for each cwd and target. Cover edited files between runs, excluded oversized content, and a non-repository directory. Exercise the built binary without inference and verify the command changes no instruction files or runtime policy.",
+      "word_count": 344,
+      "sha256": "69d38488384dde3afb92dc83739522c2af74722a7b97e0582f03d58290cc54a4",
+      "dependencies": [],
+      "suggested_batch": 14
+    },
+    {
+      "id": "15",
+      "title": "Track explicit project decisions and supersession",
+      "slug": "decision-ledger",
+      "prompt": "prompts/15-decision-ledger.md",
+      "domain": "context-knowledge",
+      "primary_paths": [
+        "src/session_memory.c",
+        "src/context_fabric.c",
+        "src/project.c"
+      ],
+      "proposed_modules": [
+        "src/decision_ledger.c",
+        "include/decision_ledger.h"
+      ],
+      "hotspots": [
+        "src/session_memory.c",
+        "src/context_fabric.c",
+        "src/project.c"
+      ],
+      "acceptance": "Record two decisions in one project, supersede one, reopen storage, and verify active retrieval and full lineage. Test two separate projects, invalid supersession IDs, cycles, truncated writes, and concurrent read/update behavior. Exercise the live CLI and inspect resulting context to ensure an outdated decision is labeled historical and an unaccepted assistant suggestion never becomes an active entry.",
+      "word_count": 344,
+      "sha256": "cf034c8f99ba526074dddacc86d26f6d0eb2a496ec46be4a104dd02e54d00b20",
+      "dependencies": [],
+      "suggested_batch": 15
+    },
+    {
+      "id": "16",
+      "title": "Assemble local evidence bundles for completed work",
+      "slug": "evidence-bundles",
+      "prompt": "prompts/16-evidence-bundles.md",
+      "domain": "developer-workflow",
+      "primary_paths": [
+        "src/context_fabric.c",
+        "src/chronicle.c",
+        "src/session_memory.c"
+      ],
+      "proposed_modules": [
+        "src/evidence_bundle.c",
+        "include/evidence_bundle.h"
+      ],
+      "hotspots": [
+        "src/context_fabric.c",
+        "src/session_memory.c"
+      ],
+      "acceptance": "Create a bundle from isolated deterministic test receipts and a small generated artifact, verify it through the live binary, then tamper with and remove entries to prove verification fails precisely. Cover paths with spaces, duplicate basenames, missing sources, and oversized selection limits. Confirm the manifest cannot escape its root and creating a bundle leaves source artifacts unchanged.",
+      "word_count": 344,
+      "sha256": "4abb46f7939ae887e75bddac3895bcfabc820dfef718e24dc6690d68da35e78d",
+      "dependencies": [],
+      "suggested_batch": 16
+    },
+    {
+      "id": "17",
+      "title": "Show workspace changes since a session checkpoint",
+      "slug": "workspace-change-digest",
+      "prompt": "prompts/17-workspace-change-digest.md",
+      "domain": "developer-workflow",
+      "primary_paths": [
+        "src/project.c",
+        "src/session_memory.c",
+        "src/context_fabric.c"
+      ],
+      "proposed_modules": [
+        "src/workspace_digest.c",
+        "include/workspace_digest.h"
+      ],
+      "hotspots": [
+        "src/project.c",
+        "src/session_memory.c",
+        "src/context_fabric.c"
+      ],
+      "acceptance": "Create a temporary dirty Git repository before checkpointing, then modify selected tracked and untracked files, delete one, and leave another unchanged. Compare digest output to actual bytes and prove preexisting dirty work is not misattributed. Exercise the binary across restart, missing baselines, binary files, and size caps, confirming the index and working files remain byte-identical.",
+      "word_count": 346,
+      "sha256": "2153b9758cfe7ffffba8b80af13556cf8811b01ec9e62eb4826b1d108a85c10e",
+      "dependencies": [],
+      "suggested_batch": 17
+    },
+    {
+      "id": "18",
+      "title": "Navigate compiler diagnostics from build output",
+      "slug": "build-diagnostics",
+      "prompt": "prompts/18-build-diagnostics.md",
+      "domain": "developer-workflow",
+      "primary_paths": [
+        "src/pty_session.c",
+        "src/buffer_store.c",
+        "src/buffer_cli.c"
+      ],
+      "proposed_modules": [
+        "src/build_diagnostics.c",
+        "include/build_diagnostics.h"
+      ],
+      "hotspots": [
+        "src/pty_session.c",
+        "src/buffer_store.c"
+      ],
+      "acceptance": "Run a small intentionally failing C build through the live binary's actual process surface in a temporary project. Verify detected locations, note relationships, original output references, and exit status. Cover split UTF-8 chunks, colored diagnostics, successful builds, malformed lines, and deleted sources. Demonstrate navigation preserves the composer draft and invokes no editor or command automatically.",
+      "word_count": 348,
+      "sha256": "0208325a763263879102c5ef84a10268a70266cf00627d13cfe75f65ec8a1d42",
+      "dependencies": [],
+      "suggested_batch": 18
+    },
+    {
+      "id": "19",
+      "title": "Save and launch explicit local terminal recipes",
+      "slug": "terminal-recipes",
+      "prompt": "prompts/19-terminal-recipes.md",
+      "domain": "developer-workflow",
+      "primary_paths": [
+        "src/pty_session.c",
+        "src/project.c",
+        "src/main.c"
+      ],
+      "proposed_modules": [
+        "src/terminal_recipes.c",
+        "include/terminal_recipes.h"
+      ],
+      "hotspots": [
+        "src/pty_session.c",
+        "src/project.c",
+        "src/main.c"
+      ],
+      "acceptance": "Create an isolated recipe for a tiny local program, run it through the live binary, read output, resize, and close using the returned session ID. Verify argv containing spaces and shell metacharacters arrives literally, capabilities are enforced, and shutdown owns cleanup. Test invalid cwd, excessive lifetime, concurrent recipe launches, and that listing recipes spawns no process.",
+      "word_count": 349,
+      "sha256": "f0ed6cf9e76a7e6130304f78ecca1e9108fc43b9b838e576d04b21d8b87e3aff",
+      "dependencies": [],
+      "suggested_batch": 19
+    },
+    {
+      "id": "20",
+      "title": "Capture reproducible local bug-report packets",
+      "slug": "repro-packets",
+      "prompt": "prompts/20-repro-packets.md",
+      "domain": "developer-workflow",
+      "primary_paths": [
+        "src/chronicle.c",
+        "src/pty_session.c",
+        "src/project.c"
+      ],
+      "proposed_modules": [
+        "src/repro_packet.c",
+        "include/repro_packet.h"
+      ],
+      "hotspots": [
+        "src/pty_session.c",
+        "src/project.c"
+      ],
+      "acceptance": "Capture a deterministic failing program with spaces, quotes, Unicode, and shell metacharacters in arguments. Verify the packet's structured invocation reproduces the same failure when explicitly executed in an isolated test directory. Cover signal exit, missing executable metadata, output truncation, excluded credential values, and packet tampering. Exercise live binary capture and inspection while proving neither action reruns the recorded command.",
+      "word_count": 347,
+      "sha256": "aa3c87e4459b2509a49f534af1db466dc4b6ff3266aeda80c1162e8009df3a08",
+      "dependencies": [],
+      "suggested_batch": 20
+    },
+    {
+      "id": "21",
+      "title": "Account-scoped offline tool catalog",
+      "slug": "account-scoped-tool-cache",
+      "prompt": "prompts/21-account-scoped-tool-cache.md",
+      "domain": "tool-management",
+      "primary_paths": [
+        "src/toolmgmt.c",
+        "include/toolmgmt.h",
+        "src/tools.c"
+      ],
+      "proposed_modules": [
+        "src/tool_catalog_cache.c",
+        "include/tool_catalog_cache.h"
+      ],
+      "hotspots": [
+        "src/toolmgmt.c",
+        "src/tools.c"
+      ],
+      "acceptance": "Verify the worktree binary against a controlled HTTP catalog: populate account A, restart offline and discover its tools, then switch to account B and prove A's entries are absent. Interrupt publication and corrupt one snapshot; the previous valid generation must remain usable. Stall refresh while submitting terminal input and record response latency. Include a bounded cache-size fixture and show that secret headers never enter persisted files.",
+      "word_count": 321,
+      "sha256": "a2ac1ac95d69bdc6cea8e43c38a562e86afac0c1303fb95a7811c104cee2afbc",
+      "dependencies": [],
+      "suggested_batch": 1
+    },
+    {
+      "id": "22",
+      "title": "Generation-pinned external tool schemas",
+      "slug": "generation-pinned-tool-schemas",
+      "prompt": "prompts/22-generation-pinned-tool-schemas.md",
+      "domain": "tool-management",
+      "primary_paths": [
+        "src/toolmgmt.c",
+        "src/tools.c",
+        "include/tools.h"
+      ],
+      "proposed_modules": [
+        "src/tool_catalog_generation.c",
+        "include/tool_catalog_generation.h"
+      ],
+      "hotspots": [
+        "src/toolmgmt.c",
+        "src/tools.c"
+      ],
+      "acceptance": "Exercise the real binary with a local catalog service that changes a required field while a call is queued. Prove the stale contract is rejected before the execution endpoint is contacted, an unchanged schema survives a generation refresh, and a fresh rediscovery succeeds. Include removal, duplicate remote IDs, and refresh failure cases. Use a repeatable concurrent fixture to demonstrate no use-after-free, lost callback, or mixed-generation result.",
+      "word_count": 319,
+      "sha256": "3704e9b5706cd8809d49db28320dfd02b9ce63cf4567c3eff3db9d2ab7716801",
+      "dependencies": [],
+      "suggested_batch": 2
+    },
+    {
+      "id": "23",
+      "title": "Explicit schema capacity and hydration errors",
+      "slug": "schema-capacity-reporting",
+      "prompt": "prompts/23-schema-capacity-reporting.md",
+      "domain": "tool-management",
+      "primary_paths": [
+        "src/mcp.c",
+        "include/mcp.h",
+        "src/toolmgmt.c",
+        "src/tools.c"
+      ],
+      "proposed_modules": [
+        "src/tool_schema_capacity.c",
+        "include/tool_schema_capacity.h"
+      ],
+      "hotspots": [
+        "src/mcp.c",
+        "src/toolmgmt.c",
+        "src/tools.c"
+      ],
+      "acceptance": "Drive the worktree binary against local HTTP and stdio fixtures advertising schemas just below and above current capacities, deeply nested JSON, malformed schema text, and a valid neighboring tool. Prove the valid tool remains usable, oversized contracts never reach execution with partial arguments, and inspection identifies the actual failure. Measure memory growth under repeated rejected refreshes and ensure startup and unrelated input stay responsive.",
+      "word_count": 317,
+      "sha256": "0e9d565d586c95782e6ff73b408a2fa1fa708f5ae7998c8640a1408b5f2ece0c",
+      "dependencies": [],
+      "suggested_batch": 3
+    },
+    {
+      "id": "24",
+      "title": "Retry-After-aware Tool Management admission",
+      "slug": "tool-api-retry-after",
+      "prompt": "prompts/24-tool-api-retry-after.md",
+      "domain": "tool-management",
+      "primary_paths": [
+        "src/toolmgmt.c",
+        "include/toolmgmt.h"
+      ],
+      "proposed_modules": [
+        "src/toolmgmt_admission.c",
+        "include/toolmgmt_admission.h"
+      ],
+      "hotspots": [
+        "src/toolmgmt.c"
+      ],
+      "acceptance": "Use the real `dsco tools` path against a controlled HTTP server returning a sequence of 429, 503, and success responses. Verify minimum retry timing with tolerance, maximum caller deadline, bounded concurrent retries, malformed and expired header handling, and an unaffected second endpoint. Include a mutation with unknown outcome and prove that admission logic does not create another execution. Capture server request timestamps and the terminal-visible error so acceptance proves actual transport behavior.",
+      "word_count": 313,
+      "sha256": "81417d32a5464ebcd9f2e28bbf47640a15cec11732e0d85476cb14be6b823397",
+      "dependencies": [],
+      "suggested_batch": 4
+    },
+    {
+      "id": "25",
+      "title": "Remote mutation outcome reconciliation",
+      "slug": "remote-mutation-reconcile",
+      "prompt": "prompts/25-remote-mutation-reconcile.md",
+      "domain": "tool-management",
+      "primary_paths": [
+        "src/toolmgmt.c",
+        "include/toolmgmt.h",
+        "src/tools.c"
+      ],
+      "proposed_modules": [
+        "src/toolmgmt_reconcile.c",
+        "include/toolmgmt_reconcile.h"
+      ],
+      "hotspots": [
+        "src/toolmgmt.c",
+        "src/tools.c"
+      ],
+      "acceptance": "Verify the worktree binary against a local server that commits a mutation, drops the response, and exposes a read-only status result. Show exactly one side effect, an initial unknown outcome, and later confirmed success. Add unknown identifier, unsupported lookup, expired reconciliation metadata, endpoint mismatch, and denied network cases. Prove reconciliation cannot call the execution route accidentally. Include request counts and redacted machine-readable output in the closeout.",
+      "word_count": 313,
+      "sha256": "ff2ce10d8f55eb67b65b3f8b0285744fcb02edb0606720844baac0b8aaab1248",
+      "dependencies": [],
+      "suggested_batch": 5
+    },
+    {
+      "id": "26",
+      "title": "Per-call MCP cancellation",
+      "slug": "mcp-per-call-cancellation",
+      "prompt": "prompts/26-mcp-per-call-cancellation.md",
+      "domain": "mcp",
+      "primary_paths": [
+        "src/mcp.c",
+        "include/mcp.h",
+        "src/mcp_response.c"
+      ],
+      "proposed_modules": [
+        "src/mcp_call_control.c",
+        "include/mcp_call_control.h"
+      ],
+      "hotspots": [
+        "src/mcp.c"
+      ],
+      "acceptance": "Run the worktree binary through local stdio and HTTP fixtures: one call stalls, another succeeds, the stalled call is cancelled, and its response arrives late. Prove subsequent calls receive their own results and shutdown reaps owned subprocesses. Measure cancellation latency against a documented threshold. Include a server ignoring cancellation, fragmented JSON, and concurrent server activity, plus the normal capability-gate checks.",
+      "word_count": 314,
+      "sha256": "c24fc6f6983fdc8f2677f777773185ff738248f68ed11b23c07e26655638b203",
+      "dependencies": [],
+      "suggested_batch": 6
+    },
+    {
+      "id": "27",
+      "title": "Capability-gated MCP resource reads",
+      "slug": "mcp-resource-reader",
+      "prompt": "prompts/27-mcp-resource-reader.md",
+      "domain": "mcp",
+      "primary_paths": [
+        "src/mcp.c",
+        "include/mcp.h",
+        "src/mcp_server.c",
+        "src/tools.c",
+        "src/capability.c"
+      ],
+      "proposed_modules": [
+        "src/mcp_resources.c",
+        "include/mcp_resources.h"
+      ],
+      "hotspots": [
+        "src/mcp.c",
+        "src/tools.c"
+      ],
+      "acceptance": "Exercise the real binary through `dsco mcp serve` with a local fixture advertising a text resource, a parameterized template, a binary response, and multiple pages. Prove the read result retains server, URI, and MIME information; reject oversized and malformed responses without destabilizing tool calls. Include a resource containing hostile instructions and verify untrusted taint is recorded before later egress is gated. Demonstrate that resource reads never bypass `tools_execute_for_tier()` and cannot directly open host paths.",
+      "word_count": 323,
+      "sha256": "5198cd22fa75b7bac69049dbb932ba24c89923d612b94307aed53c60a10d3c69",
+      "dependencies": [],
+      "suggested_batch": 7
+    },
+    {
+      "id": "28",
+      "title": "Scoped MCP catalog-change refresh",
+      "slug": "mcp-catalog-change-refresh",
+      "prompt": "prompts/28-mcp-catalog-change-refresh.md",
+      "domain": "mcp",
+      "primary_paths": [
+        "src/mcp.c",
+        "include/mcp.h",
+        "src/tools.c"
+      ],
+      "proposed_modules": [
+        "src/mcp_catalog_refresh.c",
+        "include/mcp_catalog_refresh.h"
+      ],
+      "hotspots": [
+        "src/mcp.c",
+        "src/tools.c"
+      ],
+      "acceptance": "Run the worktree binary against two controlled stdio servers. Change the first server's list while its tool call is active; demonstrate that a new tool becomes discoverable, a removed tool stops being offered, and the second server remains uninterrupted. Add repeated notifications, invalid replacement schemas, failed pagination, and shutdown during refresh. Show that no partial catalog is published and input remains responsive throughout. Capture server-side list request counts to demonstrate bounded coalescing, and verify all newly discovered tools retain ordinary capability classification.",
+      "word_count": 324,
+      "sha256": "a518ed45c0acf73a97149aa3f9a90327d304320d92bc3d33c7577f54aabb13d6",
+      "dependencies": [],
+      "suggested_batch": 8
+    },
+    {
+      "id": "29",
+      "title": "Structured tool-output contract validation",
+      "slug": "tool-output-validation",
+      "prompt": "prompts/29-tool-output-validation.md",
+      "domain": "tool-contracts",
+      "primary_paths": [
+        "src/tools.c",
+        "include/tools.h",
+        "src/mcp_response.c",
+        "src/mcp_server.c"
+      ],
+      "proposed_modules": [
+        "src/tool_output_validate.c",
+        "include/tool_output_validate.h"
+      ],
+      "hotspots": [
+        "src/tools.c"
+      ],
+      "acceptance": "Exercise the real binary via MCP JSON-RPC with a local tool fixture returning valid structured content, a wrong required type, missing fields, oversized output, and an error response. Verify advertised and enforced schemas agree, valid results retain their content, and invalid results include stable error categories and paths. Confirm a mutating fixture runs exactly once despite output validation failure. Add a native tool regression and default-schema compatibility case, then run capability-gate claims so the validator cannot create a parallel dispatch route.",
+      "word_count": 323,
+      "sha256": "0eef0f1955e615ef476de5678a8e4eda20a0ab2d1515f1727a9b70160cfdf980",
+      "dependencies": [],
+      "suggested_batch": 9
+    },
+    {
+      "id": "30",
+      "title": "Read-only capability decision preview",
+      "slug": "capability-decision-preview",
+      "prompt": "prompts/30-capability-decision-preview.md",
+      "domain": "governance",
+      "primary_paths": [
+        "src/capability.c",
+        "include/capability.h",
+        "src/tools.c",
+        "include/tools.h",
+        "src/mcp_server.c"
+      ],
+      "proposed_modules": [
+        "src/capability_explain.c",
+        "include/capability_explain.h"
+      ],
+      "hotspots": [
+        "src/tools.c"
+      ],
+      "acceptance": "Use the actual binary and `dsco mcp serve` to compare preview and execution for ordinary reads, explicit write opt-out, denied control mutation, permitted control status, and lethal-trifecta egress. Establish taint through controlled fixtures and prove preview leaves it unchanged. Check that `DSCO_ALLOW_EXFIL=1` and explicit capability opt-outs retain their current semantics. Include an argument-dependent tool verb so classification cannot be replaced with filename or tool-name heuristics. Record matching decisions and zero side effects from preview.",
+      "word_count": 320,
+      "sha256": "d2d8ba973073773717b2217652d025880cd7d677d65430e5189f8f1ca1190484",
+      "dependencies": [],
+      "suggested_batch": 10
+    },
+    {
+      "id": "31",
+      "title": "External tool origin pinning",
+      "slug": "external-tool-origin-pinning",
+      "prompt": "prompts/31-external-tool-origin-pinning.md",
+      "domain": "tool-contracts",
+      "primary_paths": [
+        "src/toolmgmt.c",
+        "src/mcp.c",
+        "src/mcp_names.c",
+        "src/tools.c",
+        "include/tools.h"
+      ],
+      "proposed_modules": [
+        "src/tool_origin.c",
+        "include/tool_origin.h"
+      ],
+      "hotspots": [
+        "src/toolmgmt.c",
+        "src/mcp.c",
+        "src/tools.c"
+      ],
+      "acceptance": "Test the worktree binary with two local servers advertising identical names and schemas. Discover on A, change configuration to B, and prove a pending selection does not execute on B. Fresh discovery should produce the documented result while exact remote names remain intact. Include endpoint normalization, a cross-origin redirect, duplicate display names, and stdio command changes. Show inspection contains no headers or environment secrets, and demonstrate that origin mismatch reporting still passes through the normal governed call path.",
+      "word_count": 329,
+      "sha256": "02e5f9d31069a9a18bea22d74b76acc5c52a6242db1163c5fd090cbfb3e3c219",
+      "dependencies": [],
+      "suggested_batch": 11
+    },
+    {
+      "id": "32",
+      "title": "External tool concurrency policies",
+      "slug": "external-tool-concurrency-policy",
+      "prompt": "prompts/32-external-tool-concurrency-policy.md",
+      "domain": "tool-contracts",
+      "primary_paths": [
+        "src/tools.c",
+        "include/tools.h",
+        "src/toolmgmt.c",
+        "src/capability.c"
+      ],
+      "proposed_modules": [
+        "src/tool_concurrency_policy.c",
+        "include/tool_concurrency_policy.h"
+      ],
+      "hotspots": [
+        "src/tools.c",
+        "src/toolmgmt.c"
+      ],
+      "acceptance": "Run the real binary against a controlled integration whose mutation handler records overlapping calls. Show that calls for the same serialized resource never overlap, independent resources can proceed when policy allows, and denied calls never reach the server. Cover timeout while queued, cancellation, malformed keys, and bounded queue capacity. Exercise direct invocation and batch invocation with equivalent policy. Record maximum observed concurrency and prove the policy cannot turn a control-plane or lethal-trifecta denial into a scheduling-only warning.",
+      "word_count": 331,
+      "sha256": "105c6f262c2311fdb827d5685052e50fb7cede734127ed37d127884151240213",
+      "dependencies": [],
+      "suggested_batch": 12
+    },
+    {
+      "id": "33",
+      "title": "Capability-constrained provider selection",
+      "slug": "provider-capability-constraints",
+      "prompt": "prompts/33-provider-capability-constraints.md",
+      "domain": "provider-routing",
+      "primary_paths": [
+        "src/router.c",
+        "include/router.h",
+        "src/provider.c",
+        "src/provider_profiles.c",
+        "src/llm.c"
+      ],
+      "proposed_modules": [
+        "src/route_constraints.c",
+        "include/route_constraints.h"
+      ],
+      "hotspots": [
+        "src/router.c",
+        "src/provider.c",
+        "src/llm.c"
+      ],
+      "acceptance": "Verify the worktree binary with controlled provider endpoints offering different capability sets. Submit requests requiring tools and structured output, force the preferred endpoint to fail, and prove fallback stays inside the constraint set. Include an unknown capability, explicit provider pin, local-only requirement, and no eligible candidate. Use endpoint request logs to prove excluded providers were never called. Add a regression showing unconstrained requests keep their prior routing behavior, and report the actual chosen provider identity rather than only the model alias.",
+      "word_count": 327,
+      "sha256": "218989b2c6367e79b586ce68518e334607c1561ac633fd691f38a69e55ee7501",
+      "dependencies": [],
+      "suggested_batch": 13
+    },
+    {
+      "id": "34",
+      "title": "Billing-lane-preserving fallback policy",
+      "slug": "billing-lane-fallback-policy",
+      "prompt": "prompts/34-billing-lane-fallback-policy.md",
+      "domain": "provider-routing",
+      "primary_paths": [
+        "src/provider.c",
+        "src/provider_pool.c",
+        "src/auth_lanes.c",
+        "src/router.c"
+      ],
+      "proposed_modules": [
+        "src/billing_lane_policy.c",
+        "include/billing_lane_policy.h"
+      ],
+      "hotspots": [
+        "src/provider.c",
+        "src/router.c"
+      ],
+      "acceptance": "Exercise the actual binary against fake subscription executors and local API endpoints using isolated credential references. Force subscription exhaustion, missing credentials, and transport failure. Prove a disallowed paid endpoint receives zero requests, an explicitly allowed API lane works, and provider identity remains accurate in the response. Include two account profiles and verify one profile's policy does not bleed into the other. Capture the exact invocation and redacted route result; do not launch paid inference or use real account credentials for acceptance.",
+      "word_count": 337,
+      "sha256": "1ea1438aa5aee04a154440d51ae77b8ae9f24bd59e9b26c995e58def52ffbabb",
+      "dependencies": [],
+      "suggested_batch": 14
+    },
+    {
+      "id": "35",
+      "title": "Safe streamed-provider failover boundary",
+      "slug": "streamed-failover-boundary",
+      "prompt": "prompts/35-streamed-failover-boundary.md",
+      "domain": "provider-reliability",
+      "primary_paths": [
+        "src/provider.c",
+        "src/llm.c",
+        "src/provider_pool.c",
+        "src/agent.c"
+      ],
+      "proposed_modules": [
+        "src/provider_failover_state.c",
+        "include/provider_failover_state.h"
+      ],
+      "hotspots": [
+        "src/provider.c",
+        "src/llm.c",
+        "src/agent.c"
+      ],
+      "acceptance": "Run the worktree binary against controlled streaming endpoints that disconnect before headers, before visible content, mid-text, mid-tool arguments, and after a tool result is accepted. Prove early failures can fail over, later failures do not duplicate text or dispatch the tool twice, and incomplete calls never execute. Include user cancellation and a second healthy turn after failure. Record endpoint attempt counts, emitted content, and tool side-effect counts. Restrict edits to small hooks around the existing stream lifecycle; do not rewrite the agent loop.",
+      "word_count": 334,
+      "sha256": "22159247f97032f9057b265a73eba1604cec9d44b94bfed4727d19c8ce5fd4fa",
+      "dependencies": [],
+      "suggested_batch": 15
+    },
+    {
+      "id": "36",
+      "title": "Explicit local-provider capability probes",
+      "slug": "local-provider-capability-probes",
+      "prompt": "prompts/36-local-provider-capability-probes.md",
+      "domain": "provider-routing",
+      "primary_paths": [
+        "src/local_llm.c",
+        "include/local_llm.h",
+        "src/provider.c",
+        "src/provider_profiles.c"
+      ],
+      "proposed_modules": [
+        "src/local_provider_probe.c",
+        "include/local_provider_probe.h"
+      ],
+      "hotspots": [
+        "src/provider.c"
+      ],
+      "acceptance": "Test the real binary against local fixtures that correctly implement one feature, falsely advertise another, omit usage, and hang. Verify bounded completion, accurate per-feature status, cache invalidation, and zero probe requests during normal help or startup. Demonstrate that routing can consume a fresh verified result without treating stale evidence as current. Include malformed model metadata and a configured nonlocal URL, which must be rejected before a probe is sent. Use only controlled endpoints for development acceptance.",
+      "word_count": 329,
+      "sha256": "c0a2f446a92380ace3250963f18c5e7771cc21fef933df25166870a717c2f363",
+      "dependencies": [],
+      "suggested_batch": 16
+    },
+    {
+      "id": "37",
+      "title": "Account-scoped quota reset handling",
+      "slug": "provider-quota-reset",
+      "prompt": "prompts/37-provider-quota-reset.md",
+      "domain": "provider-reliability",
+      "primary_paths": [
+        "src/provider_pool.c",
+        "include/provider_pool.h",
+        "src/provider.c",
+        "src/llm.c",
+        "src/auth_lanes.c"
+      ],
+      "proposed_modules": [
+        "src/provider_quota.c",
+        "include/provider_quota.h"
+      ],
+      "hotspots": [
+        "src/provider.c",
+        "src/llm.c"
+      ],
+      "acceptance": "Exercise the actual binary with two isolated account profiles and a local provider fixture returning epoch, duration, absent, malformed, and past reset values. Exhaust one profile and prove the other remains selectable. Advance a controllable test clock to demonstrate correct re-entry without real waiting, then make a successful request to clear the appropriate state. Test restart persistence, corrupt state, and authentication failure separately from quota exhaustion. Capture real route decisions and endpoint counts, preserving subscription versus direct API identity throughout.",
+      "word_count": 329,
+      "sha256": "40dc5f00fda14c25eaeddc2d73fcc0eae51b990960f579dc033c772107f9401c",
+      "dependencies": [],
+      "suggested_batch": 17
+    },
+    {
+      "id": "38",
+      "title": "Conservative inference cost admission",
+      "slug": "inference-cost-admission",
+      "prompt": "prompts/38-inference-cost-admission.md",
+      "domain": "resource-cost",
+      "primary_paths": [
+        "include/cost_budget.h",
+        "src/inference_cost.c",
+        "src/cost_model.c",
+        "src/model_pricing.c",
+        "src/router.c"
+      ],
+      "proposed_modules": [
+        "src/inference_admission.c",
+        "include/inference_admission.h"
+      ],
+      "hotspots": [
+        "src/router.c"
+      ],
+      "acceptance": "Verify the real binary against a local endpoint with a fixed test pricing table. Cover a request just within budget, one exceeding the bound, unknown pricing, cached input assumptions, and zero reported cost. Prove rejected requests produce zero HTTP calls and accepted requests use the admitted output limit. Add a retry case showing its projected spend remains covered. Reconcile reported usage after completion and explain unavoidable estimate uncertainty without claiming the client can guarantee an external provider's final invoice.",
+      "word_count": 339,
+      "sha256": "2157394310674e8b33006327c1e8b7a48a4fe792c8c5d677b6a113e547024b83",
+      "dependencies": [],
+      "suggested_batch": 18
+    },
+    {
+      "id": "39",
+      "title": "Process-local concurrent spend reservations",
+      "slug": "concurrent-spend-reservations",
+      "prompt": "prompts/39-concurrent-spend-reservations.md",
+      "domain": "resource-cost",
+      "primary_paths": [
+        "include/cost_budget.h",
+        "src/inference_cost.c",
+        "src/agent.c",
+        "src/router.c"
+      ],
+      "proposed_modules": [
+        "src/cost_reservation.c",
+        "include/cost_reservation.h"
+      ],
+      "hotspots": [
+        "src/agent.c",
+        "src/router.c"
+      ],
+      "acceptance": "Exercise the worktree binary with two concurrent controlled requests whose estimates individually fit but jointly exceed a small cap. Prove only the admissible request reaches the endpoint and that released capacity becomes available after settlement. Include early cancellation, disconnect after submission, duplicate settlement, and a lower-than-estimated reported cost. Use a deterministic barrier in the fixture to force the race rather than relying on timing luck. Confirm single-request behavior remains unchanged and document that the guarantee applies only to one process's budget authority.",
+      "word_count": 333,
+      "sha256": "a808d914d8c173e044b67001c99f02d7d1013eab5bc0a7baf7c0c780d5f7f6e3",
+      "dependencies": [],
+      "suggested_batch": 19
+    },
+    {
+      "id": "40",
+      "title": "Versioned pricing evidence for decisions",
+      "slug": "versioned-pricing-evidence",
+      "prompt": "prompts/40-versioned-pricing-evidence.md",
+      "domain": "resource-cost",
+      "primary_paths": [
+        "src/model_pricing.c",
+        "include/model_pricing.h",
+        "src/inference_cost.c",
+        "src/cost_frontier.c",
+        "src/model_catalog_refresh.c"
+      ],
+      "proposed_modules": [
+        "src/pricing_snapshot.c",
+        "include/pricing_snapshot.h"
+      ],
+      "hotspots": [],
+      "acceptance": "Use the actual binary with controlled pricing fixtures that change between admission and completion. Prove the original estimate retains its generation while a later request uses the new one. Test malformed prices, negative values, currency mismatch, truncated cache writes, and offline restart. Confirm a failed refresh preserves the prior valid snapshot and does not delay terminal input. Compare reported usage settlement against the preserved estimate, showing both sources in machine-readable evidence without claiming estimated totals are the provider's final bill.",
+      "word_count": 333,
+      "sha256": "0a6777893b129a7ac865f5f6509d66641cd54a923cafae598e57df6035642fa3",
+      "dependencies": [],
+      "suggested_batch": 20
+    },
+    {
+      "id": "41",
+      "title": "Durable retry schedules and poison-task inspection",
+      "slug": "durable-retry-schedules",
+      "prompt": "prompts/41-durable-retry-schedules.md",
+      "domain": "durable-execution",
+      "primary_paths": [
+        "src/ipc.c",
+        "src/durable_agents.c",
+        "include/ipc.h"
+      ],
+      "proposed_modules": [
+        "src/task_retry.c",
+        "include/task_retry.h"
+      ],
+      "hotspots": [
+        "src/ipc.c",
+        "Makefile"
+      ],
+      "acceptance": "Use two competing local processes against a temporary database, scripted failures, and an injectable test clock. Prove one claim per generation, no claim before eligibility, bounded attempts across restart, and stale completion rejection after requeue. Check malformed policies and clock rollback without long sleeps.",
+      "word_count": 298,
+      "sha256": "fe28fca4dfabad25a31a3a083fc016f7782096fd48f3eedadf61c43776131fd7",
+      "dependencies": [],
+      "suggested_batch": 1
+    },
+    {
+      "id": "42",
+      "title": "Event-driven scheduling of accepted blackboard dependencies",
+      "slug": "blackboard-ready-scheduler",
+      "prompt": "prompts/42-blackboard-ready-scheduler.md",
+      "domain": "fleet-collaboration",
+      "primary_paths": [
+        "src/blackboard.c",
+        "src/durable_agents.c",
+        "src/ipc.c",
+        "src/plan_dag.c"
+      ],
+      "proposed_modules": [
+        "src/board_scheduler.c",
+        "include/board_scheduler.h"
+      ],
+      "hotspots": [
+        "src/blackboard.c",
+        "src/ipc.c",
+        "Makefile"
+      ],
+      "acceptance": "Run a diamond dependency graph using deterministic worker subprocesses. Verify parallel independent roots, no downstream launch until accepted inputs exist, bounded concurrency, restart after dispatch before cursor commit, and invalidation while a worker runs. Assert no duplicate accepted publication and no inference during idle observation.",
+      "word_count": 301,
+      "sha256": "d35229756d6d853c36309c7c9c5ce1e386f83024de5e980ee814623fed3cfc57",
+      "dependencies": [],
+      "suggested_batch": 2
+    },
+    {
+      "id": "43",
+      "title": "Actionable execution recovery plans with uncertainty preserved",
+      "slug": "execution-recovery-plans",
+      "prompt": "prompts/43-execution-recovery-plans.md",
+      "domain": "durable-execution",
+      "primary_paths": [
+        "src/execution_recovery.c",
+        "src/execution_kernel.c",
+        "include/execution_recovery.h"
+      ],
+      "proposed_modules": [
+        "src/recovery_plan.c",
+        "include/recovery_plan.h"
+      ],
+      "hotspots": [
+        "src/execution_kernel.c",
+        "Makefile"
+      ],
+      "acceptance": "Construct real journal fixtures by running bounded local governed operations, then truncate or corrupt copied journals at admission, start, and completion boundaries. Prove every uncertain started operation remains non-retryable by default, clean evidence remains stable, and generating the plan neither mutates journal bytes nor launches tools.",
+      "word_count": 302,
+      "sha256": "5dddfcf14086e842681281e9ab4232df05d456e26198e47463d95568d2b650c5",
+      "dependencies": [],
+      "suggested_batch": 3
+    },
+    {
+      "id": "44",
+      "title": "Durable cancellation requests and deadline completion receipts",
+      "slug": "durable-cancellation-receipts",
+      "prompt": "prompts/44-durable-cancellation-receipts.md",
+      "domain": "durable-execution",
+      "primary_paths": [
+        "src/durable_agents.c",
+        "src/ipc.c",
+        "src/swarm.c",
+        "src/supervisor.c"
+      ],
+      "proposed_modules": [
+        "src/task_cancel.c",
+        "include/task_cancel.h"
+      ],
+      "hotspots": [
+        "src/ipc.c",
+        "src/swarm.c",
+        "Makefile"
+      ],
+      "acceptance": "Use local workers that finish normally, ignore TERM, fork an owned child, and exit during cancellation. Restart the coordinator after recording a request. Prove requests survive, unrelated PIDs are untouched, descendants are reaped within a measured bound, duplicate requests are idempotent, and a stale generation cannot cancel replacement work.",
+      "word_count": 303,
+      "sha256": "4fe3ced8d359b7ac501bd92d1524e365cd29393082285d0f3e96ea09203586b2",
+      "dependencies": [],
+      "suggested_batch": 4
+    },
+    {
+      "id": "45",
+      "title": "Recipient-specific durable mailbox acknowledgements",
+      "slug": "recipient-mailbox-acks",
+      "prompt": "prompts/45-recipient-mailbox-acks.md",
+      "domain": "fleet-collaboration",
+      "primary_paths": [
+        "src/ipc.c",
+        "include/ipc.h",
+        "src/durable_agents.c"
+      ],
+      "proposed_modules": [
+        "src/mailbox_delivery.c",
+        "include/mailbox_delivery.h"
+      ],
+      "hotspots": [
+        "src/ipc.c",
+        "Makefile"
+      ],
+      "acceptance": "Run three receiver processes and publish directed and broadcast messages through the real CLI. Kill one after delivery but before acknowledgement, restart it, and verify redelivery only to the unfinished recipient. Check duplicate sender keys, acknowledgement by the wrong agent, expired delivery tokens, and legacy receive behavior against a temporary database.",
+      "word_count": 294,
+      "sha256": "f2fdce353fd97c9ae9712c6b9da48bf61624d47540acff5ccc82e7d62879136a",
+      "dependencies": [],
+      "suggested_batch": 5
+    },
+    {
+      "id": "46",
+      "title": "Content-addressed large artifacts for worker handoffs",
+      "slug": "large-artifact-handoffs",
+      "prompt": "prompts/46-large-artifact-handoffs.md",
+      "domain": "fleet-collaboration",
+      "primary_paths": [
+        "src/blackboard.c",
+        "src/swarm.c",
+        "include/swarm.h"
+      ],
+      "proposed_modules": [
+        "src/artifact_store.c",
+        "include/artifact_store.h"
+      ],
+      "hotspots": [
+        "src/blackboard.c",
+        "src/swarm.c",
+        "Makefile"
+      ],
+      "acceptance": "Publish an artifact larger than 32 KiB, consume it from a second worktree, and verify byte identity. Inject truncated writes, duplicate publication, symlink escape, digest mismatch, and missing objects. Existing text-only blackboard contracts and stale-generation checks must continue to work unchanged.",
+      "word_count": 301,
+      "sha256": "56a49c9b6acbf67affed127e65e9a7cef157f89f643b8c84ee978289f291f070",
+      "dependencies": [],
+      "suggested_batch": 6
+    },
+    {
+      "id": "47",
+      "title": "Fair bounded admission across concurrent swarm groups",
+      "slug": "fair-swarm-admission",
+      "prompt": "prompts/47-fair-swarm-admission.md",
+      "domain": "fleet-collaboration",
+      "primary_paths": [
+        "src/swarm.c",
+        "src/swarm_scale.c",
+        "src/swarm_accounting.c",
+        "src/swarm_telemetry.c"
+      ],
+      "proposed_modules": [
+        "src/swarm_admission.c",
+        "include/swarm_admission.h"
+      ],
+      "hotspots": [
+        "src/swarm.c",
+        "Makefile"
+      ],
+      "acceptance": "Drive three deterministic groups with unequal weights, long and short local workers, and a small slot limit. Verify no physical oversubscription, bounded queue memory, progress for the smallest group, correct reservation reconciliation after launch failure and cancellation, and unchanged legacy admission when the policy is disabled. Report observed start order and wait distributions.",
+      "word_count": 306,
+      "sha256": "d312dc51a7541814b0a4a3e8a939f8a51bfe4bcf51885170c37f6e2c7b07e704",
+      "dependencies": [],
+      "suggested_batch": 7
+    },
+    {
+      "id": "48",
+      "title": "Declared resource reservations for cooperative worker edits",
+      "slug": "worker-resource-reservations",
+      "prompt": "prompts/48-worker-resource-reservations.md",
+      "domain": "fleet-collaboration",
+      "primary_paths": [
+        "src/blackboard.c",
+        "src/ipc.c",
+        "src/swarm.c"
+      ],
+      "proposed_modules": [
+        "src/work_reservations.c",
+        "include/work_reservations.h"
+      ],
+      "hotspots": [
+        "src/blackboard.c",
+        "src/ipc.c",
+        "src/swarm.c",
+        "Makefile"
+      ],
+      "acceptance": "Use competing local processes to request overlapping and disjoint key sets. Verify atomic all-or-nothing acquisition, shared-read compatibility, expiry/reclaim fencing, and bounded wait reporting. Demonstrate that two isolated worktrees can proceed on disjoint modules while an overlapping interface reservation is reported accurately and underlying filesystem permissions remain unchanged.",
+      "word_count": 305,
+      "sha256": "933798027024421d134cc1dba91a66f13c186749d85ceb3a5ea3fd55ba00b050",
+      "dependencies": [],
+      "suggested_batch": 8
+    },
+    {
+      "id": "49",
+      "title": "Evidence-based worker quarantine and controlled re-entry",
+      "slug": "worker-health-quarantine",
+      "prompt": "prompts/49-worker-health-quarantine.md",
+      "domain": "fleet-collaboration",
+      "primary_paths": [
+        "src/swarm_telemetry.c",
+        "src/swarm.c",
+        "src/durable_agents.c",
+        "src/ipc.c"
+      ],
+      "proposed_modules": [
+        "src/worker_quarantine.c",
+        "include/worker_quarantine.h"
+      ],
+      "hotspots": [
+        "src/swarm.c",
+        "src/ipc.c",
+        "Makefile"
+      ],
+      "acceptance": "Simulate repeated startup failures, intermittent recovery, malformed results, and a slow healthy worker. Verify the configured identity stops receiving new tasks at the threshold, unrelated workers continue, state survives coordinator restart, cooldown does not launch inference by itself, and one bounded successful diagnostic activation restores eligibility with an auditable transition.",
+      "word_count": 308,
+      "sha256": "4ecaf6f916c824e48949a7e3a3da5ac8b5c8cb0e5fb3c893ce92497e4b3230b0",
+      "dependencies": [],
+      "suggested_batch": 9
+    },
+    {
+      "id": "50",
+      "title": "Verified map-reduce coverage and disagreement reports",
+      "slug": "verified-swarm-reduction",
+      "prompt": "prompts/50-verified-swarm-reduction.md",
+      "domain": "fleet-collaboration",
+      "primary_paths": [
+        "src/swarm.c",
+        "src/orchestrator.c",
+        "src/blackboard.c",
+        "src/swarm_scale.c"
+      ],
+      "proposed_modules": [
+        "src/swarm_reduction.c",
+        "include/swarm_reduction.h"
+      ],
+      "hotspots": [
+        "src/swarm.c",
+        "src/blackboard.c",
+        "Makefile"
+      ],
+      "acceptance": "Run deterministic workers producing matching, conflicting, duplicate, failed, and late shard outputs. Verify only current accepted artifacts enter the final input set, conflicting claims remain visible, missing required shards block complete status, and invalidation during reduction rejects stale acceptance. Record raw worker envelopes, the pinned manifest, coverage diagnostics, and final checker receipts.",
+      "word_count": 306,
+      "sha256": "b4941c968b9c514b1a2297bc47fdf79badccbce1115201829a825ffdaed7fd0f",
+      "dependencies": [],
+      "suggested_batch": 10
+    },
+    {
+      "id": "51",
+      "title": "Checker-environment attestations for accepted worker evidence",
+      "slug": "checker-environment-attestations",
+      "prompt": "prompts/51-checker-environment-attestations.md",
+      "domain": "evaluation-proof",
+      "primary_paths": [
+        "src/blackboard.c",
+        "src/execution_layer.c",
+        "scripts/release_manifest_verify.py"
+      ],
+      "proposed_modules": [
+        "src/check_attestation.c",
+        "include/check_attestation.h"
+      ],
+      "hotspots": [
+        "src/blackboard.c",
+        "Makefile"
+      ],
+      "acceptance": "Verify the same candidate in two controlled worktrees, change the checker executable while retaining its path, and mutate a declared lockfile. Confirm attestations detect each difference, an incomplete required field blocks policy acceptance, and concurrent upstream invalidation still defeats a passing stale check. Validate receipts through a separate read-only verifier.",
+      "word_count": 304,
+      "sha256": "6e30dd138014c6518b641433cca7b8486ac07718ee8aa4f205c45a11767f1d7d",
+      "dependencies": [],
+      "suggested_batch": 11
+    },
+    {
+      "id": "52",
+      "title": "Offline declarative runtime scenario runner",
+      "slug": "runtime-scenario-runner",
+      "prompt": "prompts/52-runtime-scenario-runner.md",
+      "domain": "evaluation-proof",
+      "primary_paths": [
+        "scripts/bench_sota.py",
+        "tests/test_execution_spine_mcp.py",
+        "src/main.c",
+        "src/event_stream.c"
+      ],
+      "proposed_modules": [
+        "src/scenario_runner.c",
+        "include/scenario_runner.h"
+      ],
+      "hotspots": [
+        "src/main.c",
+        "src/event_stream.c",
+        "Makefile"
+      ],
+      "acceptance": "Execute scenarios against the newly built binary for successful local work, rejected capability use, malformed input, a hung child, and incorrect terminal-event order. Verify deadlines include child cleanup, fixture cleanup cannot escape its directory, and a failing assertion yields a failing process status. Re-run a saved manifest and compare stable fields while retaining honest timing differences.",
+      "word_count": 307,
+      "sha256": "5810f70baf477e320308d112d8247aa886c9d04085359e41fe5244f6fff42388",
+      "dependencies": [],
+      "suggested_batch": 12
+    },
+    {
+      "id": "53",
+      "title": "Crash-boundary fault-injection corpus for durable work",
+      "slug": "durable-fault-corpus",
+      "prompt": "prompts/53-durable-fault-corpus.md",
+      "domain": "evaluation-proof",
+      "primary_paths": [
+        "src/execution_kernel.c",
+        "src/execution_recovery.c",
+        "src/event_stream.c",
+        "tests/test_durable_boot_fencing.py"
+      ],
+      "proposed_modules": [
+        "src/fault_scenarios.c",
+        "include/fault_scenarios.h"
+      ],
+      "hotspots": [
+        "src/execution_kernel.c",
+        "src/event_stream.c",
+        "Makefile"
+      ],
+      "acceptance": "For each supported boundary, run a real local fixture process, inject termination, restart against copied isolated state, and assert no stale completion becomes current, committed events remain replayable, and uncertain effects stay uncertain. Include one corrupted journal and one full storage failure. Report unsupported injection points honestly and retain minimized failing cases as standalone manifests.",
+      "word_count": 306,
+      "sha256": "0ebf9c2ed7b0fa101f70c3acf6c2bd9d7c286177f8a704ade8a670e0b2a59bbf",
+      "dependencies": [],
+      "suggested_batch": 13
+    },
+    {
+      "id": "54",
+      "title": "Matched run comparisons with outcome and cost provenance",
+      "slug": "matched-run-comparisons",
+      "prompt": "prompts/54-matched-run-comparisons.md",
+      "domain": "evaluation-proof",
+      "primary_paths": [
+        "scripts/bench_sota.py",
+        "scripts/matrix_router_bench.py",
+        "src/headless_accounting.c",
+        "src/swarm_accounting.c"
+      ],
+      "proposed_modules": [
+        "src/run_compare.c",
+        "include/run_compare.h"
+      ],
+      "hotspots": [
+        "Makefile"
+      ],
+      "acceptance": "Feed synthetic manifests with known paired outcomes, missing cases, duplicate IDs, changed fixtures, and unknown costs, then compare two actual local deterministic scenario runs. Verify mismatches cannot silently enter paired statistics, seeded intervals reproduce, medians handle empty inputs correctly, and raw cases remain traceable from every reported aggregate.",
+      "word_count": 304,
+      "sha256": "da886347f669652026c4a7dea62ab52807e12d607c21f61a29ca6c9519f595b5",
+      "dependencies": [],
+      "suggested_batch": 14
+    },
+    {
+      "id": "55",
+      "title": "Runtime responsiveness budgets with regression evidence",
+      "slug": "runtime-responsiveness-budgets",
+      "prompt": "prompts/55-runtime-responsiveness-budgets.md",
+      "domain": "observability",
+      "primary_paths": [
+        "scripts/bench_sota.py",
+        "src/event_loop.c",
+        "src/swarm_progress.c",
+        "src/tool_telemetry.c"
+      ],
+      "proposed_modules": [
+        "src/latency_budget.c",
+        "include/latency_budget.h"
+      ],
+      "hotspots": [
+        "Makefile"
+      ],
+      "acceptance": "Run local workers that stream heavily while timers and control requests continue. Inject a deliberate fixture-only service stall and prove the budget catches it; verify the healthy run meets a declared conservative threshold. Measure observer overhead with instrumentation enabled and disabled, check bounded memory under sustained output, and preserve raw samples for independent percentile recomputation.",
+      "word_count": 303,
+      "sha256": "b60912f0982979a602325611ff99de94d6f9df17ec0bcfb1cf763c2bc834ac49",
+      "dependencies": [],
+      "suggested_batch": 15
+    },
+    {
+      "id": "56",
+      "title": "Read-only fleet event timeline and precise cursor queries",
+      "slug": "fleet-event-timeline",
+      "prompt": "prompts/56-fleet-event-timeline.md",
+      "domain": "observability",
+      "primary_paths": [
+        "src/event_stream.c",
+        "include/event_stream.h",
+        "src/execution_events.c",
+        "src/durable_agents.c"
+      ],
+      "proposed_modules": [
+        "src/event_query.c",
+        "include/event_query.h"
+      ],
+      "hotspots": [
+        "src/event_stream.c",
+        "Makefile"
+      ],
+      "acceptance": "Run concurrent local event producers while paging a query snapshot. Verify exact membership through the captured high-water mark, no duplicates after cursor resume, stable original order, bounded memory for a large database, and clear behavior for unknown schema versions. Compare queried event hashes with direct read-only database evidence and existing replay output.",
+      "word_count": 304,
+      "sha256": "d67112b0d1813ba3d9d023917e75a94ec4a70ce8641a4ff804d79640c826a869",
+      "dependencies": [],
+      "suggested_batch": 16
+    },
+    {
+      "id": "57",
+      "title": "Causal lineage across tasks, attempts, and worker events",
+      "slug": "fleet-causal-lineage",
+      "prompt": "prompts/57-fleet-causal-lineage.md",
+      "domain": "observability",
+      "primary_paths": [
+        "src/execution_events.c",
+        "src/execution_kernel.c",
+        "src/event_stream.c",
+        "src/ipc.c",
+        "src/swarm.c"
+      ],
+      "proposed_modules": [
+        "src/causal_lineage.c",
+        "include/causal_lineage.h"
+      ],
+      "hotspots": [
+        "src/execution_kernel.c",
+        "src/event_stream.c",
+        "src/ipc.c",
+        "src/swarm.c",
+        "Makefile"
+      ],
+      "acceptance": "Execute a fork-and-join fixture with two workers, one retry, and one cancelled branch. Verify the reconstructed graph links each execution to the correct attempt, contains no fabricated cross-worker edges, survives restart, and handles intentionally omitted legacy metadata. Check identifier size limits and cycle diagnostics using malformed copied events without corrupting the live database.",
+      "word_count": 310,
+      "sha256": "8bab6bd5992797f9e156b46292b5d478f88aa6f54fbba7e01883acd7f1230150",
+      "dependencies": [],
+      "suggested_batch": 17
+    },
+    {
+      "id": "58",
+      "title": "Offline fleet incident bundle with cross-worker evidence joins",
+      "slug": "fleet-incident-bundle",
+      "prompt": "prompts/58-fleet-incident-bundle.md",
+      "domain": "observability",
+      "primary_paths": [
+        "src/swarm_telemetry.c",
+        "src/event_stream.c",
+        "src/execution_recovery.c",
+        "src/blackboard.c"
+      ],
+      "proposed_modules": [
+        "src/fleet_incident.c",
+        "include/fleet_incident.h"
+      ],
+      "hotspots": [
+        "src/event_stream.c",
+        "src/blackboard.c",
+        "Makefile"
+      ],
+      "acceptance": "Create a local three-worker incident with one crash, one stale publication, and one successful task. Export while another worker continues writing, then inspect the bundle offline with original databases unavailable. Verify every included digest, cross-worker links, bounded export size, explicit snapshot boundaries, and absence of seeded secret canaries. No upload or external notification should occur.",
+      "word_count": 309,
+      "sha256": "040a94513be79648ab83b6531cded06e4eab027fa50d9453d6c507f4deb140f8",
+      "dependencies": [],
+      "suggested_batch": 18
+    },
+    {
+      "id": "59",
+      "title": "Release readiness from exact merged-artifact evidence",
+      "slug": "release-readiness-evidence",
+      "prompt": "prompts/59-release-readiness-evidence.md",
+      "domain": "release-delivery",
+      "primary_paths": [
+        "scripts/release_hardened.py",
+        "scripts/release_manifest_verify.py",
+        "src/blackboard.c",
+        "src/execution_layer.c"
+      ],
+      "proposed_modules": [
+        "src/release_readiness.c",
+        "include/release_readiness.h"
+      ],
+      "hotspots": [
+        "src/blackboard.c",
+        "Makefile"
+      ],
+      "acceptance": "Build a small isolated candidate and supply passing integration receipts, then replace its bytes, omit a required contract, invalidate an upstream artifact, and substitute receipts from another revision. Each case must become non-ready for the precise reason. Verify an intact complete packet succeeds through a separate verifier and retains all supporting hashes and commands.",
+      "word_count": 309,
+      "sha256": "0c81ff68ad8cd3262461a1f0d8fa8361328c7ca02ec768a3f8c6ce673ca45000",
+      "dependencies": [],
+      "suggested_batch": 19
+    },
+    {
+      "id": "60",
+      "title": "Deterministic local release staging with reproducibility reports",
+      "slug": "deterministic-release-staging",
+      "prompt": "prompts/60-deterministic-release-staging.md",
+      "domain": "release-delivery",
+      "primary_paths": [
+        "scripts/release_hardened.py",
+        "scripts/release_manifest_verify.py",
+        "Makefile",
+        "src/main.c"
+      ],
+      "proposed_modules": [
+        "src/release_stage.c",
+        "include/release_stage.h"
+      ],
+      "hotspots": [
+        "Makefile",
+        "src/main.c"
+      ],
+      "acceptance": "Stage the same fixture inputs twice under different directory names and compare payload hashes. Repeat after changing a source file and after introducing an unstable timestamp to prove differences are detected. Inject packaging failure before the final rename and verify no partial candidate appears complete. Validate archive paths, manifest hashes, and a local help smoke against the packaged binary.",
+      "word_count": 315,
+      "sha256": "c13b3dd207347e8050bb523367466580c783fd342d978db1a4d9c340b3ee5779",
+      "dependencies": [],
+      "suggested_batch": 20
+    }
+  ]
+}

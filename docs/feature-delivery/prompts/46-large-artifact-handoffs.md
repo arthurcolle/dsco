@@ -1,0 +1,11 @@
+# 46 — Content-addressed large artifacts for worker handoffs
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or the isolated worktree assigned for this feature. Read applicable `AGENTS.md` instructions and inspect current code before editing. Start at `src/blackboard.c`, `src/swarm.c`, `include/swarm.h`. If part already exists, ship the missing bounded extension and explain the observed gap; do not duplicate an existing subsystem. All interfaces named below are proposed until verified on disk.
+
+Blackboard candidates already preserve immutable UTF-8 payloads up to 32 KiB. Extend handoffs with an optional local content-addressed store for larger binary artifacts while keeping small manifests inside those existing candidates. A manifest records digest, byte length, media type, producing task generation, and relative object reference. Publication streams into a private temporary file, verifies the digest, and atomically seals the object before exposing its reference. Consumers resolve only under the configured store and verify bytes before use; mutable external paths cannot masquerade as pinned artifacts. Proposed `artifacts inspect` should report missing or corrupt objects without materializing executable content. Initial scope is local storage and explicit references, not network distribution or automatic retention deletion.
+
+Implement new capability in proposed `src/artifact_store.c` and `include/artifact_store.h`, with small dispatch hooks and a Makefile entry where needed. Preserve unrelated dirty work. Coordinate shared-file changes; keep builds, databases, sockets, fixtures, and reports isolated. Build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install a worker binary. Every tool-call path must use `tools_execute_for_tier()` and preserve capability gates.
+
+Publish an artifact larger than 32 KiB, consume it from a second worktree, and verify byte identity. Inject truncated writes, duplicate publication, symlink escape, digest mismatch, and missing objects. Existing text-only blackboard contracts and stale-generation checks must continue to work unchanged.
+
+Finish with the implemented behavior, exact reproduction commands, binary and evidence paths, relevant regression results, and remaining limitations. Verify the real local runtime path; compilation alone is insufficient.

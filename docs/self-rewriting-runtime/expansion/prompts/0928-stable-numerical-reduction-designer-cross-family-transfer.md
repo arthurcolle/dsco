@@ -1,0 +1,15 @@
+# 928 — Stable numerical reduction designer: Measured cross-family transfer
+
+Implement the measured cross-family transfer feature for the Stable numerical reduction designer RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Learn native summation and reduction kernels that meet explicit error limits across cancellation, extreme ranges, and exceptional values.
+
+External `number_batches`, `reference_values`, and `error_contracts` variables retain full distributions and precise numerical requirements. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root programs select unstable subsets, delegate accumulation strategies, and combine guarded precision or reduction-order candidates. Role output: Final `ReductionKernelCandidate` handle includes native instructions, precision policy, error domain, and numerical counterexamples. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Train the role on selected development families, then compare adapted and unadapted roots on disjoint family structures with fixed leaves. Include component ablations and a negative-transfer condition. Retain task ancestry so apparent transfer cannot come from shared templates or answer leakage.
+
+Train from executable kernel attempts labeled by independent high-precision errors and whole-call resource measurements. A frozen exact or high-precision reference checks per-case error, exceptional-value behavior, and declared reproducibility constraints. Hold out magnitude distributions, cancellation motifs, batch lengths, and exceptional-value combinations with related generators grouped. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: Average error looks small while one alternating-magnitude input suffers catastrophic cancellation beyond its permitted limit. A learned shortcut that works only for one identifier or ordering must fail on renamed and structurally changed cases. Attribute any gain to the trained root and report families harmed by the update.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/eval.c`, `src/extension/numerical_gsl.c`, `include/simd.h` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py` (`MathToolkit.analyze_numbers`). Donor baseline: Computes basic numeric aggregates; native error-contract optimization and robust reduction search are proposed. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

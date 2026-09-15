@@ -1,0 +1,11 @@
+# 44 — Durable cancellation requests and deadline completion receipts
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or the isolated worktree assigned for this feature. Read applicable `AGENTS.md` instructions and inspect current code before editing. Start at `src/durable_agents.c`, `src/ipc.c`, `src/swarm.c`, `src/supervisor.c`. If part already exists, ship the missing bounded extension and explain the observed gap; do not duplicate an existing subsystem. All interfaces named below are proposed until verified on disk.
+
+Process cleanup exists, but users need durable answers when cancellation races task completion or worker restart. Add cancellation request records scoped to task generation, with requested, delivered, and terminal outcome states. Proposed `agents cancel-task` supports a reason and a bounded grace interval; optional task deadlines use the same mechanism. The owner observes requests cooperatively, then the supervisor applies existing owned-process termination rules if necessary. Completion and cancellation race through one fenced transition: report which won instead of claiming both. Preserve partial artifact references as incomplete evidence and prevent a cancelled generation from silently restarting. Status should distinguish request acknowledgement from proof that owned processes exited.
+
+Implement new capability in proposed `src/task_cancel.c` and `include/task_cancel.h`, with small dispatch hooks and a Makefile entry where needed. Preserve unrelated dirty work. Coordinate shared-file changes; keep builds, databases, sockets, fixtures, and reports isolated. Build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install a worker binary. Every tool-call path must use `tools_execute_for_tier()` and preserve capability gates.
+
+Use local workers that finish normally, ignore TERM, fork an owned child, and exit during cancellation. Restart the coordinator after recording a request. Prove requests survive, unrelated PIDs are untouched, descendants are reaped within a measured bound, duplicate requests are idempotent, and a stale generation cannot cancel replacement work.
+
+Finish with the implemented behavior, exact reproduction commands, binary and evidence paths, relevant regression results, and remaining limitations. Verify the real local runtime path; compilation alone is insufficient.

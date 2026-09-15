@@ -1,0 +1,634 @@
+[
+  {
+    "id": "101",
+    "title": "Give every role an independently trained RLM identity",
+    "slug": "role-rlm-registry",
+    "prompt": "prompts/101-role-rlm-registry.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/agent_profile.c",
+      "src/provider_profiles.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/config.py",
+        "symbols": [
+          "ModelSpec",
+          "MODEL_SPECS"
+        ],
+        "observation": "ModelSpec binds static model settings to roles but has no trained-weight or adapter lineage."
+      }
+    ],
+    "mechanism": "Role registry binds immutable root checkpoint, tokenizer, adapter, environment, curriculum and frozen-leaf identities.",
+    "challenge": "A renamed base checkpoint or adapter for another role must not be accepted as a newly trained role model.",
+    "hotspots": [
+      "src/self_improve.c"
+    ],
+    "proposed_modules": [
+      "src/role_role_rlm_registry.c",
+      "include/role_role_rlm_registry.h"
+    ]
+  },
+  {
+    "id": "102",
+    "title": "Implement the external-context RLM execution contract",
+    "slug": "external-context-rlm-runtime",
+    "prompt": "prompts/102-external-context-rlm-runtime.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/vm.c",
+      "src/agent.c",
+      "src/agent_interop.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/core.py",
+        "symbols": [
+          "CognitiveAgentProgram",
+          "format_history"
+        ],
+        "observation": "The cognitive program passes rendered conversation text into one model call; it does not implement external prompt state."
+      }
+    ],
+    "mechanism": "Persistent context variables and programmatic recursion expose bounded observations and return Final by reference.",
+    "challenge": "Huge stdout or a large final variable must not be copied into root history or truncated into the returned answer.",
+    "hotspots": [
+      "src/agent.c",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/role_external_context_rlm_runtime.c",
+      "include/role_external_context_rlm_runtime.h"
+    ]
+  },
+  {
+    "id": "103",
+    "title": "Train programmatic recursion within role boundaries",
+    "slug": "role-recursive-call-tree",
+    "prompt": "prompts/103-role-recursive-call-tree.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/swarm.c",
+      "src/agent_profile.c",
+      "src/agent.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/pipeline.py",
+        "symbols": [
+          "FourModelHierarchicalSwarm._route",
+          "FourModelHierarchicalSwarm._run_child"
+        ],
+        "observation": "The hierarchical swarm routes listed subtasks to workers; it is not a learned recursive REPL call policy."
+      }
+    ],
+    "mechanism": "Role root adapters learn loop-generated recursive calls with immutable lineage and host-enforced role effects.",
+    "challenge": "Programmatically generated child calls cannot request a broader role or escape the inherited capability set.",
+    "hotspots": [
+      "src/swarm.c",
+      "src/agent.c",
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/role_role_recursive_call_tree.c",
+      "include/role_role_recursive_call_tree.h"
+    ]
+  },
+  {
+    "id": "104",
+    "title": "Export faithful root-turn training trajectories",
+    "slug": "root-turn-trajectory-export",
+    "prompt": "prompts/104-root-turn-trajectory-export.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/agent.c",
+      "src/chronicle.c",
+      "src/provider_events.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/decomposition.py",
+        "symbols": [
+          "_inference_receipt"
+        ],
+        "observation": "The donor records inference usage receipts but does not export token-faithful root-turn training examples."
+      }
+    ],
+    "mechanism": "Exporter reconstructs each root prefix and one generated target while preserving observations and excluding child targets.",
+    "challenge": "Flattening child assistant turns into root targets or including future observations must fail validation.",
+    "hotspots": [
+      "src/agent.c"
+    ],
+    "proposed_modules": [
+      "src/role_root_turn_trajectory_export.c",
+      "include/role_root_turn_trajectory_export.h"
+    ]
+  },
+  {
+    "id": "105",
+    "title": "Distill only executable teacher trajectories",
+    "slug": "teacher-rejection-distillation",
+    "prompt": "prompts/105-teacher-rejection-distillation.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/provider.c",
+      "src/agent.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/optimize.py",
+        "symbols": [
+          "swarm_metric",
+          "compile_with_mipro"
+        ],
+        "observation": "The default optimizer metric rewards answer substrings rather than verified execution outcomes."
+      }
+    ],
+    "mechanism": "Teacher RLM rollouts are replayed and filtered by an independent task oracle before root-adapter SFT.",
+    "challenge": "A correct answer string with nonexecuting code or unverifiable tool results must not enter the accepted training set.",
+    "hotspots": [
+      "src/provider.c",
+      "src/agent.c",
+      "src/self_improve.c"
+    ],
+    "proposed_modules": [
+      "src/role_teacher_rejection_distillation.c",
+      "include/role_teacher_rejection_distillation.h"
+    ]
+  },
+  {
+    "id": "106",
+    "title": "Align root SFT targets with actual token boundaries",
+    "slug": "root-sft-loss-masks",
+    "prompt": "prompts/106-root-sft-loss-masks.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/provider_events.c",
+      "src/agent.c",
+      "src/agent_interop.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/optimize.py",
+        "symbols": [
+          "save_program",
+          "load_program"
+        ],
+        "observation": "Program persistence saves DSPy program artifacts, not tokenizer-aligned root-model loss masks."
+      }
+    ],
+    "mechanism": "Renderer-owned serialization assigns loss only to the selected root generation and validates tensor-level gradients.",
+    "challenge": "Literal assistant markers inside tool output cannot acquire supervision or shift target masks.",
+    "hotspots": [
+      "src/agent.c"
+    ],
+    "proposed_modules": [
+      "src/role_root_sft_loss_masks.c",
+      "include/role_root_sft_loss_masks.h"
+    ]
+  },
+  {
+    "id": "107",
+    "title": "Expose each role as a verifiable RLM environment",
+    "slug": "role-verifiers-environment",
+    "prompt": "prompts/107-role-verifiers-environment.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/agent_interop.c",
+      "src/mcp_server.c",
+      "src/tools.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/optimize.py",
+        "symbols": [
+          "evaluate",
+          "swarm_metric"
+        ],
+        "observation": "The donor evaluates DSPy predictions with a callable metric rather than an isolated executable role environment."
+      }
+    ],
+    "mechanism": "Version-pinned environment and harness adapters map role tasks to RLM episodes and immutable terminal oracles.",
+    "challenge": "Generated code cannot edit grading files, and a zero-reward or failed episode cannot disappear from statistics.",
+    "hotspots": [
+      "src/tools.c"
+    ],
+    "proposed_modules": [
+      "src/role_role_verifiers_environment.c",
+      "include/role_role_verifiers_environment.h"
+    ]
+  },
+  {
+    "id": "108",
+    "title": "Bridge role root datasets to actual Prime SFT jobs",
+    "slug": "role-prime-sft-bridge",
+    "prompt": "prompts/108-role-prime-sft-bridge.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/agent_interop.c",
+      "src/self_improve.c",
+      "src/provider.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/optimize.py",
+        "symbols": [
+          "compile_with_mipro",
+          "compile_with_gepa"
+        ],
+        "observation": "The wrappers optimize DSPy programs and do not launch neural root-model SFT."
+      }
+    ],
+    "mechanism": "C-owned training manifests drive pinned prime-rl SFT with role-specific root targets and artifact validation.",
+    "challenge": "Configuration-only success, unchanged tensors, or a trainer silently using messages instead of root targets must fail acceptance.",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/provider.c"
+    ],
+    "proposed_modules": [
+      "src/role_role_prime_sft_bridge.c",
+      "include/role_role_prime_sft_bridge.h"
+    ]
+  },
+  {
+    "id": "109",
+    "title": "Train role roots with terminal verifiable rewards",
+    "slug": "role-root-rlvr",
+    "prompt": "prompts/109-role-root-rlvr.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/agent_interop.c",
+      "src/provider.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/eval_bias_reduction.py",
+        "symbols": [
+          "evaluate_test_case"
+        ],
+        "observation": "The evaluator uses heuristic coherence and model-produced scores rather than executable terminal rewards."
+      }
+    ],
+    "mechanism": "Root-policy RL updates use immutable terminal rewards and root-only action attribution with frozen leaves.",
+    "challenge": "Reward hacking, empty rollouts and timeouts cannot be scored as correct or yield fabricated optimizer progress.",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/provider.c"
+    ],
+    "proposed_modules": [
+      "src/role_role_root_rlvr.c",
+      "include/role_role_root_rlvr.h"
+    ]
+  },
+  {
+    "id": "110",
+    "title": "Separate root and leaf learning credit experimentally",
+    "slug": "root-leaf-credit-experiments",
+    "prompt": "prompts/110-root-leaf-credit-experiments.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/provider.c",
+      "src/swarm_accounting.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/pipeline.py",
+        "symbols": [
+          "FourModelHierarchicalSwarm",
+          "LeafWorker"
+        ],
+        "observation": "The pipeline uses distinct root and leaf workers but has no factorial weight-training attribution experiment."
+      }
+    ],
+    "mechanism": "Paired factorial evaluations isolate root-update, leaf-update and interaction effects on RLM outcomes.",
+    "challenge": "A stronger leaf silently substituted after root training must not be credited to the root adapter.",
+    "hotspots": [
+      "src/provider.c",
+      "src/self_improve.c"
+    ],
+    "proposed_modules": [
+      "src/role_root_leaf_credit_experiments.c",
+      "include/role_root_leaf_credit_experiments.h"
+    ]
+  },
+  {
+    "id": "111",
+    "title": "Learn recursion depth and batching as root behavior",
+    "slug": "learned-recursion-batching",
+    "prompt": "prompts/111-learned-recursion-batching.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/topology.c",
+      "src/swarm_scale.c",
+      "src/agent.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/config.py",
+        "symbols": [
+          "SwarmSettings"
+        ],
+        "observation": "Fanout and concurrency are configured ceilings rather than a trained context-dependent recursive policy."
+      }
+    ],
+    "mechanism": "Root adapter learns when to recurse, how deeply and how to batch while the host enforces hard ceilings.",
+    "challenge": "Blind maximum recursion or batching across dependent items loses correctness despite fewer model invocations.",
+    "hotspots": [
+      "src/agent.c"
+    ],
+    "proposed_modules": [
+      "src/role_learned_recursion_batching.c",
+      "include/role_learned_recursion_batching.h"
+    ]
+  },
+  {
+    "id": "112",
+    "title": "Measure role RLM length generalization",
+    "slug": "role-length-generalization",
+    "prompt": "prompts/112-role-length-generalization.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/agent.c",
+      "src/agent_interop.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/core.py",
+        "symbols": [
+          "format_history"
+        ],
+        "observation": "History is limited by turn count and per-turn character truncation, not evaluated for algorithmic length generalization."
+      }
+    ],
+    "mechanism": "Train-short evaluate-long suites vary context length and semantic work independently with exact oracles.",
+    "challenge": "Needles fixed at the same offsets or train/eval duplicates must not masquerade as length generalization.",
+    "hotspots": [
+      "src/agent.c",
+      "src/self_improve.c"
+    ],
+    "proposed_modules": [
+      "src/role_role_length_generalization.c",
+      "include/role_role_length_generalization.h"
+    ]
+  },
+  {
+    "id": "113",
+    "title": "Serve isolated role adapters by immutable version",
+    "slug": "role-adapter-serving-isolation",
+    "prompt": "prompts/113-role-adapter-serving-isolation.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/provider.c",
+      "src/provider_pool.c",
+      "src/agent_profile.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/config.py",
+        "symbols": [
+          "ModelSpec",
+          "normalize_model_id"
+        ],
+        "observation": "Static model normalization does not pin per-role trained adapters or prevent serving cross-contamination."
+      }
+    ],
+    "mechanism": "Serving snapshots bind one role adapter to each recursive tree with explicit compatibility and update receipts.",
+    "challenge": "Concurrent adapter reload cannot switch an in-flight tree or serve role A with role B weights.",
+    "hotspots": [
+      "src/provider.c"
+    ],
+    "proposed_modules": [
+      "src/role_role_adapter_serving_isolation.c",
+      "include/role_role_adapter_serving_isolation.h"
+    ]
+  },
+  {
+    "id": "114",
+    "title": "Train interrole protocols against frozen partners",
+    "slug": "frozen-partner-protocol-training",
+    "prompt": "prompts/114-frozen-partner-protocol-training.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/swarm.c",
+      "src/agent_profile.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/signatures.py",
+        "symbols": [
+          "Subtask",
+          "ChildResult",
+          "FinalSynthesis"
+        ],
+        "observation": "Typed subtask and child-result schemas exist, but no role-specific neural protocol co-training loop."
+      }
+    ],
+    "mechanism": "Alternating role-root updates learn useful typed messages against version-pinned partners and cross-play evaluation.",
+    "challenge": "Partners colluding through leaked labels or changing together cannot establish one role learned a transferable protocol.",
+    "hotspots": [
+      "src/swarm.c",
+      "src/self_improve.c"
+    ],
+    "proposed_modules": [
+      "src/role_frozen_partner_protocol_training.c",
+      "include/role_frozen_partner_protocol_training.h"
+    ]
+  },
+  {
+    "id": "115",
+    "title": "Split role training data by repository ancestry",
+    "slug": "role-training-leakage-splits",
+    "prompt": "prompts/115-role-training-leakage-splits.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/chronicle.c",
+      "src/agent_interop.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/optimize.py",
+        "symbols": [
+          "compile_with_mipro",
+          "compile_with_gepa",
+          "evaluate"
+        ],
+        "observation": "Trainset and devset are caller-supplied without repository ancestry or near-duplicate split enforcement."
+      }
+    ],
+    "mechanism": "Split planner prevents source, episode, patch-family and generated-task leakage before role weight training.",
+    "challenge": "Renamed copies, nearby commits and paraphrased tasks cannot cross into holdout without being detected.",
+    "hotspots": [
+      "src/self_improve.c"
+    ],
+    "proposed_modules": [
+      "src/role_role_training_leakage_splits.c",
+      "include/role_role_training_leakage_splits.h"
+    ]
+  },
+  {
+    "id": "116",
+    "title": "Train recovery from REPL syntax and finalization errors",
+    "slug": "rlm-recovery-training-data",
+    "prompt": "prompts/116-rlm-recovery-training-data.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/agent.c",
+      "src/agent_interop.c",
+      "src/provider_events.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/deep.py",
+        "symbols": [
+          "DeepCognitiveAgent.stream"
+        ],
+        "observation": "The stream yields a final result only if a final prediction arrives, without a learned executable correction dataset."
+      }
+    ],
+    "mechanism": "State-matched error/correction trajectories train role roots to repair code and finalize without fabricated observations.",
+    "challenge": "Repaired syntax that silently drops required work or returns an undefined final variable remains incorrect.",
+    "hotspots": [
+      "src/agent.c"
+    ],
+    "proposed_modules": [
+      "src/role_rlm_recovery_training_data.c",
+      "include/role_rlm_recovery_training_data.h"
+    ]
+  },
+  {
+    "id": "117",
+    "title": "Train asynchronous recursion policies without blocking input",
+    "slug": "async-recursion-scheduler-training",
+    "prompt": "prompts/117-async-recursion-scheduler-training.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/swarm_reactor.c",
+      "src/agent.c",
+      "src/swarm_accounting.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/debiased_async.py",
+        "symbols": [
+          "AsyncComprehensiveDebiasedReasoning.aforward"
+        ],
+        "observation": "Two fixed asyncio.gather waves execute concurrently without a learned scheduler or explicit partial-outcome contract."
+      }
+    ],
+    "mechanism": "Root adapters learn submit-await-cancel batching under host-enforced budgets and responsive asynchronous admission.",
+    "challenge": "A policy cannot gain reward by dropping slow tasks, hiding errors or blocking terminal input during training.",
+    "hotspots": [
+      "src/agent.c"
+    ],
+    "proposed_modules": [
+      "src/role_async_recursion_scheduler_training.c",
+      "include/role_async_recursion_scheduler_training.h"
+    ]
+  },
+  {
+    "id": "118",
+    "title": "Distill across roles without hiding negative transfer",
+    "slug": "cross-role-distillation",
+    "prompt": "prompts/118-cross-role-distillation.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/agent_profile.c",
+      "src/provider.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/deep.py",
+        "symbols": [
+          "REASONING_METHODOLOGIES",
+          "MethodologySignature"
+        ],
+        "observation": "Reasoning methods are shared textual instructions, not separately trained role adapters with transfer measurement."
+      }
+    ],
+    "mechanism": "Target-role adapters learn selected source-role root procedures while target and source competence are evaluated separately.",
+    "challenge": "Transferring an aggressive proposer policy into a verifier can raise apparent productivity while increasing false acceptance.",
+    "hotspots": [
+      "src/provider.c",
+      "src/self_improve.c"
+    ],
+    "proposed_modules": [
+      "src/role_cross_role_distillation.c",
+      "include/role_cross_role_distillation.h"
+    ]
+  },
+  {
+    "id": "119",
+    "title": "Admit trained models with their native runtime generation",
+    "slug": "model-native-joint-admission",
+    "prompt": "prompts/119-model-native-joint-admission.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/hotplug.c",
+      "src/provider.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/cognitive_agent/executor.py",
+        "symbols": [
+          "execute_one"
+        ],
+        "observation": "The donor executes a binary against a goal but does not jointly validate trained-model and resident-code generations."
+      }
+    ],
+    "mechanism": "Joint admission evaluates immutable model-adapter and native-code pairs under versioned execution contracts.",
+    "challenge": "A trained model and new runtime that each pass alone can still form an incompatible pair and must be tested together.",
+    "hotspots": [
+      "src/hotplug.c",
+      "src/provider.c",
+      "src/self_improve.c"
+    ],
+    "proposed_modules": [
+      "src/role_model_native_joint_admission.c",
+      "include/role_model_native_joint_admission.h"
+    ]
+  },
+  {
+    "id": "120",
+    "title": "Demonstrate every role training serving and improving",
+    "slug": "role-train-serve-improve-demo",
+    "prompt": "prompts/120-role-train-serve-improve-demo.md",
+    "domain": "role-rlm-training",
+    "primary_paths": [
+      "src/self_improve.c",
+      "src/agent_profile.c",
+      "src/provider.c",
+      "src/hotplug.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/pipeline.py",
+        "symbols": [
+          "FourModelHierarchicalSwarm"
+        ],
+        "observation": "The donor orchestrates fixed model roles but does not train and serve a distinct RLM adapter for each role."
+      }
+    ],
+    "mechanism": "Bounded end-to-end demonstrator trains distinct role roots, serves exact artifacts and tests their code-improvement loop independently.",
+    "challenge": "One shared unchanged model with different role prompts, or improvement measured only on training cases, fails the demonstration.",
+    "hotspots": [
+      "src/self_improve.c",
+      "src/provider.c",
+      "src/hotplug.c"
+    ],
+    "proposed_modules": [
+      "src/role_role_train_serve_improve_demo.c",
+      "include/role_role_train_serve_improve_demo.h"
+    ]
+  }
+]

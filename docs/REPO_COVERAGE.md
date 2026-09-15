@@ -6,23 +6,23 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 ## Summary
 
-- Total covered files: 877
+- Total covered files: 1102
 
 | Category | Files |
 |---|---:|
-| Root project files | 38 |
+| Root project files | 30 |
 | Repository policy and CI | 62 |
-| Documentation | 58 |
-| Runtime source and headers | 335 |
-| Tests | 42 |
-| Scripts and tooling | 56 |
-| Generated data assets | 20 |
+| Documentation | 66 |
+| Runtime source and headers | 394 |
+| Tests | 52 |
+| Scripts and tooling | 108 |
+| Generated data assets | 24 |
 | Provider metadata | 17 |
-| Web surface | 11 |
-| Packaging and distribution | 12 |
-| Demos | 3 |
+| Web surface | 12 |
+| Packaging and distribution | 24 |
+| Demos | 8 |
 | Vendored and compatibility code | 155 |
-| Other tracked files | 68 |
+| Other tracked files | 150 |
 
 ## Generated Coverage
 
@@ -55,23 +55,15 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `FINDINGS.md`
 - `GLOSSARY.md`
 - `GOVERNANCE_HOLD.md`
+- `HEATGRAPH.md`
 - `LICENSE`
 - `Makefile`
 - `PRAXIS_ARCHITECTURE.md`
 - `README.md`
 - `SECURITY.md`
-- `add.c`
-- `dsc.c`
-- `face_capture.py`
 - `graphsub-domain-modal.py`
 - `graphsub-next-layout.tsx`
 - `graphsub-next-page.tsx`
-- `graphsub-phosphor-sota.html`
-- `logo_crop_local.png`
-- `mobius`
-- `demos/toys/mobius.c`
-- `quine`
-- `demos/toys/quine.c`
 - `quine_out.txt`
 
 ### Repository policy and CI
@@ -141,12 +133,16 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 ### Documentation
 
+- `docs/ABLITERATION_AI_DOCS.md`
+- `docs/AGENT_UI_COMPONENT_LIBRARY.md`
 - `docs/API_REFERENCE.md`
 - `docs/ARCHITECTURE.md`
 - `docs/AVIAN_MECHANISMS.md`
+- `docs/BILLING.md`
 - `docs/BLOG_MODAL_TOOL_CALLING.html`
 - `docs/BLOG_MODAL_TOOL_CALLING.md`
 - `docs/CHRONICLE_TOKENLEDGER.md`
+- `docs/CLOUD_BUILD_FACTORY.md`
 - `docs/CLOUD_ENDPOINTS_MODAL_COMPATIBILITY.html`
 - `docs/CONSTANTS_ENV_INDEX.md`
 - `docs/COSMOPOLITAN.md`
@@ -167,7 +163,11 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `docs/LOCAL_CONTROL_PLANE.md`
 - `docs/META_CONSTRUCT_DSL.md`
 - `docs/NATIVE_AGENT_COMPOSITOR.md`
+- `docs/NATIVE_COMPOSITOR_HARDENING_24.md`
+- `docs/NATIVE_COMPOSITOR_WORKSPACE_ROADMAP.md`
 - `docs/OPERATIONS.md`
+- `docs/OVERMIND_ARCHITECTURE.md`
+- `docs/PIXEL_FOLD_FIELD_RUNTIME.md`
 - `docs/PLUGIN_MANIFEST_LOCK_SPEC.md`
 - `docs/REPO_COVERAGE.md`
 - `docs/RUNBOOKS.md`
@@ -202,10 +202,16 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 ### Runtime source and headers
 
+- `include/abliteration.h`
+- `include/acp_server.h`
 - `include/activation_lease.h`
 - `include/agent.h`
 - `include/agent_event.h`
 - `include/agent_profile.h`
+- `include/agent_ui_canvas.h`
+- `include/agent_ui_components.h`
+- `include/agent_ui_gallery.h`
+- `include/agent_ui_theme.h`
 - `include/anim.h`
 - `include/arena_alloc.h`
 - `include/ast.h`
@@ -218,15 +224,19 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/callbacks.h`
 - `include/capability.h`
 - `include/chronicle.h`
+- `include/cloud_runtime.h`
 - `include/cluster.h`
 - `include/codex_app_directory.h`
 - `include/codex_cache.h`
 - `include/codex_usage.h`
 - `include/command_plane.h`
+- `include/compositor_parity.h`
+- `include/compositor_stream_bench.h`
 - `include/compute.h`
 - `include/config.h`
 - `include/connector.h`
 - `include/construct.h`
+- `include/context_fabric.h`
 - `include/control_flow.h`
 - `include/coroutine.h`
 - `include/cost_budget.h`
@@ -258,12 +268,14 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/font_compat.h`
 - `include/fractal.h`
 - `include/frontier.h`
+- `include/generated/runtime_spec_contract.h`
 - `include/gov_experiment.h`
 - `include/governance.h`
 - `include/graphsub_client.h`
 - `include/harden.h`
 - `include/heartbeat.h`
 - `include/hlc.h`
+- `include/hotplug.h`
 - `include/http_pool.h`
 - `include/img_util.h`
 - `include/integration_fabric.h`
@@ -272,11 +284,13 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/ipc.h`
 - `include/json_util.h`
 - `include/killswitch.h`
+- `include/kimi_oauth.h`
 - `include/kitty_agent_windows.h`
 - `include/kitty_banner.h`
 - `include/kitty_banner_mask.h`
 - `include/kitty_graphics.h`
 - `include/kitty_lab.h`
+- `include/kitty_taste_grid.h`
 - `include/kitty_tools.h`
 - `include/learned_cost.h`
 - `include/legion.h`
@@ -289,6 +303,9 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/md.h`
 - `include/memory_tier.h`
 - `include/mesh.h`
+- `include/model_pricing.h`
+- `include/native_composer.h`
+- `include/native_masthead.h`
 - `include/native_ui.h`
 - `include/net_server.h`
 - `include/ooda.h`
@@ -298,12 +315,14 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/openrouter_lanes.h`
 - `include/orchestrator.h`
 - `include/output_guard.h`
+- `include/overmind.h`
 - `include/peer_bootstrap.h`
 - `include/pets.h`
 - `include/pheromone.h`
 - `include/pipeline.h`
 - `include/pixel_fx.h`
 - `include/pixel_tui.h`
+- `include/pixel_tui_perf.h`
 - `include/plan.h`
 - `include/plan_cache.h`
 - `include/plan_dag.h`
@@ -318,13 +337,19 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/provider.h`
 - `include/provider_pool.h`
 - `include/provider_profiles.h`
+- `include/px_backend.h`
+- `include/px_theme.h`
+- `include/px_widgets.h`
 - `include/realtime.h`
 - `include/recovery.h`
 - `include/remote_cli.h`
 - `include/rich_text.h`
+- `include/ring_buffer.h`
 - `include/rl_hooks.h`
+- `include/rollout.h`
 - `include/router.h`
 - `include/rsi_curriculum.h`
+- `include/rtf.h`
 - `include/scheduler.h`
 - `include/se_store.h`
 - `include/sealed_store.h`
@@ -335,13 +360,17 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/setup.h`
 - `include/shadeexpr.h`
 - `include/simd.h`
+- `include/skill_index.h`
 - `include/spend_governor.h`
 - `include/startup.h`
 - `include/stateful_atoms.h`
 - `include/strategy.h`
 - `include/structured_process.h`
+- `include/subscription_bench.h`
+- `include/subscription_gate.h`
 - `include/supervisor.h`
 - `include/swarm.h`
+- `include/swarm_daemon.h`
 - `include/talons.h`
 - `include/tamper.h`
 - `include/task_profile.h`
@@ -366,10 +395,17 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `include/weather_batch.h`
 - `include/webhook_security.h`
 - `include/workspace.h`
+- `src/abliteration.c`
+- `src/acp_server.c`
 - `src/activation_lease.c`
 - `src/agent.c`
 - `src/agent_event.c`
 - `src/agent_profile.c`
+- `src/agent_ui_canvas.c`
+- `src/agent_ui_components.c`
+- `src/agent_ui_gallery.c`
+- `src/agent_ui_gallery_main.c`
+- `src/agent_ui_theme.c`
 - `src/anim.c`
 - `src/arena_alloc.c`
 - `src/ast.c`
@@ -383,14 +419,18 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/callbacks.c`
 - `src/capability.c`
 - `src/chronicle.c`
+- `src/cloud_runtime.c`
 - `src/cluster.c`
 - `src/codex_app_directory.c`
 - `src/codex_cache.c`
 - `src/codex_usage.c`
 - `src/command_plane.c`
+- `src/compositor_parity.c`
+- `src/compositor_stream_bench.c`
 - `src/compute.c`
 - `src/connector.c`
 - `src/construct.c`
+- `src/context_fabric.c`
 - `src/control_flow.c`
 - `src/cost_model.c`
 - `src/crypto.c`
@@ -429,6 +469,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/harden.c`
 - `src/heartbeat.c`
 - `src/hlc.c`
+- `src/hotplug.c`
 - `src/http_pool.c`
 - `src/img_util.c`
 - `src/instrumenter.c`
@@ -439,12 +480,15 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/json_fast.c`
 - `src/json_util.c`
 - `src/killswitch.c`
+- `src/kimi_oauth.c`
 - `src/kitty_agent_windows.c`
 - `src/kitty_banner.c`
 - `src/kitty_banner_main.c`
 - `src/kitty_graphics.c`
 - `src/kitty_lab.c`
 - `src/kitty_lab_main.c`
+- `src/kitty_taste_grid.c`
+- `src/kitty_taste_grid_main.c`
 - `src/kitty_tools.c`
 - `src/learned_cost.c`
 - `src/legion.c`
@@ -459,6 +503,9 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/md.c`
 - `src/memory_tier.c`
 - `src/mesh.c`
+- `src/model_pricing.c`
+- `src/native_composer.c`
+- `src/native_masthead.c`
 - `src/native_ui.c`
 - `src/native_ui_json.c`
 - `src/net_server.c`
@@ -470,12 +517,14 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/openrouter_lanes.c`
 - `src/orchestrator.c`
 - `src/output_guard.c`
+- `src/overmind.c`
 - `src/peer_bootstrap.c`
 - `src/pets.c`
 - `src/pheromone.c`
 - `src/pipeline.c`
 - `src/pixel_fx.c`
 - `src/pixel_tui.c`
+- `src/pixel_tui_perf.c`
 - `src/plan.c`
 - `src/plan_cache.c`
 - `src/plan_dag.c`
@@ -490,13 +539,18 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/provider.c`
 - `src/provider_pool.c`
 - `src/provider_profiles.c`
+- `src/px_backend.c`
+- `src/px_theme.c`
+- `src/px_widgets.c`
 - `src/realtime.c`
 - `src/recovery.c`
 - `src/remote_cli.c`
 - `src/rich_text.c`
+- `src/ring_buffer.c`
 - `src/rl_hooks.c`
 - `src/router.c`
 - `src/rsi_curriculum.c`
+- `src/rtf.c`
 - `src/scheduler.c`
 - `src/se_store.c`
 - `src/sealed_store.c`
@@ -506,14 +560,19 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `src/session_memory.c`
 - `src/setup.c`
 - `src/shadeexpr.c`
+- `src/skill_index.c`
+- `src/skills_cli.c`
 - `src/spend_governor.c`
 - `src/spine_dsco_slim.c`
 - `src/startup.c`
 - `src/stateful_atoms.c`
 - `src/strategy.c`
 - `src/structured_process.c`
+- `src/subscription_bench.c`
+- `src/subscription_gate.c`
 - `src/supervisor.c`
 - `src/swarm.c`
+- `src/swarm_daemon.c`
 - `src/talons.c`
 - `src/tamper.c`
 - `src/task_profile.c`
@@ -549,10 +608,16 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `tests/smoke_callbacks.py`
 - `tests/test.c`
 - `tests/test_17_layers.sh`
+- `tests/test_acp_server.py`
+- `tests/test_activation_lease_smoke.c`
+- `tests/test_agent_ui_components.c`
 - `tests/test_avian.c`
 - `tests/test_calibration.py`
+- `tests/test_capability_hardening.c`
 - `tests/test_capability_tiering.c`
 - `tests/test_cli_global_flags.sh`
+- `tests/test_cloud_build_factory.py`
+- `tests/test_cloud_runtime_ceilings.c`
 - `tests/test_command_plane.c`
 - `tests/test_control_flow.c`
 - `tests/test_gov_bypass.c`
@@ -563,11 +628,14 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `tests/test_math_corpus.c`
 - `tests/test_memory_classification.c`
 - `tests/test_memory_keep_score.c`
+- `tests/test_native_compositor.c`
 - `tests/test_net_fanout.c`
 - `tests/test_nwp_pipeline.py`
 - `tests/test_ooda_calibration.c`
 - `tests/test_openrouter.c`
 - `tests/test_openrouter_lanes.c`
+- `tests/test_overmind.c`
+- `tests/test_pixel_fold_entrypoint.sh`
 - `tests/test_pixel_geometry.c`
 - `tests/test_pixel_plan.c`
 - `tests/test_plan_cache.c`
@@ -582,11 +650,18 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `tests/test_wasm_core.c`
 - `tests/test_weather_batch.c`
 - `tests/test_web_server.py`
+- `tests/verify_gate_claims.sh`
 
 ### Scripts and tooling
 
+- `scripts/activation_lease_sign.py`
 - `scripts/analyze_locks.sh`
+- `scripts/bake_banner_mask.py`
+- `scripts/bake_data.py`
 - `scripts/bake_data.sh`
+- `scripts/bench_abliteration_swarm.sh`
+- `scripts/bench_entropix_broad.py`
+- `scripts/bench_entropix_proxy.py`
 - `scripts/bench_sota.py`
 - `scripts/bootstrap.sh`
 - `scripts/build_cache_doctor.sh`
@@ -596,8 +671,33 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `scripts/bundle_dylibs.sh`
 - `scripts/changed_tests.sh`
 - `scripts/check_version_consistency.sh`
+- `scripts/chimera_router/ADVANCED_TRAINING_CURRICULUM.md`
+- `scripts/chimera_router/FUSION.md`
+- `scripts/chimera_router/README.md`
+- `scripts/chimera_router/build_dataset.py`
+- `scripts/chimera_router/ensemble.py`
+- `scripts/chimera_router/evaluate.py`
+- `scripts/chimera_router/features.py`
+- `scripts/chimera_router/feedback.py`
+- `scripts/chimera_router/feedback_schema.sql`
+- `scripts/chimera_router/fusion.py`
+- `scripts/chimera_router/fusion_schema.sql`
+- `scripts/chimera_router/fusion_sources.json`
+- `scripts/chimera_router/model.py`
+- `scripts/chimera_router/planner.py`
+- `scripts/chimera_router/route.py`
+- `scripts/chimera_router/serve.py`
+- `scripts/chimera_router/test_dataset_v2.py`
+- `scripts/chimera_router/test_feedback.py`
+- `scripts/chimera_router/test_fusion.py`
+- `scripts/chimera_router/test_planner.py`
+- `scripts/chimera_router/test_route_v2.py`
+- `scripts/chimera_router/test_router.py`
+- `scripts/chimera_router/train.py`
 - `scripts/clang_format_apply.sh`
 - `scripts/clang_format_check.sh`
+- `scripts/cloud_build_factory.py`
+- `scripts/codex_arcade.py`
 - `scripts/commit_compositor_wip.sh`
 - `scripts/consumer_profile_ontology/generate_extended_ontology.py`
 - `scripts/consumer_profile_ontology/generate_extended_with_boundaries.py`
@@ -606,15 +706,19 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `scripts/cosmo_bootstrap.sh`
 - `scripts/cosmo_build.sh`
 - `scripts/dev_fast.sh`
+- `scripts/dsco-acp`
 - `scripts/dsco-restricted`
 - `scripts/dsco.gdbinit`
 - `scripts/dsco.lldbinit`
+- `scripts/dsco_code_retrieval.py`
+- `scripts/dsco_code_retrieval_eval.py`
 - `scripts/dsco_perf_multiturn.py`
 - `scripts/dsco_perf_rollout.py`
 - `scripts/dsco_profile.py`
 - `scripts/dsco_run_watch.py`
 - `scripts/elf_symbol_graph_audit.py`
 - `scripts/encrypt_cstring.py`
+- `scripts/entropix_proxy.py`
 - `scripts/execute_tui_plan_p0_p1.sh`
 - `scripts/fast_touch.sh`
 - `scripts/gen_api_reference.sh`
@@ -627,23 +731,41 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `scripts/generate_agency_graph_ui.py`
 - `scripts/harden.entitlements`
 - `scripts/index_constants_env.py`
+- `scripts/jina_tiny_rerank.py`
 - `scripts/live_face_avatar.sh`
+- `scripts/local_sampler_lab.py`
+- `scripts/matrix_logprobs_bench.py`
+- `scripts/matrix_rag_smoke.py`
+- `scripts/matrix_router_bench.py`
+- `scripts/matrix_tools_agent.py`
 - `scripts/mine_book_pages.py`
 - `scripts/model_resolution_sim.py`
 - `scripts/perf_diagram_suite.py`
+- `scripts/pixel-fold/doctor`
+- `scripts/pixel-fold/dsco-device`
+- `scripts/pixel-fold/install-termux`
+- `scripts/policy_puppetry_harness.py`
+- `scripts/prompt_template_run.py`
 - `scripts/provider_metadata_audit.py`
 - `scripts/qualify_provisioned_dsco.sh`
+- `scripts/regen_tool_embeddings_v3.py`
 - `scripts/release_hardened.py`
+- `scripts/release_manifest_verify.py`
 - `scripts/scenario_model.py`
 - `scripts/setup_homebrew_tap.sh`
 - `scripts/slot_inventory.py`
+- `scripts/sync_abliteration_docs.py`
+- `scripts/term_geom.py`
 - `scripts/test_modal_dsco_live.sh`
 - `scripts/test_modal_openai_params.sh`
 - `scripts/test_modal_tool_calling.sh`
+- `scripts/update_nasdaq_prices.py`
+- `scripts/update_nasdaq_symbols.py`
 - `scripts/verifiable_agency_capsule.py`
 
 ### Generated data assets
 
+- `data/abliteration_docs_index.json`
 - `data/constants_env_index.json`
 - `data/consumer_profile_ontology/example_user_profile.json`
 - `data/consumer_profile_ontology/facet_index.py`
@@ -654,6 +776,9 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `data/consumer_profile_ontology/summary_base_with_boundaries.json`
 - `data/consumer_profile_ontology/summary_extended_50k.json`
 - `data/consumer_profile_ontology/summary_extended_50k_with_boundaries.json`
+- `data/distributed-finance/finance_fabric.sqlite`
+- `data/distributed-integration/integration_fabric.sqlite`
+- `data/distributed-unit/unit_fabric.sqlite`
 - `data/nasdaq_symbol_directory/bond_prices.csv`
 - `data/nasdaq_symbol_directory/bonds.csv`
 - `data/nasdaq_symbol_directory/equities.csv`
@@ -687,6 +812,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 ### Web surface
 
+- `web/billing.py`
 - `web/requirements.txt`
 - `web/server.py`
 - `web/static/admin.html`
@@ -702,6 +828,18 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 ### Packaging and distribution
 
 - `Formula/dsco.rb`
+- `npm/dsco-sdk/LICENSE`
+- `npm/dsco-sdk/README.md`
+- `npm/dsco-sdk/package.json`
+- `npm/dsco-sdk/src/acp.js`
+- `npm/dsco-sdk/src/index.d.ts`
+- `npm/dsco-sdk/src/index.js`
+- `npm/dsco-sdk/src/mcp.js`
+- `npm/dsco-sdk/src/resolve-binary.js`
+- `npm/dsco-sdk/src/transport.js`
+- `npm/dsco-sdk/test/.tmp-fake-server.mjs`
+- `npm/dsco-sdk/test/e2e.test.mjs`
+- `npm/dsco-sdk/test/unit.test.mjs`
 - `npm/dsco/LICENSE`
 - `npm/dsco/README.md`
 - `npm/dsco/bin/dsc.js`
@@ -719,6 +857,11 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `demos/dsco-vs-claude-codex/README.md`
 - `demos/dsco-vs-claude-codex/run_demo.sh`
 - `demos/dsco-vs-claude-codex/slides/one_page.md`
+- `demos/graphsub-phosphor-sota.html`
+- `demos/toys/add.c`
+- `demos/toys/dsc.c`
+- `demos/toys/mobius.c`
+- `demos/toys/quine.c`
 
 ### Vendored and compatibility code
 
@@ -881,20 +1024,73 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 ### Other tracked files
 
 - `bench/RESULTS.txt`
+- `bench/RESULTS_JSON_HOTPATH.txt`
 - `bench/agentic_bench.sh`
+- `bench/bench_json_getkey.c`
 - `bench/bench_libs.c`
 - `bench/diff_json.c`
+- `bench/json-hotpath-writeup.html`
+- `crates/dsco-core/Cargo.lock`
+- `crates/dsco-core/Cargo.toml`
+- `crates/dsco-core/build.rs`
+- `crates/dsco-core/src/ffi.rs`
+- `crates/dsco-core/src/lib.rs`
 - `design/agent_runtime_governed.md`
 - `doctrine/CLASSIFICATION.md`
 - `doctrine/MEMORY.md`
 - `doctrine/MEMORY_UPGRADE_2026-06-28.md`
 - `doctrine/SECRECY_HARDENING.md`
+- `evals/security_attacks/agent/A01_poisoned_page.prompt`
+- `evals/security_attacks/agent/A02_dns_exfil.prompt`
+- `evals/security_attacks/agent/A03_markdown_beacon.prompt`
+- `evals/security_attacks/agent/A04_git_hook.prompt`
+- `evals/security_attacks/agent/A05_memory_sleeper.prompt`
+- `evals/security_attacks/agent/A06_rug_pull.prompt`
+- `evals/security_attacks/agent/A07_eval_rationalization.prompt`
+- `evals/security_attacks/agent/A08_delegation_laundering.prompt`
+- `evals/security_attacks/agent/A09_plan_mutation.prompt`
+- `evals/security_attacks/agent/A10_distributed_pr.prompt`
+- `evals/security_attacks/fixtures/persistent_db/store.db`
+- `evals/security_attacks/fixtures/poisoned_mcp/descriptions_safe.txt`
+- `evals/security_attacks/fixtures/poisoned_memory/ticket.txt`
+- `evals/security_attacks/fixtures/poisoned_web/page.html`
+- `evals/security_attacks/gate/G01_trifecta_curl.case`
+- `evals/security_attacks/gate/G02_dns_tunnel.case`
+- `evals/security_attacks/gate/G03_untrusted_only_egress.case`
+- `evals/security_attacks/gate/G04_git_hook_write.case`
+- `evals/security_attacks/gate/G05_symlink_scope.case`
+- `evals/security_attacks/gate/G06_mcp_caps.case`
+- `evals/security_attacks/gate/G07_rug_pull.case`
+- `evals/security_attacks/gate/G08_clean_session_curl.case`
+- `evals/security_attacks/manifest.csv`
+- `evals/security_attacks/reports/gate-20260809-183837.jsonl`
+- `evals/security_attacks/reports/gate-20260809-183903.jsonl`
+- `evals/security_attacks/reports/gate-20260809-183920.jsonl`
+- `evals/security_attacks/reports/gate-20260809-183947.jsonl`
+- `evals/security_attacks/reports/gate-20260809-184027.jsonl`
+- `evals/security_attacks/reports/gate-20260809-184051.jsonl`
+- `evals/security_attacks/reports/gate-20260809-184119.jsonl`
+- `evals/security_attacks/reports/gate-20260809-184222.jsonl`
+- `evals/security_attacks/reports/gate-20260809-184309.jsonl`
+- `evals/security_attacks/reports/gate-20260809-190912.jsonl`
+- `evals/security_attacks/reports/gate-20260809-191447.jsonl`
+- `evals/security_attacks/runners/agent_runner.sh`
+- `evals/security_attacks/runners/gate_runner.sh`
+- `evals/security_attacks/runners/reports/gate-20260809-183802.jsonl`
+- `examples/dspy_agentic_sampling_eval.py`
+- `examples/dspy_agentic_sampling_harness.py`
 - `examples/dspy_via_dsco.py`
 - `examples/max_swarm/README.md`
 - `examples/max_swarm/swarm.py`
 - `examples/max_swarm/test_swarm.py`
+- `idl/context_fabric.thrift`
 - `levitate/expandify.py`
 - `levitate/levitate.py`
+- `orchestra/README.md`
+- `orchestra/roles/composer.md`
+- `orchestra/roles/conductor.md`
+- `orchestra/roles/critic.md`
+- `orchestra/roles/soloist.md`
 - `patches/expandify-tools.patch`
 - `prompts/PRAECEPTUM_SYSTEMATIS_DSCO.md`
 - `proposals/LOOP-F1-F4/PATCHSET.md`
@@ -919,6 +1115,14 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `proposals/proof-substrate/thx_analysis/thx_spectrogram_linear.png`
 - `proposals/proof-substrate/thx_analysis/thx_spectrogram_log.png`
 - `proposals/proof-substrate/thx_analysis/thx_video.mp4`
+- `proposals/riemann-counterexample-sampler/.gitignore`
+- `proposals/riemann-counterexample-sampler/README.md`
+- `proposals/riemann-counterexample-sampler/lean/RHCounterexample.lean`
+- `proposals/riemann-counterexample-sampler/lean/RHCounterexample/Bridge.lean`
+- `proposals/riemann-counterexample-sampler/lean/lakefile.toml`
+- `proposals/riemann-counterexample-sampler/lean/lean-toolchain`
+- `proposals/riemann-counterexample-sampler/requirements.txt`
+- `proposals/riemann-counterexample-sampler/search.py`
 - `proposals/swarm-cost/PLAN_64X.md`
 - `proposals/swarm-cost/README.md`
 - `proposals/swarm-cost/swarm_cost`
@@ -940,6 +1144,10 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `reports/perf_push_limit/rollout_stdout.jsonl`
 - `reports/perf_push_limit/startup_spans.csv`
 - `reports/perf_push_limit/startup_spans.svg`
+- `research/DSCO_RL_ENVIRONMENT_AND_INTEGRATIONS.md`
+- `research/ENTROPIX_CODE_STUDY.md`
+- `research/RL_SCALING_BEYOND_FLOPS.md`
+- `research/brown_rl_scaling_axes.md`
 - `research/multi-tenant-quota-budget-design.md`
 - `rituals/CLASSIFY.md`
 - `rituals/DECLASSIFY.md`
@@ -948,3 +1156,20 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `schemas/consumer_profile_ontology/evidence_event.schema.json`
 - `schemas/consumer_profile_ontology/facet_definition.schema.json`
 - `schemas/consumer_profile_ontology/user_facet_value.schema.json`
+- `swarm/continual_swarm.py`
+- `swarm/dashboard.py`
+- `swarm/rsi_supervisor.py`
+- `swarm/static/index.html`
+- `swarm/static/ui_versions/ledger.jsonl`
+- `swarm/static/ui_versions/ui0001_pre.html`
+- `swarm/static/ui_versions/ui0002_applied.html`
+- `swarm/static/ui_versions/ui0003_pre.html`
+- `swarm/static/ui_versions/ui0004_applied.html`
+- `swarm/static/ui_versions/ui0005_pre.html`
+- `swarm/static/ui_versions/ui0006_applied.html`
+- `swarm/thermo_probe.py`
+- `swarm/thermo_selftest.py`
+- `swarm/ui_improve.py`
+- `tools/cap_dataset_gen.c`
+- `tools/cap_dataset_gen_mt.c`
+- `tools/cap_to_trajectories.py`

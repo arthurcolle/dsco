@@ -5,6 +5,11 @@ observable, local-first CLI for distributed agents. Private study notes from the
 repo-local systems corpus live under `.workspace/book_index/` when present; this
 tracked document contains only original engineering guidance and repo policy.
 
+Per-child Kitty log windows are disabled by default. The consolidated swarm UI
+remains the execution surface without creating one Dock window per logical
+worker. Set `DSCO_KITTY_AGENT_WINDOWS=1` for explicit per-child viewers; they
+close when the child completes unless `DSCO_KITTY_AGENT_WINDOWS_KEEP_OPEN=1`.
+
 ## Goal
 
 `dsco` should feel instant for inspection commands, predictable for local tool

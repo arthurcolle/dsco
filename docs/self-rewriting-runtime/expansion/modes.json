@@ -1,0 +1,212 @@
+[
+  {
+    "id": "01",
+    "slug": "curriculum-compiler",
+    "name": "Executable curriculum compiler",
+    "mechanism": "Compile a task grammar with explicit difficulty axes, valid transformations, and known failure labels. Generate positive and negative episodes, retaining their originating family identifiers. Train the role's root policy on a balanced development curriculum and expose a reproducible curriculum-build command.",
+    "acceptance": "Reject a generator that changes the answer without updating its reference or produces duplicate families under different seeds. Measure valid-case coverage and trained-root success separately."
+  },
+  {
+    "id": "02",
+    "slug": "teacher-rejection-distillation",
+    "name": "Teacher rejection distillation",
+    "mechanism": "Collect multiple executable teacher trajectories per development task. Replay their programs against the fixed oracle, reject incorrect or incomplete episodes, and deduplicate shared derivations before extracting root action targets. Distill accepted trajectories into the role policy with balanced family sampling.",
+    "acceptance": "A fluent teacher episode containing the expected answer but an incorrect executable result must be excluded. Compare the trained root against its initial checkpoint on untouched families."
+  },
+  {
+    "id": "03",
+    "slug": "root-turn-supervision",
+    "name": "Faithful root-turn supervision",
+    "mechanism": "Export each root decision as its exact preceding visible history and that decision's generated code. Preserve environment object identities and recursive child receipts. Train only the current root target, masking earlier turns, child replies, and tool observations; verify masks after the actual renderer tokenizes each sample.",
+    "acceptance": "Reject a sample whose prefix contains a later observation. A deliberately relabeled child response must receive no root target loss, and the exported sequence must replay exactly."
+  },
+  {
+    "id": "04",
+    "slug": "execution-error-recovery",
+    "name": "Learned execution-error recovery",
+    "mechanism": "Construct paired episodes containing a recoverable syntax, schema, or reference error and an independently verified repair. Train the root to inspect execution feedback, preserve completed work, and generate the smallest valid continuation. Keep original and corrected code plus the repair transformation.",
+    "acceptance": "Inject an undefined buffer and a completed effect before the failure. Recovery must resolve the buffer without repeating the effect; inventing a final answer cannot count as repair."
+  },
+  {
+    "id": "05",
+    "slug": "counterfactual-preferences",
+    "name": "Counterfactual branch preference training",
+    "mechanism": "Fork identical development states into isolated resettable environment snapshots or a fixed replay oracle with matched randomness. Reject comparisons when reset fidelity is uncertain. Execute alternative root programs under equal budgets, derive preferences from correctness then resource use, and train a declared preference objective on root continuations.",
+    "acceptance": "A shorter incorrect branch must lose to a longer correct branch. Swapping presentation order must preserve the preference, and branches with different starting states must be rejected as unmatched."
+  },
+  {
+    "id": "06",
+    "slug": "terminal-reward-learning",
+    "name": "Verifiable terminal-reward learning",
+    "mechanism": "Run bounded on-policy root rollouts with a fixed leaf policy and independently computed terminal task reward. Record policy versions and action ownership, reject overly stale trajectories, and train the root with an explicitly selected reinforcement-learning objective. Separate correctness constraints from efficiency rewards. Pin resolved reference labels before scoring; disputed or unavailable judgments remain unknown.",
+    "acceptance": "An empty action program, forged success flag, or omitted failing partition must never receive success reward. Confirm that a genuine verified completion produces the declared reward and a reloadable parameter update."
+  },
+  {
+    "id": "07",
+    "slug": "semantic-batch-control",
+    "name": "Learned semantic batch control",
+    "mechanism": "Expose variable-size partitions and token estimates to the root. Train it to choose semantic batch boundaries, call children on those batches, and join outputs by stable item identity. Include interactions crossing naive byte boundaries and charge actual calls and processed tokens.",
+    "acceptance": "A boundary splitting a required dependency must trigger regrouping or explicit reconciliation. Compare fixed-size batching with learned batching under identical task and cost limits, retaining missing and duplicated items as failures."
+  },
+  {
+    "id": "08",
+    "slug": "adaptive-recursion-depth",
+    "name": "Adaptive recursion-depth policy",
+    "mechanism": "Create development instances whose useful decomposition ranges from direct environment computation to nested child RLMs. Train the root to decide between a leaf call and another recursive environment based on task structure and remaining budget. Record the actual tree rather than a declared depth.",
+    "acceptance": "A simple case must not gain reward from unnecessary recursion. A nested case must preserve dependent intermediate results, while attempts to exceed the host depth limit fail without changing that limit."
+  },
+  {
+    "id": "09",
+    "slug": "evidence-based-stopping",
+    "name": "Evidence-based stopping policy",
+    "mechanism": "Train a root decision among continue, return a verified environment result, and terminate unresolved. Development episodes include misleading high confidence, repetitive verification, and unresolved obligations. Optimize task completion with explicit observation requirements and costs, using oracle results rather than self-reported confidence.",
+    "acceptance": "Repeated identical child opinions cannot satisfy a missing obligation. A complete verified result should survive the stop decision unchanged; exhausted budgets must produce unresolved status instead of fabricated success."
+  },
+  {
+    "id": "10",
+    "slug": "context-access-planning",
+    "name": "Learned context-access planning",
+    "mechanism": "Expose context-region descriptors and bounded reads while keeping the full input outside the root window. Train the root to generate access programs that retrieve discriminating regions and recursively examine relevant slices. Log coverage, read amplification, and every region supporting the final artifact.",
+    "acceptance": "Plant decisive information outside the usual prefix and supply a plausible distractor near the beginning. A policy that answers from previews alone must fail the oracle, and an unbounded full-context copy must be detected."
+  },
+  {
+    "id": "11",
+    "slug": "coverage-directed-traversal",
+    "name": "Coverage-directed recursive traversal",
+    "mechanism": "Represent task partitions and their dependencies as an explicit coverage graph. Train the root to traverse unresolved frontiers, dispatch independent work, and mark a node complete only when its typed result satisfies the role contract. Preserve coverage certificates with the output object.",
+    "acceptance": "Drop one required region while returning a plausible aggregate. The completeness check must reject it; duplicate completion messages cannot compensate for a missing node or inflate coverage."
+  },
+  {
+    "id": "12",
+    "slug": "long-output-assembly",
+    "name": "Verified long-output assembly",
+    "mechanism": "Train the root to assemble semantically required role outputs exceeding one generation, using an expected coverage manifest and externally checked fragments. Return the typed result handle and digest with streaming backpressure. Padding cannot satisfy output length; validate the whole artifact against domain obligations after assembly.",
+    "acceptance": "A correct prefix followed by silent truncation must fail completeness. Reordering asynchronous fragments or repeating one fragment must be caught before final publication, without copying the whole output into the root prompt."
+  },
+  {
+    "id": "13",
+    "slug": "persistent-buffer-reuse",
+    "name": "Learned persistent-buffer reuse",
+    "mechanism": "Train the root to recognize reusable intermediate results by their context, procedure, and dependency identities. Maintain external result buffers with explicit invalidation conditions; recursive children receive scoped references. Measure saved work alongside semantic correctness, including reuse across resumed episodes.",
+    "acceptance": "Change one dependency while leaving the buffer's human-readable label unchanged. The policy must recompute affected results and retain unaffected ones; stale reuse or unnecessary replay of completed effects fails."
+  },
+  {
+    "id": "14",
+    "slug": "contradiction-guided-revision",
+    "name": "Contradiction-guided program revision",
+    "mechanism": "Generate episodes where two independently sourced intermediate results conflict. Train the root to localize the conflicting assumptions, recursively investigate discriminating evidence, and revise dependent program steps. Retain both original claims and the evidence that resolved or preserved the disagreement.",
+    "acceptance": "Several copied supporting reports must not overwhelm one valid counterexample. If the conflict remains unresolved, the output must preserve that state rather than select whichever child answered last."
+  },
+  {
+    "id": "15",
+    "slug": "child-policy-selection",
+    "name": "Cost-aware child-policy selection",
+    "mechanism": "Offer a pinned pool of child policies with measured capabilities and costs. Train the root to choose a child and context slice for each subproblem while recording actual serving identities. Optimize verified role outcomes under a shared budget, preserving conditional performance data.",
+    "acceptance": "A cheap child that fails a rare required case must not be selected solely from its average score. Swap an endpoint's model revision and require identity failure rather than silently crediting the trained root."
+  },
+  {
+    "id": "16",
+    "slug": "asynchronous-recursion",
+    "name": "Learned asynchronous recursion",
+    "mechanism": "Expose bounded futures for recursive calls and train submit, await, batch, and cancel decisions on controlled completion distributions. Reservations span all descendants. Keep completed result identities stable and ensure training and inference scheduling never block the terminal input handler.",
+    "acceptance": "Delay a required child indefinitely while delivering other results out of order. The system must remain responsive, preserve partial work, and report unresolved completeness; dropping the slow child cannot manufacture a successful fast result."
+  },
+  {
+    "id": "17",
+    "slug": "typed-role-handoffs",
+    "name": "Learned typed role handoffs",
+    "mechanism": "Train the root to delegate through explicit input, output, evidence, and uncertainty schemas while its partner policies stay frozen. Child prompts contain sufficient scoped context and exact verified dependency values. Failed or incompatible handoffs return typed diagnostics that the root can repair.",
+    "acceptance": "A partner omitting required evidence or returning a result from another task must be rejected. Matching prose labels cannot replace schema and identity checks, and a repaired handoff must preserve its original authority."
+  },
+  {
+    "id": "18",
+    "slug": "active-example-acquisition",
+    "name": "Active example acquisition",
+    "mechanism": "Train the root to select the next development example or oracle query using uncertainty, task importance, and expected decision benefit. Record selection probabilities and the population from which examples were chosen. Keep a fixed independent evaluation distribution for measuring actual improvement.",
+    "acceptance": "A policy that repeatedly samples easy successes must lose coverage credit. A highly uncertain but irrelevant example must not outrank a decisive missing case merely because it produces a larger confidence change."
+  },
+  {
+    "id": "19",
+    "slug": "counterexample-adversary",
+    "name": "Role-specific counterexample adversary",
+    "mechanism": "Train an auxiliary root policy to generate valid challenging inputs for the role's current candidate behavior. A fixed independent referee checks input validity and confirms violations. Retain diverse minimized witnesses, and evaluate the main role against non-adaptive sealed cases as well.",
+    "acceptance": "A malformed input, altered reference, or induced harness failure cannot earn adversarial success. A genuine in-contract error must produce a reproducible witness tied to the exact candidate and environment revisions."
+  },
+  {
+    "id": "20",
+    "slug": "invariant-conditioned-programs",
+    "name": "Invariant-conditioned program generation",
+    "mechanism": "Attach explicit executable invariants to development tasks and train the root to carry them through decomposition, child-result consumption, and final assembly. Check invariants outside the policy, distinguishing proven bounded conditions from sampled checks and unresolved assumptions.",
+    "acceptance": "A candidate that satisfies visible examples while violating a required invariant on a boundary case must fail. Removing the check or replacing it with the root's assurance must not change the verdict."
+  },
+  {
+    "id": "21",
+    "slug": "minimal-witness-learning",
+    "name": "Learned minimal-witness extraction",
+    "mechanism": "Train the root to shrink a failure of this role's program, preserving its original domain obligations and fixed failure identity. It removes candidate context or program regions, recursively checks reductions, and stores a verified failure witness separately from the normal role result. Measure size and replay reliability separately.",
+    "acceptance": "Deleting the evidence until a different error appears must be rejected as failure drift. The final witness must reproduce the original oracle mismatch, and timeout cannot establish that a removed region was unnecessary."
+  },
+  {
+    "id": "22",
+    "slug": "calibrated-abstention",
+    "name": "Calibrated role abstention",
+    "mechanism": "Train an explicit abstention decision using development outcomes and calibrate its thresholds on a separate calibration split. Preserve task difficulty, evidence availability, and error categories. Evaluate selective accuracy together with retained coverage so refusing every task cannot appear useful.",
+    "acceptance": "A timeout or unavailable oracle must remain unknown. Report the retained-task denominator and coverage; a high-confidence wrong answer and an always-abstain policy must both fail their predeclared acceptance conditions."
+  },
+  {
+    "id": "23",
+    "slug": "drift-adaptive-role-policy",
+    "name": "Drift-adaptive role policy",
+    "mechanism": "Train the root to distinguish transient anomalies, changed input distributions, and changed task semantics from chronological observations. It selects bounded diagnostic probes and proposes scoped relearning. Keep an immutable pre-change checkpoint and evaluate detection delay, false alarms, and post-change correctness.",
+    "acceptance": "One extreme outlier must not trigger wholesale relearning. A sustained change affecting the role's contract must be detected without access to future observations, and unaffected task families must retain their prior behavior."
+  },
+  {
+    "id": "24",
+    "slug": "dependency-scoped-retraining",
+    "name": "Dependency-scoped retraining",
+    "mechanism": "Bind training episodes and learned procedures to content and environment dependencies. When one dependency changes, select the affected development slices and train a bounded role update with replay from unaffected families. Version the dependency graph and resulting checkpoint separately.",
+    "acceptance": "Editing content at the same path must reopen dependent learning claims. Retraining only on the changed slice must not hide regressions elsewhere, and unrelated episodes must not be relabeled stale merely to improve reported coverage."
+  },
+  {
+    "id": "25",
+    "slug": "recovery-policy-training",
+    "name": "Checkpoint recovery policy training",
+    "mechanism": "Create interrupted role episodes with committed buffers, pending child calls, and explicit effect receipts. Train the root to reconstruct logical state, reconcile pending work, and continue from a compatible model/environment tuple. Treat unavailable state as a recoverable diagnostic rather than invented memory.",
+    "acceptance": "Resume after an effect completed but before its acknowledgement was recorded. Reconcile the receipt instead of repeating the effect; incompatible state schemas or changed model identities must prevent a misleading continuation claim."
+  },
+  {
+    "id": "26",
+    "slug": "hierarchical-context-navigation",
+    "name": "Hierarchical context navigation",
+    "mechanism": "Build lossless external indexes over task contexts and train the root to navigate coarse descriptors into exact evidence regions. Child RLMs inspect selected subtrees; summaries guide navigation but never replace authoritative content. Record access paths and evidence references for the final artifact.",
+    "acceptance": "A summary that omits a decisive exception must not erase the exception from the answer. Force a query requiring descent into a rarely accessed subtree and verify the exact underlying evidence is consumed."
+  },
+  {
+    "id": "27",
+    "slug": "pareto-policy-distillation",
+    "name": "Constrained Pareto policy distillation",
+    "mechanism": "Collect independently verified root trajectories with quality, latency, memory, and cost measurements. Construct a constrained frontier and distill policies conditioned on declared operating budgets. Keep correctness and capability rules as hard requirements rather than exchangeable score terms.",
+    "acceptance": "A fast invalid trajectory must never enter the feasible frontier. Tightening a resource budget should produce a valid lower-cost policy or explicit infeasibility, not an unreported reduction in required task coverage."
+  },
+  {
+    "id": "28",
+    "slug": "cross-family-transfer",
+    "name": "Measured cross-family transfer",
+    "mechanism": "Train the role on selected development families, then compare adapted and unadapted roots on disjoint family structures with fixed leaves. Include component ablations and a negative-transfer condition. Retain task ancestry so apparent transfer cannot come from shared templates or answer leakage.",
+    "acceptance": "A learned shortcut that works only for one identifier or ordering must fail on renamed and structurally changed cases. Attribute any gain to the trained root and report families harmed by the update."
+  },
+  {
+    "id": "29",
+    "slug": "capability-constrained-decoding",
+    "name": "Capability-constrained program learning",
+    "mechanism": "Train the root to generate useful programs within a declared host-service contract, using structured action schemas and explicit capability denials as observations. Constraints shape valid proposals, but the host still authorizes every effect independently. Evaluate task completion under different legitimate grant sets.",
+    "acceptance": "A recursive child requesting broader authority cannot obtain it from generated code or a rewritten schema. The root must select an allowed alternative or report inability, and a denied action cannot be recorded as completed."
+  },
+  {
+    "id": "30",
+    "slug": "joint-version-admission",
+    "name": "Joint model and runtime admission",
+    "mechanism": "Train the role to identify incompatible model, adapter, child-policy, environment, and native-procedure versions. Store a typed admission plan, pinned tuple, receipts, and decision in feature_artifact; role_result retains the domain artifact. A separate authority validates compatibility and serializes admission against revocation.",
+    "acceptance": "An unchanged parent generation with a revoked receipt must still fail admission. Native-improvement claims require changed instruction bytes, retained heap/session state, and no exec; a trained model's confidence alone cannot authorize activation."
+  }
+]

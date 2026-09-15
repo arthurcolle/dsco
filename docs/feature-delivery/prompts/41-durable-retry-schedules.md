@@ -1,0 +1,11 @@
+# 41 — Durable retry schedules and poison-task inspection
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or the isolated worktree assigned for this feature. Read applicable `AGENTS.md` instructions and inspect current code before editing. Start at `src/ipc.c`, `src/durable_agents.c`, `include/ipc.h`. If part already exists, ship the missing bounded extension and explain the observed gap; do not duplicate an existing subsystem. All interfaces named below are proposed until verified on disk.
+
+Durable tasks already have ownership generations, but repeated failures need an explicit, inspectable retry schedule. Add an opt-in policy with attempt ceiling, bounded exponential delay, deterministic jitter seed, next eligible time, and terminal exhausted reason. Preserve directed-task routing and existing stale-completion rejection. Store attempt history separately from the current task row; restarting the CLI must retain delays and consumed attempts. Proposed `agents retries` inspection should explain why an item is waiting or exhausted. Requeue requires a deliberate existing-authority operation and creates a new fenced attempt without erasing previous evidence. Do not infer that an uncertain external effect is safe to retry: classify that case as reconciliation required.
+
+Implement new capability in proposed `src/task_retry.c` and `include/task_retry.h`, with small dispatch hooks and a Makefile entry where needed. Preserve unrelated dirty work. Coordinate shared-file changes; keep builds, databases, sockets, fixtures, and reports isolated. Build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install a worker binary. Every tool-call path must use `tools_execute_for_tier()` and preserve capability gates.
+
+Use two competing local processes against a temporary database, scripted failures, and an injectable test clock. Prove one claim per generation, no claim before eligibility, bounded attempts across restart, and stale completion rejection after requeue. Check malformed policies and clock rollback without long sleeps.
+
+Finish with the implemented behavior, exact reproduction commands, binary and evidence paths, relevant regression results, and remaining limitations. Verify the real local runtime path; compilation alone is insufficient.

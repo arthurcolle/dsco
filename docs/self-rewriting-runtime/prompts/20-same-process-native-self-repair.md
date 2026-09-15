@@ -1,0 +1,15 @@
+# 20 — A closed-loop same-process native self-repair demonstration
+
+Deliver a single runnable demonstration in which DSCO observes a defect in its own bounded resident native function, reasons about the failure, writes a candidate implementation, evaluates unseen cases, and activates the repaired machine-code entrypoint without restarting. The mutable region should be a meaningful pure parser or scorer with an independent reference oracle. The stable host, capability checks, and evaluator remain outside the region the improvement agent may rewrite.
+
+The demonstration owns its complete minimal loop: capture a failing input and exact active generation; request a bounded repair using the configured model; compile or emit candidate native code; inspect its ABI and imports; evaluate training, counterexample, and hidden cases; atomically activate the qualified implementation; continue serving requests through the resident entrypoint. If supporting interfaces are absent, implement small local versions instead of requiring other numbered features.
+
+Record source and executable hashes, entrypoint ownership, actual oracle results, costs, and process-start identity throughout. A test-only deterministic proposal source may verify mechanics, but the delivered live path must exercise genuine model-proposed code when explicitly invoked with a configured inference budget. Do not claim autonomous improvement from a fixture alone. Retain the champion and compatible state so a later qualified-looking regression can be withdrawn safely.
+
+Falsifying test: the original version must fail a real hidden boundary case; the repair must change native executable behavior and pass untouched holdouts in the same PID with no exec or supervisor relaunch. Then present a later candidate that passes visible examples but fails a probation invariant: require rejection before activation or same-process rollback of future dispatch to the retained champion. Verify a fixture external-effect counter is never duplicated during evaluation. A source diff, prompt update, child-only result, or rebuilt installed binary is insufficient.
+
+Prove continuity with a resident heap sentinel's address and contents, a live session handle/counter, completion of an old-generation frame, and audited absence of exec; PID equality alone is insufficient.
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Inspect `src/autoresearch.c`, `src/self_improve.c`, `src/plugin.c`, `src/vm.c`, `src/execution_kernel.c`, then `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/agent_system.py` symbols `SelfInterrogation.interrogate`. Observed donor behavior: The donor asks an LM structured questions about progress and improvement; it does not rewrite and activate resident machine code.
+
+Preserve unrelated dirty work; add focused modules and small hooks. Govern every effectful tool call through `tools_execute_for_tier()`. Isolate state and build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

@@ -1,0 +1,23 @@
+{
+  "schema": "dsco.rlm-expansion.qa/v1",
+  "passed": true,
+  "prompt_count": 3000,
+  "ids": [
+    121,
+    3120
+  ],
+  "role_count": 100,
+  "feature_mode_count": 30,
+  "word_count_method": "whitespace split including title",
+  "min_words": 328,
+  "max_words": 376,
+  "total_words": 1047680,
+  "unique_bodies_excluding_titles": 3000,
+  "unique_structured_feature_contracts": 3000,
+  "verified_source_files": 109,
+  "foundation_prompts_unchanged": 120,
+  "semantic_uniqueness_claim": "Distinct role-feature contracts; related prompts intentionally share RLM, training and authority requirements.",
+  "authoring_method": "Source-grounded role profiles combined with thirty explicitly authored feature mechanisms; deterministic rendering.",
+  "training_runs": 0,
+  "runtime_changes": 0
+}

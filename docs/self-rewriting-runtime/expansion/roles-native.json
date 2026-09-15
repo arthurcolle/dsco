@@ -1,0 +1,921 @@
+[
+  {
+    "id": "001",
+    "name": "Bounded binary-record decoder",
+    "slug": "binary-record-decoder",
+    "brief": "Learn to synthesize bounded native decoders for length-prefixed journal records with explicit byte-order and checksum semantics.",
+    "context": "External REPL variables `record_bytes`, `format_spec`, and `decode_traces` retain complete binary corpora and parser transitions.",
+    "program": "Root code slices headers and payloads, recursively assigns field interpretations, then composes checked decoding states.",
+    "data": "Training episodes pair generated valid records and structural corruptions with independently executed decoder outcomes and root actions.",
+    "oracle": "A frozen reference decoder and checksum implementation verify exact fields, consumed offsets, rejection classes, and memory boundaries.",
+    "failure": "A forged length wraps arithmetic and makes a checksum-valid prefix conceal an out-of-bounds payload access.",
+    "holdout": "Hold out format layouts, endian combinations, nesting depths, and corruption operators with all mutated siblings grouped.",
+    "artifact": "Final environment handle resolves `DecoderCandidate` containing native artifact hash, field map, bounds contract, and executable witnesses.",
+    "primary_paths": [
+      "src/chronicle.c",
+      "src/execution_recovery.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py",
+        "symbols": [
+          "CodeAnalysisToolkit.parse_python_ast"
+        ],
+        "observation": "Extracts syntax structure from Python; native binary parsing is a proposed transfer."
+      }
+    ]
+  },
+  {
+    "id": "002",
+    "name": "Incremental Unicode decoder",
+    "slug": "incremental-unicode-decoder",
+    "brief": "Learn native Unicode decoding procedures that preserve exact scalar values and error positions across arbitrary input chunking.",
+    "context": "REPL variables `utf8_bytes`, `chunk_schedules`, and `decoder_states` retain byte streams, boundary splits, and partial sequences.",
+    "program": "Root code isolates multibyte boundaries, invokes children on sequence classes, and merges explicit decoder transition proposals.",
+    "data": "Train from reference-labeled scalar sequences, malformed encodings, split-point variations, and successful boundary-repair action trajectories.",
+    "oracle": "A fixed strict Unicode decoder checks decoded scalars, consumed bytes, incomplete status, and precise invalid-sequence locations.",
+    "failure": "A truncated multibyte prefix joined to an illegal continuation is incorrectly accepted after a chunk boundary.",
+    "holdout": "Hold out Unicode planes, malformed-sequence families, and adversarial chunk schedules rather than merely new text sentences.",
+    "artifact": "Final `UnicodeDecoderCandidate` handle contains transition tables, scalar policy, native code identity, and chunk-invariance test receipts.",
+    "primary_paths": [
+      "src/buffer_store.c",
+      "src/buffer_textedit.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_openrouter_streaming.py",
+        "symbols": [
+          "_safe_stream"
+        ],
+        "observation": "Yields streamed response objects; it does not implement or verify Unicode decoding."
+      }
+    ]
+  },
+  {
+    "id": "003",
+    "name": "Incremental stream-frame recognizer",
+    "slug": "stream-frame-recognizer",
+    "brief": "Learn executable stream recognizers that distinguish complete messages, partial frames, terminal markers, and malformed framing without guessing.",
+    "context": "External variables `wire_chunks`, `frame_contract`, and `frame_states` preserve complete segmented protocol transcripts and parser checkpoints.",
+    "program": "Root programs test delimiter hypotheses, recurse over ambiguous boundary windows, and assemble a bounded framing automaton.",
+    "data": "Train on generated fragmentation/coalescing episodes with action traces and labels from a separately fixed frame recognizer.",
+    "oracle": "A deterministic reference automaton checks emitted frame bytes, exact order, terminal status, and unconsumed trailing data.",
+    "failure": "A terminal-looking marker inside escaped payload text prematurely closes the stream and discards a later valid message.",
+    "holdout": "Hold out delimiter grammars, escape patterns, chunk lengths, and close-before-completion cases across entire transcript families.",
+    "artifact": "Final `FrameRecognizer` handle names executable states, buffering bounds, completion predicates, and minimal framing counterexamples.",
+    "primary_paths": [
+      "src/provider.c",
+      "src/mcp.c",
+      "src/event_stream.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_openrouter_streaming.py",
+        "symbols": [
+          "_safe_stream"
+        ],
+        "observation": "Consumes DSPy stream chunks and final predictions; protocol frame recognition is not implemented there."
+      }
+    ]
+  },
+  {
+    "id": "004",
+    "name": "Fixed-width arithmetic transformer",
+    "slug": "fixed-width-arithmetic-transformer",
+    "brief": "Learn native arithmetic rewrites that reduce operations while preserving declared signedness, width, overflow, and division behavior.",
+    "context": "REPL variables `arithmetic_ir`, `integer_domains`, and `counterexamples` retain expressions, type contracts, and distinguishing inputs.",
+    "program": "Root code partitions expressions, asks children for local identities, and recombines only independently checked substitutions.",
+    "data": "Train on executable rewrite attempts labeled by bitvector equivalence results and observed instruction-count changes.",
+    "oracle": "A frozen exhaustive small-width checker or bitvector solver validates every rewrite within explicitly stated input bounds.",
+    "failure": "Replacing division with a shift changes negative-number rounding despite matching all positive training inputs.",
+    "holdout": "Hold out operator combinations, widths, signed boundary ranges, and algebraic templates; equivalent renamed expressions remain grouped.",
+    "artifact": "Final `ArithmeticRewrite` handle contains typed before/after IR, native byte hashes, applicability predicates, and solver witnesses.",
+    "primary_paths": [
+      "src/eval.c",
+      "src/math_fastpath.c",
+      "src/vm.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py",
+        "symbols": [
+          "MathToolkit.evaluate_expression"
+        ],
+        "observation": "Evaluates arithmetic expressions; fixed-width native equivalence and rewrite learning are proposed extensions."
+      }
+    ]
+  },
+  {
+    "id": "005",
+    "name": "Bounded regex automaton compiler",
+    "slug": "regex-automaton-compiler",
+    "brief": "Learn native matcher generation for a declared regular-expression subset using bounded automata instead of uncontrolled backtracking.",
+    "context": "External `regex_ast`, `text_corpus`, and `automata` variables retain patterns, complete strings, transition graphs, and failing matches.",
+    "program": "Root code splits pattern subtrees, delegates transition obligations, and determinizes or minimizes candidate automata under limits.",
+    "data": "Train from generated pattern/string families, rejected unsupported constructs, and externally scored compile-and-match trajectories.",
+    "oracle": "A fixed reference matcher with identical anchoring semantics verifies acceptance, match spans, and bounded resource behavior.",
+    "failure": "A nested ambiguous quantifier triggers exponential work or silently changes leftmost matching on an overlapping substring.",
+    "holdout": "Hold out pattern grammars, alphabet classes, empty matches, and adversarial repetitions with shared pattern ancestry grouped.",
+    "artifact": "Final `RegexAutomaton` handle contains supported syntax, executable transition tables, state bounds, and counterexample match pairs.",
+    "primary_paths": [
+      "src/tools.c",
+      "src/ast.c",
+      "src/vm.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py",
+        "symbols": [
+          "DataPipelineToolkit.extract_structured_data"
+        ],
+        "observation": "Uses regular-expression patterns for field extraction; it does not synthesize verified native automata."
+      }
+    ]
+  },
+  {
+    "id": "006",
+    "name": "Canonical record serializer",
+    "slug": "canonical-record-serializer",
+    "brief": "Learn native serializers whose canonical bytes preserve typed record semantics across optional fields and schema ordering variations.",
+    "context": "REPL variables `logical_records`, `wire_schema`, and `encoding_pairs` retain complete record graphs and byte-level reference outputs.",
+    "program": "Root programs inspect field groups, recursively propose encoding rules, and join them through explicit canonical-order contracts.",
+    "data": "Train from generated records, alternate encodings, schema perturbations, and round-trip failures with independently labeled root actions.",
+    "oracle": "An immutable reference encoder/decoder checks canonical bytes, decoded types, unknown-field handling, and exact round-trip semantics.",
+    "failure": "A missing field and an explicit null collapse to identical bytes although their application meanings differ.",
+    "holdout": "Hold out optional-field combinations, integer widths, nested schemas, and equivalent presentation permutations grouped by logical record.",
+    "artifact": "Final `SerializerCandidate` handle supplies native code, canonical ordering rules, schema fingerprint, and round-trip evidence.",
+    "primary_paths": [
+      "src/json_util.c",
+      "src/json_fast.c",
+      "src/capsule.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/agents/sqlite.py",
+        "symbols": [
+          "SQLiteAgent.schema"
+        ],
+        "observation": "Returns schemas for dictionary-backed tables; it does not provide native canonical serialization."
+      }
+    ]
+  },
+  {
+    "id": "007",
+    "name": "Revision-scoped interval index designer",
+    "slug": "interval-index-designer",
+    "brief": "Learn interval index procedures for source spans that answer overlap and containment queries accurately after revision changes.",
+    "context": "External `span_sets`, `revision_maps`, and `query_batches` variables preserve all intervals, edits, and expected source identities.",
+    "program": "Root code partitions coordinate ranges, invokes children on overlap cases, and selects checked tree or sweep structures.",
+    "data": "Train on generated edit/query workloads with reference overlap labels and measured index construction plus query costs.",
+    "oracle": "A frozen exhaustive interval scan verifies result membership, endpoint conventions, ordering, and revision-specific coordinates.",
+    "failure": "Adjacent half-open spans are incorrectly merged, causing an edit in one procedure to contaminate another procedure.",
+    "holdout": "Hold out overlap densities, endpoint conventions, edit patterns, and revision histories rather than shuffled query rows.",
+    "artifact": "Final `IntervalIndexCandidate` handle contains coordinate policy, native index code, revision binding, and discriminating query witnesses.",
+    "primary_paths": [
+      "src/buffer_store.c",
+      "src/ast.c",
+      "src/trace_kg_store.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py",
+        "symbols": [
+          "CodeAnalysisToolkit.parse_python_ast"
+        ],
+        "observation": "Extracts source locations and syntax structure; interval-index optimization is a new native role."
+      }
+    ]
+  },
+  {
+    "id": "008",
+    "name": "Invocation arena allocator synthesizer",
+    "slug": "invocation-arena-allocator",
+    "brief": "Learn arena allocation procedures that exploit invocation lifetimes while preserving alignment, nested scopes, and concurrent ownership.",
+    "context": "REPL `allocation_graphs`, `scope_traces`, and `arena_layouts` retain complete object lifetimes, chunk boundaries, and alignment requests.",
+    "program": "Root programs analyze scope subgraphs, delegate escape questions, and construct allocation/reset policies with explicit ownership.",
+    "data": "Train from instrumented allocation episodes, known escaping objects, alignment failures, and independently validated lifetime-preserving rewrites.",
+    "oracle": "A fixed ownership checker plus guarded allocator validates live-object bytes, alignment, release timing, and allocation bounds.",
+    "failure": "Rewinding only the newest chunk leaves older nested allocations incorrectly reusable while an outer reference remains live.",
+    "holdout": "Hold out chunk sizes, scope nesting, concurrency patterns, and alias lifetimes with related traces grouped.",
+    "artifact": "Final `ArenaPolicyCandidate` handle includes native allocator code, scope rules, live-reference obligations, and allocation witnesses.",
+    "primary_paths": [
+      "src/arena_alloc.c",
+      "src/json_util.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "CodeSandbox.execute"
+        ],
+        "observation": "Retains Python locals between executions; native arena ownership and allocation policies are absent."
+      }
+    ]
+  },
+  {
+    "id": "009",
+    "name": "Bounded ring-buffer algorithm designer",
+    "slug": "bounded-ring-buffer-designer",
+    "brief": "Learn bounded native ring-buffer procedures with explicit overwrite, backpressure, ordering, and consumer visibility contracts.",
+    "context": "External `ring_operations`, `producer_batches`, and `consumer_views` retain operation sequences, capacities, and observed logical indices.",
+    "program": "Root code separates wraparound epochs, delegates visibility cases, and synthesizes index arithmetic plus publication-order proposals.",
+    "data": "Train from generated push/read histories, controlled interleavings, wrap defects, and exact model-checked outcome labels.",
+    "oracle": "A frozen sequential model or bounded linearizability checker verifies item identity, order, capacity behavior, and permitted loss.",
+    "failure": "Index wrap makes a stale slot appear newly published, duplicating one sample while silently dropping another.",
+    "holdout": "Hold out capacity shapes, producer counts, wrap frequencies, and delayed-consumer schedules with shared histories grouped.",
+    "artifact": "Final `RingImplementation` handle contains native code, capacity policy, synchronization contract, and replayable wraparound counterexamples.",
+    "primary_paths": [
+      "src/ring_buffer.c",
+      "src/swarm_reactor.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py",
+        "symbols": [
+          "QueueToolkit.publish"
+        ],
+        "observation": "Stores priority messages in Python lists or Redis; it does not implement native ring-buffer semantics."
+      }
+    ]
+  },
+  {
+    "id": "010",
+    "name": "Filesystem tree-diff algorithm designer",
+    "slug": "filesystem-tree-diff-designer",
+    "brief": "Learn executable filesystem diff procedures that distinguish content edits, renames, mode changes, symlinks, and missing paths.",
+    "context": "REPL variables `old_tree`, `new_tree`, and `path_events` retain immutable path/type/mode/content inventories and change histories.",
+    "program": "Root code partitions directory subtrees, delegates ambiguous rename candidates, and combines typed edit operations under path constraints.",
+    "data": "Train from generated tree transformations and reference edit scripts, preserving failed rename and type-transition episodes.",
+    "oracle": "A fixed patch applicator reconstructs the target inventory and independently checks exact path types, modes, and bytes.",
+    "failure": "A file-to-symlink transition is misclassified as an ordinary content edit and follows an unintended destination.",
+    "holdout": "Hold out directory shapes, case collisions, rename cycles, and mixed metadata/content changes with ancestry-linked trees grouped.",
+    "artifact": "Final `TreeDiffCandidate` handle names native diff code, typed operations, source/target hashes, and reconstruction receipts.",
+    "primary_paths": [
+      "src/vfs.c",
+      "src/workspace.c",
+      "src/buffer_store.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py",
+        "symbols": [
+          "FileSystemToolkitPro.read_file"
+        ],
+        "observation": "Reads files through configurable modes; it does not derive verified native tree-diff algorithms."
+      }
+    ]
+  },
+  {
+    "id": "011",
+    "name": "Logical snapshot codec designer",
+    "slug": "logical-snapshot-codec",
+    "brief": "Learn compact native codecs for immutable logical snapshots while preserving shared references, cycles, and schema identities.",
+    "context": "External `object_graphs`, `snapshot_schema`, and `encoded_snapshots` variables retain full state graphs and candidate byte streams.",
+    "program": "Root programs discover repeated structures, recurse over graph components, and synthesize reference tables plus decoding order.",
+    "data": "Train on generated object graphs, corrupted snapshots, compression choices, and independently verified encode/decode action trajectories.",
+    "oracle": "A frozen graph-isomorphism checker validates restored values, alias relationships, cycles, and declared deterministic encoding rules.",
+    "failure": "Two aliases become independent copies after decoding, so later mutation changes the restored computation behavior.",
+    "holdout": "Hold out graph motifs, cycle lengths, scalar ranges, and corruption patterns with related snapshots grouped.",
+    "artifact": "Final `SnapshotCodec` handle includes native encoder/decoder, logical schema, reference policy, and exact restoration witnesses.",
+    "primary_paths": [
+      "src/recovery.c",
+      "src/sequence_state.c",
+      "src/json_util.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "CodeSandbox.execute"
+        ],
+        "observation": "Keeps interpreter locals resident but does not encode lossless portable snapshots."
+      }
+    ]
+  },
+  {
+    "id": "012",
+    "name": "Typed protocol request-response codec",
+    "slug": "typed-protocol-codec",
+    "brief": "Learn native protocol codecs that preserve request identity, typed errors, optional fields, and forward-compatible message semantics.",
+    "context": "REPL `message_schema`, `request_response_pairs`, and `version_cases` hold full exchanges and negotiated protocol variants.",
+    "program": "Root code separates message variants, delegates field compatibility checks, and builds encoder/decoder pairs with explicit validation.",
+    "data": "Train from generated exchanges, version mismatches, missing identifiers, and externally labeled round-trip and rejection episodes.",
+    "oracle": "A fixed protocol conformance runner checks decoded meaning, correlation identity, required fields, and error response shape.",
+    "failure": "Numeric and string request identifiers collapse together, routing an otherwise valid response to the wrong request.",
+    "holdout": "Hold out message variants, optional-field interactions, protocol versions, and malformed identifier families grouped by exchange lineage.",
+    "artifact": "Final `ProtocolCodecCandidate` handle contains native codec functions, supported versions, schema hashes, and correlation counterexamples.",
+    "primary_paths": [
+      "src/mcp.c",
+      "src/acp_server.c",
+      "src/json_util.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/agent_system.py",
+        "symbols": [
+          "Message.to_json",
+          "Message.from_json"
+        ],
+        "observation": "Serializes typed agent messages to JSON; native request-response contract synthesis is a proposed extension."
+      }
+    ]
+  },
+  {
+    "id": "013",
+    "name": "Semantic build-unit partitioner",
+    "slug": "semantic-build-unit-partitioner",
+    "brief": "Learn compilation-unit partitions and reuse decisions that reduce native rebuild work without missing changed semantic dependencies.",
+    "context": "External `source_versions`, `semantic_edges`, and `build_units` variables retain edit histories, contracts, and compiled artifacts.",
+    "program": "Root programs slice changed definitions, delegate dependency closures, and assemble a minimal independently justified rebuild set.",
+    "data": "Train from edit/build trajectories labeled by clean-build comparison, actual compilation cost, and discovered stale-object failures.",
+    "oracle": "A frozen clean rebuild plus executable oracle verifies behavior and dependency coverage of each incremental candidate.",
+    "failure": "An inline constant changes while its symbol name remains identical, leaving a dependent specialization incorrectly cached.",
+    "holdout": "Hold out edit classes, module topologies, compiler configurations, and specialization dependencies with repository lineage grouped.",
+    "artifact": "Final `RebuildPlan` handle lists semantic unit hashes, reused artifacts, required recompilations, and clean-build comparison receipts.",
+    "primary_paths": [
+      "src/ast.c",
+      "src/plugin.c",
+      "src/autoresearch.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.get_ast",
+          "MetaToolRegistry.transform_tool"
+        ],
+        "observation": "Caches AST descriptions and transforms registered source; semantic incremental build partitioning is absent."
+      }
+    ]
+  },
+  {
+    "id": "014",
+    "name": "Scope-aware native symbol resolver",
+    "slug": "scope-aware-symbol-resolver",
+    "brief": "Learn native symbol resolution procedures that preserve scope, visibility, overload contracts, and generation-specific definitions.",
+    "context": "REPL variables `symbol_tables`, `import_edges`, and `resolution_queries` retain complete candidate namespaces and caller contracts.",
+    "program": "Root code partitions namespaces, delegates ambiguous bindings, and builds deterministic resolution tables with explicit rejection cases.",
+    "data": "Train on generated shadowing, aliasing, visibility, and duplicate-definition episodes labeled by a separately fixed resolver.",
+    "oracle": "An immutable reference resolver checks exact target identity, ambiguity detection, visibility rules, and unresolved-symbol diagnostics.",
+    "failure": "A same-named private symbol in another generation accidentally satisfies an external import with an incompatible contract.",
+    "holdout": "Hold out namespace depths, visibility patterns, generation overlaps, and alias chains with renamed-equivalent graphs grouped.",
+    "artifact": "Final `SymbolResolutionPlan` handle contains native lookup code, caller-to-target bindings, contract fingerprints, and ambiguity witnesses.",
+    "primary_paths": [
+      "src/ast.c",
+      "src/plugin.c",
+      "src/vm.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py",
+        "symbols": [
+          "CodeAnalysisToolkit.parse_python_ast"
+        ],
+        "observation": "Extracts function and import names; native scope and linkage resolution are new work."
+      }
+    ]
+  },
+  {
+    "id": "015",
+    "name": "Native relocation validator",
+    "slug": "native-relocation-validator",
+    "brief": "Learn relocation decoding and validation procedures for an explicit native object-format subset before executable admission.",
+    "context": "External `object_sections`, `relocation_entries`, and `target_layouts` retain bytes, symbol mappings, and candidate load addresses.",
+    "program": "Root code groups relocation kinds, delegates range equations, and generates bounded patch calculations with checked arithmetic.",
+    "data": "Train from synthetic relocatable objects, validated load layouts, malformed offsets, and reference-labeled relocation action traces.",
+    "oracle": "A frozen object-format checker verifies relocation width, target identity, arithmetic bounds, and resulting reference addresses.",
+    "failure": "A negative displacement truncates during range checking and redirects a branch outside the admitted executable section.",
+    "holdout": "Hold out relocation kinds, section arrangements, displacement extremes, and malformed-entry families with object ancestry grouped.",
+    "artifact": "Final `RelocationValidator` handle supplies native validation code, supported format subset, patch equations, and rejecting witnesses.",
+    "primary_paths": [
+      "src/plugin.c",
+      "src/vm.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.register_code"
+        ],
+        "observation": "Registers executable Python functions; it has no native relocation validation or machine-address contracts."
+      }
+    ]
+  },
+  {
+    "id": "016",
+    "name": "Transactional state-write planner",
+    "slug": "transactional-state-write-planner",
+    "brief": "Learn native write protocols that atomically publish owned state changes while preserving concurrent updates and failure recovery.",
+    "context": "REPL `write_intents`, `state_versions`, and `fault_schedules` retain complete transactions, ownership scopes, and interruption boundaries.",
+    "program": "Root programs identify conflict sets, delegate rollback paths, and synthesize prepare/validate/commit steps with version checks.",
+    "data": "Train from controlled concurrent writes, injected storage failures, and independently labeled lost-update or atomicity violations.",
+    "oracle": "A fixed transactional reference model checks allowed serial outcomes, durability points, and rejection of stale write versions.",
+    "failure": "A late writer updates the old snapshot after validation, and publication silently overwrites that acknowledged change.",
+    "holdout": "Hold out conflict shapes, failure boundaries, concurrent-writer counts, and state-schema variations with transaction histories grouped.",
+    "artifact": "Final `WriteProtocolCandidate` handle contains native transitions, commit predicates, conflict witnesses, and replayable atomicity receipts.",
+    "primary_paths": [
+      "src/blackboard.c",
+      "src/buffer_store.c",
+      "src/execution_layer.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/agents/sqlite.py",
+        "symbols": [
+          "SQLiteAgent.update"
+        ],
+        "observation": "Updates dictionary-backed rows; it does not provide transactional native state publication."
+      }
+    ]
+  },
+  {
+    "id": "017",
+    "name": "Generation reclamation policy designer",
+    "slug": "generation-reclamation-designer",
+    "brief": "Learn reclamation policies that release obsolete native images promptly while preserving frames, callbacks, and suspended continuation references.",
+    "context": "External `generation_graph`, `lease_events`, and `retirement_states` variables retain full lifetime histories and code-image ownership.",
+    "program": "Root code partitions reference paths, delegates hidden-retention checks, and proposes bounded quiescence or lease accounting rules.",
+    "data": "Train on generated activation/drain schedules, retained callbacks, and independently verified premature-release or memory-retention outcomes.",
+    "oracle": "A frozen lifetime checker verifies no unmapping before references drain and requires reclamation within a declared bound afterward.",
+    "failure": "An asynchronous callback into retired code must remain valid; a retain-forever policy must fail the post-drain reclamation deadline.",
+    "holdout": "Hold out callback nesting, continuation lifetimes, activation bursts, and shutdown interleavings grouped by reference-graph ancestry.",
+    "artifact": "Final `ReclamationPolicy` handle specifies native ownership transitions, retention bounds, code-map evidence, and adversarial lifetime traces.",
+    "primary_paths": [
+      "src/plugin.c",
+      "src/vm.c",
+      "src/event_loop.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.compose"
+        ],
+        "observation": "Composes callable references but does not manage concurrent native generation reclamation."
+      }
+    ]
+  },
+  {
+    "id": "018",
+    "name": "SIMD lane-and-tail kernel designer",
+    "slug": "simd-lane-tail-designer",
+    "brief": "Learn native vector kernels that choose lane operations and tail strategies while preserving an explicit scalar contract.",
+    "context": "REPL `scalar_ir`, `batch_inputs`, and `isa_contract` retain full expressions, alignment cases, and allowed vector instructions.",
+    "program": "Root code splits loop bodies, delegates lane mapping, and joins vector blocks with checked scalar tails.",
+    "data": "Train from compiled vectorization attempts with externally measured parity, guard-page behavior, instruction identity, and complete-call timing.",
+    "oracle": "A frozen scalar implementation checks every output and permitted overflow behavior before performance contributes reward.",
+    "failure": "A masked-looking tail load crosses a guard page even though unused lanes never reach the final output.",
+    "holdout": "Hold out expression structures, alignments, vector-boundary lengths, and ISA variants with equivalent kernel families grouped.",
+    "artifact": "Final `VectorKernelCandidate` handle contains native code hashes, lane maps, tail guards, and scalar-parity receipts.",
+    "primary_paths": [
+      "include/simd.h",
+      "src/vecstore.c",
+      "src/vm.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer.transform"
+        ],
+        "observation": "Transforms Python ASTs; native SIMD lane selection and scalar parity qualification are proposed."
+      }
+    ]
+  },
+  {
+    "id": "019",
+    "name": "Branch-distribution native specialization designer",
+    "slug": "branch-distribution-specializer",
+    "brief": "Learn native branch specialization choices from measured input distributions without eliminating rare but required semantic paths.",
+    "context": "External `branch_counts`, `input_features`, and `candidate_cfgs` variables retain profiling windows and complete control-flow alternatives.",
+    "program": "Root code compares conditional distributions, delegates cold-path checks, and proposes guarded ordering or duplication transformations.",
+    "data": "Train from workload-shift episodes, compiled branch rewrites, independent correctness results, and whole-call timing measurements.",
+    "oracle": "A fixed reference program verifies all outcomes; deterministic profile accounting validates claimed branch frequencies and guard coverage.",
+    "failure": "A common-case rewrite removes a rare error path that becomes frequent after a workload distribution shift.",
+    "holdout": "Hold out branch correlations, feature combinations, phase changes, and rare-path defects with source families grouped.",
+    "artifact": "Final `BranchSpecialization` handle records executable CFG, applicability guard, profile identity, and rare-path counterexamples.",
+    "primary_paths": [
+      "src/vm.c",
+      "src/instrumenter.c",
+      "src/autoresearch.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py",
+        "symbols": [
+          "CodeAnalysisToolkit.calculate_complexity"
+        ],
+        "observation": "Counts source branch structure; it does not learn measured branch-distribution specializations."
+      }
+    ]
+  },
+  {
+    "id": "020",
+    "name": "Native hashmap collision policy designer",
+    "slug": "hashmap-algorithm-designer",
+    "brief": "Learn native hashmap lookup, insertion, deletion, and resizing procedures that preserve key identity under adversarial collisions.",
+    "context": "REPL `key_operations`, `bucket_layouts`, and `hash_distributions` retain complete operation histories and candidate table states.",
+    "program": "Root programs partition probe chains, delegate deletion/resize cases, and synthesize checked bucket-transition rules.",
+    "data": "Train from generated collision workloads, resize events, tombstone defects, and independently labeled dictionary-equivalence traces.",
+    "oracle": "A fixed ordered key-value model checks exact presence, values, deletion semantics, and declared bounded probe behavior.",
+    "failure": "Deleting one colliding key breaks the probe chain and makes a later still-present key appear absent.",
+    "holdout": "Hold out hash families, collision clusters, resize thresholds, and operation mixtures with shared histories grouped.",
+    "artifact": "Final `HashmapCandidate` handle contains native operations, load policy, probe invariants, and minimal collision witnesses.",
+    "primary_paths": [
+      "src/dht_impl.c",
+      "src/vm.c",
+      "src/plan_cache.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/agents/kv.py",
+        "symbols": [
+          "KeyValueAgent.get",
+          "KeyValueAgent.set"
+        ],
+        "observation": "Implements dictionary-backed key-value operations; native collision and resize algorithms are not exposed."
+      }
+    ]
+  },
+  {
+    "id": "021",
+    "name": "Weighted queue-service policy designer",
+    "slug": "weighted-queue-service-designer",
+    "brief": "Learn executable queue-service policies that balance declared weights, deadlines, and starvation bounds across competing task classes.",
+    "context": "External `arrival_traces`, `service_costs`, and `queue_contracts` variables retain complete workloads and per-class obligations.",
+    "program": "Root code partitions busy periods, delegates starvation analysis, and builds deterministic admission and service transitions.",
+    "data": "Train from generated bursty workloads and fixed-reference fairness violations, retaining root choices and actual completed-work costs.",
+    "oracle": "A frozen discrete-event simulator checks service order, capacity, waiting bounds, and declared weighted-share conditions.",
+    "failure": "An endless stream of short high-priority tasks prevents one lower-weight long task from ever receiving service.",
+    "holdout": "Hold out burst correlations, weight ratios, job-size distributions, and deadline mixtures with related arrival processes grouped.",
+    "artifact": "Final `QueuePolicyCandidate` handle contains native selection code, fairness assumptions, service traces, and starvation witnesses.",
+    "primary_paths": [
+      "src/scheduler.c",
+      "src/ipc.c",
+      "src/goal_queue.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py",
+        "symbols": [
+          "QueueToolkit.publish"
+        ],
+        "observation": "Inserts messages by priority; it does not establish weighted fairness guarantees."
+      }
+    ]
+  },
+  {
+    "id": "022",
+    "name": "Semantic cache admission and eviction designer",
+    "slug": "semantic-cache-policy-designer",
+    "brief": "Learn native cache policies that preserve semantic key validity while choosing useful admission and eviction under bounded storage.",
+    "context": "REPL `access_history`, `dependency_versions`, and `cache_objects` retain reuse sequences, object costs, and validity relationships.",
+    "program": "Root code identifies reuse phases, delegates invalidation clusters, and proposes admission/eviction rules over verified keys.",
+    "data": "Train from workload replay, version changes, expensive misses, and independently measured hit validity plus total recomputation cost.",
+    "oracle": "A frozen uncached reference checks outputs while a deterministic accounting model verifies capacity and actual avoided work.",
+    "failure": "A frequently reused entry survives eviction decisions but its imported schema changed, making every hit semantically stale.",
+    "holdout": "Hold out reuse phases, object-size mixtures, dependency invalidations, and cold-start workloads with trace lineage grouped.",
+    "artifact": "Final `CachePolicyCandidate` handle specifies native policy code, semantic key fields, capacity bounds, and stale-hit counterexamples.",
+    "primary_paths": [
+      "src/plan_cache.c",
+      "src/openrouter_cache.c",
+      "src/codex_cache.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/base.py",
+        "symbols": [
+          "BaseAgent._check_cache",
+          "BaseAgent._set_cache"
+        ],
+        "observation": "Caches operation results with expiration; native semantic cache-policy learning is proposed."
+      }
+    ]
+  },
+  {
+    "id": "023",
+    "name": "Cooperative cancellation protocol designer",
+    "slug": "cooperative-cancellation-designer",
+    "brief": "Learn executable cancellation protocols that terminate owned work at defined boundaries without cancelling replacements or losing completion truth.",
+    "context": "External `cancel_requests`, `ownership_epochs`, and `worker_states` variables preserve full completion races and descendant relationships.",
+    "program": "Root programs split lifecycle intervals, delegate terminal races, and construct generation-fenced delivery and acknowledgement transitions.",
+    "data": "Train from controlled cancellation schedules, worker exits, escalation outcomes, and independently labeled ownership violations.",
+    "oracle": "A frozen lifecycle model checks permitted terminal outcomes, generation matching, bounded cooperative completion, and unaffected unrelated workers.",
+    "failure": "A delayed cancellation for an old task generation terminates a replacement worker that reused the same visible identifier.",
+    "holdout": "Hold out descendant shapes, cancellation timing, ownership reuse, and completion-race families with shared schedules grouped.",
+    "artifact": "Final `CancellationProtocol` handle includes native transitions, ownership predicates, supported stop boundaries, and race-reproduction receipts.",
+    "primary_paths": [
+      "src/scheduler.c",
+      "src/process_capture.c",
+      "src/swarm.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/agent_system.py",
+        "symbols": [
+          "TickScheduler.stop"
+        ],
+        "observation": "Cancels its scheduler task and awaits completion; native cancellation races and ownership proofs are absent."
+      }
+    ]
+  },
+  {
+    "id": "024",
+    "name": "Dependency-aware execution scheduler designer",
+    "slug": "dependency-execution-scheduler",
+    "brief": "Learn native execution schedules that exploit dependency parallelism while respecting resource limits and failed-prerequisite semantics.",
+    "context": "REPL variables `task_dag`, `runtime_costs`, and `resource_slots` retain full graphs, observations, and admission constraints.",
+    "program": "Root code computes frontiers, recursively analyzes independent subgraphs, and synthesizes bounded schedule decisions with explicit joins.",
+    "data": "Train from generated DAG executions, critical-path variations, task failures, and fixed-oracle schedule-validity outcomes.",
+    "oracle": "An immutable DAG simulator checks precedence, capacity, failure propagation, completed outputs, and measured makespan.",
+    "failure": "A prerequisite produces a terminal failure record and the scheduler wrongly treats record existence as successful readiness.",
+    "holdout": "Hold out graph motifs, resource bottlenecks, duration correlations, and failure placements with DAG ancestry grouped.",
+    "artifact": "Final `ExecutionSchedulePolicy` handle contains native admission code, dependency rules, resource assumptions, and blocked-frontier witnesses.",
+    "primary_paths": [
+      "src/scheduler.c",
+      "src/plan_dag.c",
+      "src/swarm_reactor.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_streaming_tools.py",
+        "symbols": [
+          "ToolExecutor._execute_structured"
+        ],
+        "observation": "Schedules dependency-ready call waves; resource-aware native scheduling and failure semantics are proposed extensions."
+      }
+    ]
+  },
+  {
+    "id": "025",
+    "name": "Allocation-trace causal analyst",
+    "slug": "allocation-trace-causal-analyst",
+    "brief": "Learn executable analyses that reconstruct allocation lifetimes and distinguish leaks, bounded retention, fragmentation, and measurement gaps.",
+    "context": "External `alloc_events`, `frame_generations`, and `memory_samples` variables preserve complete traces and code-version associations.",
+    "program": "Root code joins allocation/free identities, delegates suspect lifetime components, and produces checked causal retention explanations.",
+    "data": "Train from instrumented workloads with seeded leaks, address reuse, missing events, and independently labeled ownership graphs.",
+    "oracle": "A frozen allocation ledger checks outstanding bytes, object identity, lifetime intervals, and exact retained-reference paths.",
+    "failure": "A reused address is mistaken for the earlier allocation, fabricating a leak or erasing a real retained object.",
+    "holdout": "Hold out allocator reuse patterns, graph ownership shapes, sampling gaps, and generation overlap schedules grouped by workload.",
+    "artifact": "Final `AllocationDiagnosis` handle contains reconstructed object graph, attributable code generations, uncertainty markers, and reproducing traces.",
+    "primary_paths": [
+      "src/arena_alloc.c",
+      "src/ring_buffer.c",
+      "src/instrumenter.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/hooks.py",
+        "symbols": [
+          "TelemetryHook.handle",
+          "TelemetryHook.get_metrics"
+        ],
+        "observation": "Collects operation telemetry; allocation-lifetime reconstruction and native causal attribution are new work."
+      }
+    ]
+  },
+  {
+    "id": "026",
+    "name": "Executable dependency-graph reconstructor",
+    "slug": "executable-dependency-reconstructor",
+    "brief": "Learn procedures that reconstruct executable dependency graphs from typed IR, imports, state access, and observed invocation relationships.",
+    "context": "REPL `procedure_ir`, `call_observations`, and `state_accesses` retain full definitions and dynamic evidence with exact generation identities.",
+    "program": "Root code clusters procedures, delegates indirect-call questions, and merges typed edges while preserving unresolved targets.",
+    "data": "Train on synthetic modules with known dependency graphs and instrumented executions exposing missing static relationships.",
+    "oracle": "A fixed graph generator/reference analyzer verifies mandatory edges, target types, cycles, and explicit unknown-call coverage.",
+    "failure": "An indirect callback changes shared state even though its target never appears in the direct-call list.",
+    "holdout": "Hold out callback shapes, import graphs, state-sharing patterns, and recursive structures with equivalent modules grouped.",
+    "artifact": "Final `ExecutableDependencyGraph` handle names typed edges, provenance, unresolved targets, and graph-completeness counterexamples.",
+    "primary_paths": [
+      "src/ast.c",
+      "src/plan_dag.c",
+      "src/trace_kg_store.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py",
+        "symbols": [
+          "WorkflowToolkit.analyze_dependencies"
+        ],
+        "observation": "Analyzes declared workflow dependencies; recovering native semantic dependencies requires additional mechanisms."
+      }
+    ]
+  },
+  {
+    "id": "027",
+    "name": "Stable numerical reduction designer",
+    "slug": "stable-numerical-reduction-designer",
+    "brief": "Learn native summation and reduction kernels that meet explicit error limits across cancellation, extreme ranges, and exceptional values.",
+    "context": "External `number_batches`, `reference_values`, and `error_contracts` variables retain full distributions and precise numerical requirements.",
+    "program": "Root programs select unstable subsets, delegate accumulation strategies, and combine guarded precision or reduction-order candidates.",
+    "data": "Train from executable kernel attempts labeled by independent high-precision errors and whole-call resource measurements.",
+    "oracle": "A frozen exact or high-precision reference checks per-case error, exceptional-value behavior, and declared reproducibility constraints.",
+    "failure": "Average error looks small while one alternating-magnitude input suffers catastrophic cancellation beyond its permitted limit.",
+    "holdout": "Hold out magnitude distributions, cancellation motifs, batch lengths, and exceptional-value combinations with related generators grouped.",
+    "artifact": "Final `ReductionKernelCandidate` handle includes native instructions, precision policy, error domain, and numerical counterexamples.",
+    "primary_paths": [
+      "src/eval.c",
+      "src/extension/numerical_gsl.c",
+      "include/simd.h"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py",
+        "symbols": [
+          "MathToolkit.analyze_numbers"
+        ],
+        "observation": "Computes basic numeric aggregates; native error-contract optimization and robust reduction search are proposed."
+      }
+    ]
+  },
+  {
+    "id": "028",
+    "name": "Semantic change-impact analyst",
+    "slug": "semantic-change-impact-analyst",
+    "brief": "Learn change-impact procedures that identify every affected executable contract while avoiding unnecessary requalification of independent cells.",
+    "context": "REPL `before_after_ir`, `semantic_graph`, and `contract_coverage` retain changes, dependencies, and observed output obligations.",
+    "program": "Root code propagates changed definitions, delegates control-dependence slices, and proposes conservative affected-contract sets.",
+    "data": "Train on controlled program mutations and independently measured downstream changes, including false-negative slice examples.",
+    "oracle": "A frozen mutation oracle and conservative dependency checker validate affected-behavior recall before rewarding smaller qualification sets.",
+    "failure": "Changing a branch predicate alters downstream values without changing any function name or direct-call edge.",
+    "holdout": "Hold out mutation operators, shared-state patterns, graph shapes, and contract combinations with source families grouped.",
+    "artifact": "Final `ChangeImpactSlice` handle contains affected generations, required tests, justified exclusions, and unresolved dependency evidence.",
+    "primary_paths": [
+      "src/ast.c",
+      "src/autoresearch.c",
+      "src/plan_dag.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer.transform"
+        ],
+        "observation": "Applies local syntax transformations; determining downstream semantic impact is not implemented."
+      }
+    ]
+  },
+  {
+    "id": "029",
+    "name": "Logical checkpoint-schema migrator",
+    "slug": "logical-checkpoint-schema-migrator",
+    "brief": "Learn executable migrations that restore logical checkpoints into compatible new schemas without raw-pointer reinterpretation or repeated effects.",
+    "context": "External `old_checkpoint`, `new_schema`, and `continuation_maps` variables retain typed values, identities, and completed-effect references.",
+    "program": "Root code partitions state components, delegates conversion obligations, and builds transactional reconstruction plans for compatible continuations.",
+    "data": "Train from generated schema evolutions, interrupted computations, and independently checked restoration-equivalence action trajectories.",
+    "oracle": "A frozen reference continuation verifies restored aliasing, values, remaining outputs, and exactly preserved completed-effect boundaries.",
+    "failure": "A field split loses a pending carry value, so restored execution diverges only after several later steps.",
+    "holdout": "Hold out schema evolution types, graph cycles, continuation points, and incompatible generations with checkpoint ancestry grouped.",
+    "artifact": "Final `CheckpointMigration` handle contains conversion code, compatibility predicates, state hashes, and resumed-suffix comparison receipts.",
+    "primary_paths": [
+      "src/recovery.c",
+      "src/sequence_state.c",
+      "src/vm.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "CodeSandbox.execute"
+        ],
+        "observation": "Keeps Python locals alive but provides no typed checkpoint migration between executable generations."
+      }
+    ]
+  },
+  {
+    "id": "030",
+    "name": "Sparse matrix native kernel designer",
+    "slug": "sparse-matrix-kernel-designer",
+    "brief": "Learn native sparse matrix kernels and representation choices that preserve indexing, duplicate-entry, and numerical semantics.",
+    "context": "REPL `sparse_matrices`, `sparsity_profiles`, and `dense_references` retain complete matrices, layouts, and reference computations.",
+    "program": "Root code partitions row structures, delegates format choices, and synthesizes CSR/blocked traversal candidates with checked indices.",
+    "data": "Train from generated sparsity patterns, duplicate entries, layout conversions, and independently scored compiled-kernel execution episodes.",
+    "oracle": "A frozen dense implementation verifies every output under declared arithmetic tolerance and duplicate-coalescing rules.",
+    "failure": "Unsorted duplicate column entries are silently dropped, producing plausible but wrong rows on only irregular matrices.",
+    "holdout": "Hold out sparsity motifs, dimensions, empty rows, duplicate patterns, and value distributions with matrix lineage grouped.",
+    "artifact": "Final `SparseKernelCandidate` handle contains native code, representation contract, bounds, and dense-parity counterexamples.",
+    "primary_paths": [
+      "src/extension/eigen_backend.c",
+      "src/vecstore.c",
+      "src/vm.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/agents/embeddings.py",
+        "symbols": [
+          "EmbeddingAgent._cosine_sim"
+        ],
+        "observation": "Computes vector similarity over Python lists; sparse native matrix kernel generation is a proposed extension."
+      }
+    ]
+  },
+  {
+    "id": "031",
+    "name": "Generation-pinned dispatch designer",
+    "slug": "generation-pinned-dispatch-designer",
+    "brief": "Learn dispatch procedures that route nested native calls through one compatible generation while allowing later calls to use replacements.",
+    "context": "External `dispatch_maps`, `call_trees`, and `activation_events` variables retain complete binding and nested-invocation histories.",
+    "program": "Root programs partition call trees, delegate compatibility checks, and synthesize pinned lookup plus compare-and-swap transitions.",
+    "data": "Train from generated replacement races, nested calls, stale activations, and fixed-reference dispatch outcome labels.",
+    "oracle": "A frozen generation model verifies entrypoint identity, bundle consistency, activation winners, and uninterrupted old-frame completion.",
+    "failure": "An outer call acquires generation A but its nested lookup rereads the global map and enters incompatible generation B.",
+    "holdout": "Hold out nesting depths, bundle dependency patterns, activation interleavings, and stale-caller families grouped by call graph.",
+    "artifact": "Final `DispatchPolicyCandidate` handle contains native lookup code, generation rules, compatibility contracts, and mixed-version witnesses.",
+    "primary_paths": [
+      "src/vm.c",
+      "src/plugin.c",
+      "src/lingo_workflow.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.get",
+          "MetaToolRegistry.compose"
+        ],
+        "observation": "Resolves named Python callables; generation-pinned concurrent native dispatch is not provided."
+      }
+    ]
+  },
+  {
+    "id": "032",
+    "name": "Typed native import linker",
+    "slug": "typed-native-import-linker",
+    "brief": "Learn native linking plans that resolve only permitted typed host services and reject incompatible or undeclared imports.",
+    "context": "REPL variables `candidate_imports`, `host_exports`, and `abi_descriptors` retain complete signatures, capabilities, and symbol versions.",
+    "program": "Root code groups import obligations, delegates signature matching, and constructs explicit binding tables with rejection explanations.",
+    "data": "Train from synthetic object/import pairs, ABI mismatches, accidental privilege requests, and independently checked linker outcomes.",
+    "oracle": "A frozen ABI checker and import allowlist verify exact signatures, ownership conventions, and permitted service identities.",
+    "failure": "A correctly named import has the wrong buffer ownership convention and frees host memory with an incompatible allocator.",
+    "holdout": "Hold out signature shapes, service namespaces, ABI revisions, and capability combinations with renamed-equivalent interfaces grouped.",
+    "artifact": "Final `NativeLinkPlan` handle identifies verified bindings, rejected imports, ABI hashes, and executable compatibility receipts.",
+    "primary_paths": [
+      "src/plugin.c",
+      "src/service_boundary.c",
+      "src/capability.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/decorators.py",
+        "symbols": [
+          "operation"
+        ],
+        "observation": "Builds operation metadata from Python signatures; native linker import contracts require separate implementation."
+      }
+    ]
+  },
+  {
+    "id": "033",
+    "name": "Deterministic causal replay designer",
+    "slug": "deterministic-causal-replay-designer",
+    "brief": "Learn replay programs that reproduce recorded logical outcomes using pinned observations and explicit causal order within an admitted domain.",
+    "context": "External `event_journal`, `observation_objects`, and `causal_edges` variables retain complete event histories and replay prerequisites.",
+    "program": "Root code slices causal ancestors, delegates missing-observation checks, and emits bounded replay steps with exact generation references.",
+    "data": "Train from recorded fixture executions, reordered events, incomplete journals, and independently verified replay-equivalence trajectories.",
+    "oracle": "A frozen reference transition runner checks state hashes, emitted outcomes, and absence of duplicated external effects.",
+    "failure": "A timestamp-sorted replay reverses causally dependent commits from different workers and manufactures a successful final state.",
+    "holdout": "Hold out causal graph shapes, observation gaps, clock disorder, and partial-commit histories with episode ancestry grouped.",
+    "artifact": "Final `CausalReplayProgram` handle contains ordered logical steps, pinned inputs, coverage limits, and outcome-equivalence receipts.",
+    "primary_paths": [
+      "src/event_stream.c",
+      "src/chronicle.c",
+      "src/execution_recovery.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_streaming_tools.py",
+        "symbols": [
+          "ToolExecutor._execute_structured"
+        ],
+        "observation": "Schedules dependency-ready calls; reconstructing deterministic causal replay is an additional native mechanism."
+      }
+    ]
+  },
+  {
+    "id": "034",
+    "name": "Executable resource-bound certifier",
+    "slug": "executable-resource-bound-certifier",
+    "brief": "Learn resource certificates for bounded executable cells that admit useful loops without trusting candidate runtime estimates.",
+    "context": "REPL `cell_ir`, `loop_domains`, and `allocation_rules` retain complete programs, input predicates, and cost obligations.",
+    "program": "Root programs separate loops, recursively propose ranking bounds, and assemble certificates for an independent proof checker.",
+    "data": "Train from generated terminating programs, wraparound traps, rejected proofs, and checker-validated bound-construction action trajectories.",
+    "oracle": "A frozen small proof kernel checks iteration, instruction, allocation, and recursion bounds against exact typed IR.",
+    "failure": "A decreasing unsigned counter wraps before exit, violating the proposed finite bound despite convincing sample runs.",
+    "holdout": "Hold out loop templates, integer widths, nested recursion structures, and allocation patterns with program families grouped.",
+    "artifact": "Final `ResourceCertificate` handle binds verified bounds, admitted input domain, code hash, and concrete rejection witnesses.",
+    "primary_paths": [
+      "src/vm.c",
+      "src/input_budget.c",
+      "src/scheduler.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py",
+        "symbols": [
+          "WorkflowToolkit.validate_workflow"
+        ],
+        "observation": "Checks workflow structure but does not certify instruction, allocation, or recursion bounds."
+      }
+    ]
+  }
+]

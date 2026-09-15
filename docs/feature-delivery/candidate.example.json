@@ -1,0 +1,32 @@
+{
+  "schema": "dsco.delivery.candidate.proposed/v1",
+  "example_only": true,
+  "task_id": "feature-01-contract-v1",
+  "attempt_id": "RUN_ID-feature-01-generation-1",
+  "owner": "worker-A",
+  "generation": 1,
+  "prompt_sha256": "REPLACE_WITH_CATALOG_PROMPT_HASH",
+  "contract_sha256": "REPLACE_WITH_FROZEN_CONTRACT_HASH",
+  "baseline_commit": "REPLACE_WITH_IMMUTABLE_BASELINE_COMMIT",
+  "candidate_commit": "REPLACE_WITH_IMMUTABLE_CANDIDATE_COMMIT",
+  "candidate_tree": "REPLACE_WITH_GIT_TREE_HASH",
+  "changed_paths": ["src/draft_store.c", "include/draft_store.h", "tests/test_draft_store.c"],
+  "patch_bundle_sha256": "REPLACE_WITH_CONTENT_HASH",
+  "dependency_artifacts": [],
+  "worker_checks": [
+    {
+      "argv": ["make", "-j2", "dsco"],
+      "environment": {"DSCO_NO_INSTALL": "1"},
+      "exit_code": null,
+      "duration_ms": null,
+      "log_sha256": null,
+      "binary_sha256": null,
+      "status": "not-run-example"
+    }
+  ],
+  "independent_verifier_receipt_sha256": null,
+  "review_receipt_sha256": null,
+  "acceptance_status": "not-verified",
+  "known_limitations": ["Example only; actual paths and evidence must match the submitted commit"],
+  "rollback": {"code": "revert accepted integration commit", "data_compatibility": "must be established"}
+}

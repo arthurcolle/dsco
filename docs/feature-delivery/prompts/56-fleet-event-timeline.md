@@ -1,0 +1,11 @@
+# 56 — Read-only fleet event timeline and precise cursor queries
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or the isolated worktree assigned for this feature. Read applicable `AGENTS.md` instructions and inspect current code before editing. Start at `src/event_stream.c`, `include/event_stream.h`, `src/execution_events.c`, `src/durable_agents.c`. If part already exists, ship the missing bounded extension and explain the observed gap; do not duplicate an existing subsystem. All interfaces named below are proposed until verified on disk.
+
+The runtime already captures an ordered durable event outbox and supports replay. Add a read-only query projection for operators who need to isolate one task across many workers. Proposed `events query` accepts an explicit database, sequence interval, source/event filters, and bounded page size; `events timeline` groups related task and attempt records while preserving their original sequence numbers. Capture a fixed high-water mark per query session so ongoing writers cannot make pagination skip or duplicate committed events. Surface malformed payloads and capture health separately from ordinary empty results. Do not mutate exporter cursors, prune data, or imply that socket delivery means consumer acknowledgement.
+
+Implement new capability in proposed `src/event_query.c` and `include/event_query.h`, with small dispatch hooks and a Makefile entry where needed. Preserve unrelated dirty work. Coordinate shared-file changes; keep builds, databases, sockets, fixtures, and reports isolated. Build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install a worker binary. Every tool-call path must use `tools_execute_for_tier()` and preserve capability gates.
+
+Run concurrent local event producers while paging a query snapshot. Verify exact membership through the captured high-water mark, no duplicates after cursor resume, stable original order, bounded memory for a large database, and clear behavior for unknown schema versions. Compare queried event hashes with direct read-only database evidence and existing replay output.
+
+Finish with the implemented behavior, exact reproduction commands, binary and evidence paths, relevant regression results, and remaining limitations. Verify the real local runtime path; compilation alone is insufficient.

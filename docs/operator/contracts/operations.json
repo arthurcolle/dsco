@@ -1,0 +1,980 @@
+{
+  "contract": "dsco.operator.operations",
+  "version": "1.0",
+  "status": "target semantic bindings; not a registry of currently callable CLI commands or HTTP URLs",
+  "envelope": "World protocol section 2; authentication is transport-derived, not caller-granted",
+  "profiles": {
+    "browse": "scoped typed browsing",
+    "snapshot": "coherent pinned data/source reads",
+    "transaction": "snapshot plus atomic conditional durable commit/outbox",
+    "reactive": "transaction plus resumable feed and snapshot handoff",
+    "workflow": "transaction plus durable run checkpoints and fenced ownership"
+  },
+  "rules": [
+    "Operation IDs name semantics, not transport paths.",
+    "The backend adapter maps each operation to its actual selected implementation; it cannot combine independent lane guarantees by assertion.",
+    "A pure compute.submit rejects an effectful DAG; effectful graphs require command.submit and per-operation admission.",
+    "Local metadata persistence, remote storage, and subprocesses add their actual registered capabilities; effect labels cannot suppress these checks.",
+    "history.restore must not be implemented as an unguarded call to the existing live-graph replay route.",
+    "Read/evaluate never implies shared mutation or external effects.",
+    "response_record is a central evidence record where applicable, not the complete wire envelope. Request fields are semantic inventory, not executable parameter schemas.",
+    "Live browse_scope and pinned context selectors are mutually exclusive; pure evaluation requires the latter.",
+    "Replayable workflow steps prohibit immediate tool/transport effects; all fresh observations and effects require stable named step/action identity."
+  ],
+  "operations": [
+    {
+      "id": "session.attach",
+      "purpose": "Attach an authenticated principal; return session and live BrowseScope before opening pinned contexts",
+      "owner": "session",
+      "effect": "read",
+      "required_profile": "browse",
+      "context": "optional",
+      "request_fields": [
+        "connection",
+        "workspace?"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "graphsub_client; operator context binding"
+    },
+    {
+      "id": "session.restore",
+      "purpose": "Restore semantic contexts and view descriptions, revalidating authority and retained snapshots",
+      "owner": "session",
+      "effect": "read",
+      "required_profile": null,
+      "context": "optional",
+      "request_fields": [
+        "session_id"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "buffer_store; native_windows; operator session binding"
+    },
+    {
+      "id": "context.open",
+      "purpose": "Resolve roots, snapshot, source and observation pins into one immutable context",
+      "owner": "context",
+      "effect": "read",
+      "required_profile": "snapshot",
+      "context": "none",
+      "request_fields": [
+        "connection",
+        "roots",
+        "snapshot or commit selector",
+        "source_manifest",
+        "observations"
+      ],
+      "response_record": "WorldContext",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "GraphSub MVCC; VersionedTypeRegistry; source hydration"
+    },
+    {
+      "id": "context.derive",
+      "purpose": "Create a new immutable context from explicit changed dimensions",
+      "owner": "context",
+      "effect": "read",
+      "required_profile": "snapshot",
+      "context": "required",
+      "request_fields": [
+        "context",
+        "changes"
+      ],
+      "response_record": "WorldContext",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "Lingo contexts; GraphSub versioned reads"
+    },
+    {
+      "id": "snapshot.open",
+      "purpose": "Acquire a coherent retained state and declared retention lease",
+      "owner": "world",
+      "effect": "read",
+      "required_profile": "snapshot",
+      "context": "optional",
+      "request_fields": [
+        "realm",
+        "as_of?",
+        "lease"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "GraphSub specialized/mvcc.rs; txn stores; event snapshots"
+    },
+    {
+      "id": "snapshot.renew",
+      "purpose": "Renew retention without moving snapshot contents",
+      "owner": "world",
+      "effect": "read",
+      "required_profile": "snapshot",
+      "context": "required",
+      "request_fields": [
+        "snapshot_id",
+        "lease"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "selected GraphSub version retention binding"
+    },
+    {
+      "id": "snapshot.release",
+      "purpose": "Release this owner's snapshot lease",
+      "owner": "world",
+      "effect": "read",
+      "required_profile": "snapshot",
+      "context": "optional",
+      "request_fields": [
+        "snapshot_id",
+        "owner_id"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "verified handle ownership or explicit delegated management authority; own-handle cleanup remains allowed after read revocation without returning protected data",
+      "existing_foundation": "selected GraphSub version retention binding"
+    },
+    {
+      "id": "workspace.open",
+      "purpose": "Resolve a writable root and pinned parent roots",
+      "owner": "world",
+      "effect": "read",
+      "required_profile": "snapshot",
+      "context": "optional",
+      "request_fields": [
+        "workspace_id",
+        "head?"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "GraphSub graph objects and MVCC; DSCO context binding"
+    },
+    {
+      "id": "object.resolve",
+      "purpose": "Resolve a name through ordered roots with origin and shadow information",
+      "owner": "world",
+      "effect": "read",
+      "required_profile": "browse",
+      "context": "optional",
+      "request_fields": [
+        "name",
+        "class?",
+        "exact context or authenticated live browse_scope"
+      ],
+      "response_record": "ObjectRef",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "GraphSub object APIs; schema registries"
+    },
+    {
+      "id": "object.read",
+      "purpose": "Read a revisioned object projection under its declared consistency mode",
+      "owner": "world",
+      "effect": "read",
+      "required_profile": "browse",
+      "context": "optional",
+      "request_fields": [
+        "object",
+        "projection?",
+        "exact context or authenticated live browse_scope"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "GraphSub object APIs and selected MVCC lane"
+    },
+    {
+      "id": "object.query",
+      "purpose": "Query with real parameter binding and snapshot-aware pagination when negotiated",
+      "owner": "world",
+      "effect": "read",
+      "required_profile": "browse",
+      "context": "optional",
+      "request_fields": [
+        "query",
+        "parameters",
+        "projection",
+        "sort",
+        "page",
+        "exact context or authenticated live browse_scope"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities",
+        "parsed read-only query and registered procedure-effect validation; reject all writes and effectful procedures"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "GraphSub query engine; incremental collections"
+    },
+    {
+      "id": "value.address",
+      "purpose": "Construct a canonical context-independent value address",
+      "owner": "values",
+      "effect": "read",
+      "required_profile": null,
+      "context": "none",
+      "request_fields": [
+        "object",
+        "field",
+        "args"
+      ],
+      "response_record": "ValueAddress",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "Lingo value-address semantics"
+    },
+    {
+      "id": "value.evaluate",
+      "purpose": "Evaluate a value against an immutable context and return an evidence record",
+      "owner": "values",
+      "effect": "pure_evaluation",
+      "required_profile": "snapshot",
+      "context": "required",
+      "request_fields": [
+        "address",
+        "budget",
+        "numeric_profile"
+      ],
+      "response_record": "EvaluationRecord",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities",
+        "exec for script execution; nested target capabilities checked independently"
+      ],
+      "authorization": "read scope, admitted source/kernel and resource budget",
+      "existing_foundation": "Lingo dependency evaluator; supported GraphSub compute bindings"
+    },
+    {
+      "id": "value.inspect",
+      "purpose": "Inspect retained result and dependency evidence without invoking its calculation",
+      "owner": "values",
+      "effect": "read",
+      "required_profile": "snapshot",
+      "context": "required",
+      "request_fields": [
+        "address",
+        "evaluation_id?"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "Lingo why/describe/events; GraphSub compute/trace inspection"
+    },
+    {
+      "id": "source.resolve",
+      "purpose": "Resolve ordered source roots to an exact immutable manifest",
+      "owner": "source",
+      "effect": "read",
+      "required_profile": "browse",
+      "context": "optional",
+      "request_fields": [
+        "roots",
+        "entrypoints",
+        "runtime_profile",
+        "authenticated catalog scope or exact context"
+      ],
+      "response_record": "SourceManifest",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "GraphSub source hydration; versioned schema registry"
+    },
+    {
+      "id": "source.capture",
+      "purpose": "Freeze buffer content as a temporary source overlay and resolve a new manifest",
+      "owner": "source",
+      "effect": "local_draft",
+      "required_profile": null,
+      "context": "required",
+      "request_fields": [
+        "buffer_id",
+        "expected_revision",
+        "base_manifest"
+      ],
+      "response_record": "SourceManifest",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities",
+        "fs_read/fs_write for actual local file operations; shared destinations require domain write permission"
+      ],
+      "authorization": "local draft ownership; shared persistence requires its own commit admission",
+      "existing_foundation": "DSCO buffer_store; GraphSub source-artifact representation"
+    },
+    {
+      "id": "source.publish",
+      "purpose": "Publish a validated immutable package with exact artifact and interface identities",
+      "owner": "source",
+      "effect": "shared_commit",
+      "required_profile": "transaction",
+      "context": "required",
+      "request_fields": [
+        "manifest",
+        "validation_evidence",
+        "idempotency_key"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "domain write/transition permission, conditional transaction and live policy",
+      "existing_foundation": "GraphSub source objects; conditional transaction binding"
+    },
+    {
+      "id": "source.promote",
+      "purpose": "Conditionally change an authorized release binding to a validated manifest",
+      "owner": "source",
+      "effect": "shared_commit",
+      "required_profile": "transaction",
+      "context": "required",
+      "request_fields": [
+        "release",
+        "expected_revision",
+        "manifest",
+        "evidence",
+        "idempotency_key"
+      ],
+      "response_record": "CommitReceipt",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "domain write/transition permission, conditional transaction and live policy",
+      "existing_foundation": "GraphSub schema history and transaction lane"
+    },
+    {
+      "id": "buffer.open",
+      "purpose": "Open an existing typed/source/scratch buffer with explicit target",
+      "owner": "buffer",
+      "effect": "read",
+      "required_profile": null,
+      "context": "optional",
+      "request_fields": [
+        "buffer_id_or_target",
+        "kind"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "DSCO buffer_store; native_windows"
+    },
+    {
+      "id": "buffer.save",
+      "purpose": "Save to the declared local or shared target under its revision contract",
+      "owner": "buffer",
+      "effect": "local_draft",
+      "required_profile": null,
+      "context": "optional",
+      "request_fields": [
+        "buffer_id",
+        "expected_revision",
+        "target",
+        "idempotency_key"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities",
+        "fs_read/fs_write for actual local file operations; shared destinations require domain write permission"
+      ],
+      "authorization": "local draft ownership; shared persistence requires its own commit admission",
+      "existing_foundation": "DSCO buffer_store; selected GraphSub artifact adapter"
+    },
+    {
+      "id": "view.open",
+      "purpose": "Open a presentation bound to a semantic identity and context",
+      "owner": "views",
+      "effect": "read",
+      "required_profile": null,
+      "context": "required",
+      "request_fields": [
+        "view_kind",
+        "target",
+        "pin_or_follow"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "DSCO native_windows; surface_registry; GraphSub web inspectors"
+    },
+    {
+      "id": "changeset.create",
+      "purpose": "Capture an explicit draft patch and its base/read-set identities",
+      "owner": "drafts",
+      "effect": "local_draft",
+      "required_profile": null,
+      "context": "required",
+      "request_fields": [
+        "workspace",
+        "expected_head",
+        "patches",
+        "read_set"
+      ],
+      "response_record": "Changeset",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "local draft ownership; shared persistence requires its own commit admission",
+      "existing_foundation": "DSCO buffer revision patterns; GraphSub object schemas"
+    },
+    {
+      "id": "changeset.validate",
+      "purpose": "Check a changeset without installing domain writes",
+      "owner": "world",
+      "effect": "read",
+      "required_profile": "transaction",
+      "context": "required",
+      "request_fields": [
+        "changeset"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "GraphSub schema validators; transaction validation"
+    },
+    {
+      "id": "changeset.commit",
+      "purpose": "Atomically install validated conditional writes plus receipt and outbox",
+      "owner": "world",
+      "effect": "shared_commit",
+      "required_profile": "transaction",
+      "context": "required",
+      "request_fields": [
+        "changeset",
+        "idempotency_key"
+      ],
+      "response_record": "CommitReceipt",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "domain write/transition permission, conditional transaction and live policy",
+      "existing_foundation": "GraphSub transaction stores; SQLite Honker atomic outbox pattern"
+    },
+    {
+      "id": "changeset.status",
+      "purpose": "Resolve an idempotency identity after timeout without repeating a write",
+      "owner": "world",
+      "effect": "read",
+      "required_profile": "transaction",
+      "context": "optional",
+      "request_fields": [
+        "realm",
+        "idempotency_key",
+        "request_digest"
+      ],
+      "response_record": "CommitReceipt",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "GraphSub transaction records; DSCO command identity pattern"
+    },
+    {
+      "id": "changeset.rebase",
+      "purpose": "Three-way rebase explicit patches onto a selected current head",
+      "owner": "drafts",
+      "effect": "local_draft",
+      "required_profile": "snapshot",
+      "context": "required",
+      "request_fields": [
+        "changeset",
+        "target_context",
+        "resolutions"
+      ],
+      "response_record": "Changeset",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "local draft ownership; shared persistence requires its own commit admission",
+      "existing_foundation": "GraphSub MVCC/version history; DSCO draft binding"
+    },
+    {
+      "id": "scenario.create",
+      "purpose": "Construct an immutable typed override definition over a pinned baseline",
+      "owner": "values",
+      "effect": "local_draft",
+      "required_profile": "snapshot",
+      "context": "required",
+      "request_fields": [
+        "name",
+        "overrides",
+        "parent?"
+      ],
+      "response_record": "Scenario",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "local draft ownership; shared persistence requires its own commit admission",
+      "existing_foundation": "Lingo scenarios; GraphSub scenario object vocabulary"
+    },
+    {
+      "id": "scenario.save",
+      "purpose": "Persist the scenario definition as metadata without applying its overrides",
+      "owner": "world",
+      "effect": "shared_commit",
+      "required_profile": "transaction",
+      "context": "required",
+      "request_fields": [
+        "scenario",
+        "expected_revision?",
+        "idempotency_key"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "domain write/transition permission, conditional transaction and live policy",
+      "existing_foundation": "GraphSub typed object persistence"
+    },
+    {
+      "id": "scenario.apply",
+      "purpose": "Derive a hypothetical context from a compatible baseline and saved definition",
+      "owner": "values",
+      "effect": "read",
+      "required_profile": "snapshot",
+      "context": "required",
+      "request_fields": [
+        "scenario"
+      ],
+      "response_record": "WorldContext",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "Lingo override evaluator"
+    },
+    {
+      "id": "scenario.compare",
+      "purpose": "Compare evaluations with every differing context dimension declared",
+      "owner": "values",
+      "effect": "pure_evaluation",
+      "required_profile": "snapshot",
+      "context": "required",
+      "request_fields": [
+        "left",
+        "right",
+        "addresses",
+        "allowed_differences",
+        "budget"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities",
+        "exec for script execution; nested target capabilities checked independently"
+      ],
+      "authorization": "read scope, admitted source/kernel and resource budget",
+      "existing_foundation": "Lingo evaluation; GraphSub compute/trace evidence"
+    },
+    {
+      "id": "scenario.rebase",
+      "purpose": "Create a new scenario baseline and revalidate addresses and overrides",
+      "owner": "values",
+      "effect": "local_draft",
+      "required_profile": "snapshot",
+      "context": "required",
+      "request_fields": [
+        "scenario",
+        "target_context"
+      ],
+      "response_record": "Scenario",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "local draft ownership; shared persistence requires its own commit admission",
+      "existing_foundation": "GraphSub versioned reads; Lingo scenario binding"
+    },
+    {
+      "id": "scenario.promote",
+      "purpose": "Convert selected stored-field overrides into a draft without committing",
+      "owner": "drafts",
+      "effect": "local_draft",
+      "required_profile": "snapshot",
+      "context": "required",
+      "request_fields": [
+        "scenario",
+        "selected_addresses",
+        "target_context"
+      ],
+      "response_record": "Changeset",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "local draft ownership; shared persistence requires its own commit admission",
+      "existing_foundation": "Lingo scenario metadata; GraphSub stored-field schema"
+    },
+    {
+      "id": "watch.open",
+      "purpose": "Subscribe with race-free initial snapshot/cursor and bounded demand",
+      "owner": "watch",
+      "effect": "read",
+      "required_profile": "reactive",
+      "context": "required",
+      "request_fields": [
+        "target",
+        "follow_policy",
+        "demand",
+        "limits"
+      ],
+      "response_record": "WatchEvent",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "GraphSub outbox; EventStore; CDC; DSCO notification bus"
+    },
+    {
+      "id": "watch.resume",
+      "purpose": "Resume from a scoped cursor or report a gap without moving a pinned context",
+      "owner": "watch",
+      "effect": "read",
+      "required_profile": "reactive",
+      "context": "required",
+      "request_fields": [
+        "subscription_id",
+        "cursor"
+      ],
+      "response_record": "WatchEvent",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "GraphSub sequenced event history"
+    },
+    {
+      "id": "watch.close",
+      "purpose": "Release this subscription owner and its evaluation demand",
+      "owner": "watch",
+      "effect": "read",
+      "required_profile": "reactive",
+      "context": "optional",
+      "request_fields": [
+        "subscription_id",
+        "owner_id"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "verified handle ownership or explicit delegated management authority; own-handle cleanup remains allowed after read revocation without returning protected data",
+      "existing_foundation": "GraphSub subscription handlers; DSCO views"
+    },
+    {
+      "id": "command.submit",
+      "purpose": "Record and admit an explicit action intent for governed execution",
+      "owner": "commands",
+      "effect": "external_effect",
+      "required_profile": "transaction",
+      "context": "required",
+      "request_fields": [
+        "operation",
+        "target",
+        "inputs",
+        "retry_class",
+        "budget",
+        "idempotency_key"
+      ],
+      "response_record": "CommandIntent",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities",
+        "exec for script execution; nested target capabilities checked independently"
+      ],
+      "authorization": "intersection of mandate, tier, capability grants, target policy and live ownership",
+      "existing_foundation": "DSCO command_plane/execution_kernel/tools_execute_for_tier; GraphSub outbox"
+    },
+    {
+      "id": "command.status",
+      "purpose": "Read intent, attempts and outcome certainty without retrying",
+      "owner": "commands",
+      "effect": "read",
+      "required_profile": "transaction",
+      "context": "optional",
+      "request_fields": [
+        "command_id"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "DSCO execution receipts; GraphSub trace/task records"
+    },
+    {
+      "id": "command.reconcile",
+      "purpose": "Collect evidence and conditionally resolve an unknown action outcome",
+      "owner": "commands",
+      "effect": "external_effect",
+      "required_profile": "transaction",
+      "context": "required",
+      "request_fields": [
+        "command_id",
+        "evidence",
+        "resolution?"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities",
+        "exec for script execution; nested target capabilities checked independently"
+      ],
+      "authorization": "intersection of mandate, tier, capability grants, target policy and live ownership",
+      "existing_foundation": "DSCO execution_recovery; target adapters; GraphSub transactions"
+    },
+    {
+      "id": "workflow.define",
+      "purpose": "Validate and publish named-step source, contracts and checkpoint layout",
+      "owner": "runs",
+      "effect": "shared_commit",
+      "required_profile": "transaction",
+      "context": "required",
+      "request_fields": [
+        "manifest",
+        "steps",
+        "contracts",
+        "terminal_criteria",
+        "idempotency_key"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "domain write/transition permission, conditional transaction and live policy",
+      "existing_foundation": "GraphSub Flow/Step types; DSCO source binding"
+    },
+    {
+      "id": "workflow.start",
+      "purpose": "Create a run bound to input snapshot, source, budget and mandate",
+      "owner": "runs",
+      "effect": "shared_commit",
+      "required_profile": "workflow",
+      "context": "required",
+      "request_fields": [
+        "definition",
+        "inputs",
+        "mandate",
+        "budget",
+        "idempotency_key"
+      ],
+      "response_record": "RunCheckpoint",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "domain write/transition permission, conditional transaction and live policy",
+      "existing_foundation": "GraphSub FlowRunner/TraceStore; DSCO durable_agents/swarm_daemon"
+    },
+    {
+      "id": "run.inspect",
+      "purpose": "Read run state, dependencies, attempts and reconciliation status",
+      "owner": "runs",
+      "effect": "read",
+      "required_profile": "workflow",
+      "context": "optional",
+      "request_fields": [
+        "run_id"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "GraphSub trace APIs; DSCO execution journal"
+    },
+    {
+      "id": "run.cancel",
+      "purpose": "Request stopping under run authority and retain unresolved action evidence",
+      "owner": "runs",
+      "effect": "execution_control",
+      "required_profile": "workflow",
+      "context": "optional",
+      "request_fields": [
+        "run_id",
+        "expected_revision",
+        "reason",
+        "idempotency_key"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities",
+        "exec for script execution; nested target capabilities checked independently",
+        "control for registered control-plane tools; cancellation does not imply unrestricted control authority"
+      ],
+      "authorization": "run ownership/mandate and registered control requirements",
+      "existing_foundation": "DSCO worker supervision; GraphSub conditional run transition"
+    },
+    {
+      "id": "run.resume",
+      "purpose": "Admit continuation from a named durable checkpoint with fresh ownership",
+      "owner": "runs",
+      "effect": "execution_control",
+      "required_profile": "workflow",
+      "context": "optional",
+      "request_fields": [
+        "run_id",
+        "expected_revision",
+        "mandate",
+        "idempotency_key"
+      ],
+      "response_record": "RunCheckpoint",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities",
+        "exec for script execution; nested target capabilities checked independently",
+        "control for registered control-plane tools; cancellation does not imply unrestricted control authority"
+      ],
+      "authorization": "run ownership/mandate and registered control requirements",
+      "existing_foundation": "GraphSub FlowRunner resume and selected persisted checkpoints; DSCO worker leases"
+    },
+    {
+      "id": "compute.submit",
+      "purpose": "Submit a supported typed kernel/DAG under pinned inputs and declared effects",
+      "owner": "compute",
+      "effect": "pure_evaluation",
+      "required_profile": "snapshot",
+      "context": "required",
+      "request_fields": [
+        "graph_or_kernel",
+        "inputs",
+        "profile",
+        "budget"
+      ],
+      "response_record": "EvaluationRecord",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities",
+        "exec for script execution; nested target capabilities checked independently"
+      ],
+      "authorization": "read scope, admitted source/kernel and resource budget",
+      "existing_foundation": "GraphSub ComputeGraph/ComputeRuntime; registered executors"
+    },
+    {
+      "id": "compute.inspect",
+      "purpose": "Inspect a native graph, ports, dependencies and execution evidence",
+      "owner": "compute",
+      "effect": "read",
+      "required_profile": null,
+      "context": "optional",
+      "request_fields": [
+        "graph_id_or_evaluation_id"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "GraphSub compute runtime routes"
+    },
+    {
+      "id": "trace.query",
+      "purpose": "Read redacted value, execution and dependency evidence",
+      "owner": "trace",
+      "effect": "read",
+      "required_profile": null,
+      "context": "optional",
+      "request_fields": [
+        "scope",
+        "filter",
+        "cursor",
+        "limit"
+      ],
+      "response_record": null,
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "read scope and live visibility",
+      "existing_foundation": "GraphSub TraceStore and EventStore; DSCO execution kernel"
+    },
+    {
+      "id": "history.restore",
+      "purpose": "Explicitly reconstruct mutable state from retained history under write authority",
+      "owner": "world",
+      "effect": "shared_commit",
+      "required_profile": "transaction",
+      "context": "required",
+      "request_fields": [
+        "target",
+        "historical_snapshot",
+        "expected_head",
+        "idempotency_key"
+      ],
+      "response_record": "CommitReceipt",
+      "admission": [
+        "tools_execute_for_tier for every host tool invocation",
+        "net for remote transport; local transport follows its registered capabilities"
+      ],
+      "authorization": "domain write/transition permission, conditional transaction and live policy",
+      "existing_foundation": "GraphSub ReplayEngine; operator checked-restore binding"
+    }
+  ]
+}

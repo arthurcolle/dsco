@@ -1,0 +1,15 @@
+# 06 — Generate and execute bounded machine code in memory
+
+Make DSCO emit and execute actual machine instructions for a narrowly defined pure scoring expression while it remains resident. Implement one explicitly supported architecture first, preferably the current host, with a small expression language such as checked integer addition, comparison, constants, and bounded record-field loads. Parse and verify the expression, generate bytes into a writable candidate region, seal it executable, and call it through a fixed native signature. Neither dlopen nor an external compiler counts as this mechanism.
+
+Specify register use, stack alignment, return convention, permitted memory operands, overflow behavior, and instruction-cache synchronization. Enforce bounds on expression depth, emitted bytes, and input reads. The emitter must not accept arbitrary instruction bytes, indirect branches, syscalls, or unrestricted memory addresses. Retain an interpreter for differential qualification and a generation record linking expression, bytes, and actual entrypoint.
+
+Handle platform execution permissions explicitly. On hardened macOS inspect whether the running binary has the required JIT entitlement and use the appropriate MAP_JIT and write-protection protocol, including supported write callbacks, when available; otherwise report unsupported without altering signing or security settings. On supported systems enforce writable-versus-executable transitions, using the platform's permitted mechanism. Do not patch signed host text, disable host protections, or advertise an interpreter fallback as native code generation.
+
+Falsifying test: generate A and B for distinguishable arithmetic expressions, compare both against an independent reference over boundary and randomized inputs, and activate B in the same PID. Record emitted-byte hashes and show execution addresses inside the generated mappings. Invalid offsets, overflow-contract violations, or unavailable platform permissions must reject the candidate while A remains available. Check that code-writing windows never permit arbitrary concurrent execution of partially emitted bytes.
+
+Prove continuity with a resident heap sentinel's address and contents, a live session handle/counter, completion of an old-generation frame, and audited absence of exec; PID equality alone is insufficient.
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Inspect `src/vm.c`, `include/vm.h`, `src/cost_frontier.c`, `src/arena_alloc.c`, then `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py` symbols `ASTAnalyzer.transform`, `MetaToolRegistry.register_code`. Observed donor behavior: The donor executes transformed Python source; it does not generate machine instructions or manage executable memory.
+
+Preserve unrelated dirty work; add focused modules and small hooks. Govern every effectful tool call through `tools_execute_for_tier()`. Isolate state and build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

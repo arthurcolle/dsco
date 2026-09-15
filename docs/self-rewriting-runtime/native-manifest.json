@@ -1,0 +1,638 @@
+[
+  {
+    "id": "01",
+    "title": "A resident executable self-model",
+    "slug": "resident-executable-self-model",
+    "prompt": "prompts/01-resident-executable-self-model.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/ast.c",
+      "src/vm.c",
+      "src/plugin.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.register",
+          "MetaToolRegistry.get_source",
+          "MetaToolRegistry.get_ast"
+        ],
+        "observation": "The registry associates callable names with source and cached AST descriptions; it does not establish a native executable self-model."
+      }
+    ],
+    "mechanism": "Resident program cells bind actual executable entries to source, contracts, generations, and measured behavior.",
+    "challenge": "Refuse a mismatched source/code pair and demonstrate two executable generations within one PID.",
+    "hotspots": [
+      "src/ast.c",
+      "src/vm.c",
+      "src/plugin.c",
+      "src/self_improve.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "02",
+    "title": "Versioned live function dispatch",
+    "slug": "versioned-live-function-dispatch",
+    "prompt": "prompts/02-versioned-live-function-dispatch.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/vm.c",
+      "src/plugin.c",
+      "include/vm.h",
+      "include/plugin.h"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.register_code",
+          "MetaToolRegistry.transform_tool"
+        ],
+        "observation": "Registering transformed Python source replaces a named callable in a dictionary; the donor has no concurrent native generation protocol."
+      }
+    ],
+    "mechanism": "Atomic generation dispatch with invocation leases and compare-and-swap activation.",
+    "challenge": "Concurrent calls must finish entirely on the generation they acquired, while stale activations fail.",
+    "hotspots": [
+      "src/vm.c",
+      "src/plugin.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "03",
+    "title": "Typed mutable reasoning IR",
+    "slug": "typed-mutable-reasoning-ir",
+    "prompt": "prompts/03-typed-mutable-reasoning-ir.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/prompt_program.c",
+      "src/vm.c",
+      "src/lingo_workflow.c",
+      "include/vm.h"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer.parse",
+          "ASTAnalyzer.transform",
+          "MetaToolRegistry.compose"
+        ],
+        "observation": "The donor parses and transforms Python ASTs and composes callables, but does not verify typed native control flow or effect compatibility."
+      }
+    ],
+    "mechanism": "Verified typed IR with bounded control flow, native cells, evidence dependencies, and executable lowering.",
+    "challenge": "Reject bad joins, invalid native signatures, and effects on a pure branch before execution.",
+    "hotspots": [
+      "src/prompt_program.c",
+      "src/vm.c",
+      "src/lingo_workflow.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "04",
+    "title": "Resumable VM generation switching",
+    "slug": "resumable-vm-generation-switching",
+    "prompt": "prompts/04-resumable-vm-generation-switching.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/vm.c",
+      "include/vm.h",
+      "src/lingo_workflow.c",
+      "src/event_loop.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_streaming_tools.py",
+        "symbols": [
+          "ToolExecutor._execute_structured",
+          "ToolExecutor._execute_sequential"
+        ],
+        "observation": "The donor schedules dependency-ready calls and passes intermediate results; it has no resumable frame migration across program rewrites."
+      }
+    ],
+    "mechanism": "Stable continuation labels and verified live-value maps permit switching suspended VM frames.",
+    "challenge": "A suspended computation must resume on a new graph without repeating its completed effect.",
+    "hotspots": [
+      "src/vm.c",
+      "src/lingo_workflow.c",
+      "src/event_loop.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "05",
+    "title": "Compile candidate C into a live native module",
+    "slug": "compile-live-native-candidates",
+    "prompt": "prompts/05-compile-live-native-candidates.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/plugin.c",
+      "include/plugin.h",
+      "src/autoresearch.c",
+      "src/execution_layer.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.register_code",
+          "MetaToolRegistry.transform_tool"
+        ],
+        "observation": "The donor turns generated Python source into callable functions; the proposed extension compiles C into actual native code."
+      }
+    ],
+    "mechanism": "Compile, inspect, evaluate, and activate a versioned native C entrypoint inside the resident process.",
+    "challenge": "An actual compiled function must change resident execution without restart; malformed candidates never activate.",
+    "hotspots": [
+      "src/plugin.c",
+      "src/autoresearch.c",
+      "src/execution_layer.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "06",
+    "title": "Generate and execute bounded machine code in memory",
+    "slug": "in-memory-machine-code-scorer",
+    "prompt": "prompts/06-in-memory-machine-code-scorer.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/vm.c",
+      "include/vm.h",
+      "src/cost_frontier.c",
+      "src/arena_alloc.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer.transform",
+          "MetaToolRegistry.register_code"
+        ],
+        "observation": "The donor executes transformed Python source; it does not generate machine instructions or manage executable memory."
+      }
+    ],
+    "mechanism": "Emit a small verified scorer directly into executable memory with platform-correct write/execute transitions.",
+    "challenge": "Execute emitted instructions, then replace their generation in the same PID without a compiler or dlopen.",
+    "hotspots": [
+      "src/vm.c",
+      "src/cost_frontier.c",
+      "src/arena_alloc.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "07",
+    "title": "Native ABI, relocation, and import contracts",
+    "slug": "native-abi-relocation-contracts",
+    "prompt": "prompts/07-native-abi-relocation-contracts.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/plugin.c",
+      "include/plugin.h",
+      "src/vm.c",
+      "include/vm.h"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer._extract_structure",
+          "MetaToolRegistry.register_code"
+        ],
+        "observation": "The donor discovers Python functions and invokes them with kwargs; it does not establish machine-level ABI or import compatibility."
+      }
+    ],
+    "mechanism": "Validate native candidate entrypoints and imports against a bounded host ABI before activation.",
+    "challenge": "Reject incompatible layouts and relocations before any candidate initializer or function executes.",
+    "hotspots": [
+      "src/plugin.c",
+      "src/vm.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "08",
+    "title": "Safe reclamation of live native generations",
+    "slug": "safe-native-generation-reclamation",
+    "prompt": "prompts/08-safe-native-generation-reclamation.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/plugin.c",
+      "src/vm.c",
+      "src/event_loop.c",
+      "include/plugin.h"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.register_code",
+          "MetaToolRegistry.compose"
+        ],
+        "observation": "The donor stores function references in dictionaries and compositions; it does not handle native image reclamation during concurrent execution."
+      }
+    ],
+    "mechanism": "Generation leases and quiescence reclaim old code only after all calls and continuations release it.",
+    "challenge": "An old call survives activation and returns correctly; old code unloads only after its last reference drains.",
+    "hotspots": [
+      "src/plugin.c",
+      "src/vm.c",
+      "src/event_loop.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "09",
+    "title": "Transactional migration of resident heap state",
+    "slug": "transactional-resident-state-migration",
+    "prompt": "prompts/09-transactional-resident-state-migration.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/arena_alloc.c",
+      "include/arena_alloc.h",
+      "src/plugin.c",
+      "src/vm.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "CodeSandbox.execute",
+          "MetaToolRegistry.register_code"
+        ],
+        "observation": "The donor retains shared Python locals across executions but supplies no schema-versioned state migration or rollback transaction."
+      }
+    ],
+    "mechanism": "Prepare and validate a new state graph, then atomically bind it to the matching code generation.",
+    "challenge": "Migration failure leaves old state unchanged; successful migration never pairs new code with old layout.",
+    "hotspots": [
+      "src/arena_alloc.c",
+      "src/plugin.c",
+      "src/vm.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "10",
+    "title": "Atomic activation of cooperating executable cells",
+    "slug": "atomic-multicell-activation",
+    "prompt": "prompts/10-atomic-multicell-activation.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/plugin.c",
+      "src/vm.c",
+      "src/lingo_workflow.c",
+      "src/execution_kernel.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.compose",
+          "MetaToolRegistry.transform_tool"
+        ],
+        "observation": "The donor composes named functions but updates registrations individually, without a transaction over interdependent executable versions."
+      }
+    ],
+    "mechanism": "Bundle validation and atomic generation roots keep cooperating native cells on one compatible version set.",
+    "challenge": "Concurrent callers observe either the complete old bundle or the complete new bundle, never mixed results.",
+    "hotspots": [
+      "src/plugin.c",
+      "src/vm.c",
+      "src/lingo_workflow.c",
+      "src/execution_kernel.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "11",
+    "title": "Shadow native candidates with replayed observations",
+    "slug": "shadow-native-candidate-replay",
+    "prompt": "prompts/11-shadow-native-candidate-replay.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/execution_kernel.c",
+      "src/execution_events.c",
+      "src/event_stream.c",
+      "src/lingo_workflow.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_streaming_tools.py",
+        "symbols": [
+          "ToolExecutor._execute_structured",
+          "ToolExecutor._execute_single"
+        ],
+        "observation": "The donor forwards dependency results and caches call outputs; it has no native shadow-execution contract preventing duplicate effects."
+      }
+    ],
+    "mechanism": "Shadow native generations consume exact recorded observations while real effects execute once through the active path.",
+    "challenge": "A shadow attempt to alter or repeat a recorded effect must stop; valid replay produces comparable native outputs.",
+    "hotspots": [
+      "src/execution_kernel.c",
+      "src/execution_events.c",
+      "src/event_stream.c",
+      "src/lingo_workflow.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "12",
+    "title": "Counterexample-guided native executable synthesis",
+    "slug": "counterexample-guided-native-synthesis",
+    "prompt": "prompts/12-counterexample-guided-native-synthesis.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/autoresearch.c",
+      "src/ast.c",
+      "src/plugin.c",
+      "src/vm.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.register_code",
+          "MetaToolRegistry.transform_tool"
+        ],
+        "observation": "The donor can define and transform executable Python tools; it does not require an independent oracle or preserve counterexamples across revisions."
+      }
+    ],
+    "mechanism": "Generate native candidates, execute independent oracles, minimize counterexamples, and admit only surviving implementations.",
+    "challenge": "A candidate that memorizes visible examples must fail hidden cases; repaired code must execute in the resident process.",
+    "hotspots": [
+      "src/autoresearch.c",
+      "src/ast.c",
+      "src/plugin.c",
+      "src/vm.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "13",
+    "title": "Resident rollback with a bounded behavioral watchdog",
+    "slug": "resident-native-rollback-watchdog",
+    "prompt": "prompts/13-resident-native-rollback-watchdog.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/plugin.c",
+      "src/event_loop.c",
+      "src/supervisor.c",
+      "src/execution_kernel.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/scaling.py",
+        "symbols": [
+          "ScaledSwarm._run_replica",
+          "ScaledSwarm._select_best"
+        ],
+        "observation": "The donor contains failed replicas and chooses a survivor; it does not roll back resident executable generations."
+      }
+    ],
+    "mechanism": "Watchdog-monitored native generation activation with safe rollback of future dispatch and compatible state.",
+    "challenge": "A behavioral regression triggers same-PID rollback while in-flight calls retain valid generation ownership.",
+    "hotspots": [
+      "src/plugin.c",
+      "src/event_loop.c",
+      "src/supervisor.c",
+      "src/execution_kernel.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "14",
+    "title": "Causal profiling mapped to executable versions",
+    "slug": "executable-version-causal-profiling",
+    "prompt": "prompts/14-executable-version-causal-profiling.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/event_stream.c",
+      "src/execution_events.c",
+      "src/tool_telemetry.c",
+      "src/vm.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dsco_core/base.py",
+        "symbols": [
+          "AgentStats.record_call",
+          "BaseAgent.execute"
+        ],
+        "observation": "The donor records per-operation calls, timing, and errors, but has no attribution to live native code generations or causal improvement experiments."
+      }
+    ],
+    "mechanism": "Attribute native execution costs and verified outcomes to exact code versions and decision contexts.",
+    "challenge": "Calls spanning a hot swap must remain attributed to their acquired generation, and pure delay must not look like quality gain.",
+    "hotspots": [
+      "src/event_stream.c",
+      "src/execution_events.c",
+      "src/tool_telemetry.c",
+      "src/vm.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "15",
+    "title": "Effect-aware executable composition",
+    "slug": "effect-aware-executable-composition",
+    "prompt": "prompts/15-effect-aware-executable-composition.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/lingo_workflow.c",
+      "src/vm.c",
+      "src/execution_layer.c",
+      "src/capability.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.compose",
+          "MetaToolExecutor._execute_composed"
+        ],
+        "observation": "The donor composes callables by forwarding values directly, without typed effect analysis or per-stage governance."
+      }
+    ],
+    "mechanism": "Compose native cells and governed observations into typed programs whose optimizer respects effects and evidence.",
+    "challenge": "Reject illegal reordering or duplicated effects while parallelizing truly independent pure stages.",
+    "hotspots": [
+      "src/lingo_workflow.c",
+      "src/vm.c",
+      "src/execution_layer.c",
+      "src/capability.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "16",
+    "title": "Profile-driven native specialization",
+    "slug": "profile-driven-native-specialization",
+    "prompt": "prompts/16-profile-driven-native-specialization.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/vm.c",
+      "src/ast.c",
+      "src/cost_frontier.c",
+      "src/autoresearch.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer.transform",
+          "MetaToolRegistry.compose"
+        ],
+        "observation": "The donor rewrites Python ASTs and chains functions but does not specialize native executable paths from measured runtime invariants."
+      }
+    ],
+    "mechanism": "Partial evaluation creates guarded native specializations with correct deoptimization to the generic implementation.",
+    "challenge": "An input violating specialization guards must execute the generic path and preserve exact semantics.",
+    "hotspots": [
+      "src/vm.c",
+      "src/ast.c",
+      "src/cost_frontier.c",
+      "src/autoresearch.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "17",
+    "title": "Verified ephemeral tools synthesized as native code",
+    "slug": "verified-ephemeral-native-tools",
+    "prompt": "prompts/17-verified-ephemeral-native-tools.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/plugin.c",
+      "src/tools.c",
+      "src/execution_kernel.c",
+      "src/capability.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "MetaToolRegistry.register_code",
+          "define_tool",
+          "MetaToolRegistry.list_tools"
+        ],
+        "observation": "The donor defines executable tools from source and lists them, but lacks independently verified native admission and DSCO capability enforcement."
+      }
+    ],
+    "mechanism": "Synthesize a bounded native tool, qualify its contract, and expose it for governed use during the resident session.",
+    "challenge": "A new native tool must solve unseen cases, and denied effects must remain denied through its dynamic dispatch.",
+    "hotspots": [
+      "src/plugin.c",
+      "src/tools.c",
+      "src/execution_kernel.c",
+      "src/capability.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "18",
+    "title": "Learn semantics-tested executable rewrite operators",
+    "slug": "learned-executable-rewrite-operators",
+    "prompt": "prompts/18-learned-executable-rewrite-operators.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/autoresearch.c",
+      "src/ast.c",
+      "src/vm.c",
+      "src/self_improve.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py",
+        "symbols": [
+          "ASTAnalyzer.transform",
+          "ASTAnalyzer._rename_function",
+          "MetaToolRegistry.transform_tool"
+        ],
+        "observation": "The donor has hand-authored AST rename and decorator operations; it does not learn reusable transformations from verified improvement pairs."
+      }
+    ],
+    "mechanism": "Generalize successful code changes into guarded rewrite operators and promote them only after held-out equivalence checks.",
+    "challenge": "A rewrite that improves training examples but changes hidden semantics must not enter the learned operator library.",
+    "hotspots": [
+      "src/autoresearch.c",
+      "src/ast.c",
+      "src/vm.c",
+      "src/self_improve.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "19",
+    "title": "An evolution curriculum that retains prior capabilities",
+    "slug": "native-evolution-curriculum",
+    "prompt": "prompts/19-native-evolution-curriculum.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/autoresearch.c",
+      "src/self_improve.c",
+      "src/cost_frontier.c",
+      "src/blackboard.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/swarm_router/optimize.py",
+        "symbols": [
+          "compile_with_mipro",
+          "compile_with_gepa",
+          "swarm_metric"
+        ],
+        "observation": "The donor invokes optimizers with a default substring-or-nonempty-answer metric; it does not protect previously acquired native capabilities during evolution."
+      }
+    ],
+    "mechanism": "Evolve native implementations against staged tasks, held-out oracles, and retained capability constraints.",
+    "challenge": "A candidate gaining a new task while regressing a required old capability must be rejected.",
+    "hotspots": [
+      "src/autoresearch.c",
+      "src/self_improve.c",
+      "src/cost_frontier.c",
+      "src/blackboard.c"
+    ],
+    "proposed_modules": []
+  },
+  {
+    "id": "20",
+    "title": "A closed-loop same-process native self-repair demonstration",
+    "slug": "same-process-native-self-repair",
+    "prompt": "prompts/20-same-process-native-self-repair.md",
+    "domain": "resident-native-self-rewriting",
+    "primary_paths": [
+      "src/autoresearch.c",
+      "src/self_improve.c",
+      "src/plugin.c",
+      "src/vm.c",
+      "src/execution_kernel.c"
+    ],
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/agent_system.py",
+        "symbols": [
+          "SelfInterrogation.interrogate"
+        ],
+        "observation": "The donor asks an LM structured questions about progress and improvement; it does not rewrite and activate resident machine code."
+      }
+    ],
+    "mechanism": "Observe a real defect, synthesize and qualify a native repair, activate it in the same PID, then roll back a later regression.",
+    "challenge": "The full loop must change executed native bytes without exec and reject or roll back a deceptive later candidate.",
+    "hotspots": [
+      "src/autoresearch.c",
+      "src/self_improve.c",
+      "src/plugin.c",
+      "src/vm.c",
+      "src/execution_kernel.c"
+    ],
+    "proposed_modules": []
+  }
+]

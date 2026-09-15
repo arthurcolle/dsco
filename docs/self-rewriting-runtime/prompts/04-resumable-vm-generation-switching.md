@@ -1,0 +1,13 @@
+# 04 — Resumable VM generation switching
+
+Allow a suspended DSCO reasoning program to continue through an improved executable generation without restarting the process or repeating completed work. Introduce explicit VM safepoints with stable continuation labels, live-value schemas, generation identity, and a ledger of completed effect references. A rewrite may supply a checked continuation map from the old label and live values into the new program. Incompatible frames remain pinned to their original generation until they finish.
+
+Define the switch operation as a transaction over one suspended frame: validate the target generation, continuation label, live-value conversion, and effect frontier before changing the frame. Never reinterpret an old numeric program counter in a new instruction array. A failed conversion leaves the original stack, registers, owned values, and resumption target intact. Preserve ownership of strings and records across code lifetimes; borrowed pointers into reclaimed code or arenas cannot survive migration.
+
+Add a minimal resumable frame abstraction if necessary, with an instruction budget and cooperative yield integrated into the existing event loop. Exercise a real two-stage reasoning computation: collect a local governed observation, suspend, replace the downstream scoring program, then resume using the existing observation. Emit generation-aware transitions that let an operator distinguish old-frame completion from successful migration. Specify which frame shapes are supported initially instead of pretending arbitrary C stacks can migrate.
+
+Falsifying test: increment a fixture counter through a governed effect before suspension, switch to a generation that transforms the collected value differently, and require one counter increment plus the new result. Reject a migration missing a required live value and resume the unchanged original frame successfully. Any replayed effect, mixed stack layout, process exec, or silently discarded continuation fails.
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Inspect `src/vm.c`, `include/vm.h`, `src/lingo_workflow.c`, `src/event_loop.c`, then `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_streaming_tools.py` symbols `ToolExecutor._execute_structured`, `ToolExecutor._execute_sequential`. Observed donor behavior: The donor schedules dependency-ready calls and passes intermediate results; it has no resumable frame migration across program rewrites.
+
+Preserve unrelated dirty work; add focused modules and small hooks. Govern every effectful tool call through `tools_execute_for_tier()`. Isolate state and build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

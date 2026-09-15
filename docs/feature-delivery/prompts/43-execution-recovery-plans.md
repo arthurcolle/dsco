@@ -1,0 +1,11 @@
+# 43 — Actionable execution recovery plans with uncertainty preserved
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or the isolated worktree assigned for this feature. Read applicable `AGENTS.md` instructions and inspect current code before editing. Start at `src/execution_recovery.c`, `src/execution_kernel.c`, `include/execution_recovery.h`. If part already exists, ship the missing bounded extension and explain the observed gap; do not duplicate an existing subsystem. All interfaces named below are proposed until verified on disk.
+
+Execution recovery currently projects CRC-validated WAL evidence without replaying tools. Extend that read-only surface with a machine-readable recovery plan grouping attempts into completed, definitely unstarted, failed without confirmed effects, and effect uncertain. Include execution identifiers, last trustworthy event, missing evidence, and a specific recommended next inspection. Proposed `execution recovery-plan` output should have a schema version and stable reason codes. Optional operator annotations may live in a separate sidecar referencing journal hashes; they must never rewrite receipts or promote unknown effects into success. A plan is evidence for deciding what to do, not authority to repeat work. Preserve current recovery exit-code meanings or document a clearly additive command contract.
+
+Implement new capability in proposed `src/recovery_plan.c` and `include/recovery_plan.h`, with small dispatch hooks and a Makefile entry where needed. Preserve unrelated dirty work. Coordinate shared-file changes; keep builds, databases, sockets, fixtures, and reports isolated. Build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install a worker binary. Every tool-call path must use `tools_execute_for_tier()` and preserve capability gates.
+
+Construct real journal fixtures by running bounded local governed operations, then truncate or corrupt copied journals at admission, start, and completion boundaries. Prove every uncertain started operation remains non-retryable by default, clean evidence remains stable, and generating the plan neither mutates journal bytes nor launches tools.
+
+Finish with the implemented behavior, exact reproduction commands, binary and evidence paths, relevant regression results, and remaining limitations. Verify the real local runtime path; compilation alone is insufficient.

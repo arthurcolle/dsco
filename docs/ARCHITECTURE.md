@@ -71,6 +71,41 @@ Responsibilities:
 - Coordinate workers by groups
 - Maintain shared SQLite state: registry, tasks, messages, scratchpad, liveness
 
+### Hierarchical Goal Controller
+
+- `goal.c` / `goal.h`
+- `goal_queue.c` / `goal_queue.h`
+
+Responsibilities:
+
+- Promote action-shaped prompts into bounded autonomous goals in interactive and one-shot modes
+- Alternate between a planning queue and a work queue while leasing one task at a time
+- Require explicit acceptance evidence, child completion, and a verified root before goal completion
+- Reject stale task and goal mutations with independent monotonic revisions
+- Persist the task tree in session JSON and requeue an interrupted active lease on recovery
+- Continue automatically until completion, a concrete blocker, an operator pause, or a budget/turn limit
+
+All model-facing controller operations are registered tools and pass through
+`tools_execute_for_tier()`. See [Two-Queue Goal Controller](GOAL_CONTROLLER.md)
+for the state machine and operator controls.
+
+### Content-Addressed Improvement Exchange
+
+- `improvement_sync.c` / `improvement_sync.h`
+- `dsco_dht.c` / `dsco_dht.h`
+- `mesh.c` / `mesh.h`
+
+Responsibilities:
+
+- Advertise SHA-256 improvement-provider keys through the private Kademlia DHT
+- Transfer immutable signed bundles in bounded chunks over encrypted mesh links
+- Verify full content hashes and Ed25519 signatures before persistence
+- Quarantine unknown signers and require explicit trust plus promotion
+- Stage payloads for review without applying or executing received code
+
+See [DHT Improvement Sync](DHT_IMPROVEMENT_SYNC.md) for the protocol and operator
+workflow.
+
 ### Rendering and UX
 
 - `md.c` / `md.h`
@@ -127,7 +162,8 @@ Responsibilities:
    - thinking deltas (when present) -> dimmed diagnostics
 7. Parsed blocks are appended to conversation.
 8. If tool_use blocks exist, each tool executes and returns tool_result blocks.
-9. Loop repeats until `end_turn` / no tool use.
+9. For an active goal, the controller leases the next planning/work task and the loop continues;
+   an ordinary conversation ends at `end_turn` / no tool use.
 10. Usage/cost/telemetry aggregated; baseline event logs updated.
 
 ## 4) Runtime Flow: One-Shot Mode

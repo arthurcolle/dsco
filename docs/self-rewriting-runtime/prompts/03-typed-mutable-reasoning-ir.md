@@ -1,0 +1,13 @@
+# 03 — Typed mutable reasoning IR
+
+Let DSCO rewrite executable reasoning graphs in memory and run the verified result immediately. Define a bounded typed intermediate representation with constants, records, branches, bounded iteration, native-cell calls, governed effects, and explicit evidence values. Support transformations of this representation as data, followed by verification and lowering into an executable VM program or registered native graph. Changing an instruction graph must alter runtime behavior; editing a prompt document alone does not satisfy this feature.
+
+Specify value types, block parameters or stack states, entry and exit contracts, and a finite execution budget. The verifier checks every reachable instruction, opcode and operand range, control-flow target, type join, declared native signature, and effect annotation. Values carrying failed observations must remain distinct from successful evidence. A graph claiming purity cannot call a tool or smuggle an effect through an unchecked native pointer. Reject unsupported operations rather than allowing verifier/runtime disagreement.
+
+Use existing prompt-program and workflow formats as import surfaces only where their semantics are sufficient; document the new executable representation separately. Provide a minimal interpreter or lowerer if the current VM lacks needed operations. Keep immutable verified generations, with candidate rewrites isolated from the active graph until verification succeeds. Include an inspection view showing the verified instructions actually executing and their source-generation relationships.
+
+Falsifying test: run a baseline graph, rewrite its scoring branch, and observe changed outputs in the same PID. Mutate a branch target outside the program, merge incompatible types, call a mismatched native signature, and place a network effect behind a purportedly pure node. Every invalid candidate must fail before any instruction or external effect executes, while the previous graph remains usable.
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Inspect `src/prompt_program.c`, `src/vm.c`, `src/lingo_workflow.c`, `include/vm.h`, then `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py` symbols `ASTAnalyzer.parse`, `ASTAnalyzer.transform`, `MetaToolRegistry.compose`. Observed donor behavior: The donor parses and transforms Python ASTs and composes callables, but does not verify typed native control flow or effect compatibility.
+
+Preserve unrelated dirty work; add focused modules and small hooks. Govern every effectful tool call through `tools_execute_for_tier()`. Isolate state and build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

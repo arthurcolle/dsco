@@ -22,11 +22,22 @@ This documentation set is intended as a full-codebase reference for `dsco-cli`, 
 - [Constants and Environment Index](CONSTANTS_ENV_INDEX.md)
 - [Repository Coverage Manifest](REPO_COVERAGE.md)
 - [Chronicle TokenLedger](CHRONICLE_TOKENLEDGER.md)
+- [Execution Spine](EXECUTION_SPINE.md)
+- [Agent-system Interoperability](AGENT_INTEROP.md)
+- [Two-Queue Goal Controller](GOAL_CONTROLLER.md)
+- [Shared Blackboard: Claims, Artifacts, and Acceptance](BLACKBOARD.md)
 - [Integration Catalog](INTEGRATION_CATALOG.md)
 - [Swarm Parallelism Proof](SWARM_PARALLELISM_PROOF.md)
 - [Cosmopolitan Build Lane](COSMOPOLITAN.md)
 - [Local Control Plane](LOCAL_CONTROL_PLANE.md)
+- [Harness Control: Kitty, PTYs, Desktop and Browser](HARNESS_CONTROL.md)
+- [Tool Hooks](TOOL_HOOKS.md)
+- [Native UI Component Timelines](NATIVE_UI_TRACE.md)
 - [Distributed Agent Performance Doctrine](DISTRIBUTED_AGENT_PERFORMANCE.md)
+- [DHT Improvement Sync](DHT_IMPROVEMENT_SYNC.md)
+- [The Math Behind the Glossary](THE_MATH_BEHIND_THE_GLOSSARY.md)
+  ([HTML wiki](THE_MATH_BEHIND_THE_GLOSSARY.html)) — hyperlinked HATEOAS-style
+  mathematics with stable concept, symbol, and equation resources
 - [Blog: Modal Tool Calling and Hosted Tools](BLOG_MODAL_TOOL_CALLING.md) ([HTML](BLOG_MODAL_TOOL_CALLING.html))
 - [Avian Mechanisms](AVIAN_MECHANISMS.md)
 - [Sakana Fugu Provider](SAKANA_FUGU_PROVIDER.md)
@@ -83,3 +94,15 @@ This documentation set is intended as a full-codebase reference for `dsco-cli`, 
 6. Use [Integration Catalog](INTEGRATION_CATALOG.md) when working on external app/MCP metadata.
 7. Use [Operations](OPERATIONS.md) for env/config/runtime storage and troubleshooting.
 8. Use [Runbooks](RUNBOOKS.md) for operational procedures.
+
+- [Native windows](NATIVE_WINDOWS.md) — draggable native panels, buffer snapshots and workflow steering.
+- [Native compositor continuation plan](NATIVE_COMPOSITOR_NEXT.md) — verified state, remaining limits, next-session priorities and acceptance criteria.
+
+- [Lingo language and DSCO scripting](LINGO.md) — object values, dependency tracking, scenarios, and governed LuaJIT interactions.
+- [Interactive Lingo workbench](lingo/WORKBENCH.md) — open a worksheet, inspect dependencies, change typed controls, and save or restore the selected scenario through terminal or agent tools.
+- [Shared platform objects](LINGO_PLATFORM.md) — Observation, Service, Object, Artifact, Policy, Task, Run, Model and Agent contracts.
+- [Named worlds and GraphSub artifacts](lingo/WORLDS.md) — source identity, portable value addresses, atomic load, actual persistence and restart evidence.
+- [Lingo across systems](lingo/SYSTEMS.md) — real Autobot discovery/execution, GraphSub observations, DSCO artifacts and Chimera routing preferences in one script.
+- [Lingo design explorations](lingo/DESIGN_EXPLORATIONS.md) — proposed decisions, evidence needs, pinned selections, packages and executable work; includes a runnable 0.2 decision study.
+- [DSCO as the primary GraphSub operator](DSCO_GRAPHSUB_OPERATOR.md) — comprehensive SecView-style world, workbench and language definition, with bindings to existing GraphSub implementations.
+- [Live GraphSub browsing from Lingo](operator/LIVE_BROWSE.md) — implemented attachment, schema, node pages and object reads through the DSCO capability gate.

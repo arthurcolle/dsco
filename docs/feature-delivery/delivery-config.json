@@ -1,0 +1,47 @@
+{
+  "schema": "dsco.feature-delivery.design/v1",
+  "status": "design-only",
+  "dispatch_enabled": false,
+  "source_checkout": "/Users/arthurcolle/Dsco/dsco-cli",
+  "baseline_policy": "reviewed-current-source-snapshot-in-private-seed-repository",
+  "task_authority": "existing-dsco-blackboard",
+  "coordinator_implemented": false,
+  "initial_limits": {
+    "implementation_sessions": 3,
+    "coordinator_sessions": 1,
+    "integration_writers": 1,
+    "expensive_test_jobs": 1,
+    "compiler_jobs_per_worker": 2,
+    "review_priority_backlog": 2,
+    "claim_ttl_seconds": 300,
+    "renew_every_seconds": 60,
+    "max_automatic_repair_attempts": 2,
+    "worker_deadline_seconds": null,
+    "authorized_spend_usd": null,
+    "host_memory_reserve_bytes": null
+  },
+  "admission_requires": [
+    "verified-baseline",
+    "frozen-checker",
+    "explicit-worker-deadline",
+    "observed-host-capacity",
+    "configured-memory-reserve",
+    "authorized-provider-lane-and-concurrency",
+    "authorized-budget-or-explicit-no-paid-inference-policy",
+    "current-blackboard-claim"
+  ],
+  "worker_build_argv": ["make", "-j2", "dsco"],
+  "worker_environment": {
+    "DSCO_NO_INSTALL": "1",
+    "DSCO_ENV_FILE": "/dev/null",
+    "DSCO_NO_AUTO_SUPERVISE": "1",
+    "DSCO_DURABLE_AUTOWAKE": "0"
+  },
+  "isolate_per_attempt": ["worktree", "HOME", "TMPDIR", "build", "IPC", "Chronicle", "ports", "sockets"],
+  "candidate_payload_limit_bytes": 32768,
+  "max_dependencies_per_board_task": 16,
+  "inline_checker_ceiling_seconds": 120,
+  "install_authorized": false,
+  "push_authorized": false,
+  "deploy_authorized": false
+}

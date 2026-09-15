@@ -1,0 +1,15 @@
+# 898 — Executable dependency-graph reconstructor: Measured cross-family transfer
+
+Implement the measured cross-family transfer feature for the Executable dependency-graph reconstructor RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Learn procedures that reconstruct executable dependency graphs from typed IR, imports, state access, and observed invocation relationships.
+
+REPL `procedure_ir`, `call_observations`, and `state_accesses` retain full definitions and dynamic evidence with exact generation identities. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root code clusters procedures, delegates indirect-call questions, and merges typed edges while preserving unresolved targets. Role output: Final `ExecutableDependencyGraph` handle names typed edges, provenance, unresolved targets, and graph-completeness counterexamples. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Train the role on selected development families, then compare adapted and unadapted roots on disjoint family structures with fixed leaves. Include component ablations and a negative-transfer condition. Retain task ancestry so apparent transfer cannot come from shared templates or answer leakage.
+
+Train on synthetic modules with known dependency graphs and instrumented executions exposing missing static relationships. A fixed graph generator/reference analyzer verifies mandatory edges, target types, cycles, and explicit unknown-call coverage. Hold out callback shapes, import graphs, state-sharing patterns, and recursive structures with equivalent modules grouped. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: An indirect callback changes shared state even though its target never appears in the direct-call list. A learned shortcut that works only for one identifier or ordering must fail on renamed and structurally changed cases. Attribute any gain to the trained root and report families harmed by the update.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/ast.c`, `src/plan_dag.c`, `src/trace_kg_store.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/specialized_teams.py` (`WorkflowToolkit.analyze_dependencies`). Donor baseline: Analyzes declared workflow dependencies; recovering native semantic dependencies requires additional mechanisms. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

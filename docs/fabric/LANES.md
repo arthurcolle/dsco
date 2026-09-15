@@ -8,7 +8,8 @@
 
 A fabric lane is `(provider, model, effort)`. Each distinct triple is an
 independent worker process pinned via `--provider <p> -m <model>` with
-`DSCO_EFFORT` set per-lane. The swarm cap is `SWARM_MAX_CHILDREN` (64).
+`DSCO_EFFORT` set per-lane. The swarm runtime default is 64; set
+`DSCO_SWARM_MAX_CHILDREN=256` for high-throughput fanout (structural cap 256).
 
 ## Usage
 
@@ -23,7 +24,63 @@ DSCO_FABRIC_SUBLANES="$(tr '\n' ',' < docs/fabric/lane-manifest-v1.txt)" \
 
 # effort sub-lanes: same model, different reasoning budgets
 DSCO_FABRIC_SUBLANES="openai-codex:gpt-5.6-sol@xhigh,openai-codex:gpt-5.6-sol@low" ...
+
+# bounded cross-provider society: two providers, two interoperating rounds,
+# one governed-tool chair synthesis, live time and billing-class telemetry
+DSCO_FABRIC_SUBLANES_ONLY=1 \
+DSCO_FABRIC_SUBLANES="openai-codex:gpt-5.6-luna@medium,sakana:fugu@medium" \
+./dsco --machine-society --fabric-max-agents 2 \
+  --society-rounds 4 --society-min-rounds 1 \
+  --society-quorum 2 --society-quorum-grace 2 \
+  --society-time-budget 240 --society-chair-reserve 30 \
+  --society-budget-usd 0 --society-member-turns 1 \
+  --society-chair-turns 1 -p "task"
 ```
+
+## Machine society protocol
+
+`--machine-society` selects distinct provider lanes and preserves each member's
+provider/model identity across bounded, tool-enabled rounds. Round one produces independent
+typed `PUBLIC_BRIEF` messages. Every later round receives a parent-mediated,
+size-bounded public board and must reply to another provider's named claim.
+Briefs use a strict provider-neutral schema with parent-bound society/member/
+round identity, atomic claim IDs, numeric confidence, evidence, dependencies,
+falsifiers, tests, replies, dissent, artifacts, and non-authoritative veto
+alerts. Invalid output is replaced with a parent-generated rejection record;
+raw invalid text is never forwarded to peers. The final chair receives the
+complete board, may use governed tools to verify or implement it, and returns the integrated decision,
+evidence matrix, dissent/veto disposition, implementation plan, and
+verification gates.
+
+The scheduler scores a bounded portfolio rather than taking the first lanes:
+it rewards independent provider evidence, penalizes shared upstream/model
+correlation, and admits against high-side prompt-aware cost reserves. The chair
+gets a hard time and metered-cost reserve before members are admitted. Each
+round may close on a valid typed quorum after `--society-quorum-grace`; pending
+members are drained without aborting the society. After `--society-min-rounds`,
+the parent compares new claims, replies, and unresolved dissent with the prior
+ledger and stops when marginal value of another round is below threshold. Use
+`--society-fixed-rounds` when a fixed experimental design is required.
+`DSCO_FABRIC_SUBLANES_ONLY=1` makes `DSCO_FABRIC_SUBLANES` an exact operator
+allowlist; without it, sublanes augment the healthy built-in catalog.
+
+Society members and the chair run with `tool_choice=auto` and retain the worker
+tool registry, including on-demand `discover_tools` and `load_tools`. Every call
+still routes through `tools_execute_for_tier()` and the normal capability gate.
+The parent-mediated `PUBLIC_BRIEF` board is the authoritative peer channel;
+tools may gather evidence or produce artifacts but may not become a hidden
+inter-member board, credential exchange, or worker-owned spawning path. The
+parent owns the board, capability boundary, deadline, cost admission, and
+termination. Status frames distinguish
+metered provider-reported cost, estimated-unreported cost, active reserve, and
+committed budget from subscription notional cost, and display elapsed/remaining
+time while the society is live. Reserves use registry pricing and router
+history, then consume learned uncertainty intervals once enough observations
+exist; telemetry labels calibrated and heuristic reservations separately.
+Subscription calls whose equivalent API price is not catalogued are labeled
+`unpriced`; zero is never presented as an invented notional estimate. A positive
+`--society-budget-usd` is a hard metered admission ceiling; `0` leaves metered
+budget unlimited, while subscription/local lanes still remain non-drawing.
 
 ## Default built-in lanes (subscription-only)
 

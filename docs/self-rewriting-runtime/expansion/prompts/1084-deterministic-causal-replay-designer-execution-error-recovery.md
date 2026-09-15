@@ -1,0 +1,15 @@
+# 1084 — Deterministic causal replay designer: Learned execution-error recovery
+
+Implement the learned execution-error recovery feature for the Deterministic causal replay designer RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Learn replay programs that reproduce recorded logical outcomes using pinned observations and explicit causal order within an admitted domain.
+
+External `event_journal`, `observation_objects`, and `causal_edges` variables retain complete event histories and replay prerequisites. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root code slices causal ancestors, delegates missing-observation checks, and emits bounded replay steps with exact generation references. Role output: Final `CausalReplayProgram` handle contains ordered logical steps, pinned inputs, coverage limits, and outcome-equivalence receipts. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Construct paired episodes containing a recoverable syntax, schema, or reference error and an independently verified repair. Train the root to inspect execution feedback, preserve completed work, and generate the smallest valid continuation. Keep original and corrected code plus the repair transformation.
+
+Train from recorded fixture executions, reordered events, incomplete journals, and independently verified replay-equivalence trajectories. A frozen reference transition runner checks state hashes, emitted outcomes, and absence of duplicated external effects. Hold out causal graph shapes, observation gaps, clock disorder, and partial-commit histories with episode ancestry grouped. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: A timestamp-sorted replay reverses causally dependent commits from different workers and manufactures a successful final state. Inject an undefined buffer and a completed effect before the failure. Recovery must resolve the buffer without repeating the effect; inventing a final answer cannot count as repair.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/event_stream.c`, `src/chronicle.c`, `src/execution_recovery.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_streaming_tools.py` (`ToolExecutor._execute_structured`). Donor baseline: Schedules dependency-ready calls; reconstructing deterministic causal replay is an additional native mechanism. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

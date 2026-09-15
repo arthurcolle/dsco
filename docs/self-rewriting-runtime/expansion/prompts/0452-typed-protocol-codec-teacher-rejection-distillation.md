@@ -1,0 +1,15 @@
+# 452 — Typed protocol request-response codec: Teacher rejection distillation
+
+Implement the teacher rejection distillation feature for the Typed protocol request-response codec RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Learn native protocol codecs that preserve request identity, typed errors, optional fields, and forward-compatible message semantics.
+
+REPL `message_schema`, `request_response_pairs`, and `version_cases` hold full exchanges and negotiated protocol variants. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root code separates message variants, delegates field compatibility checks, and builds encoder/decoder pairs with explicit validation. Role output: Final `ProtocolCodecCandidate` handle contains native codec functions, supported versions, schema hashes, and correlation counterexamples. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Collect multiple executable teacher trajectories per development task. Replay their programs against the fixed oracle, reject incorrect or incomplete episodes, and deduplicate shared derivations before extracting root action targets. Distill accepted trajectories into the role policy with balanced family sampling.
+
+Train from generated exchanges, version mismatches, missing identifiers, and externally labeled round-trip and rejection episodes. A fixed protocol conformance runner checks decoded meaning, correlation identity, required fields, and error response shape. Hold out message variants, optional-field interactions, protocol versions, and malformed identifier families grouped by exchange lineage. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: Numeric and string request identifiers collapse together, routing an otherwise valid response to the wrong request. A fluent teacher episode containing the expected answer but an incorrect executable result must be excluded. Compare the trained root against its initial checkpoint on untouched families.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/mcp.c`, `src/acp_server.c`, `src/json_util.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/agent_system.py` (`Message.to_json`, `Message.from_json`). Donor baseline: Serializes typed agent messages to JSON; native request-response contract synthesis is a proposed extension. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

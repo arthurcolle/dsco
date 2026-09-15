@@ -1,0 +1,660 @@
+[
+  {
+    "id": "21",
+    "title": "Bind self-modification claims to executable evidence",
+    "slug": "executable-evidence-claims",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/universal_dspy_multihop.py",
+        "symbols": [
+          "NotesExtractor",
+          "UniversalMultiHopRAG.forward"
+        ],
+        "observation": "Extracted notes are free-form strings; sources are recorded at retrieval level, and each context is truncated to its first 500 characters."
+      }
+    ],
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/trace_kg.c",
+      "src/execution_kernel.c"
+    ],
+    "proposed_modules": [
+      "src/code_evidence.c",
+      "include/code_evidence.h"
+    ],
+    "mechanism": "Typed claims bind immutable source spans and behavioral receipts to resident procedure identities.",
+    "challenge": "A passing test from the old procedure must not validate its replacement, and a fabricated quotation must not resolve.",
+    "prompt": "prompts/21-executable-evidence-claims.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/context_fabric.c",
+      "src/execution_kernel.c"
+    ]
+  },
+  {
+    "id": "22",
+    "title": "Investigate the missing obligations of a self-rewrite",
+    "slug": "self-investigation-obligations",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/universal_dspy_multihop.py",
+        "symbols": [
+          "MultiHopQueryGenerator",
+          "UniversalMultiHopRAG.forward"
+        ],
+        "observation": "The next query uses accumulated notes and a hop number; there is no explicit representation of unanswered obligations or coverage."
+      }
+    ],
+    "primary_paths": [
+      "src/plan.c",
+      "src/plan_dag.c",
+      "src/context_fabric.c",
+      "src/agent.c"
+    ],
+    "proposed_modules": [
+      "src/investigation_obligations.c",
+      "include/investigation_obligations.h"
+    ],
+    "mechanism": "An explicit obligation frontier chooses investigations that can establish replacement correctness.",
+    "challenge": "An optimization supported only by average latency must remain incomplete while cancellation and ownership obligations are unresolved.",
+    "prompt": "prompts/22-self-investigation-obligations.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/plan.c",
+      "src/context_fabric.c",
+      "src/agent.c"
+    ]
+  },
+  {
+    "id": "23",
+    "title": "Resolve conflicting explanations through directed retrieval",
+    "slug": "contradiction-directed-investigation",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/universal_dspy_multihop.py",
+        "symbols": [
+          "MultiHopQueryGenerator",
+          "NotesExtractor",
+          "UniversalMultiHopRAG.forward"
+        ],
+        "observation": "All notes accumulate together; contradictory statements do not trigger a targeted distinguishing query or separate hypotheses."
+      }
+    ],
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/semantic.c",
+      "src/trace_kg_store.c"
+    ],
+    "proposed_modules": [
+      "src/contradiction_research.c",
+      "include/contradiction_research.h"
+    ],
+    "mechanism": "Conflict records generate discriminating retrieval queries before a self-rewrite rationale is accepted.",
+    "challenge": "A stale design document and current execution trace disagree about a lock; the reasoner must inspect the actual revision and call path.",
+    "prompt": "prompts/23-contradiction-directed-investigation.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/context_fabric.c"
+    ]
+  },
+  {
+    "id": "24",
+    "title": "Prevent copied evidence from becoming false consensus",
+    "slug": "independent-support-fusion",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/universal_dspy_multihop.py",
+        "symbols": [
+          "UniversalContentRetriever.retrieve",
+          "UniversalContentRetriever.rerank"
+        ],
+        "observation": "Results from different retrievers are merged by raw score; no originating-source or copied-content independence is modeled."
+      }
+    ],
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/semantic.c",
+      "src/vfs.c"
+    ],
+    "proposed_modules": [
+      "src/evidence_fusion.c",
+      "include/evidence_fusion.h"
+    ],
+    "mechanism": "Evidence families separate relevance and repetition from independent corroboration of rewrite hypotheses.",
+    "challenge": "Twenty copied performance summaries must not outweigh one independent failing execution.",
+    "prompt": "prompts/24-independent-support-fusion.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/context_fabric.c",
+      "src/vfs.c"
+    ]
+  },
+  {
+    "id": "25",
+    "title": "Stop self-investigation when retrieval adds no knowledge",
+    "slug": "retrieval-novelty-budget",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/universal_dspy_multihop.py",
+        "symbols": [
+          "UniversalMultiHopRAG.forward",
+          "UniversalContentRetriever.retrieve"
+        ],
+        "observation": "The loop always attempts num_hops, continues after errors, and reports configured hop_count rather than successful information-gathering steps."
+      }
+    ],
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/semantic.c",
+      "src/agent.c"
+    ],
+    "proposed_modules": [
+      "src/retrieval_novelty.c",
+      "include/retrieval_novelty.h"
+    ],
+    "mechanism": "A bounded retrieval controller measures novel evidence and obligation progress instead of fixed hop count.",
+    "challenge": "Repeated mirrors and paraphrased queries must stop without falsely increasing confidence or exhausting the entire turn.",
+    "prompt": "prompts/25-retrieval-novelty-budget.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/context_fabric.c",
+      "src/agent.c"
+    ]
+  },
+  {
+    "id": "26",
+    "title": "Retrieve typed evidence from the resident runtime and source corpus",
+    "slug": "typed-runtime-retrieval",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/universal_dspy_multihop.py",
+        "symbols": [
+          "RetrievalContext",
+          "UniversalContentRetriever.retrieve"
+        ],
+        "observation": "A generic source string and raw score combine heterogeneous results without typed joins, calibrated ranking, or execution identity."
+      }
+    ],
+    "primary_paths": [
+      "src/vfs.c",
+      "src/semantic.c",
+      "src/context_fabric.c",
+      "src/trace_kg_store.c"
+    ],
+    "proposed_modules": [
+      "src/runtime_retrieval.c",
+      "include/runtime_retrieval.h"
+    ],
+    "mechanism": "Structured predicates and actual lexical or semantic retrieval produce typed evidence for self-investigation.",
+    "challenge": "A similarly named function in another revision must not outrank the exact failing invocation merely because its prose matches.",
+    "prompt": "prompts/26-typed-runtime-retrieval.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/vfs.c",
+      "src/context_fabric.c"
+    ]
+  },
+  {
+    "id": "27",
+    "title": "Extract evidence that survives different chunk boundaries",
+    "slug": "overlap-invariant-extraction",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/chunked_analyzer.py",
+        "symbols": [
+          "ChunkedDocumentAnalyzer.create_chunks",
+          "ChunkedDocumentAnalyzer._aggregate_results",
+          "KnowledgeExtractionSignature"
+        ],
+        "observation": "Aggregation deduplicates normalized strings, records chunk starts rather than exact spans, and counts entity and bias occurrences repeatedly across overlaps."
+      }
+    ],
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/semantic.c",
+      "src/vfs.c"
+    ],
+    "proposed_modules": [
+      "src/evidence_chunks.c",
+      "include/evidence_chunks.h"
+    ],
+    "mechanism": "Canonical source spans make learned claims independent of chunking and overlapping observation windows.",
+    "challenge": "The same assertion straddling two windows must count once, while two real occurrences remain distinguishable.",
+    "prompt": "prompts/27-overlap-invariant-extraction.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/context_fabric.c",
+      "src/vfs.c"
+    ]
+  },
+  {
+    "id": "28",
+    "title": "Distinguish real contradictions from revision and time changes",
+    "slug": "revision-aware-contradictions",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/chunked_analyzer.py",
+        "symbols": [
+          "ChunkKnowledge",
+          "ChunkedDocumentAnalyzer._aggregate_results"
+        ],
+        "observation": "Claims retain text and chunk location but no temporal validity, revision scope, typed predicate, or cross-document contradiction relation."
+      }
+    ],
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/trace_kg_store.c",
+      "src/vfs.c"
+    ],
+    "proposed_modules": [
+      "src/revision_contradictions.c",
+      "include/revision_contradictions.h"
+    ],
+    "mechanism": "Typed claim scopes expose unresolved contradictions without erasing historical truths.",
+    "challenge": "A function safe in revision A and unsafe in revision B is a change, while simultaneous incompatible claims about B are a conflict.",
+    "prompt": "prompts/28-revision-aware-contradictions.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/context_fabric.c",
+      "src/vfs.c"
+    ]
+  },
+  {
+    "id": "29",
+    "title": "Preserve modality and attribution in learned memory",
+    "slug": "attributed-epistemic-memory",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/chunked_analyzer.py",
+        "symbols": [
+          "KnowledgeExtractionSignature",
+          "ChunkKnowledge",
+          "ChunkedDocumentAnalyzer._aggregate_results"
+        ],
+        "observation": "The extractor distinguishes claims, beliefs and utterances, but document aggregation discards utterances and does not preserve modality or attribution relationships."
+      }
+    ],
+    "primary_paths": [
+      "src/session_memory.c",
+      "src/context_fabric.c",
+      "src/memory_tier.c"
+    ],
+    "proposed_modules": [
+      "src/epistemic_memory.c",
+      "include/epistemic_memory.h"
+    ],
+    "mechanism": "Typed modality and quotation edges prevent hypothetical or attributed text from becoming operative procedure assumptions.",
+    "challenge": "A paper quoting an unsafe recommendation to refute it must not teach the runtime to adopt that recommendation.",
+    "prompt": "prompts/29-attributed-epistemic-memory.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/context_fabric.c"
+    ]
+  },
+  {
+    "id": "30",
+    "title": "Invalidate learned conclusions when their content dependencies change",
+    "slug": "reasoning-dependency-invalidation",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/analysis_cache.py",
+        "symbols": [
+          "AnalysisCache._get_cache_key",
+          "AnalysisCache.get",
+          "AnalysisCache.set"
+        ],
+        "observation": "Analysis keys use PDF path, chunk size, overlap and model, omitting source content, extractor version, prompt signature and derived-claim dependencies."
+      }
+    ],
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/vfs.c",
+      "src/plan_cache.c"
+    ],
+    "proposed_modules": [
+      "src/reasoning_dependencies.c",
+      "include/reasoning_dependencies.h"
+    ],
+    "mechanism": "Content-addressed derivation edges allow precise invalidation of learned procedure assumptions.",
+    "challenge": "Replacing source bytes at the same path must invalidate dependent optimization conclusions without discarding independent evidence.",
+    "prompt": "prompts/30-reasoning-dependency-invalidation.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/context_fabric.c",
+      "src/vfs.c"
+    ]
+  },
+  {
+    "id": "31",
+    "title": "Verify decisive algorithm evidence against PDF pages and figures",
+    "slug": "algorithm-figure-verification",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/pdf_processor.py",
+        "symbols": [
+          "PDFVisionAnalyzer._convert_pdf_to_images",
+          "PDFVisionAnalyzer._analyze_image",
+          "PDFVisionAnalyzer.process_pdf"
+        ],
+        "observation": "The implementation transcribes rasterized pages, applies max_pages only after rendering the whole PDF, and treats response length as its main validity check."
+      }
+    ],
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/tools.c",
+      "src/execution_kernel.c"
+    ],
+    "proposed_modules": [
+      "src/algorithm_evidence.c",
+      "include/algorithm_evidence.h"
+    ],
+    "mechanism": "Selective page verification links algorithm-adoption claims to exact visual and extracted evidence.",
+    "challenge": "A missing minus sign or log-scale axis must reverse an apparently favorable algorithm comparison before adoption.",
+    "prompt": "prompts/31-algorithm-figure-verification.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/context_fabric.c",
+      "src/tools.c",
+      "src/execution_kernel.c"
+    ]
+  },
+  {
+    "id": "32",
+    "title": "Make self-improvement performance claims executable",
+    "slug": "quantitative-rewrite-claims",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/chunked_analyzer.py",
+        "symbols": [
+          "ChunkedDocumentAnalyzer._aggregate_results",
+          "ChunkedDocumentAnalyzer._extract_key_findings"
+        ],
+        "observation": "Quality is an average of positive model-generated scores; failed chunks are omitted, and no executable dimensional or denominator checks substantiate aggregate claims."
+      }
+    ],
+    "primary_paths": [
+      "src/tool_telemetry.c",
+      "src/chronicle.c",
+      "src/context_fabric.c"
+    ],
+    "proposed_modules": [
+      "src/quantitative_claims.c",
+      "include/quantitative_claims.h"
+    ],
+    "mechanism": "Structured quantities and executable estimators determine whether a resident replacement improves its stated metric.",
+    "challenge": "A faster mean on fewer successful requests must not be accepted as a latency improvement for the full workload.",
+    "prompt": "prompts/32-quantitative-rewrite-claims.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/context_fabric.c"
+    ]
+  },
+  {
+    "id": "33",
+    "title": "Localize its own failures through competing source hypotheses",
+    "slug": "hypothesis-fault-graph",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/cognitive_integration.py",
+        "symbols": [
+          "CognitiveHandlers._perceive_user_input",
+          "CognitiveHandlers._plan_response",
+          "CognitiveHandlers._reflect_on_response"
+        ],
+        "observation": "Perception uses keywords, planning uses input length, and reflection records response_received=True without relating failure observations to source hypotheses."
+      }
+    ],
+    "primary_paths": [
+      "src/trace_kg.c",
+      "src/trace_kg_store.c",
+      "src/context_fabric.c",
+      "src/execution_kernel.c"
+    ],
+    "proposed_modules": [
+      "src/fault_hypotheses.c",
+      "include/fault_hypotheses.h"
+    ],
+    "mechanism": "A typed fault graph maps observed failures to source predicates and discriminating experiments.",
+    "challenge": "The last logged function must not be blamed automatically when an earlier ownership transfer caused the failure.",
+    "prompt": "prompts/33-hypothesis-fault-graph.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/context_fabric.c",
+      "src/execution_kernel.c"
+    ]
+  },
+  {
+    "id": "34",
+    "title": "Record predicted observations before running self-experiments",
+    "slug": "prediction-observation-ledger",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/integration_hooks.py",
+        "symbols": [
+          "HookEvent",
+          "HookResult",
+          "HookManager.emit"
+        ],
+        "observation": "Hooks carry request IDs and ordered stop decisions, but do not encode hypotheses, preregistered predictions or comparison of expected versus actual observations."
+      }
+    ],
+    "primary_paths": [
+      "src/execution_kernel.c",
+      "src/event_stream.c",
+      "src/context_fabric.c"
+    ],
+    "proposed_modules": [
+      "src/experiment_ledger.c",
+      "include/experiment_ledger.h"
+    ],
+    "mechanism": "An immutable prediction ledger prevents retrospective rewriting of what an experiment was supposed to establish.",
+    "challenge": "After a failed experiment the agent cannot rewrite its original prediction and report confirmation.",
+    "prompt": "prompts/34-prediction-observation-ledger.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/execution_kernel.c",
+      "src/context_fabric.c"
+    ]
+  },
+  {
+    "id": "35",
+    "title": "Branch and merge competing research states without erasing dissent",
+    "slug": "research-state-branches",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/universal_dspy_multihop.py",
+        "symbols": [
+          "UniversalMultiHopRAG.forward",
+          "NotesExtractor",
+          "AnswerSynthesizer"
+        ],
+        "observation": "A single notes list accumulates all reasoning and final synthesis; alternative research states and contradictory supports are not separately preserved."
+      }
+    ],
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/vfs.c",
+      "src/plan_dag.c"
+    ],
+    "proposed_modules": [
+      "src/research_branches.c",
+      "include/research_branches.h"
+    ],
+    "mechanism": "Immutable research scopes support bounded competing explanations and explicit evidence-preserving merges.",
+    "challenge": "Two branches choosing different replacement algorithms must merge their counterexamples rather than selecting whichever report arrived last.",
+    "prompt": "prompts/35-research-state-branches.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/context_fabric.c",
+      "src/vfs.c"
+    ]
+  },
+  {
+    "id": "36",
+    "title": "Execute cognitive stages with typed results and bounded repair",
+    "slug": "typed-cognitive-dataflow",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/cognitive_integration.py",
+        "symbols": [
+          "CognitiveHandlers.handle_user_input",
+          "CognitiveHandlers._plan_response",
+          "CognitiveHandlers._reflect_on_response"
+        ],
+        "observation": "Actions are ordered, but handlers consume the original message; reflection unconditionally marks a response received, and the verifier exercises a mock rather than real-client reasoning."
+      }
+    ],
+    "primary_paths": [
+      "src/plan.c",
+      "src/plan_dag.c",
+      "src/execution_kernel.c",
+      "src/agent.c"
+    ],
+    "proposed_modules": [
+      "src/cognitive_dataflow.c",
+      "include/cognitive_dataflow.h"
+    ],
+    "mechanism": "Explicit stage outputs make perception, planning, execution, reflection and repair operational.",
+    "challenge": "A deliberately wrong execution result must cause a bounded repair or rejection, never unconditional success.",
+    "prompt": "prompts/36-typed-cognitive-dataflow.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/plan.c",
+      "src/execution_kernel.c",
+      "src/agent.c"
+    ]
+  },
+  {
+    "id": "37",
+    "title": "Preempt long self-investigation without losing cognitive state",
+    "slug": "preemptible-reasoning-state",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/cognitive_architecture.py",
+        "symbols": [
+          "CognitiveArchitecture._action_executor",
+          "CognitiveArchitecture.stop",
+          "ActionStack.pop_ready",
+          "ActionStack.fail"
+        ],
+        "observation": "A single executor awaits each action; stop cancels it, results are not checkpointed, and failed prerequisites can leave descendants pending indefinitely."
+      }
+    ],
+    "primary_paths": [
+      "src/agent.c",
+      "src/event_loop.c",
+      "src/context_fabric.c",
+      "src/execution_kernel.c"
+    ],
+    "proposed_modules": [
+      "src/reasoning_preemption.c",
+      "include/reasoning_preemption.h"
+    ],
+    "mechanism": "Checkpointed reasoning continuations separate responsive input from resumable long cognitive work.",
+    "challenge": "A stalled retrieval during self-rewrite analysis must not lose an urgent user correction or rerun an already completed experiment on resume.",
+    "prompt": "prompts/37-preemptible-reasoning-state.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/agent.c",
+      "src/context_fabric.c",
+      "src/execution_kernel.c"
+    ]
+  },
+  {
+    "id": "38",
+    "title": "Require evidence-sensitive completion or explicit abstention",
+    "slug": "evidence-sensitive-completion",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dsco-mcp-openrouter-client/universal_dspy_multihop.py",
+        "symbols": [
+          "AnswerSynthesizer",
+          "UniversalMultiHopRAG.forward"
+        ],
+        "observation": "Confidence is parsed from model-generated text, defaults to 50 on parsing failure, and synthesis proceeds even when no retrieval succeeded."
+      }
+    ],
+    "primary_paths": [
+      "src/plan.c",
+      "src/context_fabric.c",
+      "src/execution_kernel.c"
+    ],
+    "proposed_modules": [
+      "src/evidence_completion.c",
+      "include/evidence_completion.h"
+    ],
+    "mechanism": "Completion predicates distinguish supported resident improvement from incomplete research and unsupported confidence.",
+    "challenge": "A model claiming 99 percent confidence after all retrievals fail must not mark a replacement ready.",
+    "prompt": "prompts/38-evidence-sensitive-completion.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/plan.c",
+      "src/context_fabric.c",
+      "src/execution_kernel.c"
+    ]
+  },
+  {
+    "id": "39",
+    "title": "Replay reasoning under controlled framing interventions",
+    "slug": "reasoning-intervention-replay",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/chunked_analyzer.py",
+        "symbols": [
+          "ChunkedDocumentAnalyzer.analyze_chunk",
+          "ChunkedDocumentAnalyzer._aggregate_results"
+        ],
+        "observation": "Bias detection emits labels from the first 2,000 characters; there is no controlled intervention establishing whether framing actually changes a decision."
+      }
+    ],
+    "primary_paths": [
+      "src/context_fabric.c",
+      "src/execution_kernel.c",
+      "src/event_stream.c"
+    ],
+    "proposed_modules": [
+      "src/reasoning_replay.c",
+      "include/reasoning_replay.h"
+    ],
+    "mechanism": "Paired controlled interventions measure whether irrelevant evidence presentation changes a self-rewrite decision.",
+    "challenge": "Changing a source prestige label or evidence order must not silently change adoption when facts and validity are fixed.",
+    "prompt": "prompts/39-reasoning-intervention-replay.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/context_fabric.c",
+      "src/execution_kernel.c"
+    ]
+  },
+  {
+    "id": "40",
+    "title": "Reopen learned procedures when their evidence expires",
+    "slug": "evidence-expiry-revalidation",
+    "donor_sources": [
+      {
+        "path": "/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/pdf_cache.py",
+        "symbols": [
+          "PDFTextCache._get_file_hash",
+          "PDFTextCache.get"
+        ],
+        "observation": "PDF text reuse is content-addressed, but downstream analysis and learned conclusions have no validity lease tied to runtime changes or expiring observations."
+      }
+    ],
+    "primary_paths": [
+      "src/session_memory.c",
+      "src/memory_tier.c",
+      "src/context_fabric.c",
+      "src/event_loop.c"
+    ],
+    "proposed_modules": [
+      "src/evidence_validity.c",
+      "include/evidence_validity.h"
+    ],
+    "mechanism": "Evidence validity monitors reopen only the learned procedures whose assumptions no longer hold.",
+    "challenge": "A cached improvement validated under an old runtime configuration must stop claiming current support after that configuration changes.",
+    "prompt": "prompts/40-evidence-expiry-revalidation.md",
+    "domain": "resident-evidence-and-cognition",
+    "hotspots": [
+      "src/context_fabric.c"
+    ]
+  }
+]

@@ -1,0 +1,15 @@
+# 965 — Logical checkpoint-schema migrator: Counterfactual branch preference training
+
+Implement the counterfactual branch preference training feature for the Logical checkpoint-schema migrator RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Learn executable migrations that restore logical checkpoints into compatible new schemas without raw-pointer reinterpretation or repeated effects.
+
+External `old_checkpoint`, `new_schema`, and `continuation_maps` variables retain typed values, identities, and completed-effect references. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root code partitions state components, delegates conversion obligations, and builds transactional reconstruction plans for compatible continuations. Role output: Final `CheckpointMigration` handle contains conversion code, compatibility predicates, state hashes, and resumed-suffix comparison receipts. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Fork identical development states into isolated resettable environment snapshots or a fixed replay oracle with matched randomness. Reject comparisons when reset fidelity is uncertain. Execute alternative root programs under equal budgets, derive preferences from correctness then resource use, and train a declared preference objective on root continuations.
+
+Train from generated schema evolutions, interrupted computations, and independently checked restoration-equivalence action trajectories. A frozen reference continuation verifies restored aliasing, values, remaining outputs, and exactly preserved completed-effect boundaries. Hold out schema evolution types, graph cycles, continuation points, and incompatible generations with checkpoint ancestry grouped. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: A field split loses a pending carry value, so restored execution diverges only after several later steps. A shorter incorrect branch must lose to a longer correct branch. Swapping presentation order must preserve the preference, and branches with different starting states must be rejected as unmatched.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/recovery.c`, `src/sequence_state.c`, `src/vm.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/dspy_metaprogramming.py` (`CodeSandbox.execute`). Donor baseline: Keeps Python locals alive but provides no typed checkpoint migration between executable generations. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

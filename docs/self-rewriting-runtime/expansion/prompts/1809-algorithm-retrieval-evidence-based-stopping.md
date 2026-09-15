@@ -1,0 +1,15 @@
+# 1809 — Behavior-grounded algorithm retriever: Evidence-based stopping policy
+
+Implement the evidence-based stopping policy feature for the Behavior-grounded algorithm retriever RLM in `/Users/arthurcolle/Dsco/dsco-cli` or its assigned worktree. Train an algorithm RLM to retrieve reusable procedures using behavioral requirements and checked assumptions rather than vocabulary alone.
+
+External PROCEDURE_CORPUS and PROBE_RESULTS preserve input domains, effects, complexity observations, preconditions, and revision identities. The root sees bounded metadata; generated REPL programs recursively call child RLMs on selected slices and retain results. Root programs typed retrieval, recursively checks promising mappings, and buffers applicable algorithms with remaining verification obligations. Role output: Return ALGORITHM_MATCHES with applicability evidence, counterexamples, ranked tradeoffs, and unresolved obligations. Finalize an environment handle containing `role_result`, typed `feature_artifact`, and independent training/evaluation receipts.
+
+Train a root decision among continue, return a verified environment result, and terminate unresolved. Development episodes include misleading high confidence, repetitive verification, and unresolved obligations. Optimize task completion with explicit observation requirements and costs, using oracle results rather than self-reported confidence.
+
+Training contains renamed implementations, deceptive descriptions, pure and stateful variants, boundary differences, and controlled performance regimes. Independent contract probes validate fixture applicability; similarity never establishes full equivalence or automatic adoption. Hold out algorithm families, naming conventions, and workload combinations. Partition families before extracting turns; sealed evaluation never supplies training rewards or checkpoint selection.
+
+Domain challenge: A memoization algorithm for pure functions must not transfer to a counter with stateful side effects. Repeated identical child opinions cannot satisfy a missing obligation. A complete verified result should survive the stop decision unchanged; exhausted budgets must produce unresolved status instead of fabricated success.
+
+Train actual root weights or an adapter; mask child/observation targets, fix leaf revisions, reload the checkpoint, and compare held-out outcomes at matched budgets. Declare training step/token/time caps. Supply a minimal standalone interface when shared contracts are absent.
+
+Inspect `src/skill_index.c`, `src/semantic.c`, `src/context_fabric.c` and `/Users/arthurcolle/Dsco/dspy_multidimensional_reasoning_and_cognitive_bias_reduction/comprehensive_reasoning_system.py` (`AnalogicalReasoningSignature`). Donor baseline: Analogical mappings and inferred features are generated text without executable applicability checks. Use focused modules and small hooks; preserve dirty work. Tool effects pass through `tools_execute_for_tier()`. Build/test privately with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install worker binaries.

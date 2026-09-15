@@ -1,0 +1,11 @@
+# 45 — Recipient-specific durable mailbox acknowledgements
+
+Work in `/Users/arthurcolle/Dsco/dsco-cli` or the isolated worktree assigned for this feature. Read applicable `AGENTS.md` instructions and inspect current code before editing. Start at `src/ipc.c`, `include/ipc.h`, `src/durable_agents.c`. If part already exists, ship the missing bounded extension and explain the observed gap; do not duplicate an existing subsystem. All interfaces named below are proposed until verified on disk.
+
+Existing IPC messages have a read marker; reading a broadcast must not consume another recipient's delivery. Add an opt-in durable mailbox contract with per-recipient delivery records, sender idempotency keys, explicit acknowledgement after handling, and retryable visibility timeouts. Freeze the broadcast recipient set at publication and document how later agents participate. Proposed `agents mailbox` inspection should expose pending, leased, acknowledged, and exhausted deliveries without marking them read. Preserve compatibility for existing receive callers through a deliberate adapter, and cap recipient expansion and retained payload size. Distinguish at-least-once delivery from exactly-once effects: an acknowledgement cannot make arbitrary downstream actions idempotent.
+
+Implement new capability in proposed `src/mailbox_delivery.c` and `include/mailbox_delivery.h`, with small dispatch hooks and a Makefile entry where needed. Preserve unrelated dirty work. Coordinate shared-file changes; keep builds, databases, sockets, fixtures, and reports isolated. Build with `DSCO_NO_INSTALL=1 make -j2 dsco`; never install a worker binary. Every tool-call path must use `tools_execute_for_tier()` and preserve capability gates.
+
+Run three receiver processes and publish directed and broadcast messages through the real CLI. Kill one after delivery but before acknowledgement, restart it, and verify redelivery only to the unfinished recipient. Check duplicate sender keys, acknowledgement by the wrong agent, expired delivery tokens, and legacy receive behavior against a temporary database.
+
+Finish with the implemented behavior, exact reproduction commands, binary and evidence paths, relevant regression results, and remaining limitations. Verify the real local runtime path; compilation alone is insufficient.
