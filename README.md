@@ -25,6 +25,19 @@
 that lives where serious work already happens: your terminal, your filesystem,
 your git repos, your local state.
 
+**[Lingo](docs/LINGO.md) is the shared object and calculation language of Distributed
+Systems, with DSCO as its primary operator.** A `.lingo` program uses typed worlds,
+tracked dependencies, hypothetical scenarios and source-bound GraphSub snapshots,
+then explicitly calls DSCO, Autobot and Chimera through the existing capability
+gate. The [platform classes](docs/LINGO_PLATFORM.md) and
+[stored-world contract](docs/lingo/WORLDS.md) define the common model used by scripts
+and the Python SDK.
+
+```sh
+./dsco lingo run examples/lingo/routing.lingo
+./dsco lingo check examples/lingo/stored-world.lingo
+```
+
 It is **not** a thin wrapper around a model API. DSCO is a native runtime with its
 own tool registry, hierarchical sub-agents, local provenance, provider routing,
 AST-level code intelligence, streaming pipelines, governance primitives, and a
@@ -341,6 +354,7 @@ Important environment variables:
 | `DSCO_LOCAL_FALLBACK_MODEL` | Final local lane used after configured cloud/provider fallbacks fail. |
 | `DSCO_PROFILE` | Startup profile: `full`, `lite`, or `worker`. |
 | `DSCO_ENV_FILE` | Override saved setup env-file path. |
+| `DSCO_TOOL_HOOK[_BEFORE/_AFTER/_FAILED/_DENIED]` | Optional shell-free lifecycle executables for observing or vetoing governed tool calls; see [`docs/TOOL_HOOKS.md`](docs/TOOL_HOOKS.md). |
 | `DSCO_BUDGET` / `DSCO_DAILY_BUDGET` | Session/daily cost budget controls. |
 | `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `FUGU_API_KEY` | Common provider credentials. |
 
@@ -633,7 +647,12 @@ Typical patterns:
 ./dsco --topology-list
 ./dsco --topology-auto "audit docs and tests for drift"
 ./dsco -O -M kimi-k2.7-code-highspeed "route this implementation plan to workers"
+./dsco --luna-astra "audit this repository and delegate bounded work to Astra children"
 ```
+
+`--luna-astra` pins the top-level router and synthesizer to `gpt-5.6-luna`
+with `xhigh` effort and defaults native child agents to `gpt-6-astra`. Use
+`-M MODEL` or `DSCO_SWARM_MODEL` when a task needs a different child lane.
 
 Use orchestration when work can be decomposed into independent search, audit,
 implementation, or review tracks. Keep simple edits single-process.

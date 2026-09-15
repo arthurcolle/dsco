@@ -27,6 +27,10 @@ Canonical event names:
 15. `artifact.promoted`
 16. `session.completed`
 
+Execution-spine events use the versioned family
+`execution.attempt.{proposed,denied,admitted,started,succeeded,failed}`. See
+[Execution Spine](EXECUTION_SPINE.md) for transition and durability semantics.
+
 ## Runtime controls
 
 Chronicle starts at process entry from `main.c` and is updated when DSCO enters interactive, one-shot, or timeline-server mode. Calls are idempotent, so later runtime configuration refines the same local activity stream rather than creating an unrelated subsystem.

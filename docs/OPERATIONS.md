@@ -33,9 +33,18 @@ integration catalog, constants/env index, and repository coverage manifest.
 ### Install/Uninstall
 
 ```bash
-make install PREFIX=/usr/local
-make uninstall PREFIX=/usr/local
+make install
+make uninstall
 ```
+
+The default prefix is `~/.local`, so the canonical executable is
+`~/.local/bin/dsco`. The installer replaces existing writable `dsco` copies
+found on `PATH` with symlinks to that canonical executable, preventing an old
+earlier-path copy from shadowing a newly installed build. It warns without
+modifying root-owned copies. Override both locations with `PREFIX` or `BINDIR`
+when packaging, for example `make install PREFIX=/usr/local`; non-default
+prefixes do not synchronize the rest of `PATH` unless explicitly requested
+with `DSCO_INSTALL_SYNC_PATH=1`.
 
 `make install` also installs `tool_embeddings.bin` to `PREFIX/share/dsco/`.
 At runtime `dsco` searches, in order:
@@ -149,9 +158,14 @@ Routing-specific precedence:
   fallback logic is explicitly allowed.
 - A provider-shaped `-k` key can select that provider for the run and publish the
   key under its canonical env var in-process.
-- `DSCO_EXEC=claude` and `DSCO_EXEC=codex` mean "use the external CLI".
-  `DSCO_EXEC=fugu`, `DSCO_EXEC=sakana`, and other native names mean "use dsco's
-  native provider transport".
+- `DSCO_EXEC` selects native provider transport. Historical `claude` and `codex`
+  values resolve to `anthropic` and `openai-codex`; `kimi` resolves to `kimi-code`
+  and `grok` to `xai`. A missing credential never implicitly launches a CLI.
+  External CLI compatibility requires an explicit `--exec` argument.
+- `dsco login` signs into ChatGPT with DSCO's browser OAuth flow. Anthropic
+  supports importing an existing Claude subscription credential or entering an
+  API key; DSCO does not currently initiate a new Anthropic browser login.
+  OpenAI API keys select `openai`, separately from ChatGPT subscription OAuth.
 
 ### Persistence Policy
 
@@ -171,6 +185,19 @@ DSCO_ENV_FILE="$PWD/.dsco.env.dev" ./dsco --setup-report
 DSCO_ENV_FILE="$PWD/.dsco.env.dev" ./dsco -e fugu 'smoke test'
 DSCO_ENV_FILE="$PWD/.dsco.env.ci" DSCO_NO_AUTO_INTERACTIVE=1 ./dsco --version
 ```
+
+### Autonomous Goals
+
+Action-shaped prompts automatically enter the hierarchical planning/work controller. Direct
+informational questions stay single-turn. Use `DSCO_AUTO_GOAL=0` to disable this promotion or
+`DSCO_AUTO_GOAL=1` to force it for every non-command prompt. `DSCO_GOAL` supplies an objective at
+startup; `DSCO_GOAL_TOKEN_BUDGET` and `DSCO_GOAL_MAX_TURNS` bound it. A loaded active goal resumes
+automatically unless `DSCO_GOAL_NO_AUTORUN=1` is set.
+
+Inside the interactive CLI, `/goal` shows the objective, budgets, and queue counts; `/goal queue`
+prints the full task tree. `/goal criteria`, `/goal budget`, and `/goal turns` set bounds and
+acceptance. `/goal pause`, `/goal resume`, and `/goal clear` are operator controls. See
+[Two-Queue Goal Controller](GOAL_CONTROLLER.md) for transition rules.
 
 ### Risk Tiers
 
@@ -243,7 +270,7 @@ debug files can contain prompts, documents, tool results, and provider payloads.
 
 | Env var | Guideline |
 |---|---|
-| `DSCO_EXEC` | Executor/provider override. The issued runtime defaults to native `openai-codex`; use `claude`, `codex`, `auto`, `smart`, `fugu`, `sakana`, or another provider name to override it. Only persist a provider value when the matching credential is available. |
+| `DSCO_EXEC` | Native provider default. The issued runtime defaults to `openai-codex`; use `anthropic`, `openai`, `kimi-code`, `fugu`, `sakana`, or another native provider. Historical `claude`/`codex` values resolve natively. Only persist a provider value when the matching credential is available. |
 | `DSCO_MODEL` | Default model override. Persist only when you want every run to use that model family. Clear it when switching providers if routing looks surprising. |
 | `DSCO_PROFILE` | Startup profile: `full`, `lite`, or `worker`. Use `lite` for fast local utility invocations. `worker` is normally set by dsco for child processes. |
 | `DSCO_CHEAP` | Enables cheap mode when truthy: minimal core tools plus dynamic discovery. Use for low-cost smoke tests and quick prompts. |
@@ -296,8 +323,10 @@ provider-managed; the other tier-1 request builders emit their supported cap.
 | `DSCO_CHATGPT_OAUTH_TOKEN`, `CHATGPT_OAUTH_TOKEN`, `DSCO_CHATGPT_ACCOUNT_ID` | ChatGPT/Codex subscription auth overrides. Treat as secrets; prefer `dsco login`/Codex auth discovery. |
 | `DSCO_DISABLE_CODEX_OAUTH_DISCOVERY`, `DSCO_DISABLE_CHATGPT_NATIVE` | Truthy disables subscription/native ChatGPT routes. Use to force direct OpenAI API-key routing. |
 | `DSCO_CHATGPT_STREAM_IDLE_TIMEOUT_S` | ChatGPT/Codex native streaming idle timeout. Default is `300`; raise for long silent reasoning/tool phases, lower only for fast-fail debugging. |
+| `DSCO_CHATGPT_HTTP_VERSION` | Native ChatGPT/Codex transport. Defaults to `1.1` because the subscription lane is serialized and HTTP/2 stream teardown can corrupt otherwise valid SSE turns. Set `h2` or `auto` only for transport diagnosis. |
 | `DSCO_CHATGPT_GLOBAL_GATE` | Cross-process ChatGPT subscription gate. Enabled by default so interactive sessions, fabric workers, and swarm children share one in-flight account request and one server cooldown. Set to `0` only for isolated transport testing. |
-| `DSCO_CHATGPT_MIN_INTERVAL_MS` | Minimum account-wide spacing after a native Codex request completes. Default is `1000`. |
+| `DSCO_CHATGPT_MIN_INTERVAL_MS` | Optional account-wide spacing after a successful native Codex request. Default is `0`; actual retry cooldowns remain shared. |
+| `DSCO_CHATGPT_GATE_VERBOSE` | Print each subscription-gate wait of at least 500 ms. Default is off; queue time remains available in structured telemetry. |
 | `DSCO_CHATGPT_MAX_RETRIES`, `DSCO_CHATGPT_MAX_RETRY_DELAY_MS` | Transient Codex retry count and maximum server-directed delay. Defaults are `3` and `900000` ms; quota-exhaustion responses are not retried. |
 | `DSCO_CHATGPT_GATE_MAX_WAIT_MS` | Safety ceiling for a shared persisted cooldown or stale gate state. Default is `900000` ms. |
 | `DSCO_KIMI_CODE_OAUTH_TOKEN`, `KIMI_CODE_OAUTH_TOKEN` | Kimi Code subscription OAuth overrides. Overrides cannot be refreshed; prefer the mode-0600 cache written by `kimi login` at `~/.kimi-code/credentials/kimi-code.json`. DSCO refreshes and atomically rotates that cache in-process, and refreshes once on HTTP 401 before retrying. |
@@ -378,12 +407,13 @@ provider-managed; the other tier-1 request builders emit their supported cap.
 |---|---|
 | `DSCO_HTTP_PORT` | Local HTTP/TLS API port. Use to avoid collisions; default starts at the compiled default and probes nearby ports. |
 | `DSCO_MESH_PORT`, `DSCO_DHT_PORT`, `DSCO_DHT_SWARM`, `DSCO_DHT_BOOTSTRAP`, `DSCO_PEERS` | Mesh/DHT discovery controls. Use only when intentionally joining or testing a mesh. |
+| `DSCO_IMPROVEMENT_ROOT` | Override the signed improvement object store (default `~/.dsco/improvements`). Keep it private and non-symlinked. See [DHT Improvement Sync](DHT_IMPROVEMENT_SYNC.md). |
 | `DSCO_NODE_ID`, `DSCO_BEACON_URL`, `DSCO_BEACON_SECS`, `DSCO_MESH_SECRET`, `DSCO_NET_AUTH_KEY` | Node identity/beacon/auth settings. Treat auth values as secrets. |
 | `DSCO_IPC_DB` | SQLite IPC path. Parent processes propagate it to workers. Set manually only to join a known IPC bus. |
 | `DSCO_REDIS_HOST`, `DSCO_REDIS_PORT`, `DSCO_REDIS_PASSWORD` | Redis IPC backend settings. Treat password as a secret. |
 | `DSCO_SUBAGENT`, `DSCO_SWARM_DEPTH`, `DSCO_PARENT_INSTANCE_ID` | Worker metadata. Internal; do not persist. |
 | `DSCO_SWARM_MAX_CHILDREN`, `DSCO_SWARM_MAX_GROUPS`, `DSCO_SWARM_MAX_DEPTH` | Swarm guardrails. Lower for resource-constrained machines; raise only after load testing. |
-| `DSCO_SWARM_HAIKU`, `DSCO_SWARM_SONNET`, `DSCO_SWARM_OPUS`, `DSCO_WORKER_MODEL` | Worker model overrides. Use for topology experiments and benchmarking. |
+| `DSCO_SWARM_MODEL`, `DSCO_SWARM_HAIKU`, `DSCO_SWARM_SONNET`, `DSCO_SWARM_OPUS`, `DSCO_WORKER_MODEL` | Worker model overrides. `DSCO_SWARM_MODEL` selects the default native child lane; use for topology experiments and benchmarking. |
 | `DSCO_SUBSIDIZED_EXECUTORS` | Executor subsidy hint for swarm routing. Use only when cost accounting policy requires it. |
 | `GRAPHSUB_HOST`, `GRAPHSUB_TENANT_ID`, `GRAPHSUB_API_KEY` | GraphSub client settings. Treat API key as a secret. |
 
@@ -392,10 +422,11 @@ provider-managed; the other tier-1 request builders emit their supported cap.
 | Env var | Guideline |
 |---|---|
 | `DSCO_TOOL_EMBEDDINGS_FILE` | Override tool embedding file path. Use for custom installs or testing regenerated embeddings. |
+| `DSCO_EMBED_REMOTE` | Agent-memory embeddings are deterministic and in-process by default so turn completion and swarm reduction never wait on the network. Set to `1` to opt into Tool Management/Jina dense embeddings. |
 | `DSCO_TOOL_DEFAULT_TIMEOUT`, `DSCO_TOOL_GRACE_PERIOD_S` | Tool timeout controls. Lower in CI; raise for known long-running tools. |
 | `DSCO_CONTEXT_OFFLOAD_BYTES` | Context offload threshold. Tune for large documents or memory pressure. |
 | `DSCO_BROWSER_HOST_DB`, `DSCO_BROWSER_HOST_FLUSH_SEC`, `DSCO_BROWSER_MAX_PASSES` | Browser host cache/control settings. Defaults are suitable for normal browsing. |
-| `DSCO_MCP_TIMEOUT_MS`, `DSCO_MCP_SYNC`, `DSCO_MCP_IMPORT_CLAUDE_DESKTOP` | MCP timing/import behavior. Use longer timeouts for slow MCP servers; import only from trusted local config. |
+| `DSCO_MCP_TIMEOUT_MS`, `DSCO_MCP_SYNC`, `DSCO_MCP_IMPORT_CLAUDE_DESKTOP` | MCP timing/import behavior. `DSCO_MCP_SYNC=1` applies only to piped/scripted input; terminal startup and `/mcp reload` load in the background. `/mcp` reports loading immediately. Use longer timeouts for slow MCP servers; import only from trusted local config. |
 | `DSCO_SANDBOX_FORCE_NO_DOCKER` | Forces non-Docker sandbox fallback. Use on hosts without Docker or to reproduce fallback behavior. |
 | `DSCO_QUORUM_GATE` | Tool quorum gate. Use for experiments with tool-loading policy. |
 | `JINA_API_KEY`, `TAVILY_API_KEY`, `BRAVE_API_KEY` | Web/search integrations. Set only for tools that need those providers. |
@@ -411,7 +442,8 @@ provider-managed; the other tier-1 request builders emit their supported cap.
 | `DSCO_NO_AUTO_INTERACTIVE` | Truthy makes bare `dsco` fail instead of entering interactive mode. Good for scripts. |
 | `DSCO_NO_CLEAR` | Disables initial terminal clear. Use when embedding or logging. |
 | `DSCO_NO_PANE` | Disables the interactive side pane. Use for plain logs or terminals with layout issues. |
-| `DSCO_PIXEL_TUI` | Set to `1` (or use `dsco --native`) to opt into the native compositor; `0` or `dsco --tui` keeps the established ANSI/cell TUI. |
+| `DSCO_PIXEL_TUI` | Set to `1` (or use `dsco --native`) to opt into the native compositor; `0` or `dsco --tui` keeps the established ANSI/cell TUI. Interface selection preserves full-resolution Kitty splash and inline graphics; `DSCO_KITTY_GRAPHICS=0` disables image transport separately. |
+| `DSCO_PIXEL_TUI_ZOOM` | Native display zoom: `auto` (default: 125% on reported 1× displays, 100% on HiDPI), or any positive multiplier, including `0.05`, `0.75`, `1.25`, and `3`; percentages such as `150%` also work. Change it live with `/zoom 1.25`, `/zoom +`, `/zoom -`, or `/zoom auto`. An explicit `DSCO_PIXEL_TUI_DPR=1..4` suppresses automatic zoom. |
 | `DSCO_PIXEL_TUI_PERF` | Native frame telemetry with producer/queue/frame P50/P95/P99. `1` emits one JSON record on session exit; an absolute path appends JSONL there. |
 | `DSCO_PIXEL_TUI_PATCH` | Set to `0` to disable in-place Kitty damage patches and force authoritative full-frame uploads. |
 | `DSCO_PIXEL_TUI_DAMAGE_COVERAGE` | Patch/full crossover from `0.10` to `0.95`; measured default is `0.70`. Use only for transport A/B tests. |
