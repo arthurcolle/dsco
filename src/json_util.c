@@ -248,8 +248,35 @@ static const char *parse_string(const char *p, char **out) {
     if (*p != '"')
         return NULL;
     p++;
+    /* libc's bounded/vectorized byte searches are substantially cheaper than
+     * decoding an escape-free prompt one run at a time. Stop at the first
+     * quote; if it was escaped, retain the existing decoder below. */
+    const char *probe = p;
+    for (unsigned i = 0; i < 16 && *probe && *probe != '"' && *probe != '\\'; i++)
+        probe++;
+    const char *quote = *probe == '"' ? probe : NULL;
+    const char *escape = *probe == '\\' ? probe : NULL;
+    if (*probe && !quote && !escape) {
+        quote = strchr(probe, '"');
+        if (quote)
+            escape = memchr(probe, '\\', (size_t)(quote - probe));
+    }
+    if (quote && !escape) {
+        size_t len = (size_t)(quote - p);
+        char *value = safe_malloc(len + 1);
+        memcpy(value, p, len);
+        value[len] = '\0';
+        *out = value;
+        return quote + 1;
+    }
     jbuf_t b;
     jbuf_init(&b, 256);
+    if (escape && escape > p) {
+        /* Reuse the known plain prefix while preserving normal geometric
+         * buffer growth for a long prefix followed by a short escaped tail. */
+        jbuf_append_len(&b, p, (size_t)(escape - p));
+        p = escape;
+    }
     while (*p && *p != '"') {
         if (*p == '\\') {
             p++;
@@ -348,17 +375,36 @@ static const char *parse_string(const char *p, char **out) {
     return p;
 }
 
+/* Stop at the closing quote or NUL, preserving the scalar escape semantics.
+ * strcspn-backed scans skip long payloads without a branch for every byte. */
+static const char *skip_string_content(const char *p) {
+    /* Most skipped strings are short IDs/type names: avoid libc setup there.
+     * Check each byte before advancing, including after a trailing escape. */
+    for (unsigned i = 0; i < 32; i++) {
+        if (!*p || *p == '"')
+            return p;
+        if (*p == '\\' && p[1])
+            p++;
+        p++;
+    }
+    for (;;) {
+        p += dsco_simd_json_unescaped_run(p);
+        if (*p != '\\')
+            return p;
+        p++;
+        if (!*p)
+            return p;
+        p++;
+    }
+}
+
 static const char *skip_value(const char *p) {
     p = skip_ws(p);
     if (!*p)
         return p;
     if (*p == '"') {
         p++;
-        while (*p && *p != '"') {
-            if (*p == '\\' && p[1])
-                p++;
-            p++;
-        }
+        p = skip_string_content(p);
         if (*p == '"')
             p++;
         return p;
@@ -373,11 +419,7 @@ static const char *skip_value(const char *p) {
                 depth--;
             else if (*p == '"') {
                 p++;
-                while (*p && *p != '"') {
-                    if (*p == '\\' && p[1])
-                        p++;
-                    p++;
-                }
+                p = skip_string_content(p);
                 /* If unterminated string, don't advance past \0 */
                 if (!*p)
                     return p;
@@ -396,11 +438,7 @@ static const char *skip_value(const char *p) {
                 depth--;
             else if (*p == '"') {
                 p++;
-                while (*p && *p != '"') {
-                    if (*p == '\\' && p[1])
-                        p++;
-                    p++;
-                }
+                p = skip_string_content(p);
                 /* If unterminated string, don't advance past \0 */
                 if (!*p)
                     return p;

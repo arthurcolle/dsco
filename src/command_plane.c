@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <sqlite3.h>
@@ -93,13 +94,35 @@ command_plane_status_t command_plane_status_from_name(const char *status) {
 }
 
 static int command_exec(sqlite3 *db, const char *sql) {
-    char *err = NULL;
-    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
-    if (rc != SQLITE_OK) {
-        sqlite3_free(err);
+    /* WAL mode transitions can return BUSY without invoking SQLite's busy
+     * handler. Schema statements here are idempotent; retry those transitions
+     * explicitly within a five-second monotonic per-statement deadline. */
+    struct timespec started, now;
+    if (clock_gettime(CLOCK_MONOTONIC, &started) != 0)
         return -1;
+    int remaining_ms = 5000;
+    int rc;
+    for (;;) {
+        sqlite3_busy_timeout(db, remaining_ms);
+        char *err = NULL;
+        rc = sqlite3_exec(db, sql, NULL, NULL, &err);
+        sqlite3_free(err);
+        if (rc != SQLITE_BUSY && rc != SQLITE_LOCKED)
+            break;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+            break;
+        int64_t elapsed_ms = (int64_t)(now.tv_sec - started.tv_sec) * 1000 +
+                             (now.tv_nsec - started.tv_nsec) / 1000000;
+        remaining_ms = elapsed_ms < 5000 ? 5000 - (int)elapsed_ms : 0;
+        if (remaining_ms <= 0)
+            break;
+        sqlite3_sleep(remaining_ms < 10 ? remaining_ms : 10);
+        remaining_ms -= remaining_ms < 10 ? remaining_ms : 10;
+        if (remaining_ms <= 0)
+            break;
     }
-    return 0;
+    sqlite3_busy_timeout(db, 5000);
+    return rc == SQLITE_OK ? 0 : -1;
 }
 
 static int command_schema(sqlite3 *db) {
@@ -146,6 +169,11 @@ int command_plane_open(command_plane_t *cp, const char *path) {
     if (rc != SQLITE_OK) {
         if (db)
             sqlite3_close(db);
+        return COMMAND_PLANE_ERR;
+    }
+
+    if (sqlite3_busy_timeout(db, 5000) != SQLITE_OK) {
+        sqlite3_close(db);
         return COMMAND_PLANE_ERR;
     }
 

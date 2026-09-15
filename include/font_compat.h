@@ -24,6 +24,16 @@ int font_compat_measure_utf8(const char *utf8, float point_size, bool bold);
 int font_compat_measure_utf8_styled(const char *utf8, float point_size, bool bold, bool italic);
 int font_compat_line_height(float point_size, bool bold);
 
+/* Proportional native UI/prose face. DSCO_PIXEL_PROSE_FONT overrides the
+ * platform system face; an explicit DSCO_PIXEL_FONT remains a global override.
+ * Code and terminal-aligned text should continue using the monospace APIs. */
+int font_compat_measure_prose_utf8(const char *utf8, float point_size, bool bold, bool italic);
+int font_compat_draw_prose_rgb(uint8_t *rgb, int width, int height, int stride, int x, int y,
+                               int max_width, const char *utf8, float point_size, bool bold,
+                               bool italic, uint8_t red, uint8_t green, uint8_t blue,
+                               float opacity);
+int font_compat_prose_line_height(float point_size, bool bold);
+
 /* Publication-grade math face bridge. On macOS this resolves to STIX Two Math
  * by default (override DSCO_PIXEL_MATH_FONT), independently from the compact
  * transcript face. Use this only for semantic math runs. */

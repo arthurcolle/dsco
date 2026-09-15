@@ -17,6 +17,8 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <dirent.h>
+#include <signal.h>
+#include <stdbool.h>
 #include <limits.h>
 #include <sys/stat.h>
 #include <sys/resource.h>
@@ -233,6 +235,93 @@ static void collect_runtime_sample(runtime_sample_t *s) {
     }
 }
 
+/* Reap stale per-PID telemetry files.
+ *
+ * persist_runtime_state() writes ~/.dsco/runtime-<pid>.json and the supervisor
+ * writes ~/.dsco/child-metrics-<pid>.jsonl. Neither was ever removed, so every
+ * dsco process since the feature landed left two files behind. Observed
+ * 2026-09-07: 164,790 files at the root of ~/.dsco (87,816 child-metrics +
+ * 75,137 runtime), which made Finder balloon to ~30 GB RSS rendering the
+ * directory until macOS jetsam-killed it in a restart loop.
+ *
+ * These files are write-only telemetry: nothing reads them back by scanning
+ * the directory, so a file whose PID is gone is pure garbage. Sweep is:
+ *   - bounded (DSCO_REAP_SCAN_MAX entries per pass) so startup cannot stall
+ *   - age-gated so a just-started sibling racing on PID assignment is safe
+ *   - conservative: kill(pid, 0) must prove the owner is gone
+ */
+#define DSCO_REAP_SCAN_MAX 20000
+#define DSCO_REAP_MIN_AGE_SECONDS 3600
+
+static bool reap_match_pid(const char *name, const char *prefix,
+                           const char *suffix, long *out_pid) {
+    size_t plen = strlen(prefix), slen = strlen(suffix), nlen = strlen(name);
+    if (nlen <= plen + slen)
+        return false;
+    if (strncmp(name, prefix, plen) != 0)
+        return false;
+    if (strcmp(name + nlen - slen, suffix) != 0)
+        return false;
+    char digits[32];
+    size_t dlen = nlen - plen - slen;
+    if (dlen == 0 || dlen >= sizeof(digits))
+        return false;
+    memcpy(digits, name + plen, dlen);
+    digits[dlen] = '\0';
+    for (size_t i = 0; i < dlen; i++) {
+        if (digits[i] < '0' || digits[i] > '9')
+            return false;
+    }
+    errno = 0;
+    char *end = NULL;
+    long v = strtol(digits, &end, 10);
+    if (errno != 0 || !end || *end != '\0' || v <= 0)
+        return false;
+    *out_pid = v;
+    return true;
+}
+
+static void reap_stale_pid_telemetry(const char *dir) {
+    if (!dir || !dir[0])
+        return;
+    DIR *d = opendir(dir);
+    if (!d)
+        return;
+
+    time_t now = time(NULL);
+    pid_t self = getpid();
+    struct dirent *ent;
+    int scanned = 0;
+
+    while ((ent = readdir(d)) != NULL && scanned < DSCO_REAP_SCAN_MAX) {
+        scanned++;
+        long pid = 0;
+        if (!reap_match_pid(ent->d_name, "runtime-", ".json", &pid) &&
+            !reap_match_pid(ent->d_name, "child-metrics-", ".jsonl", &pid))
+            continue;
+        if ((pid_t)pid == self)
+            continue;
+
+        char full[1024];
+        if (snprintf(full, sizeof(full), "%s/%s", dir, ent->d_name) >= (int)sizeof(full))
+            continue;
+
+        struct stat st;
+        if (stat(full, &st) != 0)
+            continue;
+        /* Young files may belong to a process still coming up. Files dated in
+         * the future (clock skew) are also treated as young, not as garbage. */
+        if (now <= st.st_mtime ||
+            (now - st.st_mtime) < DSCO_REAP_MIN_AGE_SECONDS)
+            continue;
+        /* Only remove when the owning process is provably gone. */
+        if (kill((pid_t)pid, 0) == 0 || errno == EPERM)
+            continue;
+        unlink(full);
+    }
+    closedir(d);
+}
+
 static void persist_runtime_state(const char *json) {
     char dir[512];
     dsco_dir(dir, sizeof(dir));
@@ -242,6 +331,13 @@ static void persist_runtime_state(const char *json) {
     snprintf(tmp, sizeof(tmp), "%s/last_heartbeat.%d.tmp", dir, (int)getpid());
     snprintf(live, sizeof(live), "%s/runtime-%d.json", dir, (int)getpid());
     snprintf(log_path, sizeof(log_path), "%s/runtime.log", dir);
+
+    /* Sweep dead predecessors once per process; see reap_stale_pid_telemetry. */
+    static bool reaped_once = false;
+    if (!reaped_once) {
+        reaped_once = true;
+        reap_stale_pid_telemetry(dir);
+    }
 
     int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd >= 0) {

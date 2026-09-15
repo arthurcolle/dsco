@@ -502,7 +502,10 @@ void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok,
 
 /* ── Batch Spinner (multi-tool) ───────────────────────────────────────── */
 
-#define TUI_BATCH_MAX 32
+/* Provider request builders can expose up to 128 tools and models may return
+ * wide independent batches. Keep execution/display capacity aligned so calls
+ * beyond the old 32-entry UI ceiling are not silently dropped. */
+#define TUI_BATCH_MAX 128
 
 typedef struct {
     char     name[64];
@@ -553,6 +556,12 @@ typedef struct {
     double   runway;       /* seconds until exhaustion at burn_rate; <0 unknown */
     int      turn;
     int      tools_used;
+    bool     autonomy_active; /* inner agent loop owns the next transition */
+    char     autonomy_phase[24]; /* planning|reasoning|responding|tools|paused */
+    char     autonomy_detail[96]; /* concise current objective/action */
+    int      autonomy_step;
+    int      autonomy_queue_depth;
+    double   autonomy_started_at;
     int      panel_rows;    /* bottom panel rows: top rule + input + status (3) */
     double   splash_started_at;
     double   motion_started_at;
@@ -565,6 +574,13 @@ void tui_status_bar_update(tui_status_bar_t *sb, int in_tok, int out_tok,
                            double cost, int turn, int tools);
 void tui_status_bar_set_budget(tui_status_bar_t *sb, double budget_limit,
                                double burn_rate, double percent, double runway);
+/* Persistent autonomy telemetry: remains visible while reasoning, streaming,
+ * executing tools, and waiting at a continuation boundary. */
+void tui_status_bar_set_autonomy(tui_status_bar_t *sb, bool active,
+                                 const char *phase, const char *detail,
+                                 int step, int queue_depth);
+/* Update steering depth without resetting the active phase or elapsed timer. */
+void tui_status_bar_set_autonomy_queue_depth(tui_status_bar_t *sb, int queue_depth);
 void tui_status_bar_enable(tui_status_bar_t *sb);
 void tui_status_bar_disable(tui_status_bar_t *sb);
 void tui_status_bar_render(tui_status_bar_t *sb);
@@ -665,6 +681,11 @@ int tui_composer_transcript_row(void);
  * interrupts the composer. User cancellation and raw-stdin tools leave this
  * disabled so their terminal ownership remains unambiguous. */
 void tui_composer_preserve_on_interrupt(bool preserve);
+/* Idle native workflow clicks wake the agent with an empty successful read;
+ * the draft and byte cursor survive that handoff. Disable during the live
+ * follow-up reader: the agent consumes its action queue at a model boundary. */
+void tui_composer_set_action_wakeup(bool enabled);
+void tui_composer_clear_retained_draft(void);
 
 /* ── Swarm UI ─────────────────────────────────────────────────────────── */
 typedef struct {

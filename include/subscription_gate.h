@@ -12,8 +12,10 @@
  * cooldown is persisted in the lock file so Retry-After learned by one
  * process is honored by all of them.
  *
- * Operational filesystem errors fail open; interruption is the only normal
- * false return. Set DSCO_CHATGPT_GLOBAL_GATE=0 to opt out. */
+ * Operational filesystem errors fail open. Cancellation returns false with
+ * errno=EINTR; exceeding DSCO_CHATGPT_GATE_MAX_WAIT_MS across lock contention
+ * and cooldown returns false with errno=ETIMEDOUT. waited_ms includes failed
+ * waits and uses a monotonic clock. Set DSCO_CHATGPT_GLOBAL_GATE=0 to opt out. */
 typedef struct {
     int fd;
     bool held;
@@ -23,8 +25,8 @@ bool subscription_gate_acquire(subscription_gate_t *gate, const char *scope,
                                const volatile int *interrupted, long *waited_ms);
 
 /* Release the lease and prevent the next request from starting for at least
- * cooldown_ms. Successful requests pass 0 and receive the configured minimum
- * spacing (DSCO_CHATGPT_MIN_INTERVAL_MS, default 1000ms). */
+ * cooldown_ms. Successful requests pass 0 and have no synthetic delay by
+ * default. DSCO_CHATGPT_MIN_INTERVAL_MS can add operator-selected spacing. */
 void subscription_gate_release(subscription_gate_t *gate, long cooldown_ms);
 
 #endif /* DSCO_SUBSCRIPTION_GATE_H */

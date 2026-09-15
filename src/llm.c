@@ -1,18 +1,27 @@
+#include "swarm_progress.h"
+#include "event_stream.h"
+#include "provider_events.h"
 #include "llm.h"
+#include "goal.h"
 #include "crypto.h"
 #include "error.h"
 #include "tools.h"
+#include "tool_grounding.h"
+#include "tool_effects.h"
 #include "config.h"
+#include "cost_budget.h"
 #include "provider.h"
 #include "workspace.h"
 #include "mcp_names.h"
 #include "http_pool.h"
+#include "capsule.h"
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
 #include <signal.h>
 #include <ctype.h>
+#include <unistd.h>
 #include <math.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -20,7 +29,7 @@
 #include <stdint.h>
 #include <curl/curl.h>
 
-#define CLAUDE_CODE_VERSION_FALLBACK "2.1.207"
+#define CLAUDE_CODE_VERSION_FALLBACK CLAUDE_CODE_OAUTH_COMPAT_VERSION
 #ifdef DSCO_USE_OBF_SECRETS
 /* Hardened build: resolve the client-impersonation billing salt and OAuth beta
  * set from the encrypted secrets table so they never appear in __cstring. */
@@ -29,13 +38,12 @@
 #else
 #define CLAUDE_CODE_BILLING_SALT "59cf53e54c78"
 #define CLAUDE_CODE_OAUTH_BETAS                                                                 \
-    "claude-code-20250219,interleaved-thinking-2025-05-14,"                                   \
+    "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,"                  \
     "thinking-token-count-2026-05-13,context-management-2025-06-27,"                          \
     "prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,"                      \
-    "advisor-tool-2026-03-01,effort-2025-11-24,oauth-2025-04-20"
+    "effort-2025-11-24,fallback-credit-2026-06-01"
 #endif
-#define CLAUDE_CODE_AGENT_INSTRUCTION "You are a Claude agent, built on Anthropic's Claude Agent SDK."
-#define CLAUDE_FABLE_FALLBACK_CREDIT_BETA "fallback-credit-2026-06-01"
+#define CLAUDE_CODE_AGENT_INSTRUCTION "You are Claude Code, Anthropic's official CLI for Claude."
 
 /* Global interrupt flag — set by SIGINT handler in agent.c.
    Declared extern here so the streaming code can check it. */
@@ -133,6 +141,12 @@ static bool llm_env_truthy(const char *val) {
     return val && (val[0] == '1' || strcasecmp(val, "true") == 0 || strcasecmp(val, "yes") == 0);
 }
 
+/* Explicit opt-out values for default-on flags: 0/false/off/no. */
+static bool llm_env_falsy(const char *val) {
+    return val && (val[0] == '0' || strcasecmp(val, "false") == 0 ||
+                   strcasecmp(val, "off") == 0 || strcasecmp(val, "no") == 0);
+}
+
 static bool llm_model_value_is_blank_default(const char *model) {
     if (!model)
         return true;
@@ -153,9 +167,27 @@ static const char *llm_effective_model(const char *model) {
     return llm_model_value_is_blank_default(model) ? DEFAULT_MODEL : model;
 }
 
+static const char *session_model_for_provider(const char *model, const char *provider_override) {
+    const char *effective = llm_effective_model(model);
+    if (!provider_override || !provider_override[0])
+        return model_resolve_alias(effective);
+    /* An explicit provider owns its API model namespace. Keep documented exact
+     * shorthand aliases, but never let fuzzy/catalog metadata lookup rewrite a
+     * concrete native ID into another provider's spelling. */
+    for (int i = 0; MODEL_REGISTRY[i].alias; i++)
+        if (strcmp(effective, MODEL_REGISTRY[i].alias) == 0)
+            return MODEL_REGISTRY[i].model_id;
+    return effective;
+}
+
 void session_state_init(session_state_t *s, const char *model) {
+    session_state_init_for_provider(s, model, NULL);
+}
+
+void session_state_init_for_provider(session_state_t *s, const char *model,
+                                     const char *provider_override) {
     memset(s, 0, sizeof(*s));
-    const char *resolved = model_resolve_alias(llm_effective_model(model));
+    const char *resolved = session_model_for_provider(model, provider_override);
     if (!resolved || !resolved[0])
         resolved = DEFAULT_MODEL;
     snprintf(s->model, sizeof(s->model), "%s", resolved);
@@ -171,7 +203,17 @@ void session_state_init(session_state_t *s, const char *model) {
     s->web_search = true;
     s->code_execution = true;
     s->context_window = model_context_window(resolved);
-    s->compact_enabled = llm_env_truthy(getenv("DSCO_AUTO_COMPACT"));
+    /* T3 #04 W1 flip: auto-compact is now DEFAULT-ON (lossless-by-retrieval
+     * capsules landed first, per the re-ordered PLAN #04 sequence). Explicit
+     * opt-out: DSCO_AUTO_COMPACT=0/false/off. The old opt-in truthy check is
+     * preserved for backwards compatibility (=1/true/yes still enables). */
+    {
+        const char *ac = getenv("DSCO_AUTO_COMPACT");
+        if (ac && *ac)
+            s->compact_enabled = !llm_env_falsy(ac);
+        else
+            s->compact_enabled = true; /* default-on */
+    }
     s->temperature = -1.0;
     s->top_p = -1.0;
     s->top_k = -1;
@@ -180,6 +222,9 @@ void session_state_init(session_state_t *s, const char *model) {
     s->topology_auto = false;
     s->tool_budget_ratio = 1.0f;
     s->structured_output_max_repairs = 1;
+    s->goal_turn_limit = GOAL_DEFAULT_TURNS;
+    s->goal_accounting_v2 = true;
+    goal_queue_init(&s->goal_queue);
 
     if (!llm_env_truthy(getenv("DSCO_DISABLE_DEFAULT_FALLBACKS"))) {
         s->fallback_count = provider_build_default_fallback_models(
@@ -302,6 +347,24 @@ const tool_metric_t *tool_metrics_get(tool_metrics_t *m, const char *name) {
 
 /* ── Tool result cache ─────────────────────────────────────────────────── */
 
+/* These tools act on live surfaces or return out-of-band image content. A
+ * cached text result cannot repeat the action or reconstruct its observation.
+ * Check both read and write paths so even an existing entry cannot be replayed. */
+static bool tool_cache_eligible(const char *tool, const char *input) {
+    static const char *const dynamic[] = {
+        "surface", "buffer", "buffer_view", "pty_session", "desktop", "browser_session", "computer",
+        "kitty_remote", "kitten", "view_image", "browser", NULL
+    };
+    if (!tool || !*tool)
+        return false;
+    if (strcmp(tool, "http_request") == 0)
+        return tool_http_request_is_read_only(input);
+    for (int i = 0; dynamic[i]; ++i)
+        if (strcmp(tool, dynamic[i]) == 0)
+            return false;
+    return tools_call_is_read_only(tool, input);
+}
+
 static unsigned cache_fnv(const char *s) {
     unsigned h = 2166136261u;
     while (*s) {
@@ -321,6 +384,14 @@ void tool_cache_free(tool_cache_t *c) {
     memset(c, 0, sizeof(*c));
 }
 
+void tool_cache_prepare_call(tool_cache_t *c, const char *tool, const char *input) {
+    if (tools_call_is_read_only(tool, input))
+        return;
+    for (int i = 0; i < c->count; i++)
+        free(c->entries[i].result);
+    c->count = 0;
+}
+
 static double cache_now_sec(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -329,6 +400,10 @@ static double cache_now_sec(void) {
 
 bool tool_cache_get(tool_cache_t *c, const char *tool, const char *input, char *result, size_t rlen,
                     bool *success) {
+    if (!tool_cache_eligible(tool, input)) {
+        c->misses++;
+        return false;
+    }
     char key[256];
     snprintf(key, sizeof(key), "%s:%u", tool, cache_fnv(input ? input : ""));
     double now = cache_now_sec();
@@ -352,6 +427,9 @@ bool tool_cache_get(tool_cache_t *c, const char *tool, const char *input, char *
 
 void tool_cache_put(tool_cache_t *c, const char *tool, const char *input, const char *result,
                     bool success, double ttl) {
+    tool_cache_prepare_call(c, tool, input);
+    if (!tool_cache_eligible(tool, input))
+        return;
     char key[256];
     snprintf(key, sizeof(key), "%s:%u", tool, cache_fnv(input ? input : ""));
     for (int i = 0; i < c->count; i++) {
@@ -492,8 +570,8 @@ const char *llm_get_custom_system_prompt(void) {
     const char *override = getenv("DSCO_SYSTEM_PROMPT");
     if (override && *override)
         return override;
-    if (g_cheap_mode)
-        return NULL; /* --cheap: skip workspace prompt */
+    /* A smaller prompt/tool register must still carry workspace instructions,
+     * including the applicable hierarchical AGENTS.md files. */
     return dsco_workspace_prompt();
 }
 
@@ -537,6 +615,9 @@ void conv_free(conversation_t *c) {
             free(c->msgs[i].content[j].image_media_type);
             free(c->msgs[i].content[j].image_data);
             free(c->msgs[i].content[j].image_url);
+            free(c->msgs[i].content[j].video_media_type);
+            free(c->msgs[i].content[j].video_data);
+            free(c->msgs[i].content[j].video_url);
             free(c->msgs[i].content[j].doc_media_type);
             free(c->msgs[i].content[j].doc_data);
             free(c->msgs[i].content[j].doc_title);
@@ -592,6 +673,9 @@ void conv_pop_last(conversation_t *c) {
         free(m->content[j].image_media_type);
         free(m->content[j].image_data);
         free(m->content[j].image_url);
+        free(m->content[j].video_media_type);
+        free(m->content[j].video_data);
+        free(m->content[j].video_url);
         free(m->content[j].doc_media_type);
         free(m->content[j].doc_data);
         free(m->content[j].doc_title);
@@ -644,6 +728,7 @@ void conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars) {
                         while (key_start > mc->text && *(key_start - 1) != '[' &&
                                *(key_start - 1) != '\n')
                             key_start--;
+                        if (key_start > mc->text && *(key_start - 1) == '[') key_start--;
                         const char *key_end = strchr(key_marker, ']');
                         if (key_end && (key_end - key_start) < 200) {
                             int klen = (int)(key_end - key_start + 1);
@@ -651,16 +736,30 @@ void conv_trim_old_results(conversation_t *c, int keep_recent, int max_chars) {
                         }
                     }
 
-                    int body_budget =
-                        effective_max - first_line_len - 40 - (int)strlen(vfs_key_line);
-                    if (body_budget < 80)
-                        body_budget = 80;
-
-                    size_t alloc = (size_t)(first_line_len + body_budget + 256);
+                    /* Bound the whole replacement, not just its preview. The
+                     * old 80-char floor could exceed max_chars indefinitely,
+                     * so each pass wrapped the previous trim marker again.
+                     * A recovery key has a bounded reservation even for tiny
+                     * requested budgets; repeating the same trim is idempotent. */
+                    int key_len = (int)strlen(vfs_key_line);
+                    if (effective_max < key_len + 64) effective_max = key_len + 64;
+                    if (len <= effective_max) continue;
+                    const char *body = first_nl ? first_nl + 1 : mc->text;
+                    int original_len = len, prior_budget = 0, consumed = 0;
+                    if (sscanf(body, "[trimmed %d→%d chars] %n", &original_len,
+                               &prior_budget, &consumed) == 2 && consumed > 0) {
+                        body += consumed;
+                    } else {
+                        original_len = len;
+                    }
+                    int available = effective_max - key_len - 48;
+                    if (first_line_len > available / 3) first_line_len = available / 3;
+                    int body_budget = available - first_line_len;
+                    size_t alloc = (size_t)effective_max + 1;
                     char *trimmed = safe_malloc(alloc);
                     snprintf(trimmed, alloc, "%.*s\n[trimmed %d→%d chars] %.*s%s", first_line_len,
-                             mc->text, len, (int)(first_line_len + body_budget), body_budget,
-                             mc->text + (first_nl ? first_line_len + 1 : 0), vfs_key_line);
+                             mc->text, original_len, first_line_len + body_budget, body_budget,
+                             body, vfs_key_line);
                     free(mc->text);
                     mc->text = trimmed;
                 }
@@ -707,6 +806,27 @@ tool_integrity_result_t conv_validate_tool_call_integrity(const conversation_t *
     if (!c)
         return r;
 
+    /* A live parallel batch may already have some results appended. Only
+     * its trailing result-only messages may follow a pending assistant;
+     * ordinary user text or a subsequent assistant closes that allowance. */
+    int pending_at = c->count - 1;
+    if (allow_pending_last) {
+        while (pending_at >= 0) {
+            const message_t *tail = &c->msgs[pending_at];
+            if (tail->role != ROLE_USER || tail->content_count <= 0) break;
+            bool results_only = true;
+            for (int j = 0; j < tail->content_count; j++) {
+                const msg_content_t *part = &tail->content[j];
+                if (!part->type || strcmp(part->type, "tool_result") != 0) {
+                    results_only = false;
+                    break;
+                }
+            }
+            if (!results_only) break;
+            pending_at--;
+        }
+    }
+
     for (int i = 0; i < c->count; i++) {
         const message_t *m = &c->msgs[i];
         for (int j = 0; j < m->content_count; j++) {
@@ -740,7 +860,7 @@ tool_integrity_result_t conv_validate_tool_call_integrity(const conversation_t *
                     }
                 }
             }
-            if (!found_result && !(allow_pending_last && i == c->count - 1)) {
+            if (!found_result && !(allow_pending_last && i == pending_at)) {
                 r.missing_tool_result++;
                 tool_integrity_fail(&r, "missing_tool_result", mc->tool_id, i);
             }
@@ -829,6 +949,9 @@ static void msg_clear_content(message_t *m) {
         free(m->content[j].image_media_type);
         free(m->content[j].image_data);
         free(m->content[j].image_url);
+        free(m->content[j].video_media_type);
+        free(m->content[j].video_data);
+        free(m->content[j].video_url);
         free(m->content[j].doc_media_type);
         free(m->content[j].doc_data);
         free(m->content[j].doc_title);
@@ -866,7 +989,7 @@ static char *tool_result_compact_preview(const msg_content_t *mc, int max_chars)
     return trimmed;
 }
 
-bool conv_compact_recent_tool_turn(conversation_t *c, int max_chars, int protect_tail) {
+static bool compact_recent_tool_turn(conversation_t *c, int max_chars, int protect_tail) {
     if (!c || c->count <= 0)
         return false;
 
@@ -920,6 +1043,46 @@ bool conv_compact_recent_tool_turn(conversation_t *c, int max_chars, int protect
 
     message_t *assistant = &c->msgs[assistant_idx];
     message_t *user = &c->msgs[result_idx];
+
+    /* Replacing these two messages removes their wire call IDs. Only do so
+     * for a complete one-to-one exchange: a parallel batch can have missing
+     * or split outputs, and compacting its first result would orphan the
+     * remaining results. Reject before mutating either message. */
+    for (int j = 0; j < assistant->content_count; j++) {
+        const msg_content_t *call = &assistant->content[j];
+        if (!call->type || (strcmp(call->type, "text") != 0 &&
+                            strcmp(call->type, "tool_use") != 0))
+            return false;
+        if (strcmp(call->type, "tool_use") != 0)
+            continue;
+        if (!call->tool_id || !call->tool_id[0])
+            return false;
+        int matches = 0;
+        for (int k = 0; k < user->content_count; k++) {
+            const msg_content_t *output = &user->content[k];
+            if (output->type && strcmp(output->type, "tool_result") == 0 &&
+                output->tool_id && strcmp(output->tool_id, call->tool_id) == 0)
+                matches++;
+        }
+        if (matches != 1)
+            return false;
+    }
+    for (int j = 0; j < user->content_count; j++) {
+        const msg_content_t *output = &user->content[j];
+        if (!output->type || strcmp(output->type, "tool_result") != 0)
+            continue;
+        if (!output->tool_id || !output->tool_id[0])
+            return false;
+        int matches = 0;
+        for (int k = 0; k < assistant->content_count; k++) {
+            const msg_content_t *call = &assistant->content[k];
+            if (call->type && strcmp(call->type, "tool_use") == 0 && call->tool_id &&
+                strcmp(call->tool_id, output->tool_id) == 0)
+                matches++;
+        }
+        if (matches != 1)
+            return false;
+    }
 
     jbuf_t assistant_summary;
     jbuf_t user_summary;
@@ -1001,6 +1164,19 @@ bool conv_compact_recent_tool_turn(conversation_t *c, int max_chars, int protect
     return true;
 }
 
+bool conv_compact_recent_tool_turn(conversation_t *c, int max_chars, int protect_tail) {
+    if (!c) return false;
+    if (protect_tail < 0) protect_tail = 4;
+    if (compact_recent_tool_turn(c, max_chars, protect_tail)) return true;
+    /* A protected newest exchange must not hide all the eligible older ones.
+     * Work on a two-message view so no pending/split batch can be collapsed. */
+    for (int i = c->count - protect_tail - 2; i >= 0; i--) {
+        conversation_t pair = {.msgs = &c->msgs[i], .count = 2, .cap = 2};
+        if (compact_recent_tool_turn(&pair, max_chars, 0)) return true;
+    }
+    return false;
+}
+
 /* ── Multi-tier compaction system ───────────────────────────────────────
  * Inspired by Claude Code's 4-tier approach:
  *   Micro → Snip → Session → Full
@@ -1032,7 +1208,14 @@ int effective_context_window(session_state_t *s) {
 }
 
 int auto_compact_threshold(session_state_t *s) {
-    return effective_context_window(s) - AUTOCOMPACT_BUFFER_TOKENS;
+    /* T3 #04 W1 flip: fixed 0.80 fraction of the effective window (spec:
+     * SOTA_FRAMES_2026-09-02.md PLAN #04 — freeze adaptive tier tuning at
+     * the fixed value; no tuning logic). The old absolute 13K buffer is
+     * kept as a floor for small windows so tiny models still get margin. */
+    int eff = effective_context_window(s);
+    int by_fraction = (int)(eff * 0.80);
+    int by_buffer = eff - AUTOCOMPACT_BUFFER_TOKENS;
+    return by_fraction > by_buffer ? by_buffer : by_fraction;
 }
 
 /* ── Token estimation without API call ──────────────────────────────── */
@@ -1047,6 +1230,8 @@ static int rough_token_estimate_content(const msg_content_t *mc) {
         tokens += rough_token_estimate(mc->tool_input);
     if (mc->image_data)
         tokens += IMAGE_TOKEN_ESTIMATE; /* dimension-based, not base64 bytes */
+    if (mc->video_data)
+        tokens += IMAGE_TOKEN_ESTIMATE * 8; /* conservative short-video estimate */
     if (mc->doc_data)
         tokens += (int)(strlen(mc->doc_data)) / 6;
     return tokens + 10; /* overhead for JSON structure */
@@ -1110,6 +1295,16 @@ void conv_strip_binaries(conversation_t *c, int keep_recent) {
                 mc->image_url = NULL;
                 stripped = true;
             }
+            if (mc->video_data) {
+                free(mc->video_data);
+                mc->video_data = NULL;
+                stripped = true;
+            }
+            if (mc->video_url) {
+                free(mc->video_url);
+                mc->video_url = NULL;
+                stripped = true;
+            }
             if (mc->doc_data) {
                 free(mc->doc_data);
                 mc->doc_data = NULL;
@@ -1118,6 +1313,10 @@ void conv_strip_binaries(conversation_t *c, int keep_recent) {
             if (mc->image_media_type) {
                 free(mc->image_media_type);
                 mc->image_media_type = NULL;
+            }
+            if (mc->video_media_type) {
+                free(mc->video_media_type);
+                mc->video_media_type = NULL;
             }
             if (mc->doc_media_type) {
                 free(mc->doc_media_type);
@@ -1129,11 +1328,14 @@ void conv_strip_binaries(conversation_t *c, int keep_recent) {
             }
 
             if (stripped && mc->type &&
-                (strcmp(mc->type, "image") == 0 || strcmp(mc->type, "document") == 0)) {
+                (strcmp(mc->type, "image") == 0 || strcmp(mc->type, "video") == 0 ||
+                 strcmp(mc->type, "document") == 0)) {
                 const char *was = mc->type;
                 const char *placeholder =
                     (strcmp(was, "image") == 0)
                         ? "[image elided: older than binary-retention window]"
+                    : (strcmp(was, "video") == 0)
+                        ? "[video elided: older than binary-retention window]"
                         : "[document elided: older than binary-retention window]";
                 free(mc->type);
                 mc->type = safe_strdup("text");
@@ -1220,6 +1422,9 @@ void conv_drop_rounds(conversation_t *c, api_round_t *rounds, int n_drop, int to
             free(m->content[j].image_media_type);
             free(m->content[j].image_data);
             free(m->content[j].image_url);
+            free(m->content[j].video_media_type);
+            free(m->content[j].video_data);
+            free(m->content[j].video_url);
             free(m->content[j].doc_media_type);
             free(m->content[j].doc_data);
             free(m->content[j].doc_title);
@@ -1524,6 +1729,51 @@ static char *conv_build_compaction_capsule(conversation_t *c, int drop_start, in
     return buf.data;
 }
 
+/* ── Capsule offload (T1 #04 W2): full dropped span → context fabric ───────
+ * Lossless-by-retrieval: before the middle rounds are freed, dump their
+ * complete text into the context fabric and record the ctxkey in the
+ * cwd-keyed on-disk capsule (see capsule.h). The in-context summary capsule
+ * stays as-is; this adds a fault-in pointer for what it elides.
+ * Advisory only: any failure here degrades to plain lossy compaction. */
+static void conv_offload_dropped_span(conversation_t *c, int drop_start,
+                                      int drop_end, int tokens_dropped) {
+    if (!c) return;
+    jbuf_t span;
+    jbuf_init(&span, 4096);
+    for (int i = drop_start; i <= drop_end && i < c->count; i++) {
+        message_t *m = &c->msgs[i];
+        for (int j = 0; j < m->content_count; j++) {
+            msg_content_t *mc = &m->content[j];
+            if (!mc->type) continue;
+            if (mc->text && mc->text[0])
+                jbuf_appendf(&span, "[%s] %s\n", mc->type, mc->text);
+            else if (strcmp(mc->type, "tool_use") == 0 && mc->tool_name)
+                jbuf_appendf(&span, "[tool_use] %s id=%s input=%s\n",
+                             mc->tool_name, mc->tool_id ? mc->tool_id : "?",
+                             mc->tool_input ? mc->tool_input : "");
+        }
+    }
+    if (span.len == 0) { jbuf_free(&span); return; }
+
+    char cwd[1024];
+    if (!getcwd(cwd, sizeof(cwd))) { jbuf_free(&span); return; }
+
+    capsule_t cap;
+    capsule_init(&cap, cwd); /* initialize even if load misses/corrupts */
+    capsule_load(cwd, &cap); /* advisory: merge onto existing capsule on hit */
+    char label[96];
+    snprintf(label, sizeof(label), "compaction-span:%dk", tokens_dropped / 1000);
+    if (capsule_offload_span(&cap, span.data, span.len, label) == 0) {
+        if (!cap.summary[0])
+            snprintf(cap.summary, sizeof(cap.summary),
+                     "Prior session in this directory was compacted; dropped "
+                     "rounds are recoverable via the ctxkeys below.");
+        capsule_save(&cap);
+    }
+    capsule_free(&cap);
+    jbuf_free(&span);
+}
+
 /* ── Tiered auto-compact pipeline ───────────────────────────────────── */
 
 compact_result_t conv_auto_compact(conversation_t *c, session_state_t *s, compact_config_t *cfg) {
@@ -1648,6 +1898,11 @@ compact_result_t conv_auto_compact(conversation_t *c, session_state_t *s, compac
                 char *capsule = conv_build_compaction_capsule(c, drop_start, drop_end, to_drop,
                                                               tokens_dropped);
 
+                /* T1 #04 W2: offload the full dropped span to the context
+                 * fabric + cwd capsule before freeing (lossless-by-retrieval).
+                 * Advisory — failures degrade to lossy-only silently. */
+                conv_offload_dropped_span(c, drop_start, drop_end, tokens_dropped);
+
                 /* Free middle messages */
                 for (int i = drop_start; i <= drop_end; i++) {
                     message_t *m = &c->msgs[i];
@@ -1660,6 +1915,9 @@ compact_result_t conv_auto_compact(conversation_t *c, session_state_t *s, compac
                         free(m->content[j].image_media_type);
                         free(m->content[j].image_data);
                         free(m->content[j].image_url);
+                        free(m->content[j].video_media_type);
+                        free(m->content[j].video_data);
+                        free(m->content[j].video_url);
                         free(m->content[j].doc_media_type);
                         free(m->content[j].doc_data);
                         free(m->content[j].doc_title);
@@ -1779,6 +2037,19 @@ bool conv_save_ex(conversation_t *c, const session_state_t *session, const char 
         if (session->turn_count > 0) {
             jbuf_appendf(&sb, ",\"turn_count\":%d", session->turn_count);
         }
+        /* Preserve all accounting bases across save/resume. */
+        jbuf_appendf(&sb, ",\"total_input_tokens\":%d", session->total_input_tokens);
+        jbuf_appendf(&sb, ",\"total_output_tokens\":%d", session->total_output_tokens);
+        jbuf_appendf(&sb, ",\"total_cache_read_tokens\":%d", session->total_cache_read_tokens);
+        jbuf_appendf(&sb, ",\"total_cache_write_tokens\":%d", session->total_cache_write_tokens);
+        jbuf_appendf(&sb, ",\"total_reasoning_tokens\":%d", session->total_reasoning_tokens);
+        jbuf_appendf(&sb, ",\"provider_cost_samples\":%d", session->provider_cost_samples);
+        jbuf_appendf(&sb, ",\"estimated_cost_samples\":%d", session->estimated_cost_samples);
+        jbuf_appendf(&sb, ",\"unpriced_response_count\":%d", session->unpriced_response_count);
+        jbuf_appendf(&sb, ",\"subscription_response_count\":%d", session->subscription_response_count);
+        jbuf_appendf(&sb, ",\"total_reported_cost_usd\":%.12f", session->total_reported_cost_usd);
+        jbuf_appendf(&sb, ",\"total_provider_reported_cost_usd\":%.12f", session->total_provider_reported_cost_usd);
+        jbuf_appendf(&sb, ",\"total_estimated_inference_cost_usd\":%.12f", session->total_estimated_inference_cost_usd);
         if (fabs(session->tool_budget_ratio - 1.0f) > 0.0001f) {
             jbuf_appendf(&sb, ",\"tool_budget_ratio\":%.6f", session->tool_budget_ratio);
         }
@@ -1826,6 +2097,7 @@ bool conv_save_ex(conversation_t *c, const session_state_t *session, const char 
             if (session->goal_updated_at > 0)
                 jbuf_appendf(&sb, ",\"goal_updated_at\":%lld", (long long)session->goal_updated_at);
         }
+        goal_save_fields(&sb, session);
         jbuf_append(&sb, "},");
         fwrite(sb.data, 1, sb.len, f);
         jbuf_free(&sb);
@@ -1871,8 +2143,9 @@ bool conv_save_ex(conversation_t *c, const session_state_t *session, const char 
         fprintf(f, "]}");
     }
     fprintf(f, "\n]}\n");
-    fclose(f);
-    return true;
+    bool saved = !ferror(f);
+    if (fclose(f) != 0) saved = false;
+    return saved;
 }
 
 bool conv_save(conversation_t *c, const char *path) {
@@ -1923,6 +2196,35 @@ bool conv_load_ex(conversation_t *c, session_state_t *session, const char *path)
             int saved_turn_count = json_get_int(session_raw, "turn_count", session->turn_count);
             if (saved_turn_count >= 0)
                 session->turn_count = saved_turn_count;
+            /* Legacy sessions have unknown historical costs, not proven zero. */
+            session->total_input_tokens = json_get_int(session_raw, "total_input_tokens", 0);
+            if (session->total_input_tokens < 0) session->total_input_tokens = 0;
+            session->total_output_tokens = json_get_int(session_raw, "total_output_tokens", 0);
+            if (session->total_output_tokens < 0) session->total_output_tokens = 0;
+            session->total_cache_read_tokens = json_get_int(session_raw, "total_cache_read_tokens", 0);
+            if (session->total_cache_read_tokens < 0) session->total_cache_read_tokens = 0;
+            session->total_cache_write_tokens = json_get_int(session_raw, "total_cache_write_tokens", 0);
+            if (session->total_cache_write_tokens < 0) session->total_cache_write_tokens = 0;
+            session->total_reasoning_tokens = json_get_int(session_raw, "total_reasoning_tokens", 0);
+            if (session->total_reasoning_tokens < 0) session->total_reasoning_tokens = 0;
+            session->provider_cost_samples = json_get_int(session_raw, "provider_cost_samples", 0);
+            if (session->provider_cost_samples < 0) session->provider_cost_samples = 0;
+            session->estimated_cost_samples = json_get_int(session_raw, "estimated_cost_samples", 0);
+            if (session->estimated_cost_samples < 0) session->estimated_cost_samples = 0;
+            session->unpriced_response_count = json_get_int(session_raw, "unpriced_response_count", 0);
+            if (session->unpriced_response_count < 0) session->unpriced_response_count = 0;
+            session->subscription_response_count = json_get_int(session_raw, "subscription_response_count", 0);
+            if (session->subscription_response_count < 0) session->subscription_response_count = 0;
+            session->total_reported_cost_usd = json_get_double(session_raw, "total_reported_cost_usd", 0);
+            if (!isfinite(session->total_reported_cost_usd) || session->total_reported_cost_usd < 0) session->total_reported_cost_usd = 0;
+            session->total_provider_reported_cost_usd = json_get_double(session_raw, "total_provider_reported_cost_usd", 0);
+            if (!isfinite(session->total_provider_reported_cost_usd) || session->total_provider_reported_cost_usd < 0) session->total_provider_reported_cost_usd = 0;
+            session->total_estimated_inference_cost_usd = json_get_double(session_raw, "total_estimated_inference_cost_usd", 0);
+            if (!isfinite(session->total_estimated_inference_cost_usd) || session->total_estimated_inference_cost_usd < 0) session->total_estimated_inference_cost_usd = 0;
+            char *saved_accounting = json_get_raw(session_raw, "total_reported_cost_usd");
+            if (!saved_accounting && session->turn_count > 0)
+                session->unpriced_response_count = session->turn_count;
+            free(saved_accounting);
             double saved_budget_ratio =
                 json_get_double(session_raw, "tool_budget_ratio", session->tool_budget_ratio);
             if (saved_budget_ratio >= 0.0 && saved_budget_ratio <= 1.0)
@@ -1980,6 +2282,7 @@ bool conv_load_ex(conversation_t *c, session_state_t *session, const char *path)
                                                                 (int)session->goal_updated_at);
             }
             free(goal_objective);
+            goal_load_fields(session, session_raw);
             free(session_raw);
         }
     }
@@ -2295,17 +2598,23 @@ static char *trim_context_get_batch_result(const char *text, int max_chars) {
 }
 
 void conv_ensure_tool_results(conversation_t *c) {
-    /* Scan for tool_use blocks in assistant messages that have no matching
-       tool_result in the subsequent user message.  Insert synthetic error
-       results for any orphans.  This prevents HTTP 400 from the API. */
-    for (int i = 0; i < c->count; i++) {
-        message_t *m = &c->msgs[i];
+    if (!c)
+        return;
+
+    /* Repair adjacent to the original call, never at the conversation tail.
+     * Interrupted historical turns must be closed before the next assistant
+     * message. Work backwards so inserted messages do not shift unvisited
+     * calls; collect owned blocks before growing c->msgs to avoid stale
+     * message pointers when the conversation allocation moves. */
+    for (int i = c->count - 1; i >= 0; i--) {
+        const message_t *m = &c->msgs[i];
         if (m->role != ROLE_ASSISTANT)
             continue;
 
+        message_t missing = {.role = ROLE_USER};
         /* Collect tool_use ids from this assistant message */
         for (int j = 0; j < m->content_count; j++) {
-            msg_content_t *mc = &m->content[j];
+            const msg_content_t *mc = &m->content[j];
             if (!mc->type || strcmp(mc->type, "tool_use") != 0 || !mc->tool_id)
                 continue;
 
@@ -2326,10 +2635,25 @@ void conv_ensure_tool_results(conversation_t *c) {
             }
 
             if (!found) {
-                conv_add_tool_result_named(c, mc->tool_id, mc->tool_name,
-                                           "tool result missing (session interrupted)", true);
+                msg_content_t *output = msg_add_content(&missing);
+                output->type = safe_strdup("tool_result");
+                output->tool_id = safe_strdup(mc->tool_id);
+                output->tool_name = safe_strdup(mc->tool_name);
+                output->text = safe_strdup("tool result missing (session interrupted)");
+                output->is_error = true;
             }
         }
+        if (missing.content_count == 0)
+            continue;
+
+        if (c->count >= c->cap) {
+            c->cap = c->cap > 0 ? c->cap * 2 : 32;
+            c->msgs = safe_realloc(c->msgs, (size_t)c->cap * sizeof(message_t));
+        }
+        memmove(&c->msgs[i + 2], &c->msgs[i + 1],
+                (size_t)(c->count - i - 1) * sizeof(message_t));
+        c->msgs[i + 1] = missing;
+        c->count++;
     }
 }
 
@@ -2395,6 +2719,38 @@ void conv_add_user_image_url(conversation_t *c, const char *url, const char *tex
     msg_content_t *mc = msg_add_content(m);
     mc->type = safe_strdup("image");
     mc->image_url = safe_strdup(url);
+    if (text && text[0]) {
+        msg_content_t *tc = msg_add_content(m);
+        tc->type = safe_strdup("text");
+        tc->text = safe_strdup(text);
+    }
+}
+
+void conv_add_user_video_base64(conversation_t *c, const char *media_type,
+                                const char *base64_data, const char *text) {
+    if (!base64_data || !base64_data[0]) {
+        conv_add_user_text(c, text && text[0]
+                                 ? "[video skipped: empty base64 payload]"
+                                 : "[video skipped: empty base64 payload]");
+        return;
+    }
+    message_t *m = conv_add(c, ROLE_USER);
+    msg_content_t *mc = msg_add_content(m);
+    mc->type = safe_strdup("video");
+    mc->video_media_type = safe_strdup(media_type && media_type[0] ? media_type : "video/mp4");
+    mc->video_data = safe_strdup(base64_data);
+    if (text && text[0]) {
+        msg_content_t *tc = msg_add_content(m);
+        tc->type = safe_strdup("text");
+        tc->text = safe_strdup(text);
+    }
+}
+
+void conv_add_user_video_url(conversation_t *c, const char *url, const char *text) {
+    message_t *m = conv_add(c, ROLE_USER);
+    msg_content_t *mc = msg_add_content(m);
+    mc->type = safe_strdup("video");
+    mc->video_url = safe_strdup(url);
     if (text && text[0]) {
         msg_content_t *tc = msg_add_content(m);
         tc->type = safe_strdup("text");
@@ -2542,6 +2898,11 @@ static bool content_block_is_sendable(const msg_content_t *mc) {
         return false;
     /* Do not replay assistant thinking blocks: signature handling is not persisted. */
     if (strcmp(mc->type, "thinking") == 0)
+        return false;
+    /* Responses encrypted reasoning is provider-private replay state, never
+     * an Anthropic text block (including when a session changes providers). */
+    if (strncmp(mc->type, "openai_codex_reasoning:",
+                sizeof("openai_codex_reasoning:") - 1) == 0)
         return false;
     /* Filter whitespace-only text blocks — Anthropic API rejects them with
      * HTTP 400 "text content blocks must contain non-whitespace text".
@@ -2736,30 +3097,8 @@ static char *build_runtime_context(session_state_t *session) {
                   "use loop/self-exit controls. Answer directly and then stop.");
     }
     if (session->goal_objective[0] && session->goal_status == DSCO_GOAL_ACTIVE) {
-        char goal_prompt[2600];
-        int used = session->total_input_tokens + session->total_output_tokens -
-                   session->goal_tokens_at_start;
-        if (used < 0)
-            used = 0;
-        if (session->goal_token_budget > 0) {
-            int pct_bucket = (int)(((long long)used * 100) / session->goal_token_budget);
-            if (pct_bucket > 100)
-                pct_bucket = 100;
-            pct_bucket -= pct_bucket % 10;
-            snprintf(
-                goal_prompt, sizeof(goal_prompt),
-                "[Active Goal]\nObjective: %s\nStatus: active\nBudget used: ~%d%% of %d tokens\n"
-                "Keep working toward this objective until the user changes it with /goal. "
-                "If the objective is complete, call self_exit with a concise completion reason.",
-                session->goal_objective, pct_bucket, session->goal_token_budget);
-        } else {
-            snprintf(
-                goal_prompt, sizeof(goal_prompt),
-                "[Active Goal]\nObjective: %s\nStatus: active\n"
-                "Keep working toward this objective until the user changes it with /goal. "
-                "If the objective is complete, call self_exit with a concise completion reason.",
-                session->goal_objective);
-        }
+        char goal_prompt[GOAL_PROMPT_SIZE];
+        goal_make_runtime_context(session, goal_prompt, sizeof(goal_prompt));
         runtime_context_append(&ctx, goal_prompt);
     }
 
@@ -3432,13 +3771,10 @@ static void build_messages_json(jbuf_t *b, conversation_t *c, session_state_t *s
        nudge the model toward exploitation over exploration.
        Injected as trailing user context to avoid breaking cache prefix. */
     if (session && session->total_input_tokens > 0) {
-        model_info_t priced_model;
-        const model_info_t *bmi = model_lookup_priced(session->model, &priced_model);
-        if (bmi) {
-            double cost = session->total_input_tokens * bmi->input_price / 1e6 +
-                          session->total_output_tokens * bmi->output_price / 1e6 +
-                          session->total_cache_read_tokens * bmi->cache_read_price / 1e6 +
-                          session->total_cache_write_tokens * bmi->cache_write_price / 1e6;
+        {
+            /* Recorded per-attempt costs survive route/model changes. Repricing
+             * all historical tokens with the current model invents budget jumps. */
+            double cost = cost_budget_session_spent_usd(session);
             extern double g_cost_budget;
             if (g_cost_budget > 0 && cost > g_cost_budget * 0.6) {
                 double pct = 100.0 * cost / g_cost_budget;
@@ -3524,7 +3860,7 @@ static const char *claude_code_entrypoint(void) {
     entrypoint = getenv("CLAUDE_CODE_ENTRYPOINT");
     if (entrypoint && entrypoint[0])
         return entrypoint;
-    return "sdk-cli";
+    return "cli";
 }
 
 static const char *claude_code_version(void) {
@@ -3536,32 +3872,10 @@ static const char *claude_code_version(void) {
     if (override && override[0])
         return override;
 
-    static bool loaded = false;
-    static char version[32];
-
-    if (loaded)
-        return version[0] ? version : CLAUDE_CODE_VERSION_FALLBACK;
-    loaded = true;
-
-    FILE *fp = popen("claude --version 2>/dev/null", "r");
-    if (!fp)
-        return CLAUDE_CODE_VERSION_FALLBACK;
-
-    char line[128];
-    if (fgets(line, sizeof(line), fp)) {
-        size_t n = 0;
-        while (line[n] &&
-               ((line[n] >= '0' && line[n] <= '9') || line[n] == '.' || line[n] == '-')) {
-            if (n + 1 >= sizeof(version))
-                break;
-            version[n] = line[n];
-            n++;
-        }
-        version[n] = '\0';
-    }
-    pclose(fp);
-
-    return version[0] ? version : CLAUDE_CODE_VERSION_FALLBACK;
+    /* The OAuth fingerprint is the version of Anthropic's accepted Cowork
+     * transport, not whichever standalone `claude` executable happens to be
+     * installed. OMP pins this exact value and Anthropic rejects stale bytes. */
+    return CLAUDE_CODE_VERSION_FALLBACK;
 }
 
 static const char *conv_first_user_text(conversation_t *c) {
@@ -3608,17 +3922,136 @@ static void build_claude_code_billing_header(conversation_t *c, char *out, size_
     char version_hex[65];
     sha256_hex((const uint8_t *)fingerprint_input, strlen(fingerprint_input), version_hex);
 
-    /* The old 2.1.37 wire shape used SHA-256(first user text)[:5]. Current
-     * Claude Code omits cch entirely; sending a guessed or stale value is
-     * worse than omitting a field the current client no longer sends. */
+    /* Preserve the historical 2.1.37 fixture. The current Cowork wire uses a
+     * body-wide XXH64 attestation; emit a fixed-width placeholder here and
+     * patch it only after the full JSON request has been serialized. */
     if (strcmp(version, "2.1.37") == 0) {
         snprintf(out, out_len,
                  "x-anthropic-billing-header: cc_version=%s.%.3s; cc_entrypoint=%s; cch=%.5s;",
                  version, version_hex, claude_code_entrypoint(), cch_hex);
+    } else if (strcmp(version, CLAUDE_CODE_OAUTH_COMPAT_VERSION) == 0) {
+        snprintf(out, out_len,
+                 "x-anthropic-billing-header: cc_version=%s.%.3s; cc_entrypoint=%s; cch=00000;",
+                 version, version_hex, claude_code_entrypoint());
     } else {
         snprintf(out, out_len,
                  "x-anthropic-billing-header: cc_version=%s.%.3s; cc_entrypoint=%s;", version,
                  version_hex, claude_code_entrypoint());
+    }
+}
+
+static uint64_t claude_xxh64_read64(const unsigned char *p) {
+    uint64_t value = 0;
+    for (int i = 0; i < 8; i++)
+        value |= (uint64_t)p[i] << (i * 8);
+    return value;
+}
+
+static uint32_t claude_xxh64_read32(const unsigned char *p) {
+    uint32_t value = 0;
+    for (int i = 0; i < 4; i++)
+        value |= (uint32_t)p[i] << (i * 8);
+    return value;
+}
+
+static uint64_t claude_xxh64_rotl(uint64_t value, int bits) {
+    return (value << bits) | (value >> (64 - bits));
+}
+
+static uint64_t claude_xxh64_round(uint64_t acc, uint64_t input) {
+    const uint64_t prime1 = UINT64_C(11400714785074694791);
+    const uint64_t prime2 = UINT64_C(14029467366897019727);
+    acc += input * prime2;
+    acc = claude_xxh64_rotl(acc, 31);
+    return acc * prime1;
+}
+
+static uint64_t claude_xxh64_merge_round(uint64_t acc, uint64_t value) {
+    const uint64_t prime1 = UINT64_C(11400714785074694791);
+    const uint64_t prime4 = UINT64_C(9650029242287828579);
+    acc ^= claude_xxh64_round(0, value);
+    return acc * prime1 + prime4;
+}
+
+static uint64_t claude_xxh64(const unsigned char *data, size_t len, uint64_t seed) {
+    const uint64_t prime1 = UINT64_C(11400714785074694791);
+    const uint64_t prime2 = UINT64_C(14029467366897019727);
+    const uint64_t prime3 = UINT64_C(1609587929392839161);
+    const uint64_t prime4 = UINT64_C(9650029242287828579);
+    const uint64_t prime5 = UINT64_C(2870177450012600261);
+    const unsigned char *p = data;
+    const unsigned char *end = data + len;
+    uint64_t hash;
+
+    if (len >= 32) {
+        const unsigned char *limit = end - 32;
+        uint64_t v1 = seed + prime1 + prime2;
+        uint64_t v2 = seed + prime2;
+        uint64_t v3 = seed;
+        uint64_t v4 = seed - prime1;
+        do {
+            v1 = claude_xxh64_round(v1, claude_xxh64_read64(p));
+            p += 8;
+            v2 = claude_xxh64_round(v2, claude_xxh64_read64(p));
+            p += 8;
+            v3 = claude_xxh64_round(v3, claude_xxh64_read64(p));
+            p += 8;
+            v4 = claude_xxh64_round(v4, claude_xxh64_read64(p));
+            p += 8;
+        } while (p <= limit);
+        hash = claude_xxh64_rotl(v1, 1) + claude_xxh64_rotl(v2, 7) +
+               claude_xxh64_rotl(v3, 12) + claude_xxh64_rotl(v4, 18);
+        hash = claude_xxh64_merge_round(hash, v1);
+        hash = claude_xxh64_merge_round(hash, v2);
+        hash = claude_xxh64_merge_round(hash, v3);
+        hash = claude_xxh64_merge_round(hash, v4);
+    } else {
+        hash = seed + prime5;
+    }
+
+    hash += len;
+    while (p + 8 <= end) {
+        uint64_t lane = claude_xxh64_round(0, claude_xxh64_read64(p));
+        hash ^= lane;
+        hash = claude_xxh64_rotl(hash, 27) * prime1 + prime4;
+        p += 8;
+    }
+    if (p + 4 <= end) {
+        hash ^= (uint64_t)claude_xxh64_read32(p) * prime1;
+        hash = claude_xxh64_rotl(hash, 23) * prime2 + prime3;
+        p += 4;
+    }
+    while (p < end) {
+        hash ^= (uint64_t)(*p++) * prime5;
+        hash = claude_xxh64_rotl(hash, 11) * prime1;
+    }
+    hash ^= hash >> 33;
+    hash *= prime2;
+    hash ^= hash >> 29;
+    hash *= prime3;
+    hash ^= hash >> 32;
+    return hash;
+}
+
+static void patch_claude_code_cch(char *request_json) {
+    static const char marker[] =
+        "\"system\":[{\"type\":\"text\",\"text\":\"x-anthropic-billing-header:";
+    static const char placeholder[] = "cch=00000";
+    static const char hex[] = "0123456789abcdef";
+    if (!request_json)
+        return;
+    char *billing = strstr(request_json, marker);
+    if (!billing)
+        return;
+    char *cch = strstr(billing, placeholder);
+    if (!cch || (size_t)(cch - billing) > 256)
+        return;
+
+    uint64_t value = claude_xxh64((const unsigned char *)request_json, strlen(request_json),
+                                  UINT64_C(0x4d659218e32a3268)) & UINT64_C(0xfffff);
+    for (int i = 4; i >= 0; i--) {
+        cch[4 + i] = hex[value & 0xf];
+        value >>= 4;
     }
 }
 
@@ -3651,12 +4084,30 @@ static const char *llm_anthropic_wire_model(const char *model) {
     return model;
 }
 
+/* A fresh request fact follows the last stable system cache block. It must
+ * never enter conversation history or the cached workspace prompt. */
+static void append_tool_grounding_system_block(jbuf_t *b, const char *tools_json) {
+    jbuf_t grounding;
+    jbuf_init(&grounding, 2048);
+    tool_grounding_append(&grounding, tools_json);
+    if (grounding.len > 0) {
+        jbuf_append(b, ",{\"type\":\"text\",\"text\":");
+        jbuf_append_json_str(b, grounding.data);
+        jbuf_append(b, "}");
+    }
+    jbuf_free(&grounding);
+}
+
 char *llm_build_request_for_credential(conversation_t *c, const char *model, int max_tokens,
                                        const char *credential) {
     const char *request_model = llm_effective_model(model);
     jbuf_t b;
     jbuf_init(&b, 16384);
     bool claude_code_oauth = llm_anthropic_uses_claude_code_auth(credential);
+
+    jbuf_t tool_payload;
+    jbuf_init(&tool_payload, 4096);
+    append_tools_json_filtered(&tool_payload, NULL, c, claude_code_oauth);
 
     jbuf_append(&b, "{\"model\":");
     jbuf_append_json_str(&b, llm_anthropic_wire_model(request_model));
@@ -3692,7 +4143,9 @@ char *llm_build_request_for_credential(conversation_t *c, const char *model, int
     }
     jbuf_append(&b, ",");
     jbuf_append(&b, cache_control_json_for_credential(claude_code_oauth));
-    jbuf_append(&b, "}]");
+    jbuf_append(&b, "}");
+    append_tool_grounding_system_block(&b, tool_payload.data);
+    jbuf_append(&b, "]");
 
     /* Adaptive thinking — gated by the model registry's supports_thinking
      * flag so new thinking-capable models (e.g. claude-sonnet-5) are covered
@@ -3704,7 +4157,8 @@ char *llm_build_request_for_credential(conversation_t *c, const char *model, int
         }
     }
 
-    append_tools_json_filtered(&b, NULL, c, claude_code_oauth);
+    jbuf_append(&b, tool_payload.data);
+    jbuf_free(&tool_payload);
     build_messages_json(&b, c, NULL, claude_code_oauth);
     if (claude_code_oauth) {
         const char *identity = provider_claude_code_metadata_user_id();
@@ -3819,6 +4273,12 @@ static void cache_prefix_hash_check(const char *req) {
 
 char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *session,
                                           int max_tokens, const char *credential) {
+    return llm_build_request_ex_with_tools(c, session, max_tokens, credential, NULL);
+}
+
+char *llm_build_request_ex_with_tools(conversation_t *c, session_state_t *session,
+                                     int max_tokens, const char *credential,
+                                     const char *tools_override) {
     if (!session)
         return llm_build_request_for_credential(c, DEFAULT_MODEL, max_tokens, credential);
 
@@ -3829,6 +4289,13 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
     /* Fable accepts adaptive thinking only, rejects sampling controls, and
      * refuses forced tool use. Keep interactive requests within that contract. */
     bool fable_model = request_model && strstr(request_model, "fable") != NULL;
+
+    jbuf_t tool_payload;
+    jbuf_init(&tool_payload, 4096);
+    if (tools_override)
+        jbuf_append(&tool_payload, tools_override);
+    else if (!session->direct_answer_mode)
+        append_tools_json_filtered(&tool_payload, session, c, claude_code_oauth);
 
     jbuf_append(&b, "{\"model\":");
     jbuf_append_json_str(&b, llm_anthropic_wire_model(request_model));
@@ -3890,7 +4357,10 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
     /* Cache breakpoint on last stable block — end of cached prefix */
     jbuf_append(&b, ",");
     jbuf_append(&b, cache_control_json_for_credential(claude_code_oauth));
-    jbuf_append(&b, "}]");
+    jbuf_append(&b, "}");
+    if (!session->direct_answer_mode && strcmp(session->tool_choice, "none") != 0)
+        append_tool_grounding_system_block(&b, tool_payload.data);
+    jbuf_append(&b, "]");
 
     /* Fable rejects non-default sampling parameters. */
     if (!fable_model && session->temperature >= 0) {
@@ -3936,8 +4406,8 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
         jbuf_append(&b, "]");
     }
 
-    if (!session->direct_answer_mode)
-        append_tools_json_filtered(&b, session, c, claude_code_oauth);
+    jbuf_append(&b, tool_payload.data);
+    jbuf_free(&tool_payload);
 
     /* Tool choice control */
     /* Fable rejects forced tool use. Keep tools available with the API default
@@ -3981,6 +4451,8 @@ char *llm_build_request_ex_for_credential(conversation_t *c, session_state_t *se
         session->prefill[0] = '\0';
     if (session->stop_seq[0])
         session->stop_seq[0] = '\0';
+    if (claude_code_oauth)
+        patch_claude_code_cch(b.data);
     cache_prefix_hash_check(b.data);
     return b.data;
 }
@@ -3995,13 +4467,6 @@ static size_t count_tokens_write_cb(void *ptr, size_t size, size_t nmemb, void *
     size_t total = size * nmemb;
     jbuf_append_len((jbuf_t *)userdata, (const char *)ptr, total);
     return total;
-}
-
-static bool anthropic_request_is_fable(const char *request_json) {
-    char *model = request_json ? json_get_str(request_json, "model") : NULL;
-    bool fable = model && strstr(model, "fable") != NULL;
-    free(model);
-    return fable;
 }
 
 int llm_count_tokens(const char *api_key, const char *request_json) {
@@ -4023,9 +4488,7 @@ int llm_count_tokens(const char *api_key, const char *request_json) {
     hdrs = curl_slist_append(hdrs, ver);
     char beta[768];
     if (llm_anthropic_uses_claude_code_auth(api_key)) {
-        bool fable = anthropic_request_is_fable(request_json);
-        snprintf(beta, sizeof(beta), "anthropic-beta: %s%s%s", CLAUDE_CODE_OAUTH_BETAS,
-                 fable ? "," : "", fable ? CLAUDE_FABLE_FALLBACK_CREDIT_BETA : "");
+        snprintf(beta, sizeof(beta), "anthropic-beta: %s", CLAUDE_CODE_OAUTH_BETAS);
     } else {
         snprintf(beta, sizeof(beta), "anthropic-beta: %s", ANTHROPIC_BETAS);
     }
@@ -4087,8 +4550,10 @@ typedef struct {
     void *cb_ctx;
 
     /* SSE line buffer */
+    provider_event_attempt_t *event_attempt;
     jbuf_t line_buf;
     bool got_error;
+    bool response_started, message_stopped;
     bool credit_too_low; /* 402 / credit balance too low / insufficient funds */
     char *error_msg;
     time_t credit_reset_at;
@@ -4578,6 +5043,7 @@ bool llm_repdet_text_is_degenerate(const char *text, bool subagent, char *diag, 
    the stream heartbeat with download activity information. */
 static int stream_progress_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
                               curl_off_t ultotal, curl_off_t ulnow) {
+    (void)swarm_progress_tick();
     sse_state_t *s = (sse_state_t *)clientp;
     (void)dltotal;
     (void)ultotal;
@@ -4669,12 +5135,44 @@ static void sse_finalize_block(sse_state_t *s) {
     s->current_index = -1;
 }
 
+static void sse_protocol_error(sse_state_t *s, const char *reason, const char *message) {
+    if (s->got_error) return;
+    s->got_error = true;
+    free(s->stop_reason);
+    s->stop_reason = safe_strdup(reason);
+    free(s->error_msg);
+    s->error_msg = safe_strdup(message);
+}
+
+static bool sse_validate_completed_turn(sse_state_t *s) {
+    if (!s->message_stopped || !s->stop_reason || s->current_index >= 0)
+        sse_protocol_error(s, "incomplete_stream", "stream ended before message_stop or a content block completed");
+    for (int i = 0; i < s->block_count && !s->got_error; i++) {
+        content_block_t *b = &s->blocks[i];
+        if (!b->type || strcmp(b->type, "tool_use")) continue;
+        const char *input = b->tool_input ? b->tool_input : "";
+        while (isspace((unsigned char)*input)) input++;
+        if (!b->tool_name || !b->tool_name[0] || !b->tool_id || !b->tool_id[0] ||
+            *input != '{' || !json_is_valid_container(input) ||
+            !s->stop_reason || strcmp(s->stop_reason, "tool_use"))
+            sse_protocol_error(s, "invalid_tool_call", "tool call ended with incomplete metadata, invalid arguments or no tool_use stop reason");
+    }
+    return !s->got_error;
+}
+
 static void sse_handle_event(sse_state_t *s, const char *data) {
+    if (event_stream_active() &&
+        !event_stream_emit("provider", "provider.anthropic.event", data)) {
+        g_interrupted = 1;
+        sse_protocol_error(s, "audit_failure", "event journal unavailable");
+        return;
+    }
     char *event_type = json_get_str(data, "type");
     if (!event_type)
         return;
 
     if (strcmp(event_type, "message_start") == 0) {
+        s->response_started = true;
         /* Extract usage from message.usage */
         char *msg = json_get_raw(data, "message");
         if (msg) {
@@ -4690,6 +5188,9 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
             free(msg);
         }
     } else if (strcmp(event_type, "content_block_start") == 0) {
+        s->response_started = true;
+        if (s->current_index >= 0 || s->message_stopped)
+            sse_protocol_error(s, "incomplete_stream", "content block started before its predecessor completed");
         int index = json_get_int(data, "index", 0);
         s->current_index = index;
 
@@ -4759,6 +5260,7 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
             free(cb_raw);
         }
     } else if (strcmp(event_type, "content_block_delta") == 0) {
+        s->response_started = true;
         char *delta_raw = json_get_raw(data, "delta");
         if (delta_raw) {
             char *delta_type = json_get_str(delta_raw, "type");
@@ -4860,6 +5362,8 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
                 s->usage.cache_read_input_tokens = cr;
             free(usage_raw);
         }
+    } else if (strcmp(event_type, "message_stop") == 0) {
+        s->message_stopped = true;
     } else if (strcmp(event_type, "error") == 0) {
         s->got_error = true;
         {
@@ -4885,14 +5389,15 @@ static void sse_handle_event(sse_state_t *s, const char *data) {
         if (!s->credit_too_low && provider_msg_is_credit_too_low(data))
             s->credit_too_low = true;
     }
-    /* message_stop, ping — ignored */
+    /* ping and unknown extension events do not complete a turn. */
 
     free(event_type);
 }
 
 static void sse_process_line(sse_state_t *s, const char *line) {
-    if (strncmp(line, "data: ", 6) == 0) {
-        const char *json_data = line + 6;
+    if (strncmp(line, "data:", 5) == 0) {
+        const char *json_data = line + 5;
+        if (*json_data == ' ') json_data++;
         if (strcmp(json_data, "[DONE]") == 0)
             return;
         sse_handle_event(s, json_data);
@@ -4905,6 +5410,7 @@ static size_t stream_write_cb(void *ptr, size_t size, size_t nmemb, void *userda
     size_t total = size * nmemb;
     sse_state_t *s = (sse_state_t *)userdata;
 
+    if (!provider_event_body(s->event_attempt, ptr, total)) return 0;
     if (g_interrupted || s->repdet_tripped)
         return 0;
 
@@ -4912,24 +5418,37 @@ static size_t stream_write_cb(void *ptr, size_t size, size_t nmemb, void *userda
     if (g_stream_heartbeat)
         tui_stream_heartbeat_recv(g_stream_heartbeat, total);
 
-    /* Append contiguous payload runs instead of growing the line buffer one
-     * byte at a time. Large SSE deltas otherwise cause thousands of calls. */
+    /* Scan bounded spans using libc's vectorized delimiter search. Checking
+     * the volatile cancellation flags for every payload byte defeats bulk
+     * scanning; one check per 4 KiB span/event keeps cancellation responsive. */
     const char *p = (const char *)ptr;
-    size_t start = 0;
-    for (size_t i = 0; i <= total; i++) {
+    size_t offset = 0;
+    while (offset < total) {
         if (g_interrupted || s->repdet_tripped)
             return 0;
-        if (i == total || p[i] == '\n' || p[i] == '\r') {
-            if (i > start)
-                jbuf_append_len(&s->line_buf, p + start, i - start);
-            if (i < total && p[i] == '\n' && s->line_buf.len > 0) {
-                sse_process_line(s, s->line_buf.data);
-                jbuf_reset(&s->line_buf);
-            }
-            start = i + 1;
+        size_t span = total - offset;
+        if (span > 4096)
+            span = 4096;
+        const char *start = p + offset;
+        const char *newline = memchr(start, '\n', span);
+        const char *end = newline ? newline : start + span;
+        /* Preserve the existing handling of CRLF and lone CR, including
+         * delimiters split between transport callbacks. */
+        const char *run = start;
+        while (run < end) {
+            const char *cr = memchr(run, '\r', (size_t)(end - run));
+            const char *stop = cr ? cr : end;
+            if (stop > run)
+                jbuf_append_len(&s->line_buf, run, (size_t)(stop - run));
+            run = cr ? cr + 1 : end;
+        }
+        offset += (size_t)(end - start) + (newline ? 1 : 0);
+        if (newline && s->line_buf.len > 0) {
+            sse_process_line(s, s->line_buf.data);
+            jbuf_reset(&s->line_buf);
         }
     }
-    return total;
+    return (g_interrupted || s->repdet_tripped) ? 0 : total;
 }
 
 static size_t stream_header_cb(char *buffer, size_t size, size_t nmemb, void *userdata) {
@@ -4946,7 +5465,8 @@ static size_t stream_header_cb(char *buffer, size_t size, size_t nmemb, void *us
 }
 
 /* Helper: build curl headers for API request */
-static struct curl_slist *build_api_headers(const char *api_key, const char *request_json) {
+struct curl_slist *llm_build_anthropic_headers(const char *api_key, const char *request_json) {
+    (void)request_json;
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
     bool claude_code_oauth = llm_anthropic_uses_claude_code_auth(api_key);
@@ -4963,9 +5483,7 @@ static struct curl_slist *build_api_headers(const char *api_key, const char *req
     hdrs = curl_slist_append(hdrs, ver);
     char beta[768];
     if (claude_code_oauth) {
-        bool fable = anthropic_request_is_fable(request_json);
-        snprintf(beta, sizeof(beta), "anthropic-beta: %s%s%s", CLAUDE_CODE_OAUTH_BETAS,
-                 fable ? "," : "", fable ? CLAUDE_FABLE_FALLBACK_CREDIT_BETA : "");
+        snprintf(beta, sizeof(beta), "anthropic-beta: %s", CLAUDE_CODE_OAUTH_BETAS);
     } else {
         snprintf(beta, sizeof(beta), "anthropic-beta: %s", ANTHROPIC_BETAS);
     }
@@ -4973,7 +5491,7 @@ static struct curl_slist *build_api_headers(const char *api_key, const char *req
     if (claude_code_oauth) {
         char user_agent[256];
         snprintf(user_agent, sizeof(user_agent),
-                 "User-Agent: claude-cli/%s (external, sdk-cli)",
+                 "User-Agent: claude-cli/%s (external, cli)",
                  claude_code_version());
         hdrs = curl_slist_append(hdrs, user_agent);
         char session_header[96];
@@ -4982,9 +5500,17 @@ static struct curl_slist *build_api_headers(const char *api_key, const char *req
         hdrs = curl_slist_append(hdrs, session_header);
         hdrs = curl_slist_append(hdrs, "anthropic-dangerous-direct-browser-access: true");
         hdrs = curl_slist_append(hdrs, "x-app: cli");
+        char request_id[64];
+        char request_uuid[37];
+        uuid_v4(request_uuid);
+        snprintf(request_id, sizeof(request_id), "x-client-request-id: %s", request_uuid);
+        hdrs = curl_slist_append(hdrs, request_id);
+        hdrs = curl_slist_append(hdrs, "Connection: keep-alive");
+        hdrs = curl_slist_append(hdrs, "Accept-Encoding: gzip, deflate, br, zstd");
         hdrs = curl_slist_append(hdrs, "X-Stainless-Retry-Count: 0");
         hdrs = curl_slist_append(hdrs, "X-Stainless-Runtime-Version: v26.3.0");
-        hdrs = curl_slist_append(hdrs, "X-Stainless-Package-Version: 0.94.0");
+        hdrs = curl_slist_append(hdrs,
+                                 "X-Stainless-Package-Version: " CLAUDE_CODE_OAUTH_SDK_VERSION);
         hdrs = curl_slist_append(hdrs, "X-Stainless-Runtime: node");
         hdrs = curl_slist_append(hdrs, "X-Stainless-Lang: js");
 #if defined(__aarch64__) || defined(__arm64__)
@@ -4996,8 +5522,12 @@ static struct curl_slist *build_api_headers(const char *api_key, const char *req
 #endif
 #if defined(__APPLE__)
         hdrs = curl_slist_append(hdrs, "X-Stainless-OS: MacOS");
+#elif defined(_WIN32)
+        hdrs = curl_slist_append(hdrs, "X-Stainless-OS: Windows");
 #elif defined(__linux__)
         hdrs = curl_slist_append(hdrs, "X-Stainless-OS: Linux");
+#elif defined(__FreeBSD__)
+        hdrs = curl_slist_append(hdrs, "X-Stainless-OS: FreeBSD");
 #else
         hdrs = curl_slist_append(hdrs, "X-Stainless-OS: Other::unknown");
 #endif
@@ -5008,10 +5538,15 @@ static struct curl_slist *build_api_headers(const char *api_key, const char *req
 }
 
 /* Helper: configure curl handle for streaming API call */
-static void setup_curl_opts(CURL *curl, struct curl_slist *hdrs, const char *request_json,
-                            sse_state_t *st) {
+static void setup_curl_opts(CURL *curl, const char *api_url, struct curl_slist *hdrs,
+                            const char *request_json, sse_state_t *st) {
     dsco_http_pool_apply(curl);
-    curl_easy_setopt(curl, CURLOPT_URL, API_URL_ANTHROPIC);
+    /* OAuth fingerprinting advertises the same compression set as Cowork.
+     * CURLOPT_ACCEPT_ENCODING also enables libcurl's transparent decoder so
+     * the SSE parser never sees gzip/br/zstd bytes. */
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "gzip, deflate, br, zstd");
+    curl_easy_setopt(curl, CURLOPT_URL,
+                     (api_url && api_url[0]) ? api_url : API_URL_ANTHROPIC);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request_json);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, stream_write_cb);
@@ -5052,6 +5587,8 @@ static void sse_state_reset_for_retry(sse_state_t *s) {
     s->current_index = -1;
     s->in_thinking = false;
     s->got_error = false;
+    s->response_started = false;
+    s->message_stopped = false;
     free(s->error_msg);
     s->error_msg = NULL;
     free(s->stop_reason);
@@ -5068,8 +5605,18 @@ static void sse_state_reset_for_retry(sse_state_t *s) {
     memset(&s->usage, 0, sizeof(s->usage));
 }
 
-static stream_result_t llm_stream_with_curl(CURL *reusable_curl, const char *api_key,
-                                            const char *request_json,
+static bool sse_retry_pause(int milliseconds) {
+    while (milliseconds > 0 && !g_interrupted) {
+        int step = milliseconds < 50 ? milliseconds : 50;
+        struct timespec wait = {.tv_nsec = (long)step * 1000000L};
+        while (nanosleep(&wait, &wait) < 0 && errno == EINTR && !g_interrupted) {}
+        milliseconds -= step;
+    }
+    return !g_interrupted;
+}
+
+static stream_result_t llm_stream_with_curl(CURL *reusable_curl, const char *api_url,
+                                            const char *api_key, const char *request_json,
                                             stream_text_cb text_cb,
                                             stream_tool_start_cb tool_cb,
                                             stream_tool_arg_delta_cb tool_delta_cb,
@@ -5079,6 +5626,8 @@ static stream_result_t llm_stream_with_curl(CURL *reusable_curl, const char *api
 
     /* Init SSE state */
     sse_state_t state = {0};
+    provider_event_attempt_t event_attempt = {0};
+    state.event_attempt = &event_attempt;
     state.current_index = -1;
     state.text_cb = text_cb;
     state.tool_cb = tool_cb;
@@ -5093,10 +5642,6 @@ static stream_result_t llm_stream_with_curl(CURL *reusable_curl, const char *api
         const char *subagent = getenv("DSCO_SUBAGENT");
         state.repdet_subagent = subagent && subagent[0] && strcmp(subagent, "0") != 0;
     }
-
-    /* Streaming checkpoint for retry resilience */
-    stream_checkpoint_t checkpoint;
-    stream_checkpoint_init(&checkpoint);
 
     /* Retry loop with exponential backoff */
     /* Configurable via DSCO_LLM_MAX_RETRIES and DSCO_LLM_RETRY_DELAY_MS */
@@ -5114,6 +5659,13 @@ static stream_result_t llm_stream_with_curl(CURL *reusable_curl, const char *api
         if (v >= 100 && v <= 30000)
             retry_delay_ms = v;
     }
+    char effective_api_key_storage[4096];
+    snprintf(effective_api_key_storage, sizeof(effective_api_key_storage), "%s",
+             api_key ? api_key : "");
+    const char *effective_api_key = effective_api_key_storage;
+    const char *event_provider = api_url && strcmp(api_url, API_URL_ANTHROPIC) == 0
+                                   ? "anthropic" : "anthropic-compatible";
+    bool oauth_reauth_attempted = false;
     CURLcode res = CURLE_OK;
     long http_code = 0;
 
@@ -5127,25 +5679,14 @@ static stream_result_t llm_stream_with_curl(CURL *reusable_curl, const char *api
                 res = CURLE_ABORTED_BY_CALLBACK;
                 break;
             }
-            /* Save completed blocks before retry */
-            if (state.block_count > 0) {
-                stream_checkpoint_save(&checkpoint, state.blocks, state.block_count,
-                                       state.text_buf.data, state.input_buf.data, &state.usage,
-                                       NULL);
-            }
             fprintf(stderr,
-                    "  \033[33m\xe2\x9f\xb3 retry %d/%d (waiting %dms, %d blocks "
-                    "checkpointed)\033[0m\n",
-                    attempt, max_retries, retry_delay_ms, checkpoint.saved_count);
-            if (usleep((useconds_t)retry_delay_ms * 1000) != 0 && errno == EINTR && g_interrupted) {
+                    "  \033[33m\xe2\x9f\xb3 retry %d/%d (waiting %dms)\033[0m\n",
+                    attempt, max_retries, retry_delay_ms);
+            if (!sse_retry_pause(retry_delay_ms)) {
                 res = CURLE_ABORTED_BY_CALLBACK;
                 break;
             }
-            if (g_interrupted) {
-                res = CURLE_ABORTED_BY_CALLBACK;
-                break;
-            }
-            retry_delay_ms *= 2;
+            retry_delay_ms = retry_delay_ms < 15000 ? retry_delay_ms * 2 : 30000;
             sse_state_reset_for_retry(&state);
         }
 
@@ -5159,10 +5700,16 @@ static stream_result_t llm_stream_with_curl(CURL *reusable_curl, const char *api
         if (reusable_curl)
             curl_easy_reset(curl);
 
-        struct curl_slist *headers = build_api_headers(api_key, request_json);
-        setup_curl_opts(curl, headers, request_json, &state);
+        struct curl_slist *headers =
+            llm_build_anthropic_headers(effective_api_key, request_json);
+        setup_curl_opts(curl, api_url, headers, request_json, &state);
 
-        res = curl_easy_perform(curl);
+        bool audit_started = provider_event_start(&event_attempt, event_provider, request_json, api_url);
+        res = audit_started ? curl_easy_perform(curl) : CURLE_ABORTED_BY_CALLBACK;
+        CURLcode raw_res = res;
+        if (state.line_buf.len > 0 && !g_interrupted) {
+            sse_process_line(&state, state.line_buf.data);
+        }
         if (res != CURLE_OK && (g_interrupted || state.repdet_tripped)) {
             res = CURLE_ABORTED_BY_CALLBACK;
         }
@@ -5191,9 +5738,30 @@ static stream_result_t llm_stream_with_curl(CURL *reusable_curl, const char *api
         curl_slist_free_all(headers);
         if (!reusable_curl)
             curl_easy_cleanup(curl);
+        if (!provider_event_finish(&event_attempt, (int)raw_res, (int)res, http_code,
+                                    state.message_stopped, state.got_error, state.error_msg)) {
+            res = CURLE_ABORTED_BY_CALLBACK;
+        }
+
+        /* Anthropic can revoke a cached access token before its local expiry
+         * when Claude Code rotates the grant. Refresh/re-import once and replay
+         * the same idempotent Messages request with the replacement bearer. */
+        bool oauth_reauthenticated = false;
+        if (res == CURLE_OK && http_code == 401 && !oauth_reauth_attempted &&
+            llm_anthropic_uses_claude_code_auth(effective_api_key)) {
+            oauth_reauth_attempted = true;
+            if (provider_claude_code_refresh_credentials()) {
+                const char *fresh = provider_resolve_request_api_key("anthropic", NULL);
+                if (fresh && fresh[0] && llm_anthropic_uses_claude_code_auth(fresh)) {
+                    snprintf(effective_api_key_storage, sizeof(effective_api_key_storage), "%s",
+                             fresh);
+                    oauth_reauthenticated = true;
+                }
+            }
+        }
 
         /* Determine if we should retry */
-        bool should_retry = false;
+        bool should_retry = oauth_reauthenticated;
         if (res == CURLE_OPERATION_TIMEDOUT || res == CURLE_COULDNT_CONNECT) {
             should_retry = true;
         } else if (res == CURLE_OK && (http_code == 429 || http_code == 500 || http_code == 502 ||
@@ -5202,36 +5770,25 @@ static stream_result_t llm_stream_with_curl(CURL *reusable_curl, const char *api
         }
 
         /* Don't retry user interrupts or if this was the last attempt */
-        if (g_interrupted || res == CURLE_ABORTED_BY_CALLBACK || !should_retry ||
+        if (g_interrupted || state.response_started || res == CURLE_ABORTED_BY_CALLBACK || !should_retry ||
             attempt == max_retries) {
+            break;
+        }
+        if (!provider_event_retry(event_provider, request_json,
+                oauth_reauthenticated ? "credential_refreshed_after_401" :
+                res != CURLE_OK ? "transport_failure" : "retryable_http_status", retry_delay_ms)) {
+            res = CURLE_ABORTED_BY_CALLBACK;
             break;
         }
     }
 
     result.http_status = (int)http_code;
 
-    /* Restore checkpointed blocks if current attempt yielded nothing but
-       we had saved blocks from a prior successful partial stream */
-    if (state.block_count == 0 && checkpoint.saved_count > 0) {
-        for (int i = 0; i < checkpoint.saved_count && i < MAX_CONTENT_BLOCKS; i++) {
-            state.blocks[i].type = safe_strdup(checkpoint.saved_blocks[i].type);
-            state.blocks[i].text = safe_strdup(checkpoint.saved_blocks[i].text);
-            state.blocks[i].tool_name = safe_strdup(checkpoint.saved_blocks[i].tool_name);
-            state.blocks[i].tool_id = safe_strdup(checkpoint.saved_blocks[i].tool_id);
-            state.blocks[i].tool_input = safe_strdup(checkpoint.saved_blocks[i].tool_input);
-        }
-        state.block_count = checkpoint.saved_count;
-        /* Merge usage */
-        state.usage.input_tokens += checkpoint.saved_usage.input_tokens;
-        state.usage.output_tokens += checkpoint.saved_usage.output_tokens;
-    }
-    stream_checkpoint_free(&checkpoint);
-
     if (res == CURLE_ABORTED_BY_CALLBACK) {
-        /* If aborted due to repetition detection, still mark ok=true so the
-           truncated response can be added to history, but the content is cleaned.
-           If aborted by user interrupt (Ctrl+C), treat as ok if we got content. */
-        result.ok = (state.block_count > 0 || state.text_buf.len > 0);
+        result.ok = false;
+        sse_protocol_error(&state, g_interrupted ? "interrupted" : "incomplete_stream",
+                           g_interrupted ? "stream interrupted; partial output retained" :
+                                           "degenerate stream stopped; partial output retained");
     } else if (res != CURLE_OK) {
         DSCO_SET_ERR(DSCO_ERR_NET, "stream failed: %s (HTTP %ld)", curl_easy_strerror(res),
                      http_code);
@@ -5305,7 +5862,9 @@ static stream_result_t llm_stream_with_curl(CURL *reusable_curl, const char *api
         }
         result.ok = false;
     } else {
-        result.ok = true;
+        result.ok = sse_validate_completed_turn(&state);
+        if (!result.ok)
+            fprintf(stderr, "dsco: incomplete stream: %s\n", state.error_msg ? state.error_msg : "missing terminal event");
     }
 
     /* Propagate credit_too_low as a stop_reason sentinel so agent.c can log
@@ -5371,8 +5930,8 @@ stream_result_t llm_stream(const char *api_key, const char *request_json,
                            stream_text_cb text_cb, stream_tool_start_cb tool_cb,
                            stream_tool_arg_delta_cb tool_delta_cb,
                            stream_thinking_cb thinking_cb, void *cb_ctx) {
-    return llm_stream_with_curl(NULL, api_key, request_json, text_cb, tool_cb, tool_delta_cb,
-                                thinking_cb, cb_ctx);
+    return llm_stream_with_curl(NULL, API_URL_ANTHROPIC, api_key, request_json, text_cb, tool_cb,
+                                tool_delta_cb, thinking_cb, cb_ctx);
 }
 
 stream_result_t llm_stream_reuse(CURL *curl, const char *api_key,
@@ -5380,6 +5939,15 @@ stream_result_t llm_stream_reuse(CURL *curl, const char *api_key,
                                  stream_tool_start_cb tool_cb,
                                  stream_tool_arg_delta_cb tool_delta_cb,
                                  stream_thinking_cb thinking_cb, void *cb_ctx) {
-    return llm_stream_with_curl(curl, api_key, request_json, text_cb, tool_cb, tool_delta_cb,
-                                thinking_cb, cb_ctx);
+    return llm_stream_with_curl(curl, API_URL_ANTHROPIC, api_key, request_json, text_cb, tool_cb,
+                                tool_delta_cb, thinking_cb, cb_ctx);
+}
+
+stream_result_t llm_stream_reuse_url(CURL *curl, const char *api_url,
+                                     const char *api_key, const char *request_json,
+                                     stream_text_cb text_cb, stream_tool_start_cb tool_cb,
+                                     stream_tool_arg_delta_cb tool_delta_cb,
+                                     stream_thinking_cb thinking_cb, void *cb_ctx) {
+    return llm_stream_with_curl(curl, api_url, api_key, request_json, text_cb, tool_cb,
+                                tool_delta_cb, thinking_cb, cb_ctx);
 }

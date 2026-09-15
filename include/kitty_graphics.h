@@ -51,8 +51,8 @@ bool kitty_graphics_send_pixels_ex(FILE *out, const char *control,
                                    kitty_graphics_send_stats_t *stats);
 
 /* Edit a rectangle in an existing Kitty animation frame. The payload is
- * always tightly packed RGB24. Re-select the frame after all of its dirty
- * rectangles have been sent to make the edits visible atomically. */
+ * always tightly packed RGB24. Edits to the current frame are visible as they
+ * arrive; selecting that same frame does not provide an atomic commit. */
 bool kitty_graphics_send_rgb_patch(FILE *out, uint32_t image_id,
                                    uint32_t frame,
                                    int x, int y, int width, int height,

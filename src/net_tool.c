@@ -13,6 +13,9 @@
  */
 
 #include "tools.h"
+#include "fleet_bridge.h"
+#include <fcntl.h>
+#include <pthread.h>
 #include "json_util.h"
 #include "audit_log.h"
 #include <stdio.h>
@@ -56,7 +59,6 @@ static const char *home_dir(void) {
 }
 
 /* Run a shell command, capture stdout+stderr, return malloc'd string */
-static bool net_bridge_fanout(const char *input, char *result, size_t rlen);
 
 static char *shell_capture(const char *cmd) {
     FILE *fp = popen(cmd, "r");
@@ -366,52 +368,6 @@ static bool net_bridge_fleet(const char *input, char *result, size_t rlen) {
     return true;
 }
 
-/* Execute command on bridge peer via connect.sh exec */
-static bool net_bridge_exec(const char *input, char *result, size_t rlen) {
-    char *peer = json_get_str(input, "peer");
-    char *cmd = json_get_str(input, "cmd");
-    if (!peer || !cmd) {
-        free(peer);
-        free(cmd);
-        snprintf(result, rlen, "{\"error\":\"peer and cmd required\"}");
-        return false;
-    }
-
-    /* Use fleet.sh on <peer> */
-    char sh[2048];
-    snprintf(sh, sizeof(sh), "%s/bridge/plugins/fleet.sh on %s %s 2>&1", home_dir(), peer, cmd);
-
-    char *out = shell_capture(sh);
-    snprintf(result, rlen, "{\"peer\":\"%s\",\"cmd\":\"%s\",\"output\":%s}", peer, cmd,
-             out && out[0] ? "\"see raw\"" : "\"\"");
-
-    if (out && strlen(out) + 64 < rlen) {
-        /* Escape and embed */
-        char esc[4096] = {0};
-        size_t ei = 0;
-        for (size_t i = 0; out[i] && ei < sizeof(esc) - 4; i++) {
-            if (out[i] == '"') {
-                esc[ei++] = '\\';
-                esc[ei++] = '"';
-            } else if (out[i] == '\\') {
-                esc[ei++] = '\\';
-                esc[ei++] = '\\';
-            } else if (out[i] == '\n') {
-                esc[ei++] = '\\';
-                esc[ei++] = 'n';
-            } else if (out[i] == '\r') {
-            } else
-                esc[ei++] = out[i];
-        }
-        snprintf(result, rlen, "{\"peer\":\"%s\",\"cmd\":\"%s\",\"output\":\"%s\"}", peer, cmd,
-                 esc);
-    }
-    free(out);
-    free(peer);
-    free(cmd);
-    return true;
-}
-
 /* Drop a .msg file into ~/bridge/outbox */
 static bool net_bridge_send(const char *input, char *result, size_t rlen) {
     char *msg = json_get_str(input, "message");
@@ -549,13 +505,17 @@ bool tool_net_dispatch(const char *input, char *result, size_t rlen) {
                  "\"http/post\",\"http/status\","
                  "\"bridge/fleet\",\"bridge/exec\",\"bridge/fanout\",\"bridge/send\","
                  "\"bridge/bus_put\",\"bridge/bus_get\","
-                 "\"remote\""
+                 "\"remote\",\"fleet/status\",\"fleet/exec\",\"fleet/burst\","
+                 "\"fleet/probe\",\"fleet/replication\",\"fleet/replicate\",\"fleet/swarm\""
                  "]}");
         return false;
     }
 
     bool ok = false;
-    if (strcmp(action, "mesh/status") == 0)
+    if (strncmp(action, "fleet/", 6) == 0 || !strcmp(action, "bridge/exec") ||
+        !strcmp(action, "bridge/fanout"))
+        ok = fleet_bridge_execute(input, result, rlen);
+    else if (strcmp(action, "mesh/status") == 0)
         ok = net_mesh_status(input, result, rlen);
     else if (strcmp(action, "mesh/peers") == 0)
         ok = net_mesh_peers(input, result, rlen);
@@ -571,10 +531,6 @@ bool tool_net_dispatch(const char *input, char *result, size_t rlen) {
         ok = net_http_status(input, result, rlen);
     else if (strcmp(action, "bridge/fleet") == 0)
         ok = net_bridge_fleet(input, result, rlen);
-    else if (strcmp(action, "bridge/exec") == 0)
-        ok = net_bridge_exec(input, result, rlen);
-    else if (strcmp(action, "bridge/fanout") == 0)
-        ok = net_bridge_fanout(input, result, rlen);
     else if (strcmp(action, "bridge/send") == 0)
         ok = net_bridge_send(input, result, rlen);
     else if (strcmp(action, "bridge/bus_put") == 0)
@@ -589,362 +545,6 @@ bool tool_net_dispatch(const char *input, char *result, size_t rlen) {
 
     free(action);
     return ok;
-}
-
-/* ══════════════════════════════════════════════════════════════════════════
- * NATIVE FLEET FANOUT  (bridge/fanout)
- *   Run one command across every fleet host concurrently and write a durable
- *   per-host RESULT.json envelope so a partial-failure run is replayable and
- *   inspectable. This is the "orchestrate thousands of servers" primitive the
- *   systems-agent needs — a durable workflow, not a fire-and-forget loop.
- * ══════════════════════════════════════════════════════════════════════════ */
-
-#include <fcntl.h>
-#include <pthread.h>
-#include <stdatomic.h>
-
-#define FANOUT_MAX_HOSTS 4096
-
-typedef enum {
-    FANOUT_TRANSPORT_FLEET = 0, /* fleet.sh over SSH */
-    FANOUT_TRANSPORT_MESH,      /* encrypted mesh: remote `bash` tool via netsrv */
-} fanout_transport_t;
-
-typedef struct {
-    char host[64];
-    char addr[128]; /* resolved ADDR for mesh transport */
-    char cmd[2048];
-    char run_dir[512];
-    fanout_transport_t transport;
-    int mesh_port;
-    int exit_code;
-    double duration_ms;
-    int ok; /* 1 = command ran (exit==0), 0 = failed */
-} fanout_job_t;
-
-/* Parse a "__DSCO_EXIT=<n>" trailer emitted by the remote command, strip it
-   from the captured output in place, and return the exit code (or -1 if absent
-   → treated as unknown but non-fatal for back-compat). */
-static int fanout_parse_exit_trailer(char *out) {
-    if (!out)
-        return -1;
-    char *marker = NULL, *p = out;
-    /* find the LAST occurrence so command output can't spoof an earlier one */
-    while ((p = strstr(p, "__DSCO_EXIT=")) != NULL) {
-        marker = p;
-        p += 12;
-    }
-    if (!marker)
-        return -1;
-    char *num = marker + 12;
-    if (!isdigit((unsigned char)*num))
-        return -1;
-    errno = 0;
-    char *end = NULL;
-    long code = strtol(num, &end, 10);
-    if (errno || end == num || code < 0 || code > 255 || (*end && *end != '\n' && *end != '\r'))
-        return -1;
-    /* trim the marker (and a preceding newline if present) from the output */
-    char *cut = marker;
-    if (cut > out && cut[-1] == '\n')
-        cut--;
-    *cut = '\0';
-    return (int)code;
-}
-
-static bool fanout_host_safe(const char *s) {
-    if (!s || !*s)
-        return false;
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
-        if (!(isalnum(*p) || *p == '.' || *p == '_' || *p == '-'))
-            return false;
-    }
-    return true;
-}
-
-static bool fanout_shell_single_quote(const char *src, char *dst, size_t dlen) {
-    if (!src || !dst || dlen < 3)
-        return false;
-    size_t o = 0;
-    dst[o++] = '\'';
-    for (const unsigned char *p = (const unsigned char *)src; *p; p++) {
-        if (*p == '\'') {
-            if (o + 4 >= dlen)
-                return false;
-            memcpy(dst + o, "'\\''", 4);
-            o += 4;
-        } else {
-            if (o + 1 >= dlen)
-                return false;
-            dst[o++] = (char)*p;
-        }
-    }
-    if (o + 1 >= dlen)
-        return false;
-    dst[o++] = '\'';
-    dst[o] = '\0';
-    return true;
-}
-
-static double fanout_now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
-}
-
-/* Minimal JSON string escaper into a fixed buffer (truncates safely). */
-static void fanout_json_escape(const char *in, char *out, size_t out_len) {
-    size_t o = 0;
-    for (size_t i = 0; in && in[i] && o + 2 < out_len; i++) {
-        unsigned char c = (unsigned char)in[i];
-        if (c == '"' || c == '\\') {
-            out[o++] = '\\';
-            out[o++] = (char)c;
-        } else if (c == '\n') {
-            out[o++] = '\\';
-            out[o++] = 'n';
-        } else if (c == '\r') {
-            out[o++] = '\\';
-            out[o++] = 'r';
-        } else if (c == '\t') {
-            out[o++] = '\\';
-            out[o++] = 't';
-        } else if (c < 0x20) {
-            /* skip other control chars */
-        } else {
-            out[o++] = (char)c;
-        }
-    }
-    out[o] = '\0';
-}
-
-static _Atomic int g_fanout_next = 0;
-static fanout_job_t *g_fanout_jobs = NULL;
-static int g_fanout_count = 0;
-
-static void fanout_run_one(fanout_job_t *j) {
-    double t0 = fanout_now_ms();
-    char *out = NULL;
-
-    if (j->transport == FANOUT_TRANSPORT_MESH) {
-        /* Mesh-native path: invoke the remote `bash` tool through the native
-           TLS/HTTP server instead of SSH. This uses the same remote tool route
-           as net remote, but with structured exit capture inside the command. */
-        char esc_cmd[4096];
-        fanout_json_escape(j->cmd, esc_cmd, sizeof(esc_cmd));
-        char body[8192];
-        snprintf(body, sizeof(body),
-                 "{\"tool\":\"bash\",\"params\":{\"command\":\"( %s ); "
-                 "_rc=$?; printf '\\n__DSCO_EXIT=%%d\\n' $_rc\"}}",
-                 esc_cmd);
-        uint8_t auth[32] = {0};
-        out = netsrv_client_post(j->addr[0] ? j->addr : j->host, (uint16_t)j->mesh_port,
-                                 "/tool", body, auth, sizeof(auth), false);
-        if (!out)
-            out = strdup("__DSCO_EXIT=255\nmesh remote call failed");
-    } else {
-        /* Fleet/SSH path: append a structured exit trailer to the REMOTE command
-           so popen's lack of child exit status no longer matters. */
-        char sh[8192], quoted_cmd[6144];
-        char remote[4096];
-        snprintf(remote, sizeof(remote), "( %s ); _rc=$?; printf '\\n__DSCO_EXIT=%%d\\n' $_rc", j->cmd);
-        if (!fanout_host_safe(j->host) || !fanout_shell_single_quote(remote, quoted_cmd, sizeof(quoted_cmd))) {
-            out = strdup("__DSCO_EXIT=255\ninvalid fanout host or command too long");
-        } else {
-            snprintf(sh, sizeof(sh), "%s/bridge/plugins/fleet.sh on %s %s 2>&1",
-                     home_dir(), j->host, quoted_cmd);
-            out = shell_capture(sh);
-        }
-    }
-
-    j->duration_ms = fanout_now_ms() - t0;
-    int parsed_exit = fanout_parse_exit_trailer(out);
-    j->exit_code = parsed_exit >= 0 ? parsed_exit : (out ? 0 : 255);
-    j->ok = (j->exit_code == 0);
-
-    /* Durable per-host RESULT.json envelope (atomic tmp+rename+fsync). */
-    char esc_cmd2[4096], esc_out[8192];
-    fanout_json_escape(j->cmd, esc_cmd2, sizeof(esc_cmd2));
-    fanout_json_escape(out ? out : "", esc_out, sizeof(esc_out));
-
-    char env[16384];
-    int n = snprintf(env, sizeof(env),
-                     "{\"host\":\"%s\",\"addr\":\"%s\",\"transport\":\"%s\","
-                     "\"cmd\":\"%s\",\"exit\":%d,\"ok\":%s,"
-                     "\"duration_ms\":%.1f,\"ts\":%ld,\"output\":\"%s\"}\n",
-                     j->host, j->addr, j->transport == FANOUT_TRANSPORT_MESH ? "mesh" : "fleet",
-                     esc_cmd2, j->exit_code, j->ok ? "true" : "false", j->duration_ms,
-                     (long)time(NULL), esc_out);
-    if (n > 0) {
-        char tmp[640], final[640];
-        snprintf(final, sizeof(final), "%s/%s.json", j->run_dir, j->host);
-        snprintf(tmp, sizeof(tmp), "%s/.%s.json.tmp", j->run_dir, j->host);
-        int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (fd >= 0) {
-            ssize_t wn = write(fd, env, (size_t)n);
-            (void)wn;
-            close(fd);
-            rename(tmp, final);
-        }
-    }
-    free(out);
-}
-
-static void *fanout_worker(void *arg) {
-    (void)arg;
-    for (;;) {
-        int idx = atomic_fetch_add_explicit(&g_fanout_next, 1, memory_order_relaxed);
-        if (idx >= g_fanout_count)
-            break;
-        fanout_run_one(&g_fanout_jobs[idx]);
-    }
-    return NULL;
-}
-
-static bool net_bridge_fanout(const char *input, char *result, size_t rlen) {
-    char *cmd = json_get_str(input, "cmd");
-    if (!cmd || !cmd[0]) {
-        free(cmd);
-        snprintf(result, rlen, "{\"error\":\"cmd required\"}");
-        return false;
-    }
-    char *filter = json_get_str(input, "role"); /* optional ROLES substring filter */
-    char *transport_s = json_get_str(input, "transport"); /* fleet | mesh */
-    fanout_transport_t transport = FANOUT_TRANSPORT_FLEET;
-    if (transport_s && strcmp(transport_s, "mesh") == 0)
-        transport = FANOUT_TRANSPORT_MESH;
-    int mesh_port = json_get_int(input, "mesh_port", 7547);
-    int concurrency = json_get_int(input, "concurrency", 0);
-    if (concurrency <= 0) {
-        const char *ce = getenv("DSCO_FLEET_CONCURRENCY");
-        concurrency = ce ? atoi(ce) : 16;
-    }
-    if (concurrency < 1)
-        concurrency = 1;
-    if (concurrency > 256)
-        concurrency = 256;
-
-    /* Enumerate fleet hosts. */
-    char fleet_dir[512];
-    snprintf(fleet_dir, sizeof(fleet_dir), "%s/bridge/fleet", home_dir());
-    DIR *d = opendir(fleet_dir);
-    if (!d) {
-        free(cmd);
-        free(filter);
-        free(transport_s);
-        snprintf(result, rlen, "{\"error\":\"fleet dir not found: %s\"}", fleet_dir);
-        return false;
-    }
-
-    /* Durable run directory for this fanout. */
-    char run_dir[512];
-    long ts = (long)time(NULL);
-    snprintf(run_dir, sizeof(run_dir), "%s/bridge/fanout/%ld", home_dir(), ts);
-    {
-        char mk[600];
-        snprintf(mk, sizeof(mk), "%s/bridge/fanout", home_dir());
-        mkdir(mk, 0755);
-        mkdir(run_dir, 0755);
-    }
-
-    fanout_job_t *jobs = calloc(FANOUT_MAX_HOSTS, sizeof(fanout_job_t));
-    if (!jobs) {
-        closedir(d);
-        free(cmd);
-        free(filter);
-        free(transport_s);
-        snprintf(result, rlen, "{\"error\":\"oom\"}");
-        return false;
-    }
-    int count = 0;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL && count < FANOUT_MAX_HOSTS) {
-        size_t nl = strlen(ent->d_name);
-        if (nl < 6 || strcmp(ent->d_name + nl - 5, ".host") != 0)
-            continue;
-        char fpath[1024];
-        snprintf(fpath, sizeof(fpath), "%s/%s", fleet_dir, ent->d_name);
-        FILE *f = fopen(fpath, "r");
-        if (!f)
-            continue;
-        char name[64] = "", roles[128] = "", haddr[128] = "";
-        char line[512];
-        while (fgets(line, sizeof(line), f)) {
-            char *hash = strchr(line, '#');
-            if (hash)
-                *hash = '\0';
-            char key[64], val[256];
-            if (sscanf(line, "%63[^=]=\"%255[^\"]\"", key, val) == 2) {
-                if (strcmp(key, "NAME") == 0)
-                    snprintf(name, sizeof(name), "%s", val);
-                else if (strcmp(key, "ROLES") == 0)
-                    snprintf(roles, sizeof(roles), "%s", val);
-                else if (strcmp(key, "ADDR") == 0)
-                    snprintf(haddr, sizeof(haddr), "%s", val);
-            }
-        }
-        fclose(f);
-        if (!name[0])
-            continue;
-        if (filter && filter[0] && !strstr(roles, filter))
-            continue; /* role filter */
-        snprintf(jobs[count].host, sizeof(jobs[count].host), "%s", name);
-        snprintf(jobs[count].addr, sizeof(jobs[count].addr), "%s", haddr);
-        snprintf(jobs[count].cmd, sizeof(jobs[count].cmd), "%s", cmd);
-        snprintf(jobs[count].run_dir, sizeof(jobs[count].run_dir), "%s", run_dir);
-        jobs[count].transport = transport;
-        jobs[count].mesh_port = mesh_port;
-        count++;
-    }
-    closedir(d);
-
-    if (count == 0) {
-        free(jobs);
-        free(cmd);
-        free(filter);
-        free(transport_s);
-        snprintf(result, rlen, "{\"error\":\"no matching fleet hosts\",\"run_dir\":\"%s\"}", run_dir);
-        return false;
-    }
-
-    /* Launch bounded worker pool. */
-    if (concurrency > count)
-        concurrency = count;
-    g_fanout_jobs = jobs;
-    g_fanout_count = count;
-    atomic_store_explicit(&g_fanout_next, 0, memory_order_relaxed);
-
-    double t0 = fanout_now_ms();
-    pthread_t *threads = calloc((size_t)concurrency, sizeof(pthread_t));
-    int spawned = 0;
-    for (int i = 0; i < concurrency; i++) {
-        if (pthread_create(&threads[i], NULL, fanout_worker, NULL) == 0)
-            spawned++;
-    }
-    for (int i = 0; i < spawned; i++)
-        pthread_join(threads[i], NULL);
-    free(threads);
-    double elapsed = fanout_now_ms() - t0;
-
-    int ok_count = 0;
-    for (int i = 0; i < count; i++)
-        if (jobs[i].ok)
-            ok_count++;
-
-    snprintf(result, rlen,
-             "{\"fanout\":true,\"transport\":\"%s\",\"hosts\":%d,\"ok\":%d,\"failed\":%d,"
-             "\"concurrency\":%d,\"elapsed_ms\":%.1f,\"run_dir\":\"%s\",\"note\":\"per-host "
-             "RESULT.json envelopes written; replayable\"}",
-             transport == FANOUT_TRANSPORT_MESH ? "mesh" : "fleet", count, ok_count,
-             count - ok_count, concurrency, elapsed, run_dir);
-
-    g_fanout_jobs = NULL;
-    g_fanout_count = 0;
-    free(jobs);
-    free(cmd);
-    free(filter);
-    free(transport_s);
-    return true;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -973,32 +573,36 @@ static netsrv_response_t route_health(const netsrv_request_t *req, void *ctx) {
 /* Minimal remote tool invocation: POST /tool {"tool":"name","params":{...}} */
 static netsrv_response_t route_tool(const netsrv_request_t *req, void *ctx) {
     (void)ctx;
-    if (!req->body || req->body_len == 0) {
-        return (netsrv_response_t){
-            .status = 400, .body = (char *)"{\"error\":\"empty body\"}", .heap_body = false};
-    }
-
-    /* Extract tool name and params from body JSON */
+    json_view_t *request = req->body ? json_view_open(req->body) : NULL;
+    if (!request) return (netsrv_response_t){
+        .status = 400, .body = (char *)"{\"ok\":false,\"error\":\"JSON object required\"}"};
     char *tool_name = json_get_str(req->body, "tool");
-    char *params_raw = json_get_str(req->body, "params");
-    if (!tool_name) {
+    char *params_raw = json_get_raw(req->body, "params");
+    if (params_raw && params_raw[0] == '"') {
         free(params_raw);
-        return (netsrv_response_t){
-            .status = 400, .body = (char *)"{\"error\":\"tool required\"}", .heap_body = false};
+        params_raw = json_get_str(req->body, "params");
     }
-
-    /* Look up tool in global registry */
-    char result_buf[128 * 1024];
-    result_buf[0] = '\0';
-    bool ok = tools_invoke_by_name(tool_name, params_raw ? params_raw : "{}", result_buf,
-                                   sizeof(result_buf));
-    (void)ok;
-
-    free(tool_name);
-    free(params_raw);
-
-    char *body = strdup(result_buf[0] ? result_buf : "{\"ok\":true}");
-    return (netsrv_response_t){.status = 200, .body = body, .heap_body = true};
+    json_view_t *params = json_view_open(params_raw ? params_raw : "{}");
+    bool valid = tool_name && *tool_name && params;
+    json_view_close(params);
+    json_view_close(request);
+    if (!valid) {
+        free(tool_name); free(params_raw);
+        return (netsrv_response_t){.status = 400,
+            .body = (char *)"{\"ok\":false,\"error\":\"tool and object params required\"}"};
+    }
+    char result_buf[128 * 1024] = {0};
+    bool ok = tools_invoke_by_name(tool_name, params_raw ? params_raw : "{}",
+                                   result_buf, sizeof(result_buf));
+    free(tool_name); free(params_raw);
+    jbuf_t response;
+    jbuf_init(&response, 256);
+    jbuf_append(&response, ok ? "{\"ok\":true,\"result\":" : "{\"ok\":false,\"result\":");
+    if (json_is_valid_container(result_buf)) jbuf_append(&response, result_buf);
+    else jbuf_append_json_str(&response, result_buf);
+    jbuf_append(&response, "}");
+    return (netsrv_response_t){.status = ok ? 200 : 403,
+                              .body = response.data, .heap_body = true};
 }
 
 static netsrv_response_t route_mesh_peers(const netsrv_request_t *req, void *ctx) {

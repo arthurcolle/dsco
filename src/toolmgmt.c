@@ -7,13 +7,17 @@
 #include "config.h"
 #include "crypto.h"
 #include "cloud_runtime.h"
+#include "service_boundary.h"
+#include "../vendor/yyjson.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <ctype.h>
+#include <limits.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <time.h>
 #include <stdbool.h>
 #include <curl/curl.h>
@@ -23,6 +27,27 @@
 static char s_url_override[512];
 static char s_tok_override[1024];
 static _Thread_local const char *s_idempotency_key;
+static _Thread_local size_t s_response_limit = SIZE_MAX - 1;
+static char s_file_tok[512];
+static pthread_once_t s_file_tok_once = PTHREAD_ONCE_INIT;
+
+static void tm_load_file_token_once(void) {
+    const char *home = getenv("HOME");
+    if (!home || !home[0])
+        return;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/.dsco/tools_api_token", home);
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return;
+    if (fgets(s_file_tok, sizeof(s_file_tok), f)) {
+        size_t n = strlen(s_file_tok);
+        while (n > 0 && (s_file_tok[n - 1] == '\n' || s_file_tok[n - 1] == '\r' ||
+                         s_file_tok[n - 1] == ' '))
+            s_file_tok[--n] = '\0';
+    }
+    fclose(f);
+}
 
 const char *toolmgmt_base_url(void) {
     if (s_url_override[0])
@@ -45,28 +70,9 @@ const char *toolmgmt_token(void) {
     e = getenv("AUTH_TOKEN");
     if (e && e[0])
         return e;
-    /* File fallback: ~/.dsco/tools_api_token (0600, single line). Lets the
-     * operator token persist on-machine without shell exports. Loaded once. */
-    static char s_file_tok[512];
-    static int s_file_tried = 0;
-    if (!s_file_tried) {
-        s_file_tried = 1;
-        const char *home = getenv("HOME");
-        if (home && *home) {
-            char path[512];
-            snprintf(path, sizeof(path), "%s/.dsco/tools_api_token", home);
-            FILE *f = fopen(path, "r");
-            if (f) {
-                if (fgets(s_file_tok, sizeof(s_file_tok), f)) {
-                    size_t n = strlen(s_file_tok);
-                    while (n > 0 && (s_file_tok[n - 1] == '\n' || s_file_tok[n - 1] == '\r' ||
-                                     s_file_tok[n - 1] == ' '))
-                        s_file_tok[--n] = '\0';
-                }
-                fclose(f);
-            }
-        }
-    }
+    /* File fallback: ~/.dsco/tools_api_token (0600, single line). Multiple
+     * startup workers can arrive here concurrently, so publish it atomically. */
+    pthread_once(&s_file_tok_once, tm_load_file_token_once);
     if (s_file_tok[0])
         return s_file_tok;
     return NULL;
@@ -106,14 +112,17 @@ static int tm_max_retries(void) {
 
 typedef struct {
     char *data;
-    size_t len, cap;
+    size_t len, cap, limit;
 } tm_buf_t;
 
 static size_t tm_write_cb(void *ptr, size_t size, size_t nmemb, void *ud) {
-    size_t total = size * nmemb;
     tm_buf_t *b = (tm_buf_t *)ud;
+    if ((size && nmemb > b->limit / size) || size * nmemb > b->limit - b->len)
+        return 0;
+    size_t total = size * nmemb;
     if (b->len + total + 1 > b->cap) {
-        size_t ncap = (b->len + total + 1) * 2;
+        size_t needed = b->len + total + 1;
+        size_t ncap = needed <= SIZE_MAX / 2 ? needed * 2 : needed;
         char *nd = realloc(b->data, ncap);
         if (!nd)
             return 0;
@@ -138,7 +147,14 @@ static void tm_append_config_header(struct curl_slist **hdrs, const char *header
     *hdrs = curl_slist_append(*hdrs, line);
 }
 
-static long tm_request_once(const char *method, const char *path, const char *body, char **out) {
+static int64_t tm_monotonic_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static long tm_request_once(const char *method, const char *path, const char *body, char **out,
+                            long timeout_ms) {
     if (out)
         *out = NULL;
     dsco_http_global_init();
@@ -149,15 +165,23 @@ static long tm_request_once(const char *method, const char *path, const char *bo
         return -1;
 
     /* Join base + path, dropping any trailing slash on the base. */
-    char url[1024];
+    char url[4096];
     const char *base = toolmgmt_base_url();
-    if (!dsco_cloud_destination_allowed(base)) return -1;
+    if (!service_destination_allowed("autobot_discover", base)) {
+        curl_easy_cleanup(c);
+        return -1;
+    }
     size_t bl = strlen(base);
     while (bl > 0 && base[bl - 1] == '/')
         bl--;
-    snprintf(url, sizeof(url), "%.*s%s", (int)bl, base, path);
+    int url_len = bl < sizeof(url)
+                      ? snprintf(url, sizeof(url), "%.*s%s", (int)bl, base, path) : -1;
+    if (url_len < 0 || (size_t)url_len >= sizeof(url)) {
+        curl_easy_cleanup(c);
+        return -1;
+    }
 
-    tm_buf_t buf = {0};
+    tm_buf_t buf = {.limit = s_response_limit};
     buf.data = malloc(4096);
     buf.cap = 4096;
     if (!buf.data) {
@@ -197,8 +221,14 @@ static long tm_request_once(const char *method, const char *path, const char *bo
     }
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, tm_write_cb);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &buf);
-    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT, tm_timeout_secs());
+    if (timeout_ms > 0) {
+        long connect_ms = timeout_ms < 15000L ? timeout_ms : 15000L;
+        curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT_MS, connect_ms);
+        curl_easy_setopt(c, CURLOPT_TIMEOUT_MS, timeout_ms);
+    } else {
+        curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
+        curl_easy_setopt(c, CURLOPT_TIMEOUT, tm_timeout_secs());
+    }
     curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
 
     CURLcode res = curl_easy_perform(c);
@@ -216,30 +246,62 @@ static long tm_request_once(const char *method, const char *path, const char *bo
     return code;
 }
 
+long toolmgmt_request_bounded(const char *method, const char *path, const char *body,
+                             char **out, long timeout_ms, size_t response_limit) {
+    if (out) *out = NULL;
+    if (timeout_ms < 1 || timeout_ms > 150000 || response_limit < 1 ||
+        response_limit > 256u * 1024u) return -1;
+    size_t previous = s_response_limit;
+    const char *previous_key = s_idempotency_key;
+    s_response_limit = response_limit;
+    s_idempotency_key = NULL;
+    long status = tm_request_once(method, path, body, out, timeout_ms);
+    s_response_limit = previous;
+    s_idempotency_key = previous_key;
+    return status;
+}
+
 /* Retrying wrapper: transport errors, 429, and 5xx are retried with
  * exponential backoff + jitter (bounded by TOOLS_API_RETRIES). GET and POST
  * are both retried — the API's mutating calls accept idempotency keys, and the
  * read-only ones are naturally safe. */
-long toolmgmt_request(const char *method, const char *path, const char *body, char **out) {
+static long tm_request_with_timeout(const char *method, const char *path, const char *body,
+                                    char **out, int timeout_ms) {
     int retries = tm_max_retries();
     long code = -1;
     char *resp = NULL;
+    int64_t deadline_ms = timeout_ms > 0 ? tm_monotonic_ms() + timeout_ms : 0;
     for (int attempt = 0;; attempt++) {
+        long remaining_ms = 0;
+        if (deadline_ms > 0) {
+            int64_t remaining = deadline_ms - tm_monotonic_ms();
+            if (remaining <= 0)
+                break;
+            remaining_ms = remaining > LONG_MAX ? LONG_MAX : (long)remaining;
+        }
         free(resp);
         resp = NULL;
-        code = tm_request_once(method, path, body, &resp);
+        code = tm_request_once(method, path, body, &resp, remaining_ms);
         bool mutating = method && strcasecmp(method, "GET") != 0 && strcasecmp(method, "HEAD") != 0;
         bool retryable = (code < 0 || code == 429 || (code >= 500 && code < 600)) &&
                          (!mutating || (s_idempotency_key && s_idempotency_key[0]));
         if (!retryable || attempt >= retries)
             break;
         /* backoff: 200ms, 400ms, 800ms … plus up to 100ms jitter */
-        long base_ms = 200L << attempt;
+        long base_ms = attempt < 20 ? 200L << attempt : 60000L;
         uint32_t jitter_word;
         long jitter = crypto_random_bytes((uint8_t *)&jitter_word, sizeof(jitter_word))
                           ? (long)(jitter_word % 100)
                           : 0;
-        struct timespec ts = {(base_ms + jitter) / 1000, ((base_ms + jitter) % 1000) * 1000000L};
+        long delay_ms = base_ms + jitter;
+        if (deadline_ms > 0) {
+            int64_t remaining = deadline_ms - tm_monotonic_ms();
+            if (remaining <= 0)
+                break;
+            if (delay_ms > remaining)
+                delay_ms = (long)remaining;
+        }
+        struct timespec ts = {delay_ms / 1000, (delay_ms % 1000) * 1000000L};
         nanosleep(&ts, NULL);
     }
     if (out)
@@ -247,6 +309,10 @@ long toolmgmt_request(const char *method, const char *path, const char *body, ch
     else
         free(resp);
     return code;
+}
+
+long toolmgmt_request(const char *method, const char *path, const char *body, char **out) {
+    return tm_request_with_timeout(method, path, body, out, 0);
 }
 
 /* ── High-level operations ─────────────────────────────────────────────── */
@@ -359,7 +425,6 @@ static int tm_count_tools_in_body(const char *body) {
 /* Execute one tool; always returns the response body (even on error) so the
  * caller can inspect it, and reports the HTTP status via *status. */
 static char *tm_exec(const char *tool, const char *args_json, int timeout_ms, long *status) {
-    (void)timeout_ms; /* per-tool execute has no timeout field; honored via HTTP timeout */
     jbuf_t b;
     jbuf_init(&b, 512);
     jbuf_append(&b, "{\"inputs\":");
@@ -368,17 +433,22 @@ static char *tm_exec(const char *tool, const char *args_json, int timeout_ms, lo
 
     /* /api/v1/tools/{tool}/execute is the synchronous per-tool path. */
     char *esc = curl_easy_escape(NULL, tool, 0);
-    char path[256];
-    snprintf(path, sizeof(path), "/api/v1/tools/%s/execute", esc ? esc : tool);
+    char path[2048];
+    int path_len = esc ? snprintf(path, sizeof(path), "/api/v1/tools/%s/execute", esc) : -1;
     if (esc)
         curl_free(esc);
+    if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
+        jbuf_free(&b);
+        if (status) *status = -1;
+        return NULL;
+    }
 
     char idempotency_key[37];
     uuid_v4(idempotency_key);
     const char *prior_key = s_idempotency_key;
     s_idempotency_key = idempotency_key;
     char *out = NULL;
-    long st = toolmgmt_request("POST", path, b.data, &out);
+    long st = tm_request_with_timeout("POST", path, b.data, &out, timeout_ms);
     s_idempotency_key = prior_key;
     jbuf_free(&b);
     if (status)
@@ -423,11 +493,21 @@ char *toolmgmt_list_tools_all(int page_limit) {
     int total = -1;
     int offset = 0;
     int guard_pages = 0;
+    char *previous_page = NULL;
 
     while (guard_pages++ < 1000) {
         char *page = toolmgmt_list_tools_paginated(offset, page_limit);
         if (!page)
             break;
+        /* Older flat-array deployments did not expose pagination metadata.
+         * They did accept offset, but fail closed if a still-older server
+         * ignores it instead of appending the same page 1000 times. */
+        if (previous_page && strcmp(previous_page, page) == 0) {
+            free(page);
+            break;
+        }
+        free(previous_page);
+        previous_page = safe_strdup(page);
         int count = json_get_int(page, "count", -1);
         if (total < 0)
             total = json_get_int(page, "total", -1);
@@ -441,9 +521,12 @@ char *toolmgmt_list_tools_all(int page_limit) {
         offset += count;
         if (total >= 0 && offset >= total)
             break;
-        if (!has_more)
+        /* A flat array has no has_more field. A full page therefore means
+         * "probe the next offset", while a short page is terminal. */
+        if (!has_more && total < 0 && count < page_limit)
             break;
     }
+    free(previous_page);
     jbuf_append(&all, "]");
 
     if (offset > 0 || all.len > 2)
@@ -551,7 +634,9 @@ int toolmgmt_parallel(tm_call_t *calls, int n, int max_concurrency) {
     } else {
         int spawned = 0;
         for (int i = 0; i < max_concurrency; i++)
-            if (pthread_create(&th[i], NULL, tm_worker, &pool) == 0)
+            /* Pack successful handles: a failed create must not leave a hole
+             * that makes join miss a live worker using this stack-owned pool. */
+            if (pthread_create(&th[spawned], NULL, tm_worker, &pool) == 0)
                 spawned++;
         if (spawned == 0)
             tm_worker(&pool); /* none spawned: run inline */
@@ -578,63 +663,30 @@ static char *tm_external_cb(const char *name, const char *input_json, void *ctx)
     return body; /* caller (tool dispatch) frees */
 }
 
-static unsigned long tm_fnv1a(const char *s) {
-    unsigned long h = 1469598103934665603UL;
-    for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p; p++) {
-        h ^= (unsigned long)*p;
-        h *= 1099511628211UL;
-    }
-    return h;
-}
-
+/* A discovered handle must retain its exact remote identity across later
+ * discoveries. Punctuation-only normalization (a:b versus a-b) can collide;
+ * include a stable 128-bit digest of the complete remote ID in every name. */
 static void tm_make_dsco_name(const char *tool_id, const char *name, char *out, size_t out_len) {
-    if (!out || out_len == 0)
-        return;
-    out[0] = '\0';
-    const char *src = (tool_id && tool_id[0]) ? tool_id : name;
-    if (!src || !src[0])
-        src = "remote_tool";
-
-    char raw[256];
+    if (!out || !out_len) return;
+    const char *src = tool_id && *tool_id ? tool_id : name;
+    if (!src || !*src) src = "remote_tool";
+    char label[27];
     size_t pos = 0;
-    int n = snprintf(raw, sizeof(raw), "tm__");
-    if (n < 0)
-        return;
-    pos = (size_t)n;
-    bool last_us = false;
-    for (const char *p = src; *p && pos + 1 < sizeof(raw); p++) {
-        unsigned char c = (unsigned char)*p;
-        char ch = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                   (c >= '0' && c <= '9'))
-                      ? (char)c
-                      : '_';
-        if (ch == '_' && last_us)
-            continue;
-        raw[pos++] = ch;
-        last_us = (ch == '_');
+    for (const unsigned char *p = (const unsigned char *)src; *p && pos < sizeof(label) - 1; ++p) {
+        unsigned char c = *p;
+        label[pos++] = ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9')) ? (char)c : '_';
     }
-    while (pos > 4 && raw[pos - 1] == '_')
-        pos--;
-    raw[pos] = '\0';
-
-    /* Anthropic/OpenAI-compatible tool names must remain short. Preserve a
-     * readable prefix and add a stable hash suffix to avoid collisions. */
-    const size_t api_cap = 64;
-    if (strlen(raw) < api_cap) {
-        snprintf(out, out_len, "%s", raw);
-        return;
-    }
-    unsigned long h = tm_fnv1a(src);
-    char suffix[24];
-    snprintf(suffix, sizeof(suffix), "_%08lx", h & 0xffffffffUL);
-    size_t keep = api_cap - strlen(suffix) - 1;
-    if (keep >= out_len)
-        keep = out_len > strlen(suffix) + 1 ? out_len - strlen(suffix) - 1 : 0;
-    snprintf(out, out_len, "%.*s%s", (int)keep, raw, suffix);
+    label[pos] = '\0';
+    char digest[65];
+    sha256_hex((const uint8_t *)src, strlen(src), digest);
+    snprintf(out, out_len, "tm__%s_%.32s", label, digest);
 }
 
 typedef struct {
     int count;
+    jbuf_t *discover_out;
+    bool discover_first;
 } tm_reg_ctx_t;
 
 /* Builds a JSON-Schema object from the registry's `inputs` array. Each input
@@ -774,6 +826,24 @@ static void tm_reg_cb(const char *el, void *ctx) {
     tools_register_external_with_output(dsco_name, full_desc.data ? full_desc.data : "",
                                         schema.data, output_schema.data, tm_external_cb,
                                         safe_strdup(remote_id));
+    if (rc->discover_out) {
+        if (!rc->discover_first)
+            jbuf_append(rc->discover_out, ",");
+        rc->discover_first = false;
+        jbuf_append(rc->discover_out, "{\"name\":");
+        jbuf_append_json_str(rc->discover_out, dsco_name);
+        jbuf_append(rc->discover_out, ",\"description\":");
+        jbuf_append_json_str(rc->discover_out, full_desc.data ? full_desc.data : "");
+        jbuf_append(rc->discover_out, ",\"input_schema\":");
+        jbuf_append(rc->discover_out, schema.data ? schema.data : "{}");
+        jbuf_append(rc->discover_out, ",\"output_schema\":");
+        jbuf_append(rc->discover_out, output_schema.data ? output_schema.data
+                                                        : tools_default_output_schema_json());
+        jbuf_append(rc->discover_out,
+                    ",\"source\":\"tool_management_api\",\"remote_tool_id\":");
+        jbuf_append_json_str(rc->discover_out, remote_id ? remote_id : "");
+        jbuf_append(rc->discover_out, "}");
+    }
     rc->count++;
 
     jbuf_free(&full_desc);
@@ -786,6 +856,122 @@ static void tm_reg_cb(const char *el, void *ctx) {
     free(name);
     free(desc);
     free(backend);
+}
+
+/* Validate the original service document before normalizing or registering
+ * anything. An HTTP 200 error body must not become an empty successful search. */
+static bool tm_discovery_json_valid(yyjson_val *value, unsigned depth) {
+    if (depth > 64) return false;
+    size_t i, count;
+    yyjson_val *key, *child;
+    if (yyjson_is_obj(value)) {
+        if (yyjson_obj_size(value) > 4096) return false;
+        yyjson_obj_foreach(value, i, count, key, child) {
+            const char *name = yyjson_get_str(key);
+            if (strlen(name) != yyjson_get_len(key) || yyjson_obj_get(value, name) != child ||
+                !tm_discovery_json_valid(child, depth + 1)) return false;
+        }
+    } else if (yyjson_is_arr(value)) {
+        yyjson_arr_foreach(value, i, count, child)
+            if (!tm_discovery_json_valid(child, depth + 1)) return false;
+    }
+    return true;
+}
+
+static bool tm_discovery_text(yyjson_val *value, size_t max) {
+    return yyjson_is_str(value) && yyjson_get_len(value) > 0 && yyjson_get_len(value) <= max &&
+           strlen(yyjson_get_str(value)) == yyjson_get_len(value);
+}
+
+static bool tm_discovery_response_valid(const char *body, int limit) {
+    yyjson_doc *doc = yyjson_read(body, strlen(body), 0);
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    yyjson_val *results = yyjson_obj_get(root, "results");
+    yyjson_val *reported = yyjson_obj_get(root, "count");
+    bool valid = yyjson_is_obj(root) && tm_discovery_json_valid(root, 0) &&
+                 yyjson_is_arr(results) && yyjson_arr_size(results) <= (size_t)limit &&
+                 (!reported || (yyjson_is_uint(reported) &&
+                                yyjson_get_uint(reported) == yyjson_arr_size(results)));
+    size_t i, count;
+    yyjson_val *entry;
+    if (valid) yyjson_arr_foreach(results, i, count, entry) {
+        yyjson_val *tool = yyjson_obj_get(entry, "tool");
+        if (!tool) tool = entry;
+        yyjson_val *schema = yyjson_obj_get(tool, "input_schema");
+        if (!schema) schema = yyjson_obj_get(tool, "inputSchema");
+        if (!schema) schema = yyjson_obj_get(tool, "schema");
+        if (!yyjson_is_obj(entry) || !yyjson_is_obj(tool) ||
+            !tm_discovery_text(yyjson_obj_get(entry, "tool_id"), 512) ||
+            !tm_discovery_text(yyjson_obj_get(tool, "name"), 512) ||
+            (schema && !yyjson_is_obj(schema))) {
+            valid = false;
+            break;
+        }
+    }
+    yyjson_doc_free(doc);
+    return valid;
+}
+
+char *toolmgmt_discover_tools(const char *query, int limit, int *out_count) {
+    if (out_count)
+        *out_count = 0;
+    if (!query || !query[0])
+        return NULL;
+
+    /* Demand paging is the normal path whenever Tool Management credentials
+     * exist.  It runs only after an explicit discover_tools query, so it adds
+     * no startup latency.  DSCO_TOOLMGMT=0 remains the deterministic/offline
+     * opt-out; positive values are accepted for backwards compatibility. */
+    const char *enabled = getenv("DSCO_TOOLMGMT");
+    if (enabled && enabled[0] &&
+        (!strcmp(enabled, "0") || !strcasecmp(enabled, "false") ||
+         !strcasecmp(enabled, "off")))
+        return NULL;
+    if (!toolmgmt_token())
+        return NULL;
+
+    if (limit <= 0)
+        limit = 8;
+    if (limit > 64)
+        limit = 64;
+    char *escaped = curl_easy_escape(NULL, query, 0);
+    if (!escaped)
+        return NULL;
+    char path[2048];
+    int path_len = snprintf(path, sizeof(path), "/api/v1/discover/search?query=%s&limit=%d", escaped, limit);
+    curl_free(escaped);
+    if (path_len < 0 || (size_t)path_len >= sizeof(path))
+        return NULL;
+
+    char *body = NULL;
+    size_t previous_limit = s_response_limit;
+    s_response_limit = 1024u * 1024u;
+    long st = tm_request_with_timeout("GET", path, NULL, &body, 10000);
+    s_response_limit = previous_limit;
+    if (st < 200 || st >= 300 || !body || !tm_discovery_response_valid(body, limit)) {
+        free(body);
+        return NULL;
+    }
+    jbuf_t out;
+    jbuf_init(&out, 4096);
+    jbuf_append(&out, "{\"source\":\"tool_management_api\",\"query\":");
+    jbuf_append_json_str(&out, query);
+    jbuf_append(&out, ",\"matches\":[");
+    tm_reg_ctx_t rc = {.discover_out = &out, .discover_first = true};
+    json_array_foreach(body, "results", tm_reg_cb, &rc);
+    free(body);
+    jbuf_appendf(&out,
+                 "],\"matched\":%d,\"showing\":%d,\"has_more\":false,"
+                 "\"note\":\"Service-wide semantic search over the live Tool Management API. "
+                 "Matching schemas are now registered; call load_tools with an exact name, then "
+                 "invoke directly or through invoke_tool.\"}",
+                 rc.count, rc.count);
+    if (out_count)
+        *out_count = rc.count;
+    /* An empty successful search is distinct from an unavailable service.
+     * The generic discover_tools caller still chooses its local fallback
+     * when out_count is zero; explicit Autobot callers retain this result. */
+    return out.data;
 }
 
 int toolmgmt_register_tools(void) {
@@ -875,34 +1061,76 @@ static void tm_print_name_cb(const char *el, void *ctx) {
     free(name);
 }
 
-static int tm_cli_list(int argc, char **argv) {
-    int limit = 1000;
-    for (int i = 0; i < argc; i++)
-        if (strcmp(argv[i], "--limit") == 0 && i + 1 < argc)
-            limit = atoi(argv[i + 1]);
-    char path[128];
-    snprintf(path, sizeof(path), "/api/v1/tools?limit=%d", limit > 0 ? limit : 1000);
-    char *body = NULL;
-    long st = toolmgmt_request("GET", path, NULL, &body);
-    if (st < 0) {
-        fprintf(stderr, "tools list: cannot reach %s (transport error)\n", toolmgmt_base_url());
-        free(body);
-        return 1;
-    }
-    if (st < 200 || st >= 300) {
-        fprintf(stderr, "tools list: HTTP %ld from %s\n", st, toolmgmt_base_url());
-        if (body && body[0])
-            fprintf(stderr, "  %s\n", body);
-        free(body);
-        return 1;
-    }
-    size_t n = strlen(body);
-    char *wrapped = malloc(n + 32);
-    if (wrapped) {
+static int tm_print_tools_body(const char *body) {
+    if (!body)
+        return 0;
+    const char *p = tm_skip_ws(body);
+    if (p && *p == '[') {
+        size_t n = strlen(body);
+        char *wrapped = malloc(n + 32);
+        if (!wrapped)
+            return 0;
         snprintf(wrapped, n + 32, "{\"__tm_items__\":%s}", body);
-        int c = json_array_foreach(wrapped, "__tm_items__", tm_print_name_cb, NULL);
-        printf("\n%d tools available at %s\n", c, toolmgmt_base_url());
+        int count = json_array_foreach(wrapped, "__tm_items__", tm_print_name_cb, NULL);
         free(wrapped);
+        return count;
+    }
+    int count = json_array_foreach(body, "tools", tm_print_name_cb, NULL);
+    if (count <= 0)
+        count = json_array_foreach(body, "items", tm_print_name_cb, NULL);
+    if (count <= 0)
+        count = json_array_foreach(body, "results", tm_print_name_cb, NULL);
+    return count;
+}
+
+static int tm_cli_list(int argc, char **argv) {
+    int offset = 0;
+    int limit = 100;
+    bool fetch_all = false;
+    for (int i = 0; i < argc; i++) {
+        if (strcmp(argv[i], "--all") == 0) {
+            fetch_all = true;
+        } else if (strcmp(argv[i], "--offset") == 0 && i + 1 < argc) {
+            offset = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--limit") == 0 && i + 1 < argc) {
+            limit = atoi(argv[++i]);
+        } else {
+            fprintf(stderr, "tools list: unknown or incomplete option '%s'\n", argv[i]);
+            return 2;
+        }
+    }
+    if (offset < 0 || limit <= 0) {
+        fprintf(stderr, "tools list: --offset must be >= 0 and --limit must be > 0\n");
+        return 2;
+    }
+    if (fetch_all && offset != 0) {
+        fprintf(stderr, "tools list: --offset cannot be combined with --all\n");
+        return 2;
+    }
+
+    char *body = fetch_all ? toolmgmt_list_tools_all(limit)
+                           : toolmgmt_list_tools_paginated(offset, limit);
+    if (!body) {
+        fprintf(stderr, "tools list: catalog request to %s failed\n", toolmgmt_base_url());
+        return 1;
+    }
+
+    int shown = tm_print_tools_body(body);
+    int response_offset = json_get_int(body, "offset", offset);
+    int total = json_get_int(body, "total", -1);
+    bool has_more = json_get_bool(body, "has_more", false);
+    if (fetch_all) {
+        printf("\n%d tools available at %s (complete catalog)\n", shown, toolmgmt_base_url());
+    } else if (total >= 0) {
+        printf("\n%d tools shown (offset %d, total %d) at %s\n", shown, response_offset, total,
+               toolmgmt_base_url());
+    } else {
+        printf("\n%d tools shown (offset %d) at %s\n", shown, response_offset,
+               toolmgmt_base_url());
+    }
+    if (!fetch_all && (has_more || (total >= 0 && response_offset + shown < total) ||
+                       (total < 0 && shown == limit))) {
+        printf("next: dsco tools list --offset %d --limit %d\n", response_offset + shown, limit);
     }
     free(body);
     return 0;
@@ -976,50 +1204,29 @@ static int tm_cli_search(int argc, char **argv) {
     return 0;
 }
 
-/* Finds one tool by name in the full catalog and prints its raw JSON. The
- * single-tool GET endpoint is unreliable server-side, so we filter the list
- * client-side instead. */
-typedef struct {
-    const char *want;
-    char *found;
-} tm_find_ctx_t;
-
-static void tm_find_cb(const char *el, void *ctx) {
-    tm_find_ctx_t *fc = (tm_find_ctx_t *)ctx;
-    if (fc->found)
-        return;
-    char *name = json_get_str(el, "name");
-    if (name && fc->want && strcmp(name, fc->want) == 0)
-        fc->found = safe_strdup(el);
-    free(name);
-}
-
 static int tm_cli_get(int argc, char **argv) {
     if (argc < 1) {
         fprintf(stderr, "usage: dsco tools get <tool>\n");
         return 2;
     }
     const char *want = argv[0];
-    char *body = toolmgmt_list_tools(1000);
-    if (!body) {
-        fprintf(stderr, "tools get: catalog fetch from %s failed\n", toolmgmt_base_url());
+    char *escaped = curl_easy_escape(NULL, want, 0);
+    char path[512];
+    snprintf(path, sizeof(path), "/api/v1/tools/%s", escaped ? escaped : want);
+    if (escaped)
+        curl_free(escaped);
+
+    char *body = NULL;
+    long st = toolmgmt_request("GET", path, NULL, &body);
+    if (st < 200 || st >= 300) {
+        fprintf(stderr, "tools get: HTTP %ld from %s\n", st, toolmgmt_base_url());
+        if (body && body[0])
+            fprintf(stderr, "  %s\n", body);
+        free(body);
         return 1;
     }
-    size_t n = strlen(body);
-    char *wrapped = malloc(n + 32);
-    tm_find_ctx_t fc = {want, NULL};
-    if (wrapped) {
-        snprintf(wrapped, n + 32, "{\"__tm_items__\":%s}", body);
-        json_array_foreach(wrapped, "__tm_items__", tm_find_cb, &fc);
-        free(wrapped);
-    }
+    printf("%s\n", body);
     free(body);
-    if (!fc.found) {
-        fprintf(stderr, "tools get: no tool named '%s'\n", want);
-        return 1;
-    }
-    printf("%s\n", fc.found);
-    free(fc.found);
     return 0;
 }
 
@@ -1229,6 +1436,45 @@ static int tm_cli_plan(int argc, char **argv) {
         fprintf(stderr, "usage: dsco tools plan \"<query>\" [--intent X] [--max-steps N]\n");
         return 2;
     }
+    if (!intent) {
+        static const char *publish_words[] = {"publish", "post", "release", "syndicate"};
+        static const char *remember_words[] = {"remember", "memory", "recall", "store", "save"};
+        static const char *notify_words[] = {"notify", "send", "email", "alert", "webhook"};
+        static const char *transform_words[] = {
+            "transform", "convert", "parse", "format", "extract", "calculate",
+            "compute", "add", "subtract", "multiply", "divide",
+        };
+        static const char *research_words[] = {"research", "search", "find", "investigate", "discover"};
+        const struct {
+            const char *intent;
+            const char **words;
+            size_t count;
+        } groups[] = {
+            {"publish", publish_words, DSCO_ARRAY_LEN(publish_words)},
+            {"remember", remember_words, DSCO_ARRAY_LEN(remember_words)},
+            {"notify", notify_words, DSCO_ARRAY_LEN(notify_words)},
+            {"transform", transform_words, DSCO_ARRAY_LEN(transform_words)},
+            {"research", research_words, DSCO_ARRAY_LEN(research_words)},
+        };
+        intent = "analyze";
+        for (size_t g = 0; g < DSCO_ARRAY_LEN(groups); g++) {
+            for (size_t w = 0; w < groups[g].count; w++) {
+                const char *p = query;
+                size_t word_len = strlen(groups[g].words[w]);
+                while (*p) {
+                    if ((p == query || !isalnum((unsigned char)p[-1])) &&
+                        strncasecmp(p, groups[g].words[w], word_len) == 0 &&
+                        !isalnum((unsigned char)p[word_len])) {
+                        intent = groups[g].intent;
+                        goto intent_inferred;
+                    }
+                    p++;
+                }
+            }
+        }
+    }
+intent_inferred:
+    ; /* A label must precede a statement on pre-C23 compilers. */
     char *r = toolmgmt_recommend(intent, query, max_steps);
     if (r) {
         printf("%s\n", r);
@@ -1243,7 +1489,8 @@ static void tm_cli_usage(void) {
     fprintf(stderr,
             "usage: dsco tools <command> [args]\n\n"
             "commands:\n"
-            "  list [--limit N]                 list remote tools\n"
+            "  list [--offset N] [--limit N]    list one remote catalog page\n"
+            "  list --all [--limit N]           fetch all pages (N = page size)\n"
             "  search \"<query>\" [--limit N]     semantic tool discovery\n"
             "  get <tool>                       show one tool's schema\n"
             "  run <tool> [k=v ...]             execute one tool\n"

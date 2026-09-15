@@ -1,10 +1,10 @@
 #include "kitty_agent_windows.h"
 
-#include "pixel_tui.h"
-
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <time.h>
 #include <limits.h>
 #include <signal.h>
 #include <spawn.h>
@@ -20,7 +20,7 @@
 
 extern char **environ;
 
-#define KITTY_AGENT_WINDOW_CAP 64
+#define KITTY_AGENT_WINDOW_CAP 1024
 
 typedef struct {
     bool used;
@@ -47,9 +47,28 @@ static bool env_enabled(const char *value) {
 
 static bool windows_enabled(void) {
     const char *setting = getenv("DSCO_KITTY_AGENT_WINDOWS");
-    if (setting)
-        return env_enabled(setting);
-    return pixel_tui_session_active();
+    return env_enabled(setting);
+}
+
+static const char *window_glyph(int child_id) {
+    static const char *glyphs[] = {"⍼", "⧉", "⌬", "⦇", "🝮", "⧖"};
+    return glyphs[(unsigned)child_id % 6];
+}
+
+static const char *window_location(void) {
+    const char *setting = getenv("DSCO_KITTY_AGENT_WINDOW_LOCATION");
+    if (setting && (!strcmp(setting, "vsplit") || !strcmp(setting, "hsplit")))
+        return setting;
+    return "split";
+}
+
+static const char *window_type(void) {
+    const char *setting = getenv("DSCO_KITTY_AGENT_WINDOW_TYPE");
+    return setting && !strcmp(setting, "os-window") ? "os-window" : "window";
+}
+
+static bool windows_keep_open(void) {
+    return env_enabled(getenv("DSCO_KITTY_AGENT_WINDOWS_KEEP_OPEN"));
 }
 
 static const char *find_kitty_tool(const char *name) {
@@ -75,14 +94,31 @@ static const char *find_kitty_tool(const char *name) {
 
 static void safe_title(char *dst, size_t cap, const char *prefix,
                        int child_id, const char *task) {
-    int n = snprintf(dst, cap, "dsco agent %d %s ", child_id, prefix ? prefix : "");
+    if (!cap)
+        return;
+    int n = snprintf(dst, cap, "%s dsco · %02d ", window_glyph(child_id), child_id);
     size_t off = n > 0 ? (size_t)n : 0;
     if (off >= cap)
         off = cap - 1;
-    for (const unsigned char *p = (const unsigned char *)(task ? task : "worker");
-         *p && off + 1 < cap; p++) {
-        if (*p >= 0x20 && *p != 0x7f)
-            dst[off++] = (char)*p;
+    const char *signature = getenv("DSCO_KITTY_SIGNATURE");
+    const char *parts[] = {signature && signature[0] ? signature : "dsco",
+                           " · ", prefix ? prefix : "", " · ", task ? task : "worker"};
+    for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
+        for (const unsigned char *p = (const unsigned char *)parts[i];
+             *p && off + 1 < cap; p++) {
+            if (*p >= 0x20 && *p != 0x7f)
+                dst[off++] = (char)*p;
+        }
+    }
+    /* snprintf and byte-oriented clipping may stop inside the final glyph. */
+    if (off) {
+        size_t start = off - 1;
+        while (start && ((unsigned char)dst[start] & 0xc0) == 0x80)
+            start--;
+        unsigned char lead = (unsigned char)dst[start];
+        size_t width = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+        if (off - start < width)
+            off = start;
     }
     dst[off] = '\0';
 }
@@ -124,19 +160,46 @@ static int spawn_quiet(const char *path, char *const argv[], bool capture_stdout
     }
 
     int status = 0;
-    waitpid(pid, &status, 0);
-    if (capture_stdout) {
-        ssize_t total = 0;
-        while ((size_t)total + 1 < output_cap) {
-            ssize_t n = read(pipefd[0], output + total, output_cap - (size_t)total - 1);
-            if (n <= 0)
-                break;
-            total += n;
+    bool done = false, timed_out = false;
+    size_t total = 0;
+    if (capture_stdout) fcntl(pipefd[0], F_SETFL, O_NONBLOCK);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    double deadline = (double)ts.tv_sec + ts.tv_nsec / 1e9 + 0.75;
+    while (!done) {
+        if (capture_stdout) {
+            char chunk[4096];
+            for (int i = 0; i < 16; i++) {
+                ssize_t n = read(pipefd[0], chunk, sizeof(chunk));
+                if (n <= 0) break;
+                size_t keep = (size_t)n;
+                size_t room = output_cap > total + 1 ? output_cap - total - 1 : 0;
+                if (keep > room) keep = room;
+                if (keep) { memcpy(output + total, chunk, keep); total += keep; }
+            }
         }
-        output[total > 0 ? total : 0] = '\0';
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid) { done = true; break; }
+        if (w < 0 && errno != EINTR) { timed_out = true; break; }
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        if ((double)ts.tv_sec + ts.tv_nsec / 1e9 >= deadline) { timed_out = true; break; }
+        struct timespec pause = {.tv_nsec = 1000000}; nanosleep(&pause, NULL);
+    }
+    if (timed_out && !done) {
+        kill(pid, SIGKILL);
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    }
+    if (capture_stdout) {
+        char chunk[4096]; ssize_t n;
+        for (int i = 0; i < 16 && (n = read(pipefd[0], chunk, sizeof(chunk))) > 0; i++) {
+            size_t keep = (size_t)n, room = output_cap > total + 1 ? output_cap - total - 1 : 0;
+            if (keep > room) keep = room;
+            if (keep) { memcpy(output + total, chunk, keep); total += keep; }
+        }
+        if (output_cap) output[total] = 0;
         close(pipefd[0]);
     }
-    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+    return !timed_out && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
 }
 
 static int remote_command(char *argv[], char *output, size_t output_cap) {
@@ -171,8 +234,8 @@ static void append_terminal_safe(kitty_agent_window_t *window,
     size_t out = 0;
     for (size_t i = 0; i < len; i++) {
         unsigned char c = (unsigned char)data[i];
-        if (window->escape_state == 2) { /* OSC */
-            if (c == '\a') {
+        if (window->escape_state == 2 || window->escape_state == 4) { /* OSC / control string */
+            if (c == '\a' && window->escape_state == 2) {
                 window->escape_state = 0;
                 window->osc_escape = false;
             } else if (window->osc_escape && c == '\\') {
@@ -183,20 +246,31 @@ static void append_terminal_safe(kitty_agent_window_t *window,
             }
             continue;
         }
-        if (window->escape_state == 1) { /* CSI or short escape */
-            if (c == ']') {
-                window->escape_state = 2;
+        if (window->escape_state == 1) { /* ESC introducer */
+            if (c == '[') {
+                window->escape_state = 3;
+            } else if (c == ']' || c == 'P' || c == 'X' || c == '^' || c == '_') {
+                window->escape_state = c == ']' ? 2 : 4;
                 window->osc_escape = false;
-            } else if (c >= 0x40 && c <= 0x7e) {
+            } else if (c >= 0x20 && c <= 0x2f) {
+                window->escape_state = 5;
+            } else {
                 window->escape_state = 0;
             }
+            continue;
+        }
+        if (window->escape_state == 3 || window->escape_state == 5) {
+            if (c == 0x1b)
+                window->escape_state = 1;
+            else if (c >= (window->escape_state == 3 ? 0x40 : 0x30) && c <= 0x7e)
+                window->escape_state = 0;
             continue;
         }
         if (c == 0x1b) {
             window->escape_state = 1;
             continue;
         }
-        if (c < 0x20 && c != '\n' && c != '\t' && c != '\r')
+        if (c == 0x7f || (c < 0x20 && c != '\n' && c != '\t' && c != '\r'))
             continue;
         clean[out++] = (char)c;
         if (out == sizeof(clean)) {
@@ -206,6 +280,19 @@ static void append_terminal_safe(kitty_agent_window_t *window,
     }
     if (out)
         write_all(window->log_fd, clean, out);
+}
+
+/* Decorations are trusted; metadata passes through the same escape filter as
+ * streamed model output. Incomplete escapes must not eat the next label. */
+static void write_label(kitty_agent_window_t *window, const char *label,
+                        const char *value) {
+    window->escape_state = 0;
+    window->osc_escape = false;
+    write_all(window->log_fd, label, strlen(label));
+    append_terminal_safe(window, value, strlen(value));
+    window->escape_state = 0;
+    window->osc_escape = false;
+    write_all(window->log_fd, "\033[0m\n", 5);
 }
 
 static void close_window(kitty_agent_window_t *window) {
@@ -224,7 +311,18 @@ static void close_window(kitty_agent_window_t *window) {
         remote_command(argv, NULL, 0);
     } else if (window->kitty_pid > 0) {
         kill(window->kitty_pid, SIGTERM);
-        waitpid(window->kitty_pid, NULL, WNOHANG);
+        bool reaped = false;
+        for (int i = 0; i < 20; i++) {
+            if (waitpid(window->kitty_pid, NULL, WNOHANG) == window->kitty_pid) {
+                reaped = true;
+                break;
+            }
+            usleep(10000);
+        }
+        if (!reaped) {
+            kill(window->kitty_pid, SIGKILL);
+            waitpid(window->kitty_pid, NULL, 0);
+        }
     }
     memset(window, 0, sizeof(*window));
     window->log_fd = -1;
@@ -261,30 +359,39 @@ void kitty_agent_window_spawn(int child_id, pid_t child_pid,
     snprintf(dir, sizeof(dir), "%s/.dsco/sessions/swarm/%d", home, (int)getpid());
     mkdir(dir, 0700);
     chmod(dir, 0700);
-    snprintf(window->log_path, sizeof(window->log_path), "%s/child-%d.live.log", dir, child_id);
-    window->log_fd = open(window->log_path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    snprintf(window->log_path, sizeof(window->log_path), "%s/child-%d-XXXXXX", dir, child_id);
+    window->log_fd = mkstemp(window->log_path);
+    if (window->log_fd >= 0) fcntl(window->log_fd, F_SETFD, FD_CLOEXEC);
     if (window->log_fd < 0) {
         window->used = false;
         return;
     }
 
-    char heading[512];
-    int heading_len = snprintf(heading, sizeof(heading),
-                               "DSCO SUBAGENT %d  PID %d\nTASK  %s\nMODEL %s\n\n",
-                               child_id, (int)child_pid, task ? task : "worker",
-                               model && model[0] ? model : "inherited");
-    if (heading_len > 0)
-        append_terminal_safe(window, heading, (size_t)heading_len);
+    const char *signature = getenv("DSCO_KITTY_SIGNATURE");
+    char heading[192];
+    snprintf(heading, sizeof(heading),
+             "\033[38;2;104;211;225m  %s  \033[1mSWARM / %02d\033[0m"
+             "\033[38;2;115;127;155m  ·  pid %d\033[0m\n",
+             window_glyph(child_id), child_id, (int)child_pid);
+    write_all(window->log_fd, heading, strlen(heading));
+    write_label(window, "\033[38;2;197;168;255m  ",
+                signature && signature[0] ? signature : "dsco");
+    write_label(window, "\033[38;2;115;127;155m  task   \033[0m", task ? task : "worker");
+    write_label(window, "\033[38;2;115;127;155m  model  \033[0m",
+                model && model[0] ? model : "inherited");
+    const char *rule = "\033[38;2;58;75;100m  ────────────────────────────────\033[0m\n\n";
+    write_all(window->log_fd, rule, strlen(rule));
 
     char title[256];
     safe_title(title, sizeof(title), "RUNNING", child_id, task);
     const char *listen_on = getenv("KITTY_LISTEN_ON");
     const char *source_id = getenv("KITTY_WINDOW_ID");
     if (listen_on && listen_on[0]) {
-        char source[48];
+        char source[48], tab_match[48];
         snprintf(source, sizeof(source), "id:%s", source_id && source_id[0] ? source_id : "0");
+        snprintf(tab_match, sizeof(tab_match), "window_id:%s", source_id && source_id[0] ? source_id : "0");
         char response[64] = {0};
-        char *argv[32];
+        char *argv[40];
         int j = 0;
         argv[j++] = NULL;
         argv[j++] = "@";
@@ -292,13 +399,21 @@ void kitty_agent_window_spawn(int child_id, pid_t child_pid,
         argv[j++] = (char *)listen_on;
         argv[j++] = "launch";
         argv[j++] = "--type";
-        argv[j++] = "os-window";
+        argv[j++] = (char *)window_type();
+        argv[j++] = "--location";
+        argv[j++] = (char *)window_location();
+        argv[j++] = "--spacing";
+        argv[j++] = "padding=12";
         argv[j++] = "--dont-take-focus";
         argv[j++] = "--copy-colors";
         argv[j++] = "--title";
         argv[j++] = title;
         if (source_id && source_id[0]) {
             argv[j++] = "--source-window";
+            argv[j++] = source;
+            argv[j++] = "--match";
+            argv[j++] = tab_match;
+            argv[j++] = "--next-to";
             argv[j++] = source;
         }
         argv[j++] = "/usr/bin/tail";
@@ -335,10 +450,11 @@ void kitty_agent_window_complete(int child_id, const char *status, int exit_code
     if (!window->used)
         return;
     char footer[160];
-    int n = snprintf(footer, sizeof(footer), "\nDSCO AGENT %s  EXIT %d\n",
-                     status ? status : "complete", exit_code);
-    if (n > 0)
-        append_terminal_safe(window, footer, (size_t)n);
+    snprintf(footer, sizeof(footer),
+             "\n\033[38;2;%sm  %s  EXIT %d  ·  ",
+             exit_code == 0 ? "142;218;172" : "244;137;153",
+             window_glyph(child_id), exit_code);
+    write_label(window, footer, status ? status : "complete");
     fsync(window->log_fd);
 
     const char *listen_on = getenv("KITTY_LISTEN_ON");
@@ -350,9 +466,16 @@ void kitty_agent_window_complete(int child_id, const char *status, int exit_code
                         "set-window-title", "--match", match, title, NULL};
         remote_command(argv, NULL, 0);
     }
+    if (!windows_keep_open())
+        close_window(window);
 }
 
 void kitty_agent_windows_shutdown(void) {
-    for (int i = 0; i < KITTY_AGENT_WINDOW_CAP; i++)
-        close_window(&s_windows[i]);
+    for (int i = 0; i < KITTY_AGENT_WINDOW_CAP; i++) {
+        if (windows_keep_open()) {
+            if (s_windows[i].used && s_windows[i].log_fd >= 0) close(s_windows[i].log_fd);
+            memset(&s_windows[i], 0, sizeof(s_windows[i]));
+            s_windows[i].log_fd = -1;
+        } else close_window(&s_windows[i]);
+    }
 }

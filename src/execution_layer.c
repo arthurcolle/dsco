@@ -138,7 +138,7 @@ bool execution_submit(const execution_intent_t *intent,
     receipt_init(&r, intent);
     double t0 = exec_now_ms();
 
-    if (!intent || !intent->tool_name[0] || !intent->execute) {
+    if (!intent || !intent->tool_name[0] || !intent->execute || !result || !result_len) {
         r.elapsed_ms = exec_now_ms() - t0;
         return deny_receipt(&r, receipt, result, result_len, "intent",
                             "invalid execution intent");
@@ -160,11 +160,22 @@ bool execution_submit(const execution_intent_t *intent,
                               result,
                               result_len);
     r.executed = true;
-    r.verified = ok;
+    r.verified = false; /* will be set by verifier if present */
+    if (ok && intent->verify) {
+        /* Verify the result with the verifier callback */
+        err[0] = '\0';
+        ok = intent->verify(intent->tool_name,
+                            intent->input_json ? intent->input_json : "{}",
+                            result, intent->verify_context, err, sizeof(err));
+        r.verified = ok;
+        if (!ok)
+            snprintf(r.denial_reason, sizeof(r.denial_reason), "%s",
+                     err[0] ? err : "postcondition verification failed");
+    }
     r.status = ok ? EXEC_STATUS_EXECUTED : EXEC_STATUS_FAILED;
     r.elapsed_ms = exec_now_ms() - t0;
 
-    if (!ok && result && result[0]) {
+    if (!ok && !r.denial_reason[0] && result && result[0]) {
         snprintf(r.denial_reason, sizeof(r.denial_reason), "%.*s", 220, result);
     }
 

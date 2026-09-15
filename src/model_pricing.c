@@ -4,6 +4,7 @@
 #include <curl/curl.h>
 #include <ctype.h>
 #include <errno.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,7 +14,6 @@
 #include <unistd.h>
 
 #define OPENAI_PRICING_URL "https://developers.openai.com/api/docs/pricing.md"
-#define PRICING_TTL_SECONDS (6 * 60 * 60)
 #define MAX_PRICES 256
 
 typedef struct {
@@ -31,8 +31,10 @@ static char g_cache_path[1024];
 typedef struct { char *data; size_t len; } http_buf_t;
 
 static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
+    if (size && nmemb > (4 * 1024 * 1024) / size) return 0;
     size_t n = size * nmemb;
     http_buf_t *b = userdata;
+    if (n > 4 * 1024 * 1024 - b->len) return 0;
     char *p = realloc(b->data, b->len + n + 1);
     if (!p) return 0;
     b->data = p;
@@ -69,12 +71,13 @@ static int write_atomic(const char *path, const char *data, size_t len) {
 }
 
 static int parse_money(const char *s, double *out) {
+    if (!s) return 0;
     while (*s && isspace((unsigned char)*s)) s++;
     if (*s++ != '$') return 0;
     errno = 0;
     char *end = NULL;
     double v = strtod(s, &end);
-    if (errno || end == s || v < 0.0) return 0;
+    if (errno || end == s || !isfinite(v) || v < 0.0) return 0;
     while (*end && isspace((unsigned char)*end)) end++;
     if (*end && *end != '|') return 0;
     *out = v;
@@ -121,38 +124,55 @@ int model_pricing_load_openai_markdown(const char *markdown, size_t len) {
     if (!markdown || !len) return 0;
     price_entry_t next[MAX_PRICES] = {0};
     int count = 0, in_table = 0;
-    int model_col = -1, input_col = -1, cached_col = -1, output_col = -1;
+    int standard_only = 0;
+    for (size_t i = 0; i + 25 <= len; i++)
+        if (memcmp(markdown + i, "### Standard pricing data", 25) == 0) {
+            standard_only = 1; break;
+        }
+    int in_standard = !standard_only;
+    int model_col = -1, input_col = -1, cached_col = -1, write_col = -1, output_col = -1;
 
     const char *p = markdown, *end = markdown + len;
     while (p < end) {
         const char *nl = memchr(p, '\n', (size_t)(end - p));
         size_t line_len = nl ? (size_t)(nl - p) : (size_t)(end - p);
+        if (line_len >= 4 && memcmp(p, "### ", 4) == 0) {
+            in_standard = line_len >= 25 && memcmp(p, "### Standard pricing data", 25) == 0;
+            in_table = 0;
+        }
+        if (standard_only && !in_standard) { p = nl ? nl + 1 : end; continue; }
         char *cells[12] = {0};
         int n = split_row(p, line_len, cells, 12);
 
         if (n >= 3 && cells[0] && strcmp(cells[0], "Model") == 0) {
-            model_col = input_col = cached_col = output_col = -1;
+            model_col = input_col = cached_col = write_col = output_col = -1;
             for (int i = 0; i < n; i++) {
                 if (!cells[i]) continue;
                 if (strcmp(cells[i], "Model") == 0) model_col = i;
-                else if (strcmp(cells[i], "Input") == 0) input_col = i;
-                else if (strcmp(cells[i], "Cached input") == 0) cached_col = i;
-                else if (strcmp(cells[i], "Output") == 0) output_col = i;
+                else if ((strcmp(cells[i], "Input") == 0 || strcmp(cells[i], "Short context input") == 0)) input_col = i;
+                else if ((strcmp(cells[i], "Cached input") == 0 || strcmp(cells[i], "Short context cached input") == 0)) cached_col = i;
+                else if (strcmp(cells[i], "Short context cache writes") == 0) write_col = i;
+                else if ((strcmp(cells[i], "Output") == 0 || strcmp(cells[i], "Short context output") == 0)) output_col = i;
             }
             in_table = model_col >= 0 && input_col >= 0 && output_col >= 0;
         } else if (in_table && n > output_col && cells[model_col]) {
             if (cells[model_col][0] == '-' || cells[model_col][0] == '\0') {
                 /* Markdown separator or end of table. */
             } else {
-                double input = 0.0, cached = 0.0, output = 0.0;
+                double input = 0.0, cached = -1.0, cache_write = -1.0, output = 0.0;
                 if (parse_money(cells[input_col], &input) &&
                     parse_money(cells[output_col], &output)) {
                     if (cached_col >= 0 && cached_col < n)
                         (void)parse_money(cells[cached_col], &cached);
+                    if (write_col >= 0 && write_col < n)
+                        (void)parse_money(cells[write_col], &cache_write);
                     if (count < MAX_PRICES) {
+                        /* Context qualifiers describe the rate tier, not the API ID. */
+                        char *qualifier = strstr(cells[model_col], " (<");
+                        if (qualifier) *qualifier = '\0';
                         next[count].model = strdup(cells[model_col]);
                         if (next[count].model) {
-                            next[count].price = (model_price_t){input, cached, 0.0, output};
+                            next[count].price = (model_price_t){input, cached, cache_write, output};
                             count++;
                         }
                     }
@@ -202,7 +222,7 @@ static void *refresh_thread(void *unused) {
     return NULL;
 }
 
-void model_pricing_init(void) {
+void model_pricing_load_cached(void) {
     const char *override = getenv("DSCO_OPENAI_PRICING_FILE");
     if (override && *override) {
         snprintf(g_cache_path, sizeof(g_cache_path), "%s", override);
@@ -217,10 +237,17 @@ void model_pricing_init(void) {
         (void)model_pricing_load_openai_markdown(cached, len);
         free(cached);
     }
-    if (getenv("DSCO_PRICING_OFFLINE")) return;
-    struct stat st;
-    int fresh = stat(g_cache_path, &st) == 0 && time(NULL) - st.st_mtime < PRICING_TTL_SECONDS;
-    if (!fresh && pthread_create(&g_thread, NULL, refresh_thread, NULL) == 0)
+}
+
+int model_pricing_refresh_sync(void) {
+    model_pricing_load_cached();
+    return getenv("DSCO_PRICING_OFFLINE") ? 0 : fetch_openai();
+}
+
+void model_pricing_init(void) {
+    model_pricing_load_cached();
+    if (!getenv("DSCO_PRICING_OFFLINE") && !g_thread_started &&
+        pthread_create(&g_thread, NULL, refresh_thread, NULL) == 0)
         g_thread_started = 1;
 }
 
@@ -245,6 +272,18 @@ static int lookup_exact(const char *model, model_price_t *out) {
     return found;
 }
 
+static int is_date_suffix(const char *s) {
+    if (!s || *s++ != '-') return 0;
+    size_t n = strlen(s);
+    if (n != 8 && n != 10) return 0;
+    for (size_t i = 0; i < n; i++) {
+        if (n == 10 && (i == 4 || i == 7)) {
+            if (s[i] != '-') return 0;
+        } else if (!isdigit((unsigned char)s[i])) return 0;
+    }
+    return 1;
+}
+
 int model_pricing_lookup(const char *provider, const char *model_id,
                          model_price_t *out) {
     if (!provider || !model_id || !out || strcmp(provider, "openai") != 0) return 0;
@@ -258,7 +297,7 @@ int model_pricing_lookup(const char *provider, const char *model_id,
     pthread_rwlock_rdlock(&g_lock);
     for (int i = 0; i < g_count; i++) {
         size_t n = strlen(g_prices[i].model);
-        if (n > best_len && strncmp(id, g_prices[i].model, n) == 0 && id[n] == '-') {
+        if (n > best_len && strncmp(id, g_prices[i].model, n) == 0 && is_date_suffix(id + n)) {
             best = i;
             best_len = n;
         }

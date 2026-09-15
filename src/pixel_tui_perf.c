@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "pixel_tui_perf.h"
+#include "native_trace.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -43,7 +44,7 @@ static bool perf_false(const char *value) {
 }
 
 bool pixel_tui_perf_enabled(void) {
-    return atomic_load_explicit(&g_perf_capture, memory_order_relaxed) ||
+    return native_trace_active() || atomic_load_explicit(&g_perf_capture, memory_order_relaxed) ||
            !perf_false(getenv("DSCO_PIXEL_TUI_PERF"));
 }
 

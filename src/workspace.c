@@ -1,6 +1,8 @@
 #include "workspace.h"
 #include "config.h"
 #include "json_util.h"
+#include "capsule.h"
+#include "directive_store.h"
 
 #include <ctype.h>
 #include <dirent.h>
@@ -255,16 +257,66 @@ static void markdown_summary_line(const char *text, char *out, size_t out_len) {
     out[0] = '\0';
     if (!text || !*text)
         return;
+    /* Catalog metadata only: plain/quoted description or a folded/literal
+     * scalar. Never expose the YAML delimiter or unrelated metadata as prose.
+     * This intentionally is not a general YAML parser. */
     char *copy = safe_strdup(text);
-    char *line = strtok(copy, "\n");
-    while (line) {
+    char *save = NULL;
+    bool first = true, frontmatter = false, block = false;
+    for (char *line = strtok_r(copy, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
+        bool indented = line[0] == ' ' || line[0] == '\t';
         trim_line(line);
-        if (*line && line[0] != '#') {
+        if (!*line)
+            continue;
+        if (first) {
+            first = false;
+            if (strcmp(line, "---") == 0) {
+                frontmatter = true;
+                continue;
+            }
+        }
+        if (frontmatter) {
+            if (!indented && (strcmp(line, "---") == 0 || strcmp(line, "...") == 0)) {
+                frontmatter = false;
+                if (*out)
+                    break;
+                continue;
+            }
+            if (block && indented) {
+                size_t used = strlen(out);
+                if (used < out_len - 1)
+                    snprintf(out + used, out_len - used, "%s%s", used ? " " : "", line);
+                continue;
+            }
+            if (block && !indented) {
+                block = false;
+                /* Keep scanning to ensure the frontmatter closes. */
+            }
+            if (!indented && strncmp(line, "description:", 12) == 0 && !*out) {
+                char *value = line + 12;
+                trim_line(value);
+                if (*value == '>' || *value == '|') {
+                    block = true;
+                } else {
+                    size_t n = strlen(value);
+                    if (n >= 2 && ((*value == '\"' && value[n - 1] == '\"') ||
+                                   (*value == '\'' && value[n - 1] == '\''))) {
+                        value[n - 1] = '\0';
+                        value++;
+                    }
+                    snprintf(out, out_len, "%s", value);
+                }
+            }
+            continue;
+        }
+        if (line[0] != '#' && strcmp(line, "---") != 0) {
             snprintf(out, out_len, "%s", line);
             break;
         }
-        line = strtok(NULL, "\n");
     }
+    if (frontmatter)
+        out[0] = '\0'; /* Truncated/malformed header: use the skill name only. */
     free(copy);
 }
 
@@ -780,7 +832,7 @@ int dsco_workspace_list_skills(char *out, size_t out_len) {
         char path[PATH_MAX];
         snprintf(path, sizeof(path), "%s/%s/SKILL.md", skills_dir, emit[i]);
         char *text = NULL;
-        if (!read_file_head(path, 640, &text))
+        if (!read_file_head(path, 4096, &text))
             continue;
         char summary[256];
         markdown_summary_line(text, summary, sizeof(summary));
@@ -870,6 +922,29 @@ const char *dsco_workspace_prompt(void) {
     }
 
     append_project_agents_prompt(buf, WORKSPACE_PROMPT_LIMIT, &pos);
+
+    /* Agent-authored, persistent overlay. This remains below platform,
+     * developer, AGENTS.md, and constitutional workspace documents. */
+    {
+        const char *directive = dsco_directive_prompt();
+        if (directive && directive[0])
+            append_prompt_section(buf, WORKSPACE_PROMPT_LIMIT, &pos,
+                                  "Persistent Agent Directive — advisory, versioned, rollback-safe",
+                                  directive);
+    }
+
+    /* T1 #04 W3: session-start capsule injection (advisory). If a compaction
+     * capsule exists for the current cwd, surface its summary + ctxkeys so
+     * the model can fault-in previously dropped context on demand. */
+    {
+        char cwd[1024];
+        if (getcwd(cwd, sizeof(cwd))) {
+            char *block = capsule_inject_block(cwd, 4096);
+            if (block && block[0])
+                sbuf_append(buf, WORKSPACE_PROMPT_LIMIT, &pos, block);
+            free(block);
+        }
+    }
 
     const char *docs[][2] = {
         {"Identity", "IDENTITY.md"},

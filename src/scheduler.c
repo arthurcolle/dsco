@@ -174,7 +174,13 @@ int sched_tick(scheduler_t *s) {
     /* Pick highest-priority ready task */
     task_id_t picked = TASK_INVALID;
     for (int p = 0; p < SCHED_PRIO_COUNT; p++) {
-        picked = dequeue(s, (sched_priority_t)p);
+        /* Cancellation leaves its queue entry behind. Discard stale entries
+         * before dispatch so cancellation cannot resurrect a task. */
+        while ((picked = dequeue(s, (sched_priority_t)p)) != TASK_INVALID) {
+            sched_task_t *candidate = find_task(s, picked);
+            if (candidate && candidate->state == TASK_READY)
+                break;
+        }
         if (picked != TASK_INVALID)
             break;
     }

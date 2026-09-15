@@ -20,7 +20,9 @@
  * Gated on HAVE_LIBSODIUM (uses randombytes + crypto_hash_sha256). When built
  * without libsodium, all functions are no-ops / return NULL.
  *
- * Phase 2 (not yet): a key→value blob overlay on top of this routing.
+ * Content providers: improvement bundles map SHA-256 → a 160-bit DHT key.
+ * The DHT returns provider addresses only; verified immutable bytes travel on
+ * the encrypted mesh rather than through unauthenticated DHT payloads.
  * ─────────────────────────────────────────────────────────────────────── */
 
 #include <stdbool.h>
@@ -39,6 +41,8 @@ typedef struct {
     int  good, dubious, cached, incoming;  /* routing-table node counts */
     int  peers_found;                       /* distinct peers discovered */
     int  searches;                          /* searches launched */
+    int  keys_provided;                     /* content keys announced */
+    int  provider_lookups;                  /* content-key searches */
     bool running;
 } dsco_dht_stats_t;
 
@@ -62,6 +66,15 @@ void dsco_dht_stop(dsco_dht_t *d);
 
 /* Process-global handle (set by dsco_dht_start), for tool/slash access. */
 dsco_dht_t *dsco_dht_global(void);
+
+/* Publish/find providers for an immutable SHA-256 object. The DHT key is the
+ * first 160 bits of the digest; callers must still verify the full digest.
+ * Announcements use the configured encrypted-mesh TCP port. */
+bool dsco_dht_provide_hash(dsco_dht_t *d, const char *sha256_hex);
+bool dsco_dht_find_hash(dsco_dht_t *d, const char *sha256_hex);
+
+/* Pure conversion helper, exposed for deterministic validation. */
+bool dsco_dht_key_from_sha256(const char *sha256_hex, uint8_t out_key[20]);
 
 #ifdef DSCO_INTERNAL_TESTS
 dsco_dht_kbuckets_t *dsco_dht_kbuckets_create(const uint8_t self_id[20], int k);

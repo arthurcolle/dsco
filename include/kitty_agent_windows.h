@@ -6,7 +6,13 @@
 
 /* Live Kitty companions for real swarm workers.  These hooks are intentionally
  * lifecycle-shaped: swarm owns worker creation/output/completion, while this
- * module only mirrors that already-governed stream into a terminal window. */
+ * module only mirrors that already-governed stream into a terminal window.
+ * Explicitly enabled with DSCO_KITTY_AGENT_WINDOWS=1. The normal TUI uses
+ * internal worker cards instead. Companions use the parent tab with an
+ * adaptive split. DSCO_KITTY_AGENT_WINDOW_TYPE=os-window restores separate OS
+ * windows; DSCO_KITTY_AGENT_WINDOW_LOCATION=hsplit|vsplit forces orientation.
+ * DSCO_KITTY_SIGNATURE supplies the optional identity shown in pane chrome.
+ * Remote-control permission must already exist; these hooks never enable it. */
 void kitty_agent_window_spawn(int child_id, pid_t child_pid,
                               const char *task, const char *model);
 void kitty_agent_window_append(int child_id, const char *data, size_t len);

@@ -18,13 +18,13 @@ static const px_theme_t k_themes[] = {
         .bg_bottom = {8, 10, 12},
         .panel = {17, 20, 23},
         .panel_alt = {21, 24, 28},
-        .text = {205, 211, 216},
-        .dim = {100, 108, 116},
-        .accent = {105, 139, 153},
-        .accent_alt = {111, 108, 122},
-        .success = {108, 142, 122},
-        .warning = {174, 142, 94},
-        .danger = {166, 96, 99},
+        .text = {226, 231, 235},
+        .dim = {151, 161, 171},
+        .accent = {137, 181, 199},
+        .accent_alt = {167, 156, 190},
+        .success = {140, 192, 160},
+        .warning = {220, 181, 122},
+        .danger = {225, 132, 137},
         .brand = {206, 32, 38},
         .chart = {{105, 139, 153},
                   {111, 108, 122},
@@ -32,6 +32,27 @@ static const px_theme_t k_themes[] = {
                   {174, 142, 94},
                   {166, 96, 99},
                   {150, 150, 158}},
+    },
+    {
+        .name = "copper-ice",
+        .display_name = "Copper & Ice",
+        .description = "Midnight ink, luminous ice, warm copper instrumentation",
+        .light = false,
+        .shadow_opacity = 0.32f,
+        .bg_top = {13, 20, 29},
+        .bg_bottom = {7, 11, 18},
+        .panel = {18, 28, 39},
+        .panel_alt = {25, 38, 51},
+        .text = {226, 237, 244},
+        .dim = {139, 160, 177},
+        .accent = {134, 218, 230},
+        .accent_alt = {226, 166, 116},
+        .success = {145, 209, 173},
+        .warning = {242, 199, 127},
+        .danger = {243, 135, 145},
+        .brand = {226, 166, 116},
+        .chart = {{134, 218, 230}, {226, 166, 116}, {145, 209, 173},
+                  {178, 162, 224}, {243, 135, 145}, {242, 199, 127}},
     },
     {
         .name = "distributed-crimson",
@@ -392,7 +413,12 @@ px_backend_palette_t px_theme_palette(const px_theme_t *theme) {
     palette.colors[NATIVE_UI_COLOR_SUCCESS] = theme->success;
     palette.colors[NATIVE_UI_COLOR_WARNING] = theme->warning;
     palette.colors[NATIVE_UI_COLOR_DANGER] = theme->danger;
-    palette.colors[NATIVE_UI_COLOR_BORDER] = theme->dim;
+    /* Hairlines separate surfaces without competing with readable text. */
+    palette.colors[NATIVE_UI_COLOR_BORDER] = (px_backend_color_t){
+        (uint8_t)((theme->panel.r * 4 + theme->dim.r) / 5),
+        (uint8_t)((theme->panel.g * 4 + theme->dim.g) / 5),
+        (uint8_t)((theme->panel.b * 4 + theme->dim.b) / 5),
+    };
     palette.colors[NATIVE_UI_COLOR_FOCUS] = theme->accent;
     return palette;
 }

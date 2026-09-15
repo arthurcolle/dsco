@@ -7,6 +7,7 @@
 #include <time.h>
 #include <curl/curl.h>
 #include "json_util.h"
+#include "goal_queue.h"
 
 typedef enum { ROLE_USER, ROLE_ASSISTANT } msg_role_t;
 
@@ -21,6 +22,10 @@ typedef struct {
     char *image_media_type;  /* e.g., "image/png", "image/jpeg" */
     char *image_data;        /* base64-encoded image data */
     char *image_url;         /* URL source for image */
+    /* Video: Abliteration.ai base model, Chat Completions only. */
+    char *video_media_type;  /* video/mp4, video/webm, video/quicktime */
+    char *video_data;        /* base64-encoded video data */
+    char *video_url;         /* public HTTPS source */
     /* Document: PDF content */
     char *doc_media_type;    /* e.g., "application/pdf" */
     char *doc_data;          /* base64-encoded PDF data */
@@ -91,12 +96,13 @@ typedef struct {
     bool               retryable;         /* transient provider failure may be retried */
     long               retry_after_ms;     /* provider-requested retry delay; 0 = backoff */
     bool               context_overflow;  /* provider rejected prompt as too long → reactive compaction can retry */
-    double             cost_usd;           /* authoritative per-turn cost reported by provider (OpenRouter usage.cost); 0 = not reported, fall back to token math */
+    double             cost_usd;           /* provider-reported cost; cost_reported distinguishes zero from missing */
     time_t             credit_reset_at;    /* provider-supplied epoch seconds when exhausted subscription/rate window reopens */
     /* OpenRouter/provider metadata — printed after md_flush, never inside stream */
     char              *actual_model;       /* model actually used (may differ from requested) */
     char              *generation_id;      /* provider generation/request ID */
     int                reasoning_tokens;   /* reasoning tokens this turn */
+    bool               cost_reported;      /* authoritative cost, including explicit zero */
 } stream_result_t;
 
 /* ── Session state (mutable per-session settings) ──────────────────────── */
@@ -132,12 +138,17 @@ typedef struct {
     int    total_cache_read_tokens;
     int    total_cache_write_tokens;
     int    turn_count;
-    /* Accounted session cost. Accumulates the provider-reported cost
-     * (OpenRouter usage.cost) when present, else the per-turn token-math
-     * estimate. Subscription-included turns contribute an authoritative zero.
-     * Used for budget enforcement so caching discounts are reflected instead
-     * of billing every cached token at full input price. */
-    double total_reported_cost_usd;
+    /* Budget-accounted sum: provider report when available, otherwise the
+     * token-priced estimate. Subscription entitlement never zeroes inference
+     * value; reported and estimated bases are also retained independently. */
+    double total_reported_cost_usd; /* legacy name: budget-accounted aggregate */
+    double total_provider_reported_cost_usd;
+    double total_estimated_inference_cost_usd;
+    int provider_cost_samples;
+    int estimated_cost_samples;
+    int unpriced_response_count;
+    int subscription_response_count;
+    int total_reasoning_tokens;
     /* Most recent API response's input usage (single turn, not cumulative).
      * Used by conv_token_estimate to calibrate the rough estimate against
      * what the API actually counted. */
@@ -210,9 +221,24 @@ typedef struct {
     int    goal_turns_at_start;
     time_t goal_started_at;
     time_t goal_updated_at;
+    /* Evidence-bearing goal contract and bounded autonomous controller. */
+    char   goal_criteria[2048];
+    char   goal_evidence[4096];
+    char   goal_reason[1024];
+    int    goal_revision;
+    long long goal_tokens_used;
+    long long goal_last_tokens;
+    bool   goal_accounting_v2;
+    int    goal_turns;
+    int    goal_turn_limit;
+    int    goal_no_progress;
+    goal_queue_t goal_queue;
 } session_state_t;
 
 void  session_state_init(session_state_t *s, const char *model);
+/* Explicit providers preserve concrete API model IDs; only exact aliases expand. */
+void  session_state_init_for_provider(session_state_t *s, const char *model,
+                                      const char *provider_override);
 const char *session_trust_tier_to_string(dsco_trust_tier_t tier);
 dsco_trust_tier_t session_trust_tier_from_string(const char *s, bool *ok);
 const char *session_goal_status_to_string(dsco_goal_status_t status);
@@ -233,6 +259,9 @@ void  conv_add_assistant_raw(conversation_t *c, parsed_response_t *resp);
 void  conv_add_user_image_base64(conversation_t *c, const char *media_type,
                                   const char *base64_data, const char *text);
 void  conv_add_user_image_url(conversation_t *c, const char *url, const char *text);
+void  conv_add_user_video_base64(conversation_t *c, const char *media_type,
+                                 const char *base64_data, const char *text);
+void  conv_add_user_video_url(conversation_t *c, const char *url, const char *text);
 void  conv_add_user_document(conversation_t *c, const char *media_type,
                               const char *base64_data, const char *title,
                               const char *text);
@@ -407,11 +436,21 @@ char *llm_build_request_ex_for_credential(conversation_t *c,
                                           session_state_t *session,
                                           int max_tokens,
                                           const char *credential);
+/* Provider-internal exact wire override (serialized ,"tools":[...] fragment).
+ * NULL keeps normal paging; a non-NULL fragment is selected only once and is
+ * used both for the request payload and its fresh system inventory. */
+char *llm_build_request_ex_with_tools(conversation_t *c, session_state_t *session,
+                                     int max_tokens, const char *credential,
+                                     const char *tools_override);
 
 int   llm_count_tokens(const char *api_key, const char *request_json);
 const char *llm_get_custom_system_prompt(void);
 void  llm_debug_save_request(const char *request_json, int http_status);
 bool  llm_anthropic_uses_claude_code_auth(const char *credential);
+/* Shared Anthropic header builder used by the native provider and focused
+ * request-shape regressions. The caller owns the returned curl list. */
+struct curl_slist *llm_build_anthropic_headers(const char *api_key,
+                                               const char *request_json);
 
 stream_result_t llm_stream(const char *api_key, const char *request_json,
                            stream_text_cb text_cb,
@@ -428,6 +467,16 @@ stream_result_t llm_stream_reuse(CURL *curl, const char *api_key,
                                  stream_tool_arg_delta_cb tool_delta_cb,
                                  stream_thinking_cb thinking_cb,
                                  void *cb_ctx);
+/* Anthropic-compatible stream against a caller-selected Messages endpoint.
+ * Used by providers that implement the Messages wire without living at
+ * api.anthropic.com. */
+stream_result_t llm_stream_reuse_url(CURL *curl, const char *api_url,
+                                     const char *api_key, const char *request_json,
+                                     stream_text_cb text_cb,
+                                     stream_tool_start_cb tool_cb,
+                                     stream_tool_arg_delta_cb tool_delta_cb,
+                                     stream_thinking_cb thinking_cb,
+                                     void *cb_ctx);
 void dsco_strip_terminal_controls_inplace(char *s);
 
 /* ── Per-tool metrics ──────────────────────────────────────────────────── */
@@ -476,6 +525,9 @@ typedef struct {
 
 void  tool_cache_init(tool_cache_t *c);
 void  tool_cache_free(tool_cache_t *c);
+/* Call under the cache lock before execution, including failure/timeout paths.
+ * Potential mutations invalidate observations even if they later fail. */
+void  tool_cache_prepare_call(tool_cache_t *c, const char *tool, const char *input);
 bool  tool_cache_get(tool_cache_t *c, const char *tool, const char *input,
                        char *result, size_t rlen, bool *success);
 void  tool_cache_put(tool_cache_t *c, const char *tool, const char *input,

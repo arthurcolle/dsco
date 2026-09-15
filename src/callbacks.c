@@ -8,6 +8,7 @@
 
 #include <curl/curl.h>
 
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -287,7 +288,9 @@ static void signature_headers(struct curl_slist **hdrs, const char *secret, cons
     *hdrs = curl_slist_append(*hdrs, hsig);
 }
 
-static long post_callback_json(const char *url, const char *body, const char *delivery_id, char *err, size_t err_len) {
+static long post_callback_json(const char *url, const char *body, const char *delivery_id,
+                               const webhook_resolved_target_t *target,
+                               char *err, size_t err_len) {
     if (err_len) err[0] = 0;
     CURL *curl = curl_easy_init();
     if (!curl) { snprintf(err, err_len, "curl init failed"); return 0; }
@@ -300,6 +303,40 @@ static long post_callback_json(const char *url, const char *body, const char *de
     char h_event[128];
     snprintf(h_event, sizeof(h_event), "X-DSCO-Delivery-ID: %s", delivery_id ? delivery_id : "");
     hdrs = curl_slist_append(hdrs, h_event);
+    struct curl_slist *resolved = NULL;
+    if (target && target->address_count > 0) {
+        uint8_t ignored4[4];
+        uint8_t ignored6[16];
+        bool literal = inet_pton(AF_INET, target->host, ignored4) == 1 ||
+                       inet_pton(AF_INET6, target->host, ignored6) == 1;
+        if (!literal) {
+            for (size_t i = 0; i < target->address_count; i++) {
+                char entry[WEBHOOK_RESOLVED_HOST_MAX + WEBHOOK_RESOLVED_ADDR_TEXT_MAX + 32];
+                if (strchr(target->addresses[i], ':'))
+                    snprintf(entry, sizeof(entry), "%s:%hu:[%s]", target->host, target->port,
+                             target->addresses[i]);
+                else
+                    snprintf(entry, sizeof(entry), "%s:%hu:%s", target->host, target->port,
+                             target->addresses[i]);
+                struct curl_slist *next = curl_slist_append(resolved, entry);
+                if (!next) {
+                    curl_slist_free_all(resolved);
+                    curl_slist_free_all(hdrs);
+                    curl_easy_cleanup(curl);
+                    snprintf(err, err_len, "could not pin resolved callback address");
+                    return 0;
+                }
+                resolved = next;
+            }
+            if (curl_easy_setopt(curl, CURLOPT_RESOLVE, resolved) != CURLE_OK) {
+                curl_slist_free_all(resolved);
+                curl_slist_free_all(hdrs);
+                curl_easy_cleanup(curl);
+                snprintf(err, err_len, "could not pin resolved callback address");
+                return 0;
+            }
+        }
+    }
     curl_easy_setopt(curl, CURLOPT_URL, url);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body ? body : "{}");
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
@@ -314,6 +351,7 @@ static long post_callback_json(const char *url, const char *body, const char *de
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
     if (rc != CURLE_OK) snprintf(err, err_len, "%s", curl_easy_strerror(rc));
     free(resp.data);
+    curl_slist_free_all(resolved);
     curl_slist_free_all(hdrs);
     curl_easy_cleanup(curl);
     return code;
@@ -356,7 +394,9 @@ static int callbacks_drain_run(const char *run) {
         bool private_override = allow_private &&
                                 (strcmp(allow_private, "1") == 0 ||
                                  strcasecmp(allow_private, "true") == 0);
-        if (!private_override && !webhook_egress_url_allowed(url, err, sizeof(err))) {
+        webhook_resolved_target_t target;
+        memset(&target, 0, sizeof(target));
+        if (!private_override && !webhook_resolve_public_url(url, &target, err, sizeof(err))) {
             jbuf_t denied; jbuf_init(&denied, 512);
             attempts++;
             jbuf_appendf(&denied,
@@ -371,7 +411,9 @@ static int callbacks_drain_run(const char *run) {
             failed++;
             continue;
         }
-        long code = post_callback_json(url, body, delivery_id, err, sizeof(err));
+        long code = post_callback_json(url, body, delivery_id,
+                                       private_override ? NULL : &target,
+                                       err, sizeof(err));
         jbuf_t sb; jbuf_init(&sb, 512);
         attempts++;
         if (code >= 200 && code < 300) {

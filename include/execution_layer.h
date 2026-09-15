@@ -26,6 +26,12 @@ typedef bool (*execution_leaf_fn)(const char *name, const char *input_json,
                                   const char *tier, char *result,
                                   size_t result_len);
 
+/* Read-only postcondition check. This callback does not confer tool authority.
+ * Any tools used by a verifier must still pass tools_execute_for_tier(). */
+typedef bool (*execution_verifier_fn)(const char *tool_name, const char *input_json,
+                                     const char *result, void *context,
+                                     char *error, size_t error_len);
+
 typedef struct {
     char principal[64];
     char tier[32];
@@ -37,6 +43,8 @@ typedef struct {
     bool has_rollback;
     char rollback_hint[256];
     execution_leaf_fn execute;
+    execution_verifier_fn verify; /* optional postcondition verifier */
+    void *verify_context;
 } execution_intent_t;
 
 typedef struct {

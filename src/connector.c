@@ -24,6 +24,8 @@
 #include <errno.h>
 #include <poll.h>
 #include <sqlite3.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 /* ── Shared helpers ───────────────────────────────────────────────────── */
 static long conn_now_ms(void) {
@@ -160,32 +162,53 @@ void conn_result_free(conn_result_t *r) {
 #define CONN_MAX_KINDS 32
 static const connector_vtable_t *g_kinds[CONN_MAX_KINDS];
 static int g_nkinds = 0;
+static pthread_mutex_t g_kinds_mu = PTHREAD_MUTEX_INITIALIZER;
 
 int connector_register(const connector_vtable_t *vt) {
     if (!vt || !vt->kind || !vt->kind[0])
         return -1;
-    if (connector_find(vt->kind))
-        return -1; /* no dup kinds */
-    if (g_nkinds >= CONN_MAX_KINDS)
+    pthread_mutex_lock(&g_kinds_mu);
+    for (int i = 0; i < g_nkinds; i++) {
+        if (strcmp(g_kinds[i]->kind, vt->kind) == 0) {
+            pthread_mutex_unlock(&g_kinds_mu);
+            return -1; /* no dup kinds */
+        }
+    }
+    if (g_nkinds >= CONN_MAX_KINDS) {
+        pthread_mutex_unlock(&g_kinds_mu);
         return -1;
+    }
     g_kinds[g_nkinds++] = vt;
+    pthread_mutex_unlock(&g_kinds_mu);
     return 0;
 }
 
 const connector_vtable_t *connector_find(const char *kind) {
     if (!kind)
         return NULL;
+    pthread_mutex_lock(&g_kinds_mu);
+    const connector_vtable_t *found = NULL;
     for (int i = 0; i < g_nkinds; i++)
-        if (strcmp(g_kinds[i]->kind, kind) == 0)
-            return g_kinds[i];
-    return NULL;
+        if (strcmp(g_kinds[i]->kind, kind) == 0) {
+            found = g_kinds[i];
+            break;
+        }
+    pthread_mutex_unlock(&g_kinds_mu);
+    return found;
 }
 
 int connector_list(const connector_vtable_t **out, int max) {
-    int n = g_nkinds < max ? g_nkinds : max;
-    for (int i = 0; i < n; i++)
-        out[i] = g_kinds[i];
-    return g_nkinds;
+    if (max < 0)
+        max = 0;
+    pthread_mutex_lock(&g_kinds_mu);
+    int count = g_nkinds;
+    int n = count < max ? count : max;
+    if (out) {
+        for (int i = 0; i < n; i++)
+            out[i] = g_kinds[i];
+    }
+    pthread_mutex_unlock(&g_kinds_mu);
+    return count;
 }
 
 /* ── Lifecycle ────────────────────────────────────────────────────────── */
@@ -212,9 +235,9 @@ connector_t *connector_open(const char *kind, const char *config_json, char *err
     return c;
 }
 
-static int g_validate = 0;
+static atomic_int g_validate = 0;
 void connector_set_validate(int on) {
-    g_validate = on;
+    atomic_store_explicit(&g_validate, on != 0, memory_order_release);
 }
 
 char *connector_schema(connector_t *c, const char *method) {
@@ -250,7 +273,7 @@ void connector_invoke(connector_t *c, const char *method, const char *params_jso
             snprintf(out->error, sizeof(out->error), "connector does not support invoke");
         return;
     }
-    if (g_validate) {
+    if (atomic_load_explicit(&g_validate, memory_order_acquire)) {
         char verr[256];
         if (connector_validate(c, method, params_json, verr, sizeof(verr)) == 0) {
             if (out) {
@@ -1944,11 +1967,7 @@ static const connector_vtable_t SQLITE_VT = {
     .close = sqlite_close,
 };
 
-void connector_register_builtins(void) {
-    static int done = 0;
-    if (done)
-        return;
-    done = 1;
+static void register_builtins_once(void) {
     connector_register(&TOOL_VT);
     connector_register(&SHELL_VT);
     connector_register(&FLOW_VT);
@@ -1957,6 +1976,11 @@ void connector_register_builtins(void) {
     connector_register(&CHAIN_VT);
     connector_register(&AGENT_VT);
     connector_register(&SQLITE_VT);
+}
+
+void connector_register_builtins(void) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, register_builtins_once);
 }
 
 /* ── CLI ──────────────────────────────────────────────────────────────── */

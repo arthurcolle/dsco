@@ -116,12 +116,19 @@ void ui_motion_set(ui_motion_t *m, uint64_t key, uint16_t prop, double target,
                    double duration_s, ui_motion_curve_t curve, double now) {
     if (!m || key == 0) return;
     ui_motion_track_t *track = find_track(m, key, prop);
+    /* Producers may publish the same target every tick. Preserve the original
+     * deadline and spring velocity rather than asymptotically restarting it.
+     * Explicit immediate/reduced-motion updates still snap below. */
+    if (track && !m->reduced && duration_s > 0.0 &&
+        track->target == target && track->duration_s == duration_s &&
+        track->curve == curve)
+        return;
     double from = target, velocity = 0.0;
     if (track)
         track_sample(track, now, &from, &velocity);
     else if (!(track = alloc_track(m)))
         return;
-    if (m->reduced || duration_s <= 0.0) {
+    if (m->reduced || duration_s <= 0.0 || (from == target && velocity == 0.0)) {
         from = target;
         velocity = 0.0;
         duration_s = 0.0;

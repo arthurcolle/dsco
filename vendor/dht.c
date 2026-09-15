@@ -1225,7 +1225,7 @@ search_step(struct search *sr, dht_callback_t *callback, void *closure)
                     debugf("Sending announce_peer.\n");
                     make_tid(tid, "ap", sr->tid);
                     send_announce_peer((struct sockaddr*)&n->ss,
-                                       sizeof(struct sockaddr_storage),
+                                       n->sslen,
                                        tid, 4, sr->id, sr->port,
                                        n->token, n->token_len,
                                        n->reply_time >= now.tv_sec - 15);

@@ -529,7 +529,7 @@ static void parse_inline(const char *line, rich_style_t base, int level, int ind
         }
         const char *start = p;
         while (*p && strncmp(p, "**", 2) && strncmp(p, "~~", 2) && *p != '`' && *p != '$' &&
-               strncmp(p, "\\(", 2) && *p != '[' && *p != '*' && *p != '_' && *p != '<')
+               strncmp(p, "\\(", 2) && *p != '[' && !emphasis_opens(line, p) && *p != '<')
             p++;
         if (p == start)
             p++;
@@ -593,7 +593,7 @@ size_t rich_text_parse(const char *markdown, rich_token_t *tokens, size_t capaci
             code = !code;
             if (code && s[3]) {
                 char label[96];
-                snprintf(label, sizeof(label), "  %s", s + 3);
+                snprintf(label, sizeof(label), "%s", s + 3);
                 emit_cstr(tokens, capacity, &count, RICH_STYLE_MUTED, label, 0, indent, true);
                 emit_token(tokens, capacity, &count, RICH_TOKEN_BREAK, RICH_STYLE_CODE, NULL, 0, 0,
                            indent, false);

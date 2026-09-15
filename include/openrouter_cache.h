@@ -5,7 +5,7 @@
  *
  * On startup dsco loads the on-disk catalog (~/.dsco/openrouter_models.json)
  * into memory immediately, then — on a detached background thread — refreshes
- * it from https://openrouter.ai/api/v1/models when the cache is stale. This
+ * it from https://openrouter.ai/api/v1/models on each launch. This
  * keeps model metadata (context window, pricing, reasoning support) current
  * for *every* real slug without anything being hardcoded, so `-m <slug>` and
  * cost tracking work for new models the moment OpenRouter ships them.
@@ -28,9 +28,11 @@ int openrouter_cache_count(void);
 int openrouter_cache_wait_ready(int timeout_ms);
 
 /* Synchronously load the catalog on the calling thread: publishes the on-disk
- * copy, then refreshes over the network when stale. Returns the resulting model
+ * copy, then refreshes over the network. Returns the resulting model
  * count. For CLI listing where waiting on the background thread is undesirable. */
 int openrouter_cache_load_sync(void);
+/* Disk only, no network or subprocess. */
+int openrouter_cache_load_cached(void);
 
 /* Read-only view of one indexed model, materialised for enumeration. */
 typedef struct {

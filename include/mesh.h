@@ -10,6 +10,11 @@
  *   Handshake (36 bytes, each side sends immediately after connect):
  *     [uint32_t MESH_MAGIC big-endian] [uint8_t pubkey[32]]
  *
+ *   Each side then sends a 32-byte random challenge and a crypto_box proof
+ *   binding both challenges and both directional public keys. Membership is
+ *   published only after allowlist admission and proof verification. Legacy
+ *   DSMH peers are intentionally incompatible and must be upgraded explicitly.
+ *
  *   Message frame:
  *     [uint32_t wire_body_len big-endian]      -- NONCE_LEN + ciphertext
  *     [uint8_t nonce[24]]
@@ -23,7 +28,7 @@
 #define MESH_PUBKEY_LEN   32
 #define MESH_MAX_PEERS    64
 #define MESH_MAX_PAYLOAD  (128 * 1024)
-#define MESH_MAGIC        0x44534D48u  /* "DSMH" */
+#define MESH_MAGIC        0x44534D32u  /* "DSM2": pinned key-possession handshake */
 
 typedef struct {
     uint8_t pubkey[MESH_PUBKEY_LEN];
@@ -45,6 +50,10 @@ void           mesh_node_stop(mesh_node_t *n);
 const uint8_t *mesh_node_pubkey(mesh_node_t *n);
 
 bool mesh_node_connect(mesh_node_t *n, const char *host, uint16_t port);
+/* Bound TCP establishment to three seconds; cancellation is checked at most
+ * every 50 ms while connecting. Hostname resolution uses the system resolver. */
+bool mesh_node_connect_interruptible(mesh_node_t *n, const char *host, uint16_t port,
+                                     bool (*cancelled)(void *), void *ctx);
 bool mesh_node_send_to(mesh_node_t *n, const uint8_t *peer_pk,
                        const void *data, size_t len);
 int  mesh_node_broadcast(mesh_node_t *n, const void *data, size_t len);

@@ -91,6 +91,7 @@ static inline int sodium_memcmp(const void *a, const void *b, size_t n) {
 #include <sys/ptrace.h>
 #include <sys/sysctl.h>
 #include <sys/event.h>
+#include <sys/acl.h>
 #include <mach-o/dyld.h>
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
@@ -122,6 +123,11 @@ static struct {
     char exe_path[4096];
     int watch_fd;      /* fd used for kqueue / inotify */
     int kq_or_inotify; /* kqueue fd (macOS) or inotify fd (Linux) */
+#ifdef __APPLE__
+    struct stat watch_stat;
+    char *watch_acl;
+    bool watch_acl_valid;
+#endif
 
     pthread_t watch_thread;
     volatile bool watch_running;
@@ -216,10 +222,48 @@ static bool compute_code_hash(uint8_t *out) {
 /* ═══════════════════════════════════════════════════════════════════════ */
 
 #ifdef __APPLE__
+static bool watch_acl_snapshot(char **text) {
+    *text = NULL;
+    acl_t acl = acl_get_fd_np(g.watch_fd, ACL_TYPE_EXTENDED);
+    if (!acl)
+        return errno == ENOENT || errno == ENOTSUP;
+    *text = acl_to_text(acl, NULL);
+    acl_free(acl);
+    return *text != NULL;
+}
+
+static bool watch_security_metadata_changed(void) {
+    struct stat current;
+    if (fstat(g.watch_fd, &current) != 0)
+        return true;
+    const struct stat *saved = &g.watch_stat;
+    if (current.st_mode != saved->st_mode || current.st_uid != saved->st_uid ||
+        current.st_gid != saved->st_gid ||
+        /* Atomic replacement unlinks the loaded inode; that is not a patch.
+         * Still reject added links and all other security metadata changes. */
+        current.st_nlink > saved->st_nlink ||
+        current.st_flags != saved->st_flags || current.st_dev != saved->st_dev ||
+        current.st_ino != saved->st_ino || current.st_size != saved->st_size)
+        return true;
+    char *acl = NULL;
+    bool same = g.watch_acl_valid && watch_acl_snapshot(&acl) &&
+                strcmp(g.watch_acl ? g.watch_acl : "", acl ? acl : "") == 0;
+    if (acl) acl_free(acl);
+    /* Track unlink decrements so later added links are still detected. */
+    if (same) g.watch_stat.st_nlink = current.st_nlink;
+    return !same;
+}
+
 static bool setup_kqueue_watch(void) {
     g.watch_fd = open(g.exe_path, O_RDONLY | O_CLOEXEC);
     if (g.watch_fd < 0)
         return false;
+    if (fstat(g.watch_fd, &g.watch_stat) != 0) {
+        close(g.watch_fd);
+        g.watch_fd = -1;
+        return false;
+    }
+    g.watch_acl_valid = watch_acl_snapshot(&g.watch_acl);
 
     g.kq_or_inotify = kqueue();
     if (g.kq_or_inotify < 0) {
@@ -228,33 +272,45 @@ static bool setup_kqueue_watch(void) {
     }
 
     struct kevent kev;
-    /* NOTE_OPEN fires when any process (other than us, post-setup) opens
-     * the binary — catches Ghidra, objdump, strings, etc.
-     * NOTE_WRITE / NOTE_DELETE catch in-place patching or removal. */
+    /* Follow the loaded inode across atomic replacement. In-place writes,
+     * revocation and security metadata changes remain fatal. */
     EV_SET(&kev, (uintptr_t)g.watch_fd, EVFILT_VNODE, EV_ADD | EV_CLEAR | EV_ENABLE,
-           NOTE_WRITE | NOTE_DELETE | NOTE_RENAME | NOTE_ATTRIB | NOTE_REVOKE, 0, NULL);
-    kevent(g.kq_or_inotify, &kev, 1, NULL, 0, NULL);
+           NOTE_WRITE | NOTE_DELETE | NOTE_RENAME | NOTE_ATTRIB | NOTE_REVOKE | NOTE_LINK, 0, NULL);
+    if (kevent(g.kq_or_inotify, &kev, 1, NULL, 0, NULL) < 0) {
+        close(g.kq_or_inotify);
+        close(g.watch_fd);
+        g.kq_or_inotify = g.watch_fd = -1;
+        return false;
+    }
     return true;
 }
 
 static void *watcher_thread(void *arg) {
     (void)arg;
-    struct timespec timeout = {.tv_sec = 0, .tv_nsec = WATCH_INTERVAL_MS * 1000000};
+    struct timespec timeout = {.tv_sec = WATCH_INTERVAL_MS / 1000,
+                              .tv_nsec = (WATCH_INTERVAL_MS % 1000) * 1000000L};
     struct kevent ev[4];
 
-    /* Drain any events from our own startup open */
-    kevent(g.kq_or_inotify, NULL, 0, ev, 4, &timeout);
-
+    /* Do not discard the first mutation while the watcher starts. */
     while (g.watch_running) {
         int n = kevent(g.kq_or_inotify, NULL, 0, ev, 4, &timeout);
+        if (n < 0) {
+            if (errno != EINTR)
+                nanosleep(&timeout, NULL); /* retry without a syscall spin */
+            continue;
+        }
         for (int i = 0; i < n; i++) {
             uint32_t flags = (uint32_t)ev[i].fflags;
             if (flags & NOTE_WRITE)
                 do_response("binary modified on disk (patching attempt)");
-            if (flags & (NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE))
-                do_response("binary deleted, renamed, or revoked");
-            if (flags & NOTE_ATTRIB)
-                do_response("binary attributes modified (setuid/chmod tampering)");
+            /* A build can replace/unlink the pathname without changing our
+             * loaded image. Do not wipe or restart active work for that. */
+            if (flags & NOTE_REVOKE)
+                do_response("binary access revoked");
+            /* APFS also emits NOTE_ATTRIB for access-time updates from normal
+               reads/hashing. Compare security state, not timestamps alone. */
+            if ((flags & (NOTE_ATTRIB | NOTE_LINK)) && watch_security_metadata_changed())
+                do_response("binary security attributes modified (mode/owner/link/flags/ACL)");
         }
     }
     return NULL;

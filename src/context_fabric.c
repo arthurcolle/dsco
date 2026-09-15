@@ -129,6 +129,11 @@ static void ctx_mkdir_p(const char *path) {
             *p = '/';
         }
     }
+    /* Final component too: the loop above only fires at embedded '/', so a
+     * path like ~/.dsco/context never had its last segment created and
+     * vfs_open(…, CREATE) failed with ENOENT on fresh HOMEs. mkdir is
+     * idempotent (EEXIST swallowed). */
+    mkdir(tmp, 0700);
 }
 
 static void ctx_default_db_path(char *out, size_t cap) {

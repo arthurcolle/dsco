@@ -17,7 +17,7 @@ static inline const char *tier_model_id(model_tier_t t) {
     switch (t) {
         case TIER_HAIKU:  return "claude-haiku-4-5";
         case TIER_SONNET: return "claude-sonnet-5";
-        case TIER_OPUS:   return "claude-opus-4-8";
+        case TIER_OPUS:   return "claude-opus-5";
         case TIER_FABLE:  return "claude-fable-5";
     }
     return "claude-sonnet-5";

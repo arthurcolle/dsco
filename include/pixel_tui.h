@@ -76,6 +76,9 @@ void pixel_tui_session_set_composer(FILE *out, const char *text, size_t cursor,
 void pixel_tui_session_set_model(FILE *out, const char *model, const char *slot_name);
 void pixel_tui_session_set_usage(FILE *out, int input_tokens, int output_tokens,
                                  double cost_usd, int turn, int tools_used);
+/* Parallel observations, never additive: provider bills vs reference estimates. */
+void pixel_tui_session_set_cost_details(FILE *out, double reported_usd, int reported_samples,
+                                      double estimated_usd, int estimated_samples, int unpriced);
 void pixel_tui_session_set_budget(FILE *out, double limit_usd, double burn_rate,
                                   double percent, double runway_seconds);
 void pixel_tui_session_set_clock(FILE *out, bool show_clock);
@@ -95,6 +98,13 @@ void pixel_tui_session_show_modal(FILE *out, pixel_tui_modal_kind_t kind,
                                   int selected, const char *footer);
 void pixel_tui_session_clear_modal(FILE *out);
 void pixel_tui_session_scroll(FILE *out, int lines);
+/* Native retained windows. Pointer input uses SGR 1006 one-based cell
+ * coordinates; key codes/modifiers are declared in native_windows.h.
+ * Return true only for consumed input, preserving composer/transcript fallback. */
+bool pixel_tui_session_pointer(FILE *out, int button, int column, int row, bool released);
+bool pixel_tui_session_window_key(FILE *out, int key, unsigned modifiers);
+/* Call after model mutations have released their own lock. */
+void pixel_tui_session_windows_changed(FILE *out);
 void pixel_tui_session_set_turn(FILE *out, int turn);
 void pixel_tui_session_set_runtime_metrics(FILE *out, double cost_usd,
                                            double context_percent);
@@ -135,6 +145,8 @@ bool pixel_tui_session_terminal_suspended(void);
 /* Re-query cell + pixel geometry; changed dimensions regenerate and atomically
  * swap the active surface, preserving the current agent phase. */
 void pixel_tui_session_refresh(FILE *out);
+/* Change or inspect session zoom without restarting: auto, any positive multiplier or percentage, +, -. */
+bool pixel_tui_session_zoom(FILE *out, const char *value, char *result, size_t result_cap);
 void pixel_tui_session_end(FILE *out);
 
 typedef enum {
@@ -225,17 +237,22 @@ void pixel_tui_tool_preview_extract(const char *name, const char *input_json,
 
 /* ── Generative UI ───────────────────────────────────────────────────────
  * Render a declarative native_ui JSON scene (see native_ui_scene_from_json)
- * as a native RGB overlay above the session — or at the cursor outside a
- * session. This is how agent output materializes ad-hoc panels, dashboards,
- * and inspectors without owning pixels. Returns rows occupied, 0 on error. */
+ * as one retained RGB scene above the session transcript, or at the cursor
+ * outside a session. The session owns a bounded JSON copy until replacement,
+ * explicit close, or shutdown; temporary menus hide its placement. Returns
+ * rows occupied, 0 on error. This is not a multiple-panel window manager. */
+#define PIXEL_TUI_SCENE_JSON_MAX (1024U * 1024U)
+#define PIXEL_TUI_SCENE_DIMENSION_MAX 4096
 int pixel_tui_render_scene_json(FILE *out, const char *scene_json);
+/* Idempotent dismissal of the live session scene. Returns whether one existed. */
+bool pixel_tui_clear_scene(FILE *out);
 
 /* Headless scene render for tests and design iteration. */
 bool pixel_tui_write_scene_ppm(const char *path, const char *scene_json,
                                int width, int height);
 
-/* Governed agent-facing tool: input {"spec": {…}, "ppm_path"?: "…"}.
- * Renders the spec as a native overlay (and/or a PPM artifact). */
+/* Governed tool: {"action"?:"render","spec":{…},"ppm_path"?:"…"}, or
+ * {"action":"close"}. Rendering retains one live scene and/or writes a PPM. */
 bool tool_ui_render(const char *input_json, char *result, size_t result_len);
 
 /* ── Capture stream parser ───────────────────────────────────────────────

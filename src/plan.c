@@ -22,6 +22,7 @@
 
 static plan_t s_plans[PLAN_MAX];
 static step_t s_steps[STEP_MAX];
+static bool s_step_explicit_block[STEP_MAX];
 static atom_t s_atoms[ATOM_MAX];
 static dialog_t s_dialogs[DIALOG_MAX];
 
@@ -66,6 +67,7 @@ void plan_engine_init(void) {
     }
     memset(s_plans, 0, sizeof(s_plans));
     memset(s_steps, 0, sizeof(s_steps));
+    memset(s_step_explicit_block, 0, sizeof(s_step_explicit_block));
     memset(s_atoms, 0, sizeof(s_atoms));
     memset(s_dialogs, 0, sizeof(s_dialogs));
     s_next_plan_id = 1;
@@ -92,6 +94,7 @@ static step_t *step_alloc(void) {
     for (int i = 0; i < STEP_MAX; i++) {
         if (!s_steps[i].active) {
             memset(&s_steps[i], 0, sizeof(s_steps[i]));
+            s_step_explicit_block[i] = false;
             s_steps[i].active = true;
             s_steps[i].id = s_next_step_id++;
             return &s_steps[i];
@@ -520,6 +523,7 @@ bool step_set_status(int step_id, plan_status_t status) {
     if (!s)
         return false;
     s->status = status;
+    s_step_explicit_block[s - s_steps] = status == PLAN_BLOCKED;
     return true;
 }
 
@@ -583,9 +587,16 @@ bool step_deps_satisfied(int step_id) {
 
 bool step_can_run(int step_id) {
     step_t *s = step_find(step_id);
-    if (!s)
-        return false;
-    return (s->status == PLAN_PENDING) && step_deps_satisfied(step_id);
+    /* Every ancestor contributes status and dependency gates. Bound traversal
+     * defensively so malformed parent cycles cannot hang ready-work selection. */
+    for (int depth = 0; s && depth < STEP_MAX; depth++) {
+        if ((s->status != PLAN_PENDING && s->status != PLAN_IN_PROGRESS) ||
+            !step_deps_satisfied(s->id))
+            return false;
+        if (!s->parent_step_id) return true;
+        s = step_find(s->parent_step_id);
+    }
+    return false;
 }
 
 /* ── Atom management ─────────────────────────────────────────────────────── */
@@ -980,7 +991,7 @@ bool atom_inputs_ready(int atom_id) {
 
 static int collect_ready_atoms(int step_id, int *out, int max_out, int count) {
     step_t *s = step_find(step_id);
-    if (!s)
+    if (!s || !step_can_run(step_id))
         return count;
 
     if (step_can_run(step_id)) {
@@ -1004,9 +1015,23 @@ int plan_ready_atoms(int plan_id, int *atom_ids_out, int max_out) {
     plan_t *p = plan_find(plan_id);
     if (!p || !atom_ids_out || max_out <= 0)
         return 0;
+    /* Select across the complete frontier before applying the caller's limit;
+     * otherwise a high-priority step later in the tree can never overtake it. */
+    int ready[ATOM_MAX];
     int count = 0;
-    for (int i = 0; i < p->root_step_count && count < max_out; i++)
-        count = collect_ready_atoms(p->root_step_ids[i], atom_ids_out, max_out, count);
+    for (int i = 0; i < p->root_step_count && count < ATOM_MAX; i++)
+        count = collect_ready_atoms(p->root_step_ids[i], ready, ATOM_MAX, count);
+    for (int i = 1; i < count; i++) {
+        int id = ready[i], j = i;
+        int priority = step_find(atom_find(id)->step_id)->priority;
+        while (j > 0 && step_find(atom_find(ready[j - 1])->step_id)->priority < priority) {
+            ready[j] = ready[j - 1];
+            j--;
+        }
+        ready[j] = id;
+    }
+    if (count > max_out) count = max_out;
+    memcpy(atom_ids_out, ready, (size_t)count * sizeof(*ready));
     return count;
 }
 
@@ -1033,7 +1058,8 @@ static plan_status_t rollup_step(int step_id, int depth) {
         return PLAN_PENDING;
 
     /* Terminal statuses set explicitly (skip/cancel) are preserved. */
-    if (s->status == PLAN_SKIPPED || s->status == PLAN_CANCELLED)
+    if (s->status == PLAN_SKIPPED || s->status == PLAN_CANCELLED ||
+        s_step_explicit_block[s - s_steps])
         return s->status;
 
     int units = 0, done = 0, failed = 0, blocked = 0, in_prog = 0;
@@ -1126,15 +1152,11 @@ int plan_run_all(int plan_id, int max_atoms) {
 
     p->status = PLAN_IN_PROGRESS;
     while (executed < ceiling) {
-        int ids[16];
-        int n = plan_ready_atoms(plan_id, ids, 16);
-        if (n < 1)
-            break;
-        for (int i = 0; i < n && executed < ceiling; i++) {
-            char buf[8192];
-            atom_run(ids[i], buf, sizeof(buf));
-            executed++;
-        }
+        int id;
+        if (plan_ready_atoms(plan_id, &id, 1) < 1) break;
+        char buf[8192];
+        atom_run(id, buf, sizeof(buf));
+        executed++;
         plan_rollup_status(plan_id);
     }
     plan_rollup_status(plan_id);

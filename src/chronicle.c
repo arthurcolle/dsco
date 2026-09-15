@@ -1,7 +1,10 @@
 #include "chronicle.h"
+#include "tool_telemetry.h"
 #include "agent_event.h"
 #include "callbacks.h"
 #include "json_util.h"
+#include "execution_recovery.h"
+#include "event_stream.h"
 
 #include <sqlite3.h>
 
@@ -9,6 +12,8 @@
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -25,6 +30,17 @@
 #endif
 
 #define CHRONICLE_SCHEMA_VERSION "chronicle.v1"
+
+extern volatile int g_interrupted;
+
+/* This sink does not call Chronicle: retaining an event must not recurse into
+ * the recorder. A failed durable append stops active work, never samples it. */
+static bool stream_record(const char *source, const char *event, const char *json) {
+    if (!event_stream_active()) return true;
+    bool ok = event_stream_emit(source, event, json);
+    if (!ok) g_interrupted = 1;
+    return ok;
+}
 
 /* Small embedded SHA-256 implementation (public-domain style primitives).
  * Used for content addressing and tamper-evident event payload hashes without
@@ -173,11 +189,14 @@ typedef struct {
     char session_id[37];
     char instance_id[128];
     time_t started_at;
-    unsigned long long seq;
+    _Atomic unsigned long long seq;
     char prev_event_hash[65];
 } chronicle_state_t;
 
 static chronicle_state_t g_chronicle = {0};
+/* One ordering boundary for every WAL producer and the event hash chain.
+ * Lifecycle start/stop still belong to the coordinator, after workers join. */
+static pthread_mutex_t g_append_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static const char *nz(const char *s) { return s ? s : ""; }
 
@@ -473,7 +492,12 @@ bool chronicle_start(const chronicle_start_opts_t *opts) {
 
     snprintf(g_chronicle.db_path, sizeof(g_chronicle.db_path), "%s/indexes/chronicle.sqlite", g_chronicle.root);
     if (!ensure_parent_dir(g_chronicle.db_path)) return false;
-    if (sqlite3_open(g_chronicle.db_path, &g_chronicle.db) != SQLITE_OK) {
+    /* This connection is shared by provider, tool and telemetry threads.
+     * Do not depend on a process-global sqlite3_config call succeeding before
+     * another subsystem initializes SQLite. */
+    if (sqlite3_open_v2(g_chronicle.db_path, &g_chronicle.db,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                        NULL) != SQLITE_OK) {
         fprintf(stderr, "chronicle: failed to open %s: %s\n", g_chronicle.db_path, sqlite3_errmsg(g_chronicle.db));
         if (g_chronicle.db) sqlite3_close(g_chronicle.db);
         return false;
@@ -722,7 +746,8 @@ int chronicle_runs_cli(int argc, char **argv) {
         if (argc < 4) { fprintf(stderr, "usage: dsco runs show <run-id>\n"); return 2; }
         char jp[PATH_MAX];
         snprintf(jp, sizeof(jp), "%s/%s/journal.wal", runs, argv[3]);
-        return journal_print_file(jp, stdout, false) < 0 ? 1 : 0;
+        int rc = journal_print_file(jp, stdout, false);
+        return rc < 0 ? 1 : rc;
     }
     if (strcmp(cmd, "check") == 0) {
         if (argc < 4) { fprintf(stderr, "usage: dsco runs check <run-id>\n"); return 2; }
@@ -735,7 +760,17 @@ int chronicle_runs_cli(int argc, char **argv) {
         fprintf(stderr, "dsco runs gc: not implemented yet (Wave B P1.3)\n");
         return 2;
     }
-    fprintf(stderr, "usage: dsco runs [list|show <run-id>|check <run-id>|gc]\n");
+    if (strcmp(cmd, "inspect") == 0) {
+        if (argc != 4 || !execution_recovery_valid_run_id(argv[3])) {
+            fprintf(stderr, "usage: dsco runs inspect <run-id> (read-only recovery report)\n");
+            return 2;
+        }
+        char jp[PATH_MAX];
+        int n = snprintf(jp, sizeof(jp), "%s/%s/journal.wal", runs, argv[3]);
+        if (n < 0 || (size_t)n >= sizeof(jp)) return 2;
+        return execution_recovery_report(jp, argv[3], stdout);
+    }
+    fprintf(stderr, "usage: dsco runs [list|show <run-id>|check <run-id>|inspect <run-id>|gc]\n");
     return 2;
 }
 
@@ -818,8 +853,14 @@ static bool chronicle_journal_open(void) {
 }
 
 bool chronicle_journal_append(const char *record_type, const char *payload_json, bool durable) {
-    if (!g_chronicle.ready || !g_chronicle.journal_enabled || g_chronicle.journal_fd < 0) return false;
     if (!record_type || !record_type[0]) return false;
+    pthread_mutex_lock(&g_append_mu);
+    bool legacy_ready = g_chronicle.ready && g_chronicle.journal_enabled &&
+                        g_chronicle.journal_fd >= 0;
+    if (!legacy_ready && !event_stream_active()) {
+        pthread_mutex_unlock(&g_append_mu);
+        return false;
+    }
     long long ms = 0;
     struct timeval tv;
     if (gettimeofday(&tv, NULL) == 0) ms = (long long)tv.tv_sec * 1000LL + tv.tv_usec / 1000;
@@ -831,6 +872,17 @@ bool chronicle_journal_append(const char *record_type, const char *payload_json,
     if (payload_json && json_is_valid_container(payload_json)) jbuf_append(&rec, payload_json);
     else { jbuf_append(&rec, "{\"text\":"); jbuf_append_json_str(&rec, nz(payload_json)); jbuf_append(&rec, "}"); }
     jbuf_append(&rec, "}\n");
+    bool captured = stream_record("journal", record_type, rec.data);
+    if (!legacy_ready) {
+        jbuf_free(&rec);
+        pthread_mutex_unlock(&g_append_mu);
+        return captured;
+    }
+    if (rec.len > 32U * 1024U * 1024U) {
+        jbuf_free(&rec);
+        pthread_mutex_unlock(&g_append_mu);
+        return false;
+    }
     uint32_t len = (uint32_t)rec.len;
     uint32_t crc = crc32_update(0, rec.data, rec.len);
     unsigned char hdr[8];
@@ -840,8 +892,12 @@ bool chronicle_journal_append(const char *record_type, const char *payload_json,
     hdr[6] = (unsigned char)((crc >> 16) & 0xff); hdr[7] = (unsigned char)((crc >> 24) & 0xff);
     bool ok = write_all_fd(g_chronicle.journal_fd, hdr, sizeof(hdr)) && write_all_fd(g_chronicle.journal_fd, rec.data, rec.len);
     if (ok && durable) ok = (fsync(g_chronicle.journal_fd) == 0);
+    /* A partial frame is a recoverable tail only if nothing follows it.
+     * Preserve the evidence and refuse subsequent appends after I/O failure. */
+    if (!ok) g_chronicle.journal_enabled = false;
     jbuf_free(&rec);
-    return ok;
+    pthread_mutex_unlock(&g_append_mu);
+    return ok && captured;
 }
 
 static bool append_event_to_sqlite(const char *event_id, const char *trace_id, const char *span_id,
@@ -880,7 +936,13 @@ static bool append_event_to_sqlite(const char *event_id, const char *trace_id, c
 bool chronicle_event(const char *event_type, const char *trace_id, const char *span_id,
                      const char *parent_span_id, const char *actor_type, const char *actor_id,
                      const char *payload_json, const char *sensitivity) {
-    if (!g_chronicle.ready || !event_type || !event_type[0]) return false;
+    if (!event_type || !event_type[0]) return false;
+    pthread_mutex_lock(&g_append_mu);
+    bool legacy_ready = g_chronicle.ready;
+    if (!legacy_ready && !event_stream_active()) {
+        pthread_mutex_unlock(&g_append_mu);
+        return false;
+    }
     char event_id[37]; chronicle_new_id(event_id, sizeof(event_id));
     char payload_hash[65]; sha256_hex(payload_json ? payload_json : "", payload_json ? strlen(payload_json) : 0, payload_hash);
     sqlite3_int64 now = (sqlite3_int64)time(NULL);
@@ -907,15 +969,18 @@ bool chronicle_event(const char *event_type, const char *trace_id, const char *s
     jbuf_append(&line, "}");
 
     char event_hash[65]; sha256_hex(line.data, line.len, event_hash);
-    append_event_to_sqlite(event_id, trace_id, span_id, parent_span_id, event_type, actor_type, actor_id,
-                           payload_json, payload_hash, sensitivity, g_chronicle.prev_event_hash,
-                           event_hash, now, seq);
-    if (g_chronicle.events_fp) {
+    bool captured = stream_record("chronicle", event_type, line.data);
+    if (legacy_ready)
+        append_event_to_sqlite(event_id, trace_id, span_id, parent_span_id, event_type, actor_type, actor_id,
+                               payload_json, payload_hash, sensitivity, g_chronicle.prev_event_hash,
+                               event_hash, now, seq);
+    if (legacy_ready && g_chronicle.events_fp) {
         fputs(line.data, g_chronicle.events_fp); fputc('\n', g_chronicle.events_fp); fflush(g_chronicle.events_fp);
     }
     snprintf(g_chronicle.prev_event_hash, sizeof(g_chronicle.prev_event_hash), "%s", event_hash);
     jbuf_free(&line);
-    return true;
+    pthread_mutex_unlock(&g_append_mu);
+    return captured;
 }
 
 bool chronicle_blob_put(const void *data, size_t len, const char *logical_type, const char *content_type,
@@ -1081,7 +1146,20 @@ bool chronicle_llm_request(const char *trace_id, const char *span_id, const char
 }
 
 bool chronicle_llm_delta(const char *trace_id, const char *span_id, const char *kind, const char *text) {
-    if (!g_chronicle.ready || g_chronicle.mode != CHRONICLE_MODE_BLACKBOX) return false;
+    bool streamed = event_stream_active();
+    bool captured = true;
+    if (streamed) {
+        jbuf_t delta; jbuf_init(&delta, 256);
+        jbuf_append(&delta, "{\"kind\":"); jbuf_append_json_str(&delta, nz(kind));
+        jbuf_append(&delta, ",\"text\":"); jbuf_append_json_str(&delta, nz(text));
+        jbuf_append(&delta, ",\"trace_id\":"); jbuf_append_json_str(&delta, nz(trace_id));
+        jbuf_append(&delta, ",\"span_id\":"); jbuf_append_json_str(&delta, nz(span_id));
+        jbuf_append(&delta, "}");
+        captured = stream_record("llm", "llm.response.delta", delta.data);
+        jbuf_free(&delta);
+    }
+    if (!g_chronicle.ready || g_chronicle.mode != CHRONICLE_MODE_BLACKBOX)
+        return streamed && captured;
     char sha[65] = ""; chronicle_blob_put_text(text, kind && strcmp(kind, "thinking") == 0 ? "llm.response.thinking_delta" : "llm.response.text_delta", "model_output", sha, sizeof(sha));
     jbuf_t p; jbuf_init(&p, 256);
     jbuf_append(&p, "{\"kind\":"); jbuf_append_json_str(&p, nz(kind));
@@ -1089,7 +1167,7 @@ bool chronicle_llm_delta(const char *trace_id, const char *span_id, const char *
     jbuf_append(&p, ",\"blob_sha256\":"); jbuf_append_json_str(&p, sha);
     jbuf_append(&p, "}");
     bool ok = chronicle_event("llm.response.delta", trace_id, span_id, NULL, "model", "provider", p.data, "model_output");
-    jbuf_free(&p); return ok;
+    jbuf_free(&p); return ok && captured;
 }
 
 bool chronicle_llm_response(const char *trace_id, const char *span_id, const char *provider,
@@ -1130,6 +1208,13 @@ bool chronicle_tool_call_start(const char *trace_id, const char *parent_span_id,
     jbuf_t p; jbuf_init(&p, 512);
     jbuf_append(&p, "{\"tool_name\":"); jbuf_append_json_str(&p, nz(tool_name));
     jbuf_append(&p, ",\"tool_id\":"); jbuf_append_json_str(&p, nz(tool_id));
+    /* Requested routing identity only: not proof of downstream resolution. */
+    char *requested_target = tool_name && strcmp(tool_name, "invoke_tool") == 0
+                                 ? json_get_str(args_json ? args_json : "{}", "name") : NULL;
+    jbuf_append(&p, ",\"wrapper_tool_name\":"); jbuf_append_json_str(&p, nz(tool_name));
+    jbuf_append(&p, ",\"requested_tool_name\":");
+    if (requested_target) jbuf_append_json_str(&p, requested_target); else jbuf_append(&p, "null");
+    free(requested_target);
     jbuf_append(&p, ",\"args_blob_sha256\":"); if (arg_sha[0]) jbuf_append_json_str(&p, arg_sha); else jbuf_append(&p, "null");
     jbuf_append(&p, ",\"args_byte_len\":"); jbuf_appendf(&p, "%zu", args_json ? strlen(args_json) : 0);
     jbuf_append(&p, "}");
@@ -1140,12 +1225,17 @@ bool chronicle_tool_call_start(const char *trace_id, const char *parent_span_id,
 
 bool chronicle_tool_call_end(const char *trace_id, const char *tool_span_id, const char *tool_name,
                              const char *result_text, bool ok, bool timeout, double latency_ms) {
+    tool_timeout_origin_t origin = timeout ? tool_telemetry_origin() : TOOL_TIMEOUT_NONE;
+    if (timeout && origin == TOOL_TIMEOUT_NONE) origin = TOOL_TIMEOUT_WATCHDOG;
     char res_sha[65] = "";
     if (capture_full_payload()) chronicle_blob_put_text(result_text, "tool.result_text", "tool_output", res_sha, sizeof(res_sha));
     jbuf_t p; jbuf_init(&p, 512);
     jbuf_append(&p, "{\"tool_name\":"); jbuf_append_json_str(&p, nz(tool_name));
     jbuf_append(&p, ",\"ok\":"); jbuf_append(&p, ok ? "true" : "false");
     jbuf_append(&p, ",\"timeout\":"); jbuf_append(&p, timeout ? "true" : "false");
+    jbuf_append(&p, ",\"timeout_origin\":"); jbuf_append_json_str(&p, tool_timeout_origin_name(origin));
+    jbuf_append(&p, ",\"execution_status\":"); jbuf_append_json_str(&p, timeout ? "timeout" : (ok ? "succeeded" : "failed"));
+    jbuf_append(&p, ",\"failure_class\":"); jbuf_append_json_str(&p, timeout ? "timeout" : (ok ? "none" : "unspecified"));
     jbuf_append(&p, ",\"latency_ms\":"); jbuf_appendf(&p, "%.3f", latency_ms);
     jbuf_append(&p, ",\"result_byte_len\":"); jbuf_appendf(&p, "%zu", result_text ? strlen(result_text) : 0);
     jbuf_append(&p, ",\"result_blob_sha256\":"); if (res_sha[0]) jbuf_append_json_str(&p, res_sha); else jbuf_append(&p, "null");

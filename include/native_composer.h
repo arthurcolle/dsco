@@ -19,6 +19,7 @@
 #define NATIVE_COMPOSER_KEY_FOOTER     UINT64_C(0x434f4d50000a)
 #define NATIVE_COMPOSER_KEY_HINT       UINT64_C(0x434f4d50000b)
 #define NATIVE_COMPOSER_KEY_CLOCK      UINT64_C(0x434f4d50000c)
+#define NATIVE_COMPOSER_KEY_DIAGNOSTICS UINT64_C(0x434f4d50000d)
 
 typedef struct {
     const char *text;
@@ -32,6 +33,8 @@ typedef struct {
     const char *clock;
     bool compact;
     uint8_t accent_opacity;
+    const char *diagnostics_label, *diagnostics_detail;
+    bool diagnostics_enabled;
 } native_composer_model_t;
 
 /* Builds the retained presentation for the shared cell editor. Editing,

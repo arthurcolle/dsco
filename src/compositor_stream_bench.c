@@ -208,6 +208,10 @@ int compositor_stream_bench_run(FILE *summary,
             sleep_us(config.interval_us);
         }
         pixel_tui_session_end_message(stderr);
+        /* End-of-stream is a semantic boundary, not permission to tear down
+         * before the compositor consumes the final mailbox state. This also
+         * makes zero-interval burst runs prove visible convergence. */
+        sleep_us(50000);
     }
     double elapsed_ms = monotonic_ms() - started_ms;
     pixel_tui_session_end(stderr);

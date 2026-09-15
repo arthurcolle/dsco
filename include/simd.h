@@ -185,66 +185,12 @@ static inline size_t dsco_simd_count_byte(const char *base, size_t len, char nee
 }
 
 /* ── Count bytes from `p` up to (not including) the first '"', '\\', or NUL.
- *    `p` must be NUL-terminated; no length is needed. Page-safe: reads only
- *    16-byte-ALIGNED blocks, masking off lanes before `p`, so it never touches a
- *    page the caller's own bytes don't already reach (the SIMD-strlen trick).
- *
- *    This is the decode fast path for parse_string: JSON string *values* pulled
- *    from responses are mostly escape-free plain text, so the run bulk-copies
- *    instead of appending one char at a time. */
+ *    `p` must be NUL-terminated. Page-aligned SIMD loads are not object-safe:
+ *    they can read before p or beyond the terminating NUL into a redzone.
+ *    Without a caller-supplied extent, use the bounded-by-NUL libc scan.
+ *    parse_string still bulk-copies the resulting ordinary-character run. */
 static inline size_t dsco_simd_json_unescaped_run(const char *p) {
-    const uint8_t *s = (const uint8_t *)p;
-#if DSCO_SIMD_NEON
-    const uint8x16_t q = vdupq_n_u8('"');
-    const uint8x16_t bs = vdupq_n_u8('\\');
-    const uint8x16_t z = vdupq_n_u8(0);
-    uintptr_t addr = (uintptr_t)s;
-    const uint8_t *base = (const uint8_t *)(addr & ~(uintptr_t)15);
-    size_t off = (size_t)(addr - (uintptr_t)base);
-    uint8x16_t v = vld1q_u8(base);
-    uint8x16_t m = vorrq_u8(vorrq_u8(vceqq_u8(v, q), vceqq_u8(v, bs)), vceqq_u8(v, z));
-    uint8x8_t nb = vshrn_n_u16(vreinterpretq_u16_u8(m), 4);
-    uint64_t bits = vget_lane_u64(vreinterpret_u64_u8(nb), 0);
-    bits &= (~0ULL << (off * 4)); /* ignore lanes before p */
-    if (bits)
-        return ((size_t)__builtin_ctzll(bits) >> 2) - off;
-    for (const uint8_t *cur = base + 16;; cur += 16) {
-        v = vld1q_u8(cur);
-        m = vorrq_u8(vorrq_u8(vceqq_u8(v, q), vceqq_u8(v, bs)), vceqq_u8(v, z));
-        if (vmaxvq_u8(m) == 0)
-            continue;
-        nb = vshrn_n_u16(vreinterpretq_u16_u8(m), 4);
-        bits = vget_lane_u64(vreinterpret_u64_u8(nb), 0);
-        return (size_t)(cur - s) + ((size_t)__builtin_ctzll(bits) >> 2);
-    }
-#elif DSCO_SIMD_SSE2
-    const __m128i q = _mm_set1_epi8('"');
-    const __m128i bs = _mm_set1_epi8('\\');
-    const __m128i z = _mm_setzero_si128();
-    uintptr_t addr = (uintptr_t)s;
-    const uint8_t *base = (const uint8_t *)(addr & ~(uintptr_t)15);
-    size_t off = (size_t)(addr - (uintptr_t)base);
-    __m128i v = _mm_load_si128((const __m128i *)base);
-    __m128i m = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(v, q), _mm_cmpeq_epi8(v, bs)),
-                             _mm_cmpeq_epi8(v, z));
-    unsigned bits = (unsigned)_mm_movemask_epi8(m) & (~0u << off);
-    if (bits)
-        return (size_t)__builtin_ctz(bits) - off;
-    for (const uint8_t *cur = base + 16;; cur += 16) {
-        v = _mm_load_si128((const __m128i *)cur);
-        m = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(v, q), _mm_cmpeq_epi8(v, bs)),
-                         _mm_cmpeq_epi8(v, z));
-        unsigned b2 = (unsigned)_mm_movemask_epi8(m);
-        if (!b2)
-            continue;
-        return (size_t)(cur - s) + (size_t)__builtin_ctz(b2);
-    }
-#else
-    size_t i = 0;
-    while (p[i] && p[i] != '"' && p[i] != '\\')
-        i++;
-    return i;
-#endif
+    return strcspn(p, "\"\\");
 }
 
 /* ── Count leading bytes in [base, base+len) that can be copied verbatim into a

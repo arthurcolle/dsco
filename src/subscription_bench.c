@@ -20,7 +20,7 @@ static const dsco_subscription_lane_spec_t SUBSCRIPTION_LANES[] = {
     {"anthropic", "claude-sonnet-5", "Claude Max", "claude-code-oauth"},
     {"openai-codex", DEFAULT_MODEL, "ChatGPT Codex", "chatgpt-subscription"},
     {"kimi-code", KIMI_CODE_DEFAULT_MODEL, "Kimi Code", "kimi-code-subscription"},
-    {"sakana", "fugu", "Sakana Fugu", "sakana-subscription-api-key"},
+    {"sakana", "fugu-ultra", "Sakana Fugu Ultra", "sakana-subscription-api-key"},
     {"zai", "glm-5.2", "Z.AI Coding Plan", "zai-coding-plan-api-key"},
 };
 

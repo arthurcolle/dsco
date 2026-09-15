@@ -112,7 +112,9 @@ typedef enum {
 
 typedef struct {
     int    id;
-    char   assigned_to[IPC_MAX_AGENT_ID]; /* empty = unassigned */
+    long long generation;                 /* attempt fence; returned by claim */
+    char   assigned_to[IPC_MAX_AGENT_ID]; /* current owner; pending rows retain target */
+    char   target_agent_id[IPC_MAX_AGENT_ID]; /* durable routing; empty = shared work */
     char   created_by[IPC_MAX_AGENT_ID];
     int    parent_task_id;                 /* for sub-tasks */
     int    priority;                       /* higher = more urgent */
@@ -163,6 +165,9 @@ bool ipc_agent_define(const char *agent_id, const char *parent_id, int depth,
 bool ipc_agent_define_bound(const char *agent_id, const char *parent_id, int depth,
                             const char *role, const char *model, const char *toolkit,
                             const ipc_agent_binding_t *binding);
+/* Materialize this process as an existing durable identity. Fails if another
+ * live process owns the identity; preserves its hierarchy and policy fields. */
+bool ipc_agent_activate(void);
 
 /* Update own status */
 bool ipc_set_status(ipc_agent_status_t status, const char *current_task);
@@ -208,18 +213,26 @@ int ipc_unread_count(void);
 
 /* Submit a task to the queue. Returns task ID or -1 on error. */
 int ipc_task_submit(const char *description, int priority, int parent_task_id);
+/* Submit directly to a durable agent. The target exclusively claims it. */
+int ipc_task_submit_to(const char *agent_id, const char *description,
+                       int priority, int parent_task_id);
 
-/* Claim the highest-priority unassigned task. Returns true + fills out. */
+/* Claim the highest-priority unassigned task or one targeted to this agent. */
 bool ipc_task_claim(ipc_task_t *out);
+/* Claim only work explicitly targeted to this durable identity. */
+bool ipc_task_claim_targeted(ipc_task_t *out);
 
-/* Mark a task as running */
-bool ipc_task_start(int task_id);
+/* Claim one exact pending task addressed to this identity (durable boot). */
+bool ipc_task_claim_id(int task_id, ipc_task_t *out);
+
+/* Transitions require the current owner, attempt, and an active state. */
+bool ipc_task_start(int task_id, long long generation);
 
 /* Complete a task with result */
-bool ipc_task_complete(int task_id, const char *result);
+bool ipc_task_complete(int task_id, long long generation, const char *result);
 
 /* Fail a task with error */
-bool ipc_task_fail(int task_id, const char *error);
+bool ipc_task_fail(int task_id, long long generation, const char *error);
 
 /* List tasks (optionally filtered by assigned_to, NULL=all). */
 int ipc_task_list(const char *assigned_to, ipc_task_t *out, int max);

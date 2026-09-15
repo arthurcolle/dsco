@@ -1,7 +1,7 @@
 /* Background OpenRouter model catalog — see include/openrouter_cache.h.
  *
  * Loads ~/.dsco/openrouter_models.json into memory at startup, then refreshes
- * from https://openrouter.ai/api/v1/models on a detached thread when stale.
+ * from https://openrouter.ai/api/v1/models on each launch in a bounded background worker.
  * The parsed catalog is published via an atomic pointer; model_lookup() (in
  * config.h) falls through to openrouter_cache_lookup() so any real slug
  * resolves with live context/pricing/reasoning metadata. The /models endpoint
@@ -18,7 +18,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <unistd.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <math.h>
 #include <string.h>
 #include <time.h>
 #include <pthread.h>
@@ -31,7 +34,6 @@
 #include "json_util.h"
 
 #define OR_MODELS_URL "https://openrouter.ai/api/v1/models"
-#define OR_CACHE_TTL (60 * 60) /* refresh over network when older */
 
 /* One indexed model. `info` is the registry-compatible view returned by
  * model_lookup(); the trailing fields carry the richer OpenRouter metadata. */
@@ -203,6 +205,16 @@ static char *org_of(const char *id) {
     return o;
 }
 
+static double parse_token_price(const char *s) {
+    if (!s || !*s) return -1.0;
+    errno = 0;
+    char *end = NULL;
+    double value = strtod(s, &end);
+    if (errno || end == s || *end || !isfinite(value) || value < 0.0 ||
+        !isfinite(value * 1e6)) return -1.0;
+    return value * 1e6;
+}
+
 static void on_model(const char *elem, void *ctx) {
     build_ctx_t *b = ctx;
 
@@ -227,28 +239,28 @@ static void on_model(const char *elem, void *ctx) {
         free(tp);
     }
 
-    double in_p = 0, out_p = 0, cache_r = 0, cache_w = 0;
+    double in_p = -1, out_p = -1, cache_r = -1, cache_w = -1;
     char *pr = json_get_raw(elem, "pricing");
     if (pr) {
         char *s;
         s = json_get_str(pr, "prompt");
         if (s) {
-            in_p = strtod(s, NULL) * 1e6;
+            in_p = parse_token_price(s);
             free(s);
         }
         s = json_get_str(pr, "completion");
         if (s) {
-            out_p = strtod(s, NULL) * 1e6;
+            out_p = parse_token_price(s);
             free(s);
         }
         s = json_get_str(pr, "input_cache_read");
         if (s) {
-            cache_r = strtod(s, NULL) * 1e6;
+            cache_r = parse_token_price(s);
             free(s);
         }
         s = json_get_str(pr, "input_cache_write");
         if (s) {
-            cache_w = strtod(s, NULL) * 1e6;
+            cache_w = parse_token_price(s);
             free(s);
         }
         free(pr);
@@ -426,24 +438,18 @@ static char *read_file(const char *path, size_t *len_out) {
 }
 
 static void write_file(const char *path, const char *data, size_t len) {
-    char tmp[1024];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    char tmp[1100];
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%ld", path, (long)getpid());
     FILE *f = fopen(tmp, "wb");
     if (!f)
         return;
-    fwrite(data, 1, len, f);
-    fclose(f);
-    rename(tmp, path); /* atomic replace */
+    int ok = fwrite(data, 1, len, f) == len && fflush(f) == 0 && fsync(fileno(f)) == 0;
+    if (fclose(f) != 0) ok = 0;
+    if (!ok || rename(tmp, path) != 0) unlink(tmp); /* atomic replace */
 }
 
 /* Returns true when the on-disk cache is missing or older than the TTL. */
-static bool cache_is_stale(const char *path) {
-    struct stat st;
-    if (stat(path, &st) != 0)
-        return true;
-    time_t now = time(NULL);
-    return (now - st.st_mtime) > OR_CACHE_TTL;
-}
+
 
 /* ── network fetch ─────────────────────────────────────────────────────── */
 
@@ -453,8 +459,10 @@ typedef struct {
 } http_buf_t;
 
 static size_t http_write_cb(char *ptr, size_t sz, size_t nm, void *ud) {
+    if (sz && nm > (16 * 1024 * 1024) / sz) return 0;
     size_t n = sz * nm;
     http_buf_t *b = ud;
+    if (n > 16 * 1024 * 1024 - b->len) return 0;
     char *p = realloc(b->data, b->len + n + 1);
     if (!p)
         return 0;
@@ -479,7 +487,7 @@ static char *http_get(const char *url, size_t *len_out) {
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, http_write_cb);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &b);
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
-    curl_easy_setopt(c, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT, 15L);
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
     CURLcode r = curl_easy_perform(c);
@@ -512,8 +520,8 @@ static int load_catalog(bool allow_network) {
         }
     }
 
-    /* 2. Refresh over the network when stale (or when there was no disk copy). */
-    if (allow_network && (!have_path || cache_is_stale(path))) {
+    /* 2. Refresh on every request; cached data remains usable during failure. */
+    if (allow_network && !getenv("DSCO_PRICING_OFFLINE")) {
         size_t len = 0;
         char *body = http_get(OR_MODELS_URL, &len);
         if (body) {
@@ -543,6 +551,10 @@ static void start_once(void) {
 
 void openrouter_cache_init(void) {
     pthread_once(&g_once, start_once);
+}
+
+int openrouter_cache_load_cached(void) {
+    return load_catalog(false);
 }
 
 int openrouter_cache_load_sync(void) {

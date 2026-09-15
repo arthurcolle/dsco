@@ -49,7 +49,8 @@ void ui_motion_init(ui_motion_t *m, bool reduced_motion);
 /* Animate (key, prop) toward `target` over `duration_s` starting at `now`.
  * A live track retargets from its current value/velocity; a new track starts
  * at `target` unless it was seeded with ui_motion_snap first (no pop-in from
- * a meaningless origin). Reduced motion applies the target immediately. */
+ * a meaningless origin). Identical target/duration/curve updates preserve the
+ * timeline. Reduced motion applies the target immediately. */
 void ui_motion_set(ui_motion_t *m, uint64_t key, uint16_t prop, double target,
                    double duration_s, ui_motion_curve_t curve, double now);
 

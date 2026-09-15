@@ -7,7 +7,7 @@
 static void usage(const char *name) {
     fprintf(stderr,
             "usage: %s [--view overview|plan|actions] [--ppm PATH] "
-            "[--width N] [--height N] [--frames N] [--animate]\n",
+            "[--width N] [--height N] [--frames N] [--animate] [--hdr]\n",
             name ? name : "dsco-kitty-lab");
 }
 
@@ -46,6 +46,8 @@ int main(int argc, char **argv) {
             frames = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--animate")) {
             animate = true;
+        } else if (!strcmp(argv[i], "--hdr")) {
+            kitty_lab_set_hdr(true);
         } else {
             usage(argv[0]);
             return 2;

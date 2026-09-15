@@ -578,15 +578,40 @@ const char *dcr_reasoning_effort_normalize(const char *provider, const char *mod
             }
         }
     }
+    const char *bare_model = model ? strrchr(model, '/') : NULL;
+    bare_model = bare_model ? bare_model + 1 : model;
+    if ((provider && (strcmp(provider, "abliteration-ai") == 0 ||
+                      strcmp(provider, "abliteration") == 0 ||
+                      strcmp(provider, "ablit") == 0)) ||
+        (bare_model && (strcmp(bare_model, "abliterated-model") == 0 ||
+                        strcmp(bare_model, "abliterated-model-large-v2") == 0 ||
+                        strcmp(bare_model, "abliterated-model-large") == 0))) {
+        /* Chat Completions accepts the full documented ladder, including a
+         * literal max for every Abliteration model. The gateway performs the
+         * model-aware low/high/max collapse for large variants. */
+        dcr_copy(out, out_len, e);
+        return out;
+    }
     if (provider && strcmp(provider, "sakana") == 0) {
-        if (strcmp(e, EFFORT_MAX) == 0 || strcmp(e, EFFORT_XHIGH) == 0)
+        /* Fugu Ultra v1.1 gives Max subscribers a real max tier.  Older
+         * Fugu/Ultra variants accept max only as an xhigh compatibility alias. */
+        bool ultra_v11 = bare_model &&
+            (strcmp(bare_model, "fugu-ultra") == 0 ||
+             strcmp(bare_model, "fugu-ultra-v1.1") == 0);
+        if (strcmp(e, EFFORT_MAX) == 0 && ultra_v11)
+            dcr_copy(out, out_len, EFFORT_MAX);
+        else if (strcmp(e, EFFORT_MAX) == 0 || strcmp(e, EFFORT_XHIGH) == 0)
             dcr_copy(out, out_len, EFFORT_XHIGH);
         else
             dcr_copy(out, out_len, EFFORT_HIGH);
         return out;
     }
-    const char *bare_model = model ? strrchr(model, '/') : NULL;
-    bare_model = bare_model ? bare_model + 1 : model;
+    if (provider &&
+        (strcmp(provider, "groq") == 0 || strcmp(provider, "cerebras") == 0) &&
+        (strcmp(e, EFFORT_XHIGH) == 0 || strcmp(e, EFFORT_MAX) == 0)) {
+        dcr_copy(out, out_len, EFFORT_HIGH);
+        return out;
+    }
     if (bare_model && strncmp(bare_model, "gpt-5.6", 7) == 0 &&
         strcmp(e, EFFORT_MAX) == 0) {
         dcr_copy(out, out_len, EFFORT_MAX);
@@ -624,7 +649,7 @@ static int dcr_write_default_sakana(void) {
             "wire_api = \"chat_completions\"\n"
             "env_keys = [\"FUGU_API_KEY\", \"SAKANA_API_KEY\", \"FISH_API_KEY\", \"SAKANA_TOKEN\"]\n"
             "aliases = [\"fugu\", \"sakana-ai\"]\n"
-            "default_model = \"fugu\"\n"
+            "default_model = \"fugu-ultra\"\n"
             "stream_idle_timeout_ms = 7200000\n"
             "stream_max_retries = 5\n"
             "request_max_retries = 4\n"

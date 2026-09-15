@@ -34,15 +34,20 @@ static const char *seeds_path(void) {
     return buf;
 }
 
+static bool discovery_cancelled(void *ctx) {
+    (void)ctx;
+    return !atomic_load(&s_running);
+}
+
 static void try_connect(const char *host, uint16_t port) {
-    if (!s_node)
+    if (!s_node || discovery_cancelled(NULL))
         return;
     char addr[256];
     snprintf(addr, sizeof(addr), "%s:%u", host, port);
     char msg[512];
     snprintf(msg, sizeof(msg), "peer_bootstrap: connecting %s", addr);
     audit_log("peer", msg);
-    mesh_node_connect(s_node, host, port);
+    mesh_node_connect_interruptible(s_node, host, port, discovery_cancelled, NULL);
 }
 
 static void read_seed_file(void) {
@@ -52,7 +57,7 @@ static void read_seed_file(void) {
         char buf[4096];
         snprintf(buf, sizeof(buf), "%s", env);
         char *tok = strtok(buf, ",; \t\n");
-        while (tok) {
+        while (tok && atomic_load(&s_running)) {
             char host[256] = {0};
             int port = (int)s_port;
             /* parse host:port */
@@ -79,7 +84,7 @@ static void read_seed_file(void) {
     if (!f)
         return;
     char line[512];
-    while (fgets(line, sizeof(line), f)) {
+    while (atomic_load(&s_running) && fgets(line, sizeof(line), f)) {
         /* strip comment / newline */
         char *hash = strchr(line, '#');
         if (hash)
@@ -125,7 +130,7 @@ static void read_bridge_fleet(void) {
         return;
 
     struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
+    while (atomic_load(&s_running) && (ent = readdir(d)) != NULL) {
         size_t nl = strlen(ent->d_name);
         if (nl < 6 || strcmp(ent->d_name + nl - 5, ".host") != 0)
             continue;
@@ -176,11 +181,32 @@ static void read_bridge_fleet(void) {
 
 #ifdef __APPLE__
 #include <dns_sd.h>
-#include <sys/select.h>
+#include <poll.h>
+#include <fcntl.h>
 #include <arpa/inet.h>
 
 static DNSServiceRef s_sdref = NULL;
 static pthread_t s_mdns_thread;
+static bool s_mdns_started = false;
+static int s_mdns_wake[2] = {-1, -1};
+
+static void mdns_wake_close(void) {
+    for (int i = 0; i < 2; i++) {
+        if (s_mdns_wake[i] >= 0) close(s_mdns_wake[i]);
+        s_mdns_wake[i] = -1;
+    }
+}
+
+static void mdns_wake_init(void) {
+    if (pipe(s_mdns_wake) != 0) return;
+    for (int i = 0; i < 2; i++) {
+        if (fcntl(s_mdns_wake[i], F_SETFD, FD_CLOEXEC) < 0 ||
+            fcntl(s_mdns_wake[i], F_SETFL, O_NONBLOCK) < 0) {
+            mdns_wake_close();
+            return;
+        }
+    }
+}
 
 static __attribute__((unused)) void DNSSD_API mdns_cb(DNSServiceRef sdRef, DNSServiceFlags flags,
                                                       uint32_t interfaceIndex,
@@ -218,28 +244,25 @@ static void *mdns_loop(void *arg) {
     e = DNSServiceBrowse(&browse_ref, 0, 0, "_dsco._tcp", NULL, NULL, NULL);
 
     while (atomic_load(&s_running)) {
-        /* service the register ref */
-        int fd = DNSServiceRefSockFD(s_sdref);
-        struct timeval tv = {1, 0};
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(fd, &fds);
-        if (select(fd + 1, &fds, NULL, NULL, &tv) > 0)
-            DNSServiceProcessResult(s_sdref);
-
-        /* service the browse ref */
-        if (browse_ref) {
-            int bfd = DNSServiceRefSockFD(browse_ref);
-            FD_ZERO(&fds);
-            FD_SET(bfd, &fds);
-            tv.tv_sec = 0;
-            tv.tv_usec = 0;
-            if (select(bfd + 1, &fds, NULL, NULL, &tv) > 0) {
-                /* on browse result, resolve to get hosttarget+port */
-                /* simplified: just process the result */
-                DNSServiceProcessResult(browse_ref);
-            }
+        /* Stop wakes the same wait as DNS activity. Keep the old bounded
+         * timeout only if the wake pipe could not be created. */
+        struct pollfd fds[] = {
+            {DNSServiceRefSockFD(s_sdref), POLLIN, 0},
+            {browse_ref ? DNSServiceRefSockFD(browse_ref) : -1, POLLIN, 0},
+            {s_mdns_wake[0], POLLIN, 0},
+        };
+        int ready = poll(fds, 3, s_mdns_wake[0] >= 0 ? -1 : 1000);
+        if (!atomic_load(&s_running)) break;
+        if (ready < 0) {
+            if (errno == EINTR) continue;
+            break;
         }
+        if (fds[0].revents & POLLIN)
+            DNSServiceProcessResult(s_sdref);
+        if (browse_ref && (fds[1].revents & POLLIN))
+            DNSServiceProcessResult(browse_ref);
+        if ((fds[0].revents | fds[1].revents) & (POLLERR | POLLHUP | POLLNVAL))
+            break;
     }
     DNSServiceRefDeallocate(s_sdref);
     s_sdref = NULL;
@@ -283,7 +306,9 @@ void peer_bootstrap_init(void *mesh_node, uint16_t port) {
     audit_log("peer_bootstrap", "starting peer discovery");
 
 #ifdef __APPLE__
-    pthread_create(&s_mdns_thread, NULL, mdns_loop, NULL);
+    mdns_wake_init();
+    s_mdns_started = pthread_create(&s_mdns_thread, NULL, mdns_loop, NULL) == 0;
+    if (!s_mdns_started) mdns_wake_close();
 #endif
 
     pthread_create(&s_thread, NULL, discovery_thread, NULL);
@@ -294,9 +319,18 @@ void peer_bootstrap_stop(void) {
         return;
     atomic_store(&s_running, 0);
     dsco_waiter_stop(&s_waiter); /* instant wakeup instead of ≤1s lag */
+#ifdef __APPLE__
+    if (s_mdns_wake[1] >= 0) {
+        char byte = 1;
+        ssize_t written;
+        do { written = write(s_mdns_wake[1], &byte, 1); } while (written < 0 && errno == EINTR);
+    }
+#endif
     pthread_join(s_thread, NULL);
 #ifdef __APPLE__
-    pthread_join(s_mdns_thread, NULL);
+    if (s_mdns_started) pthread_join(s_mdns_thread, NULL);
+    s_mdns_started = false;
+    mdns_wake_close();
 #endif
 }
 

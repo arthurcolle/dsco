@@ -1,4 +1,5 @@
 #include "capability.h"
+#include "surface_policy.h"
 
 #include <stdatomic.h>
 #include <stdio.h>
@@ -50,7 +51,7 @@ static const char *const k_read_tools[] = {
 /* Local file mutation. Implies read too. */
 static const char *const k_write_tools[] = {
     "write_file", "edit_file", "apply_patch", "ast_edit", "create_file", "delete_file",
-    "move_file", "rename_file", "patch", "openai_image_generate",
+    "move_file", "rename_file", "patch", "openai_image_generate", "persistent_directive", "value_ledger",
     /* Claude-compatible surfaces */
     "Write", "Edit", NULL};
 
@@ -60,8 +61,9 @@ static const char *const k_exec_tools[] = {
     "docker", "docker_compose", "kill_process", "crontab", "make",
     /* Registered spawn/interpreter surfaces (audit 2026-07-12): each starts a
      * subprocess or interprets arbitrary code, so each is an exec egress leg. */
-    "python", "spawn_bg", "swarm", "signal_process", "test_run", "watch_run", "preprocess",
+    "python", "dsco-python-3x", "spawn_bg", "swarm", "signal_process", "test_run", "watch_run", "preprocess",
     "hermes_agent", "agent", "Task", "Agent", "KillShell", "kitty_remote", "kitten",
+    "standing_directive",
     /* Claude-compatible surface (input inspected for net/write escalation) */
     "Bash", NULL};
 
@@ -73,7 +75,8 @@ static const char *const k_net_tools[] = {
      * read-only/fs_write catch-all and evaded the trifecta flow guard. */
     "tavily_search", "jina_ai_search", "jina_ai_research", "jina_search", "github_search",
     "parallel_search", "curl_raw", "download_file", "net_probe", "network", "net",
-    "graphsub", "openrouter_models", "alpha_vantage", "polymarket", "agentic_commerce",
+    "graphsub", "graphsub_operator", "autobot_discover", "chimera_route",
+    "openrouter_models", "alpha_vantage", "polymarket", "agentic_commerce",
     "research_probe", "research_compare",
     /* Claude-compatible surfaces */
     "WebFetch", "WebSearch", NULL};
@@ -111,15 +114,26 @@ static const char *const k_secret_tools[] = {
 static bool input_touches_secrets(const char *input) {
     static const char *const marks[] = {
         /* Credential files / stores — path-shaped, high signal. */
-        ".env",        ".ssh/",      ".aws/",     ".gnupg/",
+        ".ssh/",      ".aws/",      ".gnupg/",
         "id_rsa",      "id_ed25519", "id_ecdsa",  "id_dsa",
-        ".netrc",      "keychain",   "private_key",
-        "/credentials", "credentials.json", "credentials", "service_account",
+        ".netrc",      "private_key",   "security keychain",
+        "aws/credentials", ".aws/credentials", "credentials.json", "service_account",
         ".pem",        ".p12",       ".pfx",      ".kdbx",
         NULL};
     for (int i = 0; marks[i]; i++)
         if (contains_ci(input, marks[i]))
             return true;
+    /* Bounded filename matching for ".env": latches only when it terminates
+     * as a filename (followed by quote, whitespace, slash, or end), so the
+     * common substring false positives — ".environment", ".envrc", ".env.example"
+     * — do not fire. An actual `cat .env`, `cat cfg/.env`, or `.env` in a
+     * shell token still latches. */
+    for (const char *p = input; (p = strstr(p, ".env")) != NULL; p++) {
+        char n = p[4];
+        if (n == '\0' || n == '"' || n == '\'' || n == ' ' || n == '\t' ||
+            n == '\n' || n == '/' || n == ';' || n == ':')
+            return true;
+    }
     return false;
 }
 
@@ -149,12 +163,111 @@ unsigned dsco_caps_for_tool(const char *name, const char *input_json) {
     if (!name || !name[0])
         return CAP_EGRESS | CAP_UNTRUSTED_IN; /* unknown: worst case */
 
+    /* Lingo executes source in-process; every interaction is gated again. */
+    if (strcmp(name, "lingo") == 0 || strcmp(name, "lingo_session") == 0) {
+        unsigned caps = CAP_EXEC | CAP_FS_READ;
+        if (input_json && input_touches_secrets(input_json)) caps |= CAP_SECRETS;
+        return caps;
+    }
+
+    if (strcmp(name, "autobot_workflow") == 0) {
+        char *action = input_json ? json_get_str(input_json, "action") : NULL;
+        unsigned caps = CAP_NET | CAP_UNTRUSTED_IN;
+        if (!action || (strcmp(action, "read") != 0 && strcmp(action, "reconcile") != 0)) caps |= CAP_EXEC | CAP_FS_WRITE;
+        free(action);
+        return caps;
+    }
+    if (strcmp(name, "chimera_execute") == 0) return CAP_NET | CAP_UNTRUSTED_IN;
+
+    /* A stored-world publication is a remote write. Reads retain NET ingress
+     * policy without acquiring WRITE; missing/unknown verbs fail conservatively. */
+    if (strcmp(name, "graphsub_world") == 0) {
+        char *action = input_json ? json_get_str(input_json, "action") : NULL;
+        unsigned caps = CAP_NET | CAP_UNTRUSTED_IN;
+        if (!action || strcmp(action, "read") != 0) caps |= CAP_FS_WRITE;
+        free(action);
+        return caps;
+    }
+
+    unsigned surface_caps = 0;
+    if (strcmp(name, "ui_trace") == 0) {
+        char *action = input_json ? json_get_str(input_json, "action") : NULL;
+        unsigned caps = action && strcmp(action, "status") == 0 ? CAP_FS_READ : CAP_FS_WRITE;
+        free(action);
+        return caps;
+    }
+    /* The board's SQLite path is explicit, so ordinary path-scoped grants
+     * apply. Verification materializes a snapshot and runs the frozen checker
+     * through nested governed bash dispatch under the same execution tier. */
+    if (strcmp(name, "blackboard") == 0) {
+        char *action = input_json ? json_get_str(input_json, "action") : NULL;
+        unsigned board_caps = CAP_FS_READ;
+        if (!action || (strcmp(action, "status") && strcmp(action, "events")))
+            board_caps |= CAP_FS_WRITE;
+        if (action && strcmp(action, "verify") == 0)
+            board_caps |= CAP_EXEC;
+        free(action);
+        return board_caps;
+    }
+    if (surface_policy_caps(name, input_json, &surface_caps)) {
+        if (input_json && input_touches_secrets(input_json)) surface_caps |= CAP_SECRETS;
+        return surface_caps;
+    }
+
+    /* Goal/controller mutations only change bounded session metadata. They do
+     * not write files, grant authority, execute code, or reach the network. */
+    if (strcmp(name, "get_goal") == 0 || strcmp(name, "update_goal") == 0 ||
+        strcmp(name, "goal_queue") == 0)
+        return CAP_FS_READ;
+
+    /* Health still passes the normal gate, using its actual read capability. */
+    if (strcmp(name, "swarm") == 0) {
+        char *action = input_json ? json_get_str(input_json, "action") : NULL;
+        bool health = action && strcmp(action, "health") == 0;
+        free(action);
+        if (health) return CAP_FS_READ;
+    }
+
     unsigned caps = CAP_NONE;
+
+    /* Improvement exchange is verb-sensitive: catalog inspection is exposed
+     * as a separate read-only tool, while this mixed tool can publish local
+     * bytes, ingest untrusted peer bytes, or modify the signer trust root. */
+    if (strcmp(name, "improvement_sync") == 0) {
+        char *action = input_json ? json_get_str(input_json, "action") : NULL;
+        caps |= CAP_FS_READ;
+        if (action && strcmp(action, "announce") == 0) {
+            caps |= CAP_NET;
+        } else if (action && strcmp(action, "publish") == 0) {
+            caps |= CAP_FS_WRITE | CAP_NET;
+        } else if (action && strcmp(action, "fetch") == 0) {
+            caps |= CAP_FS_WRITE | CAP_NET | CAP_UNTRUSTED_IN;
+        } else if (action && (strcmp(action, "trust") == 0 ||
+                              strcmp(action, "promote") == 0)) {
+            caps |= CAP_FS_WRITE | CAP_CONTROL;
+        } else if (action && strcmp(action, "materialize") == 0) {
+            caps |= CAP_FS_WRITE;
+        } else {
+            caps |= CAP_FS_WRITE | CAP_NET | CAP_UNTRUSTED_IN;
+        }
+        free(action);
+    }
 
     if (name_in(name, k_read_tools))
         caps |= CAP_FS_READ;
-    if (name_in(name, k_write_tools))
-        caps |= CAP_FS_READ | CAP_FS_WRITE;
+    if (name_in(name, k_write_tools)) {
+        /* persistent_directive and value_ledger introspection are read-only;
+         * mutation is a write. */
+        bool read_only_verb = false;
+        if (strcmp(name, "persistent_directive") == 0)
+            read_only_verb = input_json && (contains_ci(input_json, "\"action\":\"status\"") ||
+                                            contains_ci(input_json, "\"action\":\"history\""));
+        else if (strcmp(name, "value_ledger") == 0)
+            read_only_verb = input_json && contains_ci(input_json, "\"action\":\"summary\"");
+        if (!read_only_verb)
+            caps |= CAP_FS_WRITE;
+        caps |= CAP_FS_READ;
+    }
     if (name_in(name, k_control_tools))
         caps |= CAP_CONTROL;
     if (name_in(name, k_secret_tools))
@@ -164,6 +277,24 @@ unsigned dsco_caps_for_tool(const char *name, const char *input_json) {
         caps |= CAP_NET | CAP_UNTRUSTED_IN; /* remote content is untrusted */
     if (name_in(name, k_egress_tools))
         caps |= CAP_NET;
+
+    /* Fleet dispatch starts processes and writes durable receipts. Network
+     * permission alone must never authorize its execution/write surfaces. */
+    if (strcmp(name, "net") == 0) {
+        char *action = input_json ? json_get_str(input_json, "action") : NULL;
+        if (action && !strncmp(action, "fleet/", 6)) {
+            caps |= CAP_FS_READ | CAP_EXEC;
+            if (strcmp(action, "fleet/status") && strcmp(action, "fleet/replication") &&
+                strcmp(action, "fleet/swarm")) caps |= CAP_FS_WRITE;
+        } else if (!action || !strcmp(action, "bridge/exec") ||
+                   !strcmp(action, "bridge/fanout") || !strcmp(action, "remote") ||
+                   !strcmp(action, "http/post")) {
+            caps |= CAP_EXEC | CAP_FS_READ | CAP_FS_WRITE;
+        } else if (!strcmp(action, "bridge/send") || !strcmp(action, "bridge/bus_put")) {
+            caps |= CAP_FS_WRITE;
+        }
+        free(action);
+    }
 
     /* MCP / external tools (prefixed) reach out to third-party systems: both an
      * egress and an untrusted-content ingress. */
@@ -474,32 +605,9 @@ dsco_cap_decision_t dsco_capability_gate(const char *name, const char *input_jso
             snprintf(reason, reason_len, __VA_ARGS__);                                             \
     } while (0)
 
-    /* 1. Control capability: self-modification of the gate/governance. */
-    if ((caps & CAP_CONTROL) && !dsco_cap_granted(CAP_CONTROL, tier)) {
-        CAP_REASON("control capability denied: '%s' would modify the gate/governance "
-                   "(grant DSCO_ALLOW_CONTROL=1 to authorize)",
-                   name);
-        return CAP_DECISION_DENY;
-    }
-
-    /* 2. Lethal trifecta: this call egresses and the session has already
-     *    ingested untrusted content AND accessed private data. Fail closed —
-     *    this is the exfiltration edge. The operator can acknowledge the risk
-     *    for a run with DSCO_ALLOW_EXFIL=1. */
-    if (dsco_flow_would_exfiltrate(caps)) {
-        if (env_tristate("DSCO_ALLOW_EXFIL") == 1)
-            return CAP_DECISION_ALLOW;
-        CAP_REASON("lethal-trifecta block: '%s' would egress after untrusted-content "
-                   "ingestion + private-data access; set DSCO_ALLOW_EXFIL=1 to override",
-                   name);
-        return CAP_DECISION_DENY;
-    }
-
-    /* 3. Deno-style explicit hardening. Tier-based allow/deny for these
-     *    capabilities — and untrusted-tier sandbox routing — remains owned by
-     *    the existing tier system (tools_is_allowed_for_tier + sandbox route).
-     *    Here we only enforce an EXPLICIT operator lockdown, e.g.
-     *    DSCO_ALLOW_NET=0 blocks every network tool regardless of tier. */
+    /* 1. Explicit operator lockdowns are absolute. In particular, the narrow
+     * DSCO_ALLOW_EXFIL override below must never manufacture net/exec/write or
+     * secrets authority that the operator explicitly disabled. */
     static const struct {
         dsco_cap_t cap;
         const char *env;
@@ -519,7 +627,35 @@ dsco_cap_decision_t dsco_capability_gate(const char *name, const char *input_jso
         }
     }
 
-    /* 3b. VCS control-plane writes. Writing under .git/hooks or .git/config lets a
+    /* Embedded script admission follows the exec grant, including explicit
+     * operator grants at untrusted tier. Nested interactions keep that tier. */
+    if (name && (!strcmp(name, "lingo") || !strcmp(name, "lingo_session")) && !dsco_cap_granted(CAP_EXEC, tier)) {
+        CAP_REASON("exec capability denied for lingo at %s tier (DSCO_ALLOW_RUN)", tier);
+        return CAP_DECISION_DENY;
+    }
+
+    /* 2. Control capability: self-modification of the gate/governance. */
+    if ((caps & CAP_CONTROL) && !dsco_cap_granted(CAP_CONTROL, tier)) {
+        CAP_REASON("control capability denied: '%s' would modify the gate/governance "
+                   "(grant DSCO_ALLOW_CONTROL=1 to authorize)",
+                   name);
+        return CAP_DECISION_DENY;
+    }
+
+    /* 3. Lethal trifecta: this call egresses and the session has already
+     *    ingested untrusted content AND accessed private data. Fail closed —
+     *    this is the exfiltration edge. The operator can acknowledge the risk
+     *    for a run with DSCO_ALLOW_EXFIL=1. */
+    if (dsco_flow_would_exfiltrate(caps)) {
+        if (env_tristate("DSCO_ALLOW_EXFIL") == 1)
+            return CAP_DECISION_ALLOW;
+        CAP_REASON("lethal-trifecta block: '%s' would egress after untrusted-content "
+                   "ingestion + private-data access; set DSCO_ALLOW_EXFIL=1 to override",
+                   name);
+        return CAP_DECISION_DENY;
+    }
+
+    /* 4. VCS control-plane writes. Writing under .git/hooks or .git/config lets a
      *     repo persist executable hooks and rewrite remotes — a sandbox-escape
      *     / persistence vector (Cursor GHSA-8pcm class). Treat these as
      *     control-plane writes: require DSCO_ALLOW_CONTROL=1 even though the
@@ -575,6 +711,20 @@ dsco_cap_decision_t dsco_capability_gate(const char *name, const char *input_jso
                 CAP_REASON("write path outside DSCO_ALLOW_WRITE scope: %.80s", pth);
                 free(pth);
                 return CAP_DECISION_DENY;
+            }
+            if (pth && pth[0] && strcmp(name, "blackboard") == 0) {
+                /* SQLite sidecars and verifier snapshots live beside the DB.
+                 * A grant for only its filename cannot authorize those writes. */
+                char parent[4096];
+                cap_path_resolve(pth, parent, sizeof(parent));
+                char *slash = strrchr(parent, '/');
+                if (slash == parent) parent[1] = '\0';
+                else if (slash) *slash = '\0';
+                if (!cap_path_in_scope(parent, ws)) {
+                    CAP_REASON("blackboard requires DSCO_ALLOW_WRITE scope for its parent directory (WAL and snapshots)");
+                    free(pth);
+                    return CAP_DECISION_DENY;
+                }
             }
             if ((!pth || !pth[0]) && (caps & CAP_EXEC)) {
                 CAP_REASON("scoped write grant requires explicit structured path for exec-capable tool '%s'",

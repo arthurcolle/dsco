@@ -15,7 +15,7 @@
  *   4. Capture ?code=...&state=... on /auth/callback.
  *   5. Exchange the code at auth.openai.com/oauth/token (PKCE, no secret).
  *   6. Decode the id_token to extract the chatgpt account id.
- *   7. Persist tokens (encrypted dsco cache + ~/.codex/auth.json compatible).
+ *   7. Persist tokens in DSCO's mode-0600 ~/.dsco/chatgpt-oauth.json cache.
  *
  * Token resolution priority (openai_oauth_load):
  *   env DSCO_CHATGPT_OAUTH_TOKEN  →  ~/.dsco/chatgpt-oauth.json  →

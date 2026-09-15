@@ -31,12 +31,16 @@ typedef void (*codex_model_cb)(const codex_model_view_t *m, void *ud);
 void codex_cache_init(void);
 int codex_cache_count(void);
 int codex_cache_load_sync(void);
+/* Disk only, no network or subprocess. */
+int codex_cache_load_cached(void);
 int codex_cache_wait_ready(int timeout_ms);
 int codex_cache_foreach(codex_model_cb cb, void *ud);
 
 const model_info_t *codex_cache_lookup(const char *name);
 const char *codex_cache_default_model(void);
 const char *codex_cache_default_effort(const char *model);
+/* NULL unless official cached metadata explicitly supports a valid default. */
+const char *codex_cache_default_verbosity(const char *model);
 bool codex_cache_model_supported(const char *model);
 
 #endif /* DSCO_CODEX_CACHE_H */
