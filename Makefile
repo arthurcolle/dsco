@@ -60,6 +60,9 @@ RELEASE_LDFLAGS += -flto=thin
 endif
 LDFLAGS ?=
 LDLIBS ?= -lcurl -lsqlite3 -ldl -lz -lm
+ifeq ($(shell uname -s),Linux)
+LDLIBS += -lutil -lpthread
+endif
 
 TARGET = dsco
 LITE_TARGET = dsco-lite
@@ -78,23 +81,23 @@ COSMO_TARGET ?= dsco.distributed.systems
 COSMO_LEGACY_TARGET ?= dsco.com
 COSMOCC_VERSION ?= 4.0.2
 
-SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swarm.c machine_society.c swarm_daemon.c tui.c native_ui.c native_ui_json.c pixel_tui.c pixel_tui_perf.c pixel_fx.c ui_motion.c kitty_graphics.c rich_text.c font_compat.c kitty_tools.c kitty_agent_windows.c env_config.c \
-	px_backend.c px_theme.c native_composer.c native_masthead.c compositor_parity.c compositor_stream_bench.c \
+SRC_NAMES = main.c agent.c llm.c codex_tool_bridge.c input_budget.c tools.c tool_effects.c execution_layer.c execution_kernel.c execution_events.c event_stream.c provider_events.c execution_recovery.c headless_accounting.c inference_cost.c json_util.c ast.c swarm.c swarm_progress.c swarm_scale.c swarm_accounting.c swarm_telemetry.c machine_society.c swarm_daemon.c tui.c tui_swarm_dock.c native_windows.c native_window_tool.c native_ui.c native_ui_json.c pixel_tui.c pixel_tui_perf.c pixel_fx.c pixel_hdr.c ui_motion.c kitty_graphics.c rich_text.c font_compat.c kitty_tools.c kitty_agent_windows.c process_capture.c tool_content.c tool_grounding.c surface_policy.c surface_registry.c surface_cli.c buffer_store.c buffer_view.c buffer_textedit.c buffer_cli.c ide_cli.c buffer_ui.c pty_session.c desktop_macos.c browser_session.c env_config.c \
+	px_backend.c px_theme.c native_composer.c native_display.c native_masthead.c compositor_parity.c compositor_stream_bench.c native_buffer_editor.c native_trace.c native_trace_ui.c \
 	md.c rtf.c baseline.c chronicle.c agent_event.c callbacks.c setup.c crypto.c eval.c pipeline.c plugin.c kitty_banner.c \
-			semantic.c hlc.c ipc.c mcp.c mcp_server.c mcp_names.c provider_profiles.c abliteration.c provider.c integrations.c error.c trace.c instrumenter.c structured_process.c task_profile.c \
+			semantic.c hlc.c ipc.c mcp.c mcp_response.c mcp_server.c mcp_names.c provider_profiles.c abliteration.c provider.c provider_transport.c integrations.c error.c trace.c instrumenter.c structured_process.c task_profile.c \
 	output_guard.c topology.c workspace.c directive_store.c value_ledger.c plan.c stateful_atoms.c recovery.c router.c \
-		durable_agents.c bus_cli.c skills_cli.c skill_index.c \
-	capability.c \
+		durable_agents.c bus_cli.c skills_cli.c skill_index.c skill_candidate.c skill_trace.c \
+	capability.c tool_hooks.c \
 	pheromone.c ooda.c overmind.c killswitch.c governance.c gov_experiment.c memory_tier.c talons.c avian.c \
-	arena_alloc.c event_loop.c vm.c scheduler.c waiter.c vfs.c trading.c legion.c \
+	arena_alloc.c event_loop.c swarm_reactor.c vm.c scheduler.c waiter.c vfs.c trading.c legion.c \
 	agent_profile.c orchestrator.c vecstore.c tamper.c sealed_store.c harden.c embedded_data.c cstring_unlock.c \
 	se_store.c watchdog.c audit_log.c heartbeat.c env_guard.c peer_bootstrap.c presence.c \
 	project.c project_mux.c project_grid.c \
 	dsco_accel.c dsco_mlx.c dsco_pool.c \
-	fingerprint.c trust.c toolmgmt.c connector.c integration_fabric.c codex_app_directory.c openrouter_cache.c codex_cache.c codex_usage.c dcr.c \
-	openai_oauth.c kimi_oauth.c local_llm.c model_pricing.c subscription_gate.c subscription_bench.c auth_lanes.c \
+	fingerprint.c trust.c tool_telemetry.c trace_kg.c trace_kg_store.c toolmgmt.c connector.c integration_fabric.c codex_app_directory.c openrouter_cache.c codex_cache.c codex_usage.c dcr.c \
+	openai_oauth.c kimi_oauth.c local_llm.c model_pricing.c parallel_pricing.c cost_frontier.c deepseek_pricing.c model_catalog_refresh.c subscription_gate.c subscription_bench.c auth_lanes.c \
 	startup.c plot.c anim.c fractal.c shadeexpr.c face_sdf.c avatar.c self_improve.c bg_learn.c autoresearch.c rsi_curriculum.c pets.c img_util.c supervisor.c ring_buffer.c \
-	graphsub_client.c graphsub_tools.c \
+	graphsub_client.c graphsub_tools.c graphsub_operator.c lingo_graphsub_world.c lingo_autobot.c lingo_chimera.c lingo_workflow.c service_boundary.c \
 	openai_images.c \
 	webhook_security.c \
 	extension/backend.c extension/numerical_gsl.c extension/skill_requirements.c \
@@ -111,15 +114,15 @@ SRC_NAMES = main.c agent.c llm.c tools.c execution_layer.c json_util.c ast.c swa
 	plan_dag.c \
 	session_memory.c \
 	provider_pool.c \
-	dsco_swim.c weather_batch.c openrouter_lanes.c sequence_state.c \
+	dsco_swim.c improvement_sync.c weather_batch.c openrouter_lanes.c sequence_state.c \
 	math_fastpath.c \
 	http_pool.c \
 	realtime.c \
 	remote_cli.c \
 	cluster.c \
 	activation_lease.c \
-	cloud_runtime.c context_fabric.c capsule.c acp_server.c \
-	json_fast.c \
+	cloud_runtime.c context_fabric.c context_eviction.c prompt_branch.c capsule.c acp_server.c agent_interop.c task_closeout.c goal.c goal_queue.c tool_assurance.c \
+           blackboard.c lingo.c lingo_origin.c lingo_session.c lingo_workbench.c json_fast.c \
 	construct.c prompt_pool.c rl_hooks.c \
 	$(OPTIONAL_SRCS)
 TEST_SRC_NAMES = test.c
@@ -203,8 +206,8 @@ BASE_CFLAGS += -DHAVE_SECURE_ENCLAVE -DHAVE_TOUCHID
 ifeq ($(UNAME_M),arm64)
 BASE_CFLAGS += -mbranch-protection=standard
 endif
-LDLIBS      += -framework Security -framework CoreFoundation -framework IOKit \
-               -framework CoreGraphics -framework CoreText -framework LocalAuthentication \
+LDLIBS      += -framework Security -framework CoreFoundation -framework IOKit -framework DiskArbitration \
+               -framework ApplicationServices -framework CoreGraphics -framework CoreText -framework LocalAuthentication \
                -framework Foundation -framework Metal -framework MetalKit \
                -framework Accelerate -framework AudioToolbox
 
@@ -242,6 +245,14 @@ endif
 # a 5.7ms `dsco --version`; static hiredis+mbedtls cut startup to ~3.3ms (1.7x
 # total with -dead_strip_dylibs). Set STATIC_DEPS=0 to force dylibs.
 STATIC_DEPS ?= 1
+
+# LuaJIT is optional; the Lingo tool reports a clear build requirement if absent.
+LUAJIT_CFLAGS := $(shell pkg-config --cflags luajit 2>/dev/null)
+LUAJIT_LIBS := $(shell pkg-config --libs luajit 2>/dev/null)
+ifneq ($(LUAJIT_LIBS),)
+BASE_CFLAGS += $(LUAJIT_CFLAGS) -DHAVE_LUAJIT
+LDLIBS += $(LUAJIT_LIBS)
+endif
 
 # hiredis (Redis fast-path IPC)
 HIREDIS_CFLAGS := $(shell pkg-config --cflags hiredis 2>/dev/null)
@@ -327,8 +338,8 @@ GENERATED_OBJS   := $(patsubst src/generated/%.c,$(OBJ_DIR)/generated_%.o,$(GENE
 # Conditionally add mesh + net_server when libsodium is available
 OPTIONAL_SRCS =
 ifeq ($(SODIUM_FOUND),yes)
-OPTIONAL_SRCS += mesh.c
-OPTIONAL_SRCS += net_tool.c
+OPTIONAL_SRCS += mesh.c mesh_identity.c
+OPTIONAL_SRCS += net_tool.c fleet_bridge.c
 OPTIONAL_SRCS += plan_optimizer.c
 OPTIONAL_SRCS += cost_model.c
 OPTIONAL_SRCS += plan_cache.c
@@ -536,6 +547,10 @@ endif
 dsc: demos/toys/dsc.c
 	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -o $@ $< -lcurl -lreadline
 
+# Standalone Mobius logo exploration; deliberately separate from canonical branding.
+dsco-mobius: $(SRC_DIR)/mobius_main.c $(SRC_DIR)/mobius.c $(SRC_DIR)/kitty_graphics.c include/mobius.h include/kitty_graphics.h
+	$(CC) $(CFLAGS) -o $@ $(SRC_DIR)/mobius_main.c $(SRC_DIR)/mobius.c $(SRC_DIR)/kitty_graphics.c -lm -lz
+
 # Standalone animated Distributed Systems wordmark (Kitty graphics protocol).
 dsco-banner: $(SRC_DIR)/kitty_banner_main.c $(SRC_DIR)/kitty_banner.c \
 		$(SRC_DIR)/kitty_graphics.c $(SRC_DIR)/px_theme.c $(INC_DIR)/kitty_banner.h \
@@ -547,27 +562,30 @@ dsco-banner: $(SRC_DIR)/kitty_banner_main.c $(SRC_DIR)/kitty_banner.c \
 # Native semantic surface gallery. Use `--ppm /tmp/dsco-lab.ppm` headlessly,
 # or run `./dsco-kitty-lab --animate` inside Kitty/Ghostty/WezTerm.
 dsco-kitty-lab: $(SRC_DIR)/kitty_lab_main.c $(SRC_DIR)/kitty_lab.c \
-		$(SRC_DIR)/kitty_graphics.c $(INC_DIR)/kitty_lab.h $(INC_DIR)/kitty_graphics.h
+		$(SRC_DIR)/kitty_graphics.c $(SRC_DIR)/pixel_hdr.c \
+		$(INC_DIR)/kitty_lab.h $(INC_DIR)/kitty_graphics.h $(INC_DIR)/pixel_hdr.h
 	$(CC) -O2 -std=$(DSCO_STD) $(C2Y_WARNING_FLAGS) -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -I$(INC_DIR) \
 		-o $@ $(SRC_DIR)/kitty_lab_main.c $(SRC_DIR)/kitty_lab.c \
-		$(SRC_DIR)/kitty_graphics.c -lz -lm
+		$(SRC_DIR)/kitty_graphics.c $(SRC_DIR)/pixel_hdr.c -lz -lm
 
 $(DEBUG_TARGET): $(DEBUG_OBJS) $(GSL_DEBUG_OBJS)
 	$(CC) $(DEBUG_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
+# Publish only a fully linked and signed fresh inode, never patch a live one.
 $(TARGET): $(OBJS) $(GSL_OBJS)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(RELEASE_LDFLAGS) $(LDLIBS)
-ifeq ($(UNAME_S),Darwin)
-	@# Any post-link mutation invalidates Mach-O's linker signature and macOS
-	@# terminates the process with an opaque SIGKILL. Seal and verify the final
-	@# artifact here so a successful build always leaves an executable binary.
-	codesign --force --sign - $@
-	codesign --verify --strict $@
-endif
+	@set -eu; tmp=$$(mktemp "$@.tmp.XXXXXX"); \
+	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	$(CC) $(CFLAGS) -o "$$tmp" $^ $(LDFLAGS) $(RELEASE_LDFLAGS) $(LDLIBS); \
+	chmod 755 "$$tmp"; \
+	if [ "$(UNAME_S)" = Darwin ]; then \
+		codesign --force --sign - "$$tmp"; \
+		codesign --verify --strict "$$tmp"; \
+	fi; \
+	mv -f "$$tmp" "$@"
 
 # dsco-new is a twin of dsco — same code, same composer, distinct name.
 dsco-new: $(TARGET)
-	cp -f $(TARGET) $@
+	sh scripts/install_atomic.sh "$(TARGET)" "$@"
 
 $(LITE_TARGET): $(SRC_DIR)/lite_main.c $(INC_DIR)/config.h
 	$(CC) $(LITE_CFLAGS) -o $@ $<
@@ -582,14 +600,18 @@ test-spine-dsco-slim: $(SPINE_TARGET)
 
 # Source compilation rules
 # ── Pizza box: bake data/ blobs before generated .o files are compiled ──
+.PHONY: test-bake-dependencies
+test-bake-dependencies:
+	python3 tests/test_bake_dependencies.py
+
 .PHONY: bake_data
 bake_data: $(BUILD_DIR)/.bake_data.stamp
 
-$(BUILD_DIR)/.bake_data.stamp: $(BAKED_DATA) scripts/bake_data.sh | $(BUILD_DIR)
+$(BUILD_DIR)/.bake_data.stamp: $(BAKED_DATA) scripts/bake_data.sh scripts/bake_data.py | $(BUILD_DIR)
 	@bash scripts/bake_data.sh data src/generated include
 	@touch $@
 
-$(GENERATED_C) $(GENERATED_REGISTRY): $(BUILD_DIR)/.bake_data.stamp
+$(GENERATED_C) $(GENERATED_REGISTRY) include/embedded_key.gen.h: $(BUILD_DIR)/.bake_data.stamp
 	@if [ ! -f "$@" ]; then \
 		rm -f $(BUILD_DIR)/.bake_data.stamp; \
 		$(MAKE) --no-print-directory bake_data; \
@@ -627,11 +649,87 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-# Fresh clones have no baked artifacts yet; make must be able to resolve these
-# targets BEFORE dispatching bakes, so give the generated headers real rules.
-# bake_data.py is idempotent (skips up-to-date blobs, reuses build/.embed_key).
-include/embedded_data_registry.h include/embedded_key.gen.h:
-	@python3 scripts/bake_data.py
+include/lingo_runtime.gen.h: lingo/runtime.lua scripts/embed_lingo.py
+	python3 scripts/embed_lingo.py $< $@
+
+include/lingo_operator.gen.h: lingo/operator.lua scripts/embed_lingo.py
+	python3 scripts/embed_lingo.py $< $@ lingo_operator
+
+include/lingo_dsco.gen.h: lingo/dsco.lua scripts/embed_lingo.py
+	python3 scripts/embed_lingo.py $< $@ lingo_dsco
+
+include/lingo_autobot.gen.h: lingo/autobot.lua scripts/embed_lingo.py
+	python3 scripts/embed_lingo.py $< $@ lingo_autobot
+
+include/lingo_chimera.gen.h: lingo/chimera.lua scripts/embed_lingo.py
+	python3 scripts/embed_lingo.py $< $@ lingo_chimera
+
+include/lingo_world_io.gen.h: lingo/world_io.lua scripts/embed_lingo.py
+	python3 scripts/embed_lingo.py $< $@ lingo_world_io
+
+include/lingo_platform.gen.h: lingo/platform.lua scripts/embed_lingo.py
+	python3 scripts/embed_lingo.py $< $@ lingo_platform
+
+include/lingo_workspace.gen.h: lingo/workspace.lua scripts/embed_lingo.py
+	python3 scripts/embed_lingo.py $< $@ lingo_workspace
+
+include/lingo_view.gen.h: lingo/view.lua scripts/embed_lingo.py
+	python3 scripts/embed_lingo.py $< $@ lingo_view
+
+include/lingo_workflow.gen.h: lingo/workflow.lua scripts/embed_lingo.py
+	python3 scripts/embed_lingo.py $< $@ lingo_workflow
+
+LINGO_OBJS = $(foreach d,$(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_DIR) $(UBSAN_OBJ_DIR) $(ASAN_TEST_OBJ_DIR) $(UBSAN_TEST_OBJ_DIR) $(TSAN_TEST_OBJ_DIR) $(ASAN_UBSAN_TEST_OBJ_DIR),$(d)/lingo.o)
+LINGO_ORIGIN_OBJS = $(foreach d,$(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_DIR) $(UBSAN_OBJ_DIR) $(ASAN_TEST_OBJ_DIR) $(UBSAN_TEST_OBJ_DIR) $(TSAN_TEST_OBJ_DIR) $(ASAN_UBSAN_TEST_OBJ_DIR),$(d)/lingo_origin.o)
+$(LINGO_OBJS): include/lingo_runtime.gen.h include/lingo_operator.gen.h include/lingo_dsco.gen.h include/lingo_autobot.gen.h include/lingo_chimera.gen.h include/lingo_world_io.gen.h include/lingo_platform.gen.h include/lingo_workspace.gen.h include/lingo_view.gen.h include/lingo_workflow.gen.h
+# LuaJIT external unwinding cannot traverse PAC-signed C return addresses on
+# this macOS arm64 runtime. Keep BTI; scope the exception to Lua host callbacks.
+ifeq ($(UNAME_S)-$(UNAME_M),Darwin-arm64)
+ifneq ($(COSMO_BUILD),1)
+$(LINGO_OBJS) $(LINGO_ORIGIN_OBJS): override BASE_CFLAGS += -mbranch-protection=bti
+endif
+endif
+
+.PHONY: test-lingo test-lingo-operator test-lingo-systems test-lingo-world test-lingo-platform test-lingo-workspace test-lingo-session
+test-lingo: dsco
+	python3 tests/test_lingo.py ./dsco
+
+.PHONY: test-lingo-ipc test-event-stream test-lingo-event-semantics test-provider-event-stream
+test-lingo-ipc: dsco
+	python3 tests/test_lingo_ipc.py ./dsco
+
+test-provider-event-stream: dsco $(BUILD_DIR)/stream_completion_fixture
+	python3 tests/test_provider_event_stream.py --dsco ./dsco --fixture $(BUILD_DIR)/stream_completion_fixture --output $(BUILD_DIR)/provider-event-capture.json
+
+test-lingo-event-semantics:
+	python3 tests/test_lingo_event_semantics.py
+
+test-event-stream:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -std=c11 -D_DARWIN_C_SOURCE -D_GNU_SOURCE -Iinclude -o $(BUILD_DIR)/test_event_stream tests/test_event_stream.c src/event_stream.c vendor/yyjson.c -lsqlite3 -lpthread
+	python3 tests/run_event_stream_tests.py $(BUILD_DIR)/test_event_stream
+
+test-lingo-world: dsco
+	python3 tests/test_lingo_world.py ./dsco
+
+test-lingo-platform: dsco
+	python3 tests/test_lingo_platform.py ./dsco
+
+test-lingo-workspace: dsco
+	python3 tests/test_lingo_workspace.py ./dsco
+
+test-lingo-session: dsco
+	python3 tests/test_lingo_session.py ./dsco
+
+.PHONY: test-lingo-workflow
+test-lingo-workflow: dsco
+	python3 tests/test_lingo_workflow.py ./dsco
+
+test-lingo-operator: dsco
+	python3 tests/test_lingo_operator.py ./dsco
+
+test-lingo-systems: dsco
+	python3 tests/test_lingo_systems.py ./dsco
 
 # embedded_data.c pulls in the generated key header + registry.
 $(OBJ_DIR)/embedded_data.o: include/embedded_data_registry.h include/embedded_key.gen.h
@@ -817,14 +915,44 @@ $(OBJ_DIR) $(DEBUG_OBJ_DIR) $(TEST_OBJ_DIR) $(TEST_COVERAGE_OBJ_DIR) $(ASAN_OBJ_
 
 # test_runner's dsco-subgoal integration case fork/execs ./dsco; build the
 # shipped binary first so `make test` never relies on a stale local artifact.
-test: $(TARGET) test_runner
+test: $(TARGET) test_runner test-execution-kernel test-execution-spine-mcp test-goal-queue test-goal-controller-binary test-tool-assurance test-agent-interop
 	./test_runner
+
+.PHONY: test-tool-assurance
+test-tool-assurance:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ tests/test_tool_assurance.c src/tool_assurance.c
+	$(BUILD_DIR)/$@
+
+.PHONY: test-agent-interop
+test-agent-interop: $(TARGET)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ tests/test_agent_interop.c src/agent_interop.c src/process_capture.c src/json_util.c
+	$(BUILD_DIR)/$@
+	python3 tests/test_agent_interop_binary.py --binary ./$(TARGET)
+	python3 tests/test_agent_interop_conformance.py
+	python3 tests/test_agent_interop_protocols.py --binary ./$(TARGET)
+	python3 tests/test_acp_server.py --binary ./$(TARGET)
+
+.PHONY: test-agent-interop-live test-agent-interop-live-invoke
+test-agent-interop-live: $(TARGET)
+	python3 scripts/agent_interop_conformance.py --binary ./$(TARGET) --require-all
+
+test-agent-interop-live-invoke: $(TARGET)
+	python3 scripts/agent_interop_conformance.py --binary ./$(TARGET) --require-all --invoke
 
 # End-to-end behavioral verification of documented gate claims against the
 # LIVE binary (drives `dsco mcp serve` over JSON-RPC; no LLM, deterministic).
 # NOTE: this verifies the gate itself — it runs with DSCO_GOV_BYPASS unset so
 # a shell-level DSCO_GOV_BYPASS=1 / DSCO_GOV_MODEL=none cannot silently make
 # these checks pass against an ungoverned process.
+.PHONY: test-blackboard
+test-blackboard: $(TARGET)
+	python3 tests/test_blackboard.py --binary ./$(TARGET)
+	python3 tests/test_ipc_task_fencing.py
+	python3 tests/test_ipc_target_recovery.py
+	python3 tests/test_durable_boot_fencing.py --binary ./$(TARGET)
+
 test-gate-claims: $(TARGET)
 	env -u DSCO_GOV_BYPASS -u DSCO_GOV_MODEL \
 		-u DSCO_ALLOW_READ -u DSCO_ALLOW_WRITE -u DSCO_ALLOW_NET \
@@ -832,10 +960,39 @@ test-gate-claims: $(TARGET)
 		-u DSCO_ALLOW_EXFIL \
 		bash tests/verify_gate_claims.sh ./dsco
 
+.PHONY: test-prompt-branches
+test-prompt-branches: $(TARGET)
+	python3 tests/test_prompt_branches.py --binary "$(abspath $(TARGET))"
+
 .PHONY: test-directive-store
 test-directive-store:
 	$(CC) $(TEST_CFLAGS) -Iinclude -o $(BUILD_DIR)/test_directive_store tests/test_directive_store.c src/directive_store.c src/workspace.c src/capsule.c tests/directive_context_stubs.c src/json_fast.c src/crypto.c src/json_util.c $(LDFLAGS) $(LDLIBS)
 	$(BUILD_DIR)/test_directive_store
+
+.PHONY: test-workspace-skills
+test-workspace-skills:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -Iinclude -o $(BUILD_DIR)/test_workspace_skills tests/test_workspace_skills.c src/workspace.c src/capsule.c tests/directive_context_stubs.c src/json_fast.c src/crypto.c src/json_util.c $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/test_workspace_skills
+
+.PHONY: test-json-skip bench-json-skip
+# Offline hot-path regression/benchmark; does not invoke providers or tools.
+test-json-skip:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(ASAN_CFLAGS) -o $(BUILD_DIR)/test_json_skip tests/test_json_skip.c src/json_util.c $(ASAN_LDFLAGS)
+	ASAN_OPTIONS='$(ASAN_RUNTIME_OPTIONS):halt_on_error=1' $(BUILD_DIR)/test_json_skip
+
+bench-json-skip:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $(BUILD_DIR)/bench_json_skip bench/bench_json_skip.c src/json_util.c
+	$(BUILD_DIR)/bench_json_skip
+
+.PHONY: test-json-scan-bounds
+# Standalone decoder bounds regression; no providers, network, or runtime state.
+test-json-scan-bounds:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(ASAN_CFLAGS) -o $(BUILD_DIR)/test_json_scan_bounds tests/test_json_scan_bounds.c src/json_util.c $(ASAN_LDFLAGS)
+	ASAN_OPTIONS='$(ASAN_RUNTIME_OPTIONS):halt_on_error=1' $(BUILD_DIR)/test_json_scan_bounds
 
 .PHONY: test-value-ledger
 test-value-ledger: $(TARGET)
@@ -865,6 +1022,16 @@ test-sdk: $(TARGET)
 test-cli-flags: $(TARGET)
 	bash tests/test_cli_global_flags.sh ./$(TARGET)
 
+.PHONY: test-native-cli-routing
+test-native-cli-routing: $(TARGET)
+	python3 tests/test_native_cli_routing.py ./$(TARGET)
+
+.PHONY: test-native-storage
+test-native-storage:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/test_native_storage tests/test_native_storage.c src/crypto.c $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/test_native_storage
+
 # Deterministic capability-gate hardening test (G04 .git control-writes,
 # G05 symlink-scope escape). Links only the gate + json objects plus a tiny
 # stub for the registry read-only predicate. No network, no LLM.
@@ -875,6 +1042,13 @@ test-cap-hardening: $(TARGET)
 		build/obj/_cap_test_stub.c
 	./test_cap_hardening
 
+# Deterministic HDR compositing test: tonemap curve invariants, sRGB identity
+# round-trip, bloom propagation vs a bloom-off control, dither determinism and
+# banding, allocation guards. Pure CPU, no terminal, no network, no LLM.
+test-pixel-hdr:
+	$(CC) $(TEST_CFLAGS) -Iinclude -o test_pixel_hdr tests/test_pixel_hdr.c src/pixel_hdr.c -lm
+	./test_pixel_hdr
+
 # Deterministic cognitive-orchestration kernel test. No network or LLM.
 test-overmind:
 	$(CC) $(TEST_CFLAGS) -o test_overmind tests/test_overmind.c src/overmind.c
@@ -883,7 +1057,7 @@ test-overmind:
 test_runner: $(TEST_OBJS) $(GSL_TEST_OBJS)
 	$(CC) $(TEST_CFLAGS) -o $@ $^ $(LDFLAGS) $(LDLIBS)
 
-.PHONY: asan-test leak-test ubsan-test asan-ubsan-test tsan-test sanitizer-test
+.PHONY: test-pixel-hdr asan-test leak-test ubsan-test asan-ubsan-test tsan-test sanitizer-test
 
 test_runner_tsan: $(TSAN_TEST_OBJS) $(GSL_TSAN_TEST_OBJS)
 	$(CC) $(TSAN_CFLAGS) -o $@ $^ $(LDFLAGS) $(TSAN_LDFLAGS) $(LDLIBS)
@@ -958,10 +1132,90 @@ test_pixel_plan: $(TEST_OBJ_DIR)/test_pixel_plan.o $(TUI_TEST_LIB_OBJS)
 	$(BUILD_DIR)/$@
 
 # Headless Kitty APC framing, query, and terminal-hint contract tests.
-.PHONY: test_kitty_graphics
+.PHONY: test_tui_swarm_dock test_tui_swarm_composer
+test_tui_swarm_composer: tui_swarm_composer_fixture
+	python3 tests/test_tui_swarm_composer.py
+
+tui_swarm_composer_fixture: tests/tui_swarm_composer_fixture.c $(TUI_TEST_LIB_OBJS)
+	$(CC) $(TEST_CFLAGS) -fcommon -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
+
+test_tui_swarm_dock: tests/test_tui_swarm_dock.c src/tui_swarm_dock.c include/tui_swarm_dock.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -DDSCO_TUI_SWARM_DOCK_TEST -o $(BUILD_DIR)/$@ tests/test_tui_swarm_dock.c src/tui_swarm_dock.c -lpthread
+	$(BUILD_DIR)/$@
+
+.PHONY: test_kitty_agent_windows
+test_kitty_agent_windows: tests/test_kitty_agent_windows.c src/kitty_agent_windows.c include/kitty_agent_windows.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ tests/test_kitty_agent_windows.c
+	$(BUILD_DIR)/$@
+
+.PHONY: test_pty_session test_desktop_adapter test_surface_transport test_surface_cli test_dynamic_tool_cache test_browser_session test_harness_surfaces test_surface_workspace
+test_surface_cli:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ tests/test_surface_cli.c src/surface_cli.c src/json_fast.c
+	$(BUILD_DIR)/$@
+
+.PHONY: test_context_eviction test_task_closeout
+test_context_eviction:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -ffunction-sections -fdata-sections $(if $(filter Darwin,$(shell uname -s)),-Xlinker -dead_strip,-Xlinker --gc-sections) -o $(BUILD_DIR)/$@ tests/test_context_eviction.c src/context_eviction.c src/llm.c src/json_util.c src/json_fast.c -lcurl -lm
+	$(BUILD_DIR)/$@
+
+.PHONY: test-context-recovery
+test-context-recovery: $(TARGET) test_context_eviction
+	python3 tests/test_context_proxy_tools.py
+	python3 tests/test_context_recovery_binary.py --binary $(abspath $(TARGET))
+
+test_task_closeout:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -ffunction-sections -fdata-sections $(if $(filter Darwin,$(shell uname -s)),-Xlinker -dead_strip,-Xlinker --gc-sections) -o $(BUILD_DIR)/$@ tests/test_task_closeout.c src/task_closeout.c src/llm.c src/json_util.c src/json_fast.c -lcurl -lm
+	$(BUILD_DIR)/$@
+	python3 tests/test_next_action_dataset.py
+
+test_dynamic_tool_cache:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -ffunction-sections -fdata-sections $(if $(filter Darwin,$(shell uname -s)),-Xlinker -dead_strip,-Xlinker --gc-sections) -o $(BUILD_DIR)/$@ tests/test_dynamic_tool_cache.c src/llm.c src/tool_effects.c src/json_util.c vendor/yyjson.c -lcurl -lm
+	$(BUILD_DIR)/$@
+
+test_surface_workspace: $(TARGET)
+	python3 tests/test_surface_workspace_mcp.py --binary ./$(TARGET)
+
+.PHONY: test_desktop_live
+test_desktop_live: $(TARGET)
+	python3 tests/test_desktop_live_mcp.py --binary ./$(TARGET) --type-text 'Astra π 🦉'
+
+test_pty_session:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -D_DARWIN_C_SOURCE -o $(BUILD_DIR)/$@ tests/test_pty_session.c src/pty_session.c src/json_util.c src/json_fast.c -lpthread $(if $(filter Linux,$(shell uname -s)),-lutil)
+	$(BUILD_DIR)/$@
+
+test_desktop_adapter:
+	sh tests/verify_desktop_adapter.sh
+
+test_surface_transport:
+	sh tests/verify_surface_transport.sh
+
+test_browser_session:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/browser_session_driver tests/browser_session_driver.c src/browser_session.c src/json_util.c src/json_fast.c -lpthread
+	python3 tests/test_browser_session.py --binary $(BUILD_DIR)/browser_session_driver
+
+test_harness_surfaces: $(TARGET)
+	python3 tests/test_harness_surfaces_mcp.py --binary ./$(TARGET)
+
+.PHONY: test_kitty_graphics test_kitty_patch_live test_tui_splash
+test_tui_splash: $(TARGET)
+	python3 tests/test_tui_splash.py --binary ./$(TARGET)
+
 test_kitty_graphics: $(TEST_OBJ_DIR)/test_kitty_graphics.o \
 	$(TEST_OBJ_DIR)/kitty_graphics.o
 	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ $^ $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+test_kitty_patch_live: tests/test_kitty_patch_live.c src/kitty_graphics.c include/kitty_graphics.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ tests/test_kitty_patch_live.c src/kitty_graphics.c -lz
 	$(BUILD_DIR)/$@
 
 .PHONY: test_kitty_lab
@@ -1248,10 +1502,10 @@ clean:
 install: $(TARGET) dsco-new $(LITE_TARGET) dsc
 	install -d "$(BINDIR)"
 	install -d "$(DSCO_SHARE_DIR)"
-	install -m 755 $(TARGET) "$(BINDIR)/"
+	sh scripts/install_atomic.sh "$(TARGET)" "$(BINDIR)/$(notdir $(TARGET))"
 	install -m 755 $(LITE_TARGET) "$(BINDIR)/"
 	install -m 755 dsc "$(BINDIR)/"
-	install -m 755 dsco-new "$(BINDIR)/"
+	sh scripts/install_atomic.sh dsco-new "$(BINDIR)/dsco-new"
 	install -m 644 $(INC_DIR)/tool_embeddings.bin "$(DSCO_SHARE_DIR)/"
 	install -d "$(DSCO_DIR)/sessions" "$(DSCO_DIR)/plugins" "$(DSCO_DIR)/debug"
 	@canonical="$$(cd "$(BINDIR)" && pwd -P)/$(TARGET)"; \
@@ -1336,3 +1590,319 @@ revenue-check:
 
 tripwires: staleness-check revenue-check
 	@echo "tripwires: staleness + revenue-pace both ran (see exit code / output above)"
+
+.PHONY: test-execution-kernel test-execution-spine-structure test-execution-spine-mcp test-tool-hooks test-self-swarm-core
+test-execution-kernel:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -std=c11 -D_DARWIN_C_SOURCE -Iinclude -o $(BUILD_DIR)/test_execution_kernel tests/test_execution_kernel.c src/execution_kernel.c src/tool_hooks.c src/process_capture.c src/env_config.c src/json_util.c src/crypto.c -lpthread
+	$(BUILD_DIR)/test_execution_kernel
+
+test-tool-hooks: $(TARGET)
+	python3 tests/test_tool_hooks.py --binary "$(abspath $(TARGET))"
+
+test-execution-spine-structure:
+	python3 tests/test_execution_spine_structure.py
+
+test-execution-spine-mcp: $(TARGET) test-execution-spine-structure
+	python3 tests/test_execution_spine_mcp.py --binary "$(abspath $(TARGET))"
+
+.PHONY: test-journal-concurrency test-execution-recovery test-context-normalization
+test-journal-concurrency:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -std=c11 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -Iinclude -ffunction-sections -fdata-sections -o $(BUILD_DIR)/test_journal_concurrency tests/test_journal_concurrency.c src/json_util.c vendor/yyjson.c $(RELEASE_LDFLAGS) -lsqlite3 -lpthread
+	$(BUILD_DIR)/test_journal_concurrency
+
+test-execution-recovery: $(TARGET)
+	python3 tests/test_execution_recovery.py --binary "$(abspath $(TARGET))"
+
+test-context-normalization:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -std=c11 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -Iinclude -ffunction-sections -fdata-sections -o $(BUILD_DIR)/test_context_normalization tests/test_context_normalization.c src/llm.c src/json_util.c src/json_fast.c $(RELEASE_LDFLAGS)
+	$(BUILD_DIR)/test_context_normalization
+
+.PHONY: test-process-capture-lifecycle test-agent-batch-order test-harness-reliability
+test-process-capture-lifecycle:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -std=c11 -D_POSIX_C_SOURCE=200809L -D_GNU_SOURCE -Iinclude -o $(BUILD_DIR)/test_process_capture_lifecycle tests/test_process_capture_lifecycle.c src/process_capture.c src/json_util.c
+	$(BUILD_DIR)/test_process_capture_lifecycle
+
+test-agent-batch-order: $(TARGET)
+	python3 tests/test_agent_batch_order_binary.py --binary "$(abspath $(TARGET))"
+
+test-harness-reliability: test-journal-concurrency test-context-normalization test_dynamic_tool_cache test-process-capture-lifecycle test_pty_session test-execution-recovery test-agent-batch-order test-execution-spine-mcp test-tool-hooks test-gate-claims
+
+test: test-harness-reliability
+
+.PHONY: test-input-budget test_composer_input test-interactive-core
+test-input-budget:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/test_input_budget tests/test_input_budget.c src/input_budget.c vendor/yyjson.c
+	$(BUILD_DIR)/test_input_budget
+
+$(BUILD_DIR)/composer_input_fixture: tests/composer_input_fixture.c $(TUI_TEST_LIB_OBJS)
+	$(CC) $(TEST_CFLAGS) -fcommon -o $@ tests/composer_input_fixture.c $(TUI_TEST_LIB_OBJS) $(LDFLAGS) $(LDLIBS)
+
+test_composer_input: $(BUILD_DIR)/composer_input_fixture
+	python3 tests/test_composer_input.py --fixture $(BUILD_DIR)/composer_input_fixture
+
+$(BUILD_DIR)/stream_completion_fixture: tests/stream_completion_fixture.c $(TUI_TEST_LIB_OBJS)
+	$(CC) $(TEST_CFLAGS) -fcommon -o $@ tests/stream_completion_fixture.c $(TUI_TEST_LIB_OBJS) $(LDFLAGS) $(LDLIBS)
+
+.PHONY: test-stream-completion test-interactive-cost test-input-budget-binary
+test-stream-completion: $(BUILD_DIR)/stream_completion_fixture
+	python3 tests/test_stream_completion.py --fixture $(BUILD_DIR)/stream_completion_fixture --output $(BUILD_DIR)/stream-completion-results
+	python3 tests/test_native_provider_transport.py --fixture $(BUILD_DIR)/stream_completion_fixture
+
+test-interactive-cost: $(TARGET)
+	python3 tests/test_interactive_cost_binary.py --binary $(abspath $(TARGET))
+
+test-input-budget-binary: $(TARGET)
+	python3 tests/test_input_budget_binary.py --binary $(abspath $(TARGET))
+
+.PHONY: test-interactive-stream-recovery
+test-interactive-stream-recovery: $(TARGET)
+	python3 tests/test_interactive_stream_recovery.py --binary $(abspath $(TARGET)) --output $(BUILD_DIR)/interactive-stream-results
+
+test-interactive-core: test-input-budget test_composer_input test-stream-completion test-interactive-cost test-input-budget-binary test-interactive-stream-recovery
+
+test: test-interactive-core
+
+.PHONY: test-goal-queue
+test-goal-queue:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(ASAN_CFLAGS) -Iinclude -o $(BUILD_DIR)/test_goal_queue tests/test_goal_queue.c src/goal_queue.c src/json_util.c vendor/yyjson.c $(ASAN_LDFLAGS)
+	ASAN_OPTIONS='$(ASAN_RUNTIME_OPTIONS):halt_on_error=1' $(BUILD_DIR)/test_goal_queue
+
+.PHONY: test-goal-controller-binary
+test-goal-controller-binary: $(TARGET)
+	python3 tests/test_goal_controller_binary.py --binary "$(abspath $(TARGET))"
+
+test-self-swarm-core:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -std=c11 -D_DARWIN_C_SOURCE -Iinclude -o $(BUILD_DIR)/test_execution_verification tests/test_execution_layer_verification.c src/execution_layer.c src/json_util.c -lm
+	$(BUILD_DIR)/test_execution_verification
+	$(CC) -std=c11 -D_DARWIN_C_SOURCE -Iinclude -o $(BUILD_DIR)/test_headless_accounting tests/test_headless_accounting.c src/headless_accounting.c src/inference_cost.c src/json_util.c -lm
+	$(BUILD_DIR)/test_headless_accounting
+	$(CC) -std=c11 -D_DARWIN_C_SOURCE -Iinclude -o $(BUILD_DIR)/test_value_ledger_failures tests/test_value_ledger_failures.c src/value_ledger.c src/json_util.c -lm
+	$(BUILD_DIR)/test_value_ledger_failures
+
+.PHONY: test-deepseek-pricing
+test-deepseek-pricing:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -std=c11 -D_DARWIN_C_SOURCE -Iinclude $$(pkg-config --cflags libcurl) -o $(BUILD_DIR)/test_deepseek_pricing tests/test_deepseek_pricing.c src/deepseek_pricing.c $$(pkg-config --libs libcurl) -lpthread
+	$(BUILD_DIR)/test_deepseek_pricing
+
+.PHONY: test-parallel-pricing
+test-parallel-pricing:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -Iinclude -o $(BUILD_DIR)/test_parallel_pricing tests/test_parallel_pricing.c src/parallel_pricing.c -lm
+	$(BUILD_DIR)/test_parallel_pricing
+
+.PHONY: test-cost-frontier
+test-cost-frontier:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -std=c11 -Iinclude -o $(BUILD_DIR)/test_cost_frontier tests/test_cost_frontier.c src/cost_frontier.c src/json_util.c -lm
+	$(BUILD_DIR)/test_cost_frontier
+
+.PHONY: test_buffer_cli test_buffer_views
+test_buffer_cli:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ tests/test_buffer_cli.c src/buffer_cli.c src/json_fast.c
+	$(BUILD_DIR)/$@
+
+test_buffer_views: $(TARGET)
+	python3 tests/test_buffer_views_mcp.py --binary ./$(TARGET)
+
+.PHONY: test_buffer_store test_buffer_view test_buffer_ui test_pixel_scene_lifetime
+test_buffer_store:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -D_DARWIN_C_SOURCE -o $(BUILD_DIR)/$@ tests/test_buffer_store.c src/buffer_store.c src/json_util.c src/crypto.c src/json_fast.c -lsqlite3 -lpthread
+	$(BUILD_DIR)/$@
+
+test_buffer_view:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ tests/test_buffer_view.c src/buffer_view.c src/buffer_textedit.c src/json_fast.c
+	$(BUILD_DIR)/$@
+
+test_buffer_ui:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ tests/test_buffer_ui.c src/buffer_ui.c src/json_fast.c
+	$(BUILD_DIR)/$@
+
+test_pixel_scene_lifetime: tests/test_pixel_scene_lifetime.c src/pixel_tui.c include/pixel_tui.h $(filter-out $(OBJ_DIR)/pixel_tui.o,$(TUI_TEST_LIB_OBJS))
+	$(CC) $(TEST_CFLAGS) -fcommon -o $(BUILD_DIR)/$@ tests/test_pixel_scene_lifetime.c $(filter-out $(OBJ_DIR)/pixel_tui.o,$(TUI_TEST_LIB_OBJS)) $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+.PHONY: test_buffer_slash test_native_scene_visual
+test_buffer_slash: $(TARGET)
+	python3 tests/test_buffer_slash.py --binary ./$(TARGET)
+	python3 tests/test_buffer_slash.py --binary ./$(TARGET) --native
+
+test_native_scene_visual: $(TARGET) test_pixel_scene_lifetime
+	python3 tests/test_native_scene_visual.py --binary ./$(TARGET)
+
+.PHONY: test_agent_tool_routing test_agent_tool_routing_binary
+test: test_agent_tool_routing test_agent_tool_routing_binary
+
+test_agent_tool_routing:
+	python3 tests/test_agent_tool_routing.py
+
+test_agent_tool_routing_binary: $(TARGET)
+	python3 tests/test_agent_tool_routing_binary.py --binary ./$(TARGET)
+
+.PHONY: test_tool_grounding
+test_tool_grounding:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ tests/test_tool_grounding.c src/tool_grounding.c src/json_util.c src/json_fast.c
+	$(BUILD_DIR)/$@
+
+.PHONY: test_tool_grounding_requests test_selected_mcp_gate
+test_tool_grounding_requests: tests/test_tool_grounding_requests.c src/provider.c include/tool_grounding.h include/llm.h $(filter-out $(OBJ_DIR)/provider.o,$(TUI_TEST_LIB_OBJS))
+	$(CC) $(TEST_CFLAGS) -fcommon -o $(BUILD_DIR)/$@ tests/test_tool_grounding_requests.c $(filter-out $(OBJ_DIR)/provider.o,$(TUI_TEST_LIB_OBJS)) $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+test_selected_mcp_gate: $(TARGET)
+	python3 tests/test_selected_mcp_gate.py --binary ./$(TARGET)
+
+.PHONY: test_mcp_catalog_retry
+test_mcp_catalog_retry:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -D_DARWIN_C_SOURCE -ffunction-sections -fdata-sections -o $(BUILD_DIR)/$@ tests/test_mcp_catalog_retry.c src/mcp_response.c src/json_util.c src/json_fast.c -Wl,-dead_strip -lcurl -lm
+	$(BUILD_DIR)/$@
+
+.PHONY: test_swarm_progress
+swarm_progress_fixture: tests/test_swarm_progress.c $(TUI_TEST_LIB_OBJS)
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ tests/test_swarm_progress.c $(TUI_TEST_LIB_OBJS) $(LDFLAGS) $(LDLIBS)
+
+test_swarm_progress: swarm_progress_fixture
+	$(BUILD_DIR)/swarm_progress_fixture
+	$(BUILD_DIR)/swarm_progress_fixture tool
+	$(BUILD_DIR)/swarm_progress_fixture negative-tool
+	$(BUILD_DIR)/swarm_progress_fixture condition
+	$(BUILD_DIR)/swarm_progress_fixture kill-wait
+	$(BUILD_DIR)/swarm_progress_fixture concurrent 64
+	$(BUILD_DIR)/swarm_progress_fixture busy 16
+	$(BUILD_DIR)/swarm_progress_fixture anthropic
+	$(BUILD_DIR)/swarm_progress_fixture openai
+	$(BUILD_DIR)/swarm_progress_fixture bench 16
+	$(BUILD_DIR)/swarm_progress_fixture bench 64
+	$(BUILD_DIR)/swarm_progress_fixture bench 100
+
+.PHONY: test_invoke_tool_tier
+test_invoke_tool_tier: $(TARGET)
+	python3 tests/test_invoke_tool_tier.py --binary ./$(TARGET)
+
+.PHONY: test_swarm_scale
+test_swarm_scale: tests/test_swarm_scale.c src/swarm_scale.c include/swarm_scale.h
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -O2 -o $(BUILD_DIR)/$@ tests/test_swarm_scale.c src/swarm_scale.c src/json_util.c src/crypto.c vendor/yyjson.c -lm -lpthread
+	$(BUILD_DIR)/$@
+
+.PHONY: test_native_windows
+test_native_windows:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ tests/test_native_windows.c src/native_windows.c src/native_buffer_editor.c src/json_util.c src/json_fast.c -lpthread
+	$(BUILD_DIR)/$@
+
+.PHONY: test_native_tool_cadence
+test_native_tool_cadence: $(TARGET)
+	python3 tests/test_native_tool_cadence.py --binary ./$(TARGET) --output $(BUILD_DIR)/native-tool-cadence.json
+
+.PHONY: test_native_buffer_edit
+test_native_buffer_edit: $(TARGET)
+	python3 tests/test_native_buffer_edit.py --binary ./$(TARGET)
+
+.PHONY: test_native_trace
+test_native_trace:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ tests/test_native_trace.c src/native_trace.c src/json_fast.c -lpthread -lm
+	./$(BUILD_DIR)/$@
+
+.PHONY: test_native_activity
+.PHONY: test_native_zoom
+.PHONY: test_native_transcript_review
+.PHONY: test_native_render_perf
+test_native_render_perf: tests/test_native_render_perf.c tests/test_native_transcript_review.c src/pixel_tui.c $(filter-out $(OBJ_DIR)/pixel_tui.o,$(TUI_TEST_LIB_OBJS))
+	$(CC) $(CFLAGS) -DDSCO_INTERNAL_TESTS -fcommon -o $(BUILD_DIR)/$@ tests/test_native_render_perf.c $(filter-out $(OBJ_DIR)/pixel_tui.o,$(TUI_TEST_LIB_OBJS)) $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+.PHONY: test_native_composer_perf test_native_readability
+test_native_readability: tests/test_native_readability.c tests/test_native_transcript_review.c src/pixel_tui.c $(filter-out $(OBJ_DIR)/pixel_tui.o,$(TUI_TEST_LIB_OBJS))
+	$(CC) $(CFLAGS) -DDSCO_INTERNAL_TESTS -fcommon -o $(BUILD_DIR)/$@ tests/test_native_readability.c $(filter-out $(OBJ_DIR)/pixel_tui.o,$(TUI_TEST_LIB_OBJS)) $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+	python3 tests/test_native_swarm_echo.py
+
+test_native_composer_perf: tests/test_native_composer_perf.c tests/test_native_transcript_review.c src/pixel_tui.c $(filter-out $(OBJ_DIR)/pixel_tui.o,$(TUI_TEST_LIB_OBJS))
+	$(CC) $(CFLAGS) -DDSCO_INTERNAL_TESTS -fcommon -o $(BUILD_DIR)/$@ tests/test_native_composer_perf.c $(filter-out $(OBJ_DIR)/pixel_tui.o,$(TUI_TEST_LIB_OBJS)) $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+test_native_transcript_review: tests/test_native_transcript_review.c src/pixel_tui.c $(filter-out $(OBJ_DIR)/pixel_tui.o,$(TUI_TEST_LIB_OBJS))
+	$(CC) $(CFLAGS) -DDSCO_INTERNAL_TESTS -fcommon -o $(BUILD_DIR)/$@ tests/test_native_transcript_review.c $(filter-out $(OBJ_DIR)/pixel_tui.o,$(TUI_TEST_LIB_OBJS)) $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+test_native_zoom: tests/test_native_zoom.c src/pixel_tui.c $(filter-out $(OBJ_DIR)/pixel_tui.o,$(TUI_TEST_LIB_OBJS))
+	$(CC) $(CFLAGS) -DDSCO_INTERNAL_TESTS -fcommon -o $(BUILD_DIR)/$@ tests/test_native_zoom.c $(filter-out $(OBJ_DIR)/pixel_tui.o,$(TUI_TEST_LIB_OBJS)) $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+test_native_activity: tests/test_native_activity.c src/pixel_tui.c $(filter-out $(OBJ_DIR)/pixel_tui.o,$(TUI_TEST_LIB_OBJS))
+	$(CC) $(CFLAGS) -DDSCO_INTERNAL_TESTS -fcommon -o $(BUILD_DIR)/$@ tests/test_native_activity.c $(filter-out $(OBJ_DIR)/pixel_tui.o,$(TUI_TEST_LIB_OBJS)) $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+.PHONY: test_native_trace_ui
+test_native_trace_ui:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ tests/test_native_trace_ui.c src/native_trace_ui.c src/native_trace.c src/json_fast.c -lpthread -lm
+	$(BUILD_DIR)/$@
+
+.PHONY: test_native_trace_controls
+test_native_trace_controls: $(TARGET)
+	python3 tests/test_native_trace_controls.py --binary ./$(TARGET) --output $(BUILD_DIR)/native-trace-controls.json
+
+.PHONY: test_pixel_native_windows test_native_windows_visual
+test_pixel_native_windows: tests/test_pixel_native_windows.c src/pixel_tui.c include/pixel_tui.h $(filter-out $(OBJ_DIR)/pixel_tui.o,$(TUI_TEST_LIB_OBJS))
+	$(CC) $(TEST_CFLAGS) -fcommon -o $(BUILD_DIR)/$@ tests/test_pixel_native_windows.c $(filter-out $(OBJ_DIR)/pixel_tui.o,$(TUI_TEST_LIB_OBJS)) $(LDFLAGS) $(LDLIBS)
+	$(BUILD_DIR)/$@
+
+test_native_windows_visual: $(TARGET) test_pixel_native_windows
+	python3 tests/test_native_windows_visual.py --binary ./$(TARGET)
+
+.PHONY: test_native_windows_composer
+$(BUILD_DIR)/native_windows_composer_fixture: tests/native_windows_composer_fixture.c $(TUI_TEST_LIB_OBJS)
+	$(CC) $(TEST_CFLAGS) -fcommon -o $@ tests/native_windows_composer_fixture.c $(TUI_TEST_LIB_OBJS) $(LDFLAGS) $(LDLIBS)
+
+test_native_windows_composer: $(BUILD_DIR)/native_windows_composer_fixture
+	python3 tests/test_native_windows_composer.py
+
+.PHONY: test_native_window_tool
+test_native_window_tool:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ tests/test_native_window_tool.c src/native_window_tool.c src/native_windows.c src/native_buffer_editor.c src/crypto.c src/json_fast.c -lpthread
+	$(BUILD_DIR)/$@
+
+.PHONY: test_native_writing_editor
+test_native_writing_editor:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ tests/test_native_writing_editor.c src/native_window_tool.c src/native_windows.c src/native_buffer_editor.c src/crypto.c src/json_fast.c -lpthread
+	$(BUILD_DIR)/$@
+
+$(BUILD_DIR)/native_writing_composer_fixture: tests/native_writing_composer_fixture.c $(TUI_TEST_LIB_OBJS)
+	$(CC) $(TEST_CFLAGS) -fcommon -o $@ tests/native_writing_composer_fixture.c $(TUI_TEST_LIB_OBJS) $(LDFLAGS) $(LDLIBS)
+
+.PHONY: test_buffer_textedit
+test_buffer_textedit:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/$@ tests/test_buffer_textedit.c src/buffer_textedit.c src/json_fast.c
+	$(BUILD_DIR)/$@
+
+.PHONY: test_mcp_response
+test_mcp_response:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(TEST_CFLAGS) -o $(BUILD_DIR)/test_mcp_response tests/test_mcp_response.c src/mcp_response.c src/json_fast.c
+	$(BUILD_DIR)/test_mcp_response
+	$(CC) $(TEST_CFLAGS) -D_DARWIN_C_SOURCE -ffunction-sections -fdata-sections -o $(BUILD_DIR)/mcp_http_response_fixture tests/mcp_http_response_fixture.c src/mcp_response.c src/http_pool.c src/json_util.c src/json_fast.c $(if $(filter Darwin,$(UNAME_S)),-Xlinker -dead_strip,-Xlinker --gc-sections) -lcurl -lm -lpthread
+	python3 tests/test_mcp_http_response.py
+
+.PHONY: test-native-transport-reuse
+test-native-transport-reuse:
+	python3 tests/test_native_transport_reuse.py --sanitize --output $(BUILD_DIR)/native-transport-reuse.json
