@@ -1,0 +1,54 @@
+local l = require("lingo")
+local world = l.world {id="research-studio"}
+
+-- Illustrative facts: these are not claims about live DSCO capabilities.
+world:define("Capability", {
+    name = l.stored("string"),
+    proven = l.stored("boolean", false),
+})
+
+world:define("Product", {
+    requires = l.stored(l.types.list(l.types.ref("Capability"))),
+
+    missing = l.derived(l.types.list("string"), function(self)
+        local missing = l.array {}
+        for _,capability in ipairs(self.requires) do
+            if not capability.proven then
+                missing[#missing + 1] = capability.name
+            end
+        end
+        return missing
+    end),
+
+    deliverable = l.derived("boolean", function(self)
+        return #self.missing == 0
+    end),
+})
+
+local retrieval = world:new("Capability", "retrieval", {
+    name="Source retrieval", proven=true,
+})
+local grounding = world:new("Capability", "grounding", {
+    name="Evidence-backed answers", proven=false,
+})
+local research = world:new("Product", "research-desk", {
+    requires={retrieval, grounding},
+})
+
+local function read_world()
+    return {deliverable=research.deliverable, missing=research.missing}
+end
+
+local observed = read_world()
+local possible = world:scenario("If grounding were proven", function(w)
+    w:override(grounding, "proven", true)
+    return read_world()
+end)
+local after = read_world()
+
+assert(not observed.deliverable and #observed.missing == 1)
+assert(possible.deliverable and #possible.missing == 0)
+assert(not after.deliverable and not grounding.proven)
+
+return {observed=observed, possible=possible, after=after,
+    why=world:why(research, "deliverable")}

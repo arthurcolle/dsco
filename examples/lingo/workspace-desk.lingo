@@ -1,0 +1,85 @@
+-- From dsco-cli: dsco lingo open examples/lingo/workspace-desk.lingo
+-- Optional args: root and collector (collector resolves from root).
+-- Collect Git metadata once. Controls change a local scenario, never repositories.
+-- Restoring a saved desk uses the same source and its captured observations.
+local l=require("lingo")
+local d=require("lingo.dsco")
+local t=l.types
+local w=l.world{id="distributed-systems:workspace-desk"}
+
+-- Declarations execute both on open and restore, before any objects are loaded.
+w:define("Capture",{metadata=l.stored(t.json)},{version="1",immutable=true})
+w:define("Repository",{
+  name=l.stored(t.string),scope=l.stored(t.string),owner=l.stored(t.string),
+  status=l.stored(t.string),observed_at=l.stored(t.integer),
+  source_changes=l.stored(t.integer),conflicts=l.stored(t.integer),
+},{version="1",immutable=true})
+w:define("Review",{
+  repositories=l.stored(t.list(t.ref("Repository"))),
+  captured_at=l.stored(t.integer),order=l.stored(t.string,"largest"),
+  focus=l.stored(t.string,"all"),elapsed_seconds=l.stored(t.integer,0),
+  max_age_seconds=l.stored(t.integer,300),
+  decision=l.derived(t.json,function(self)
+    assert(self.elapsed_seconds>=0 and self.max_age_seconds>=0,"time controls must be nonnegative")
+    local ranked,needs=l.array{},l.array{}
+    local as_of=self.captured_at+self.elapsed_seconds
+    for _,repo in ipairs(self.repositories) do
+      if self.focus=="all" or repo.name==self.focus then
+        if repo.status~="ok" or repo.observed_at>as_of or as_of-repo.observed_at>self.max_age_seconds then
+          needs[#needs+1]=repo.name
+        elseif repo.source_changes>0 or repo.conflicts>0 then
+          ranked[#ranked+1]={name=repo.name,source_changes=repo.source_changes,conflicts=repo.conflicts,
+            next_action=repo.conflicts>0 and "inspect conflicts" or "review changed source paths"}
+        end
+      end
+    end
+    local order=self.order
+    table.sort(ranked,function(a,b)
+      if (a.conflicts>0)~=(b.conflicts>0) then return a.conflicts>0 end
+      if a.source_changes~=b.source_changes then
+        return order=="largest" and a.source_changes>b.source_changes or
+          order=="smallest" and a.source_changes<b.source_changes
+      end
+      return a.name<b.name
+    end)
+    local ready=#needs==0 and #ranked>0
+    return {status=#needs>0 and "needs_evidence" or (ready and "ready" or "no_work"),
+      selected=ready and ranked[1].name or l.null,queue=ranked,needs=needs,
+      captured_at=self.captured_at,assumed_as_of=as_of,order=order,focus=self.focus,
+      meaning="Changed source path counts guide review priority; they do not measure code quality or build health",
+      repository_edits=false}
+  end),
+},{version="1"})
+
+return l.view{
+  title="Workspace review desk",world=w,target={object="review",field="decision"},
+  controls={
+    {object="review",field="order",label="Review order",choices={"largest","smallest"}},
+    {object="review",field="focus",label="Component",choices={"all","cli","sdk","chimera","autobot","graphsub"}},
+    {object="review",field="elapsed_seconds",label="Assumed elapsed seconds"},
+    {object="review",field="max_age_seconds",label="Maximum observation age"},
+  },
+  initialize=function()
+    local root=args.root or ".."
+    local collector=args.collector or "dsco-cli/scripts/verify_lingo_workspace_review.py"
+    assert(type(root)=="string" and type(collector)=="string","root and collector paths must be strings")
+    local function quote(value)
+      assert(not value:find("%z"),"paths cannot contain NUL")
+      return "'"..value:gsub("'", "'\"'\"'").."'"
+    end
+    local capture=d.tool("bash"):json{
+      command="python3 "..quote(collector).." --collect --root .",
+      cwd=root,timeout=120,
+    }
+    assert(capture.schema=="workspace-review-observation/v1","unexpected collector schema")
+    w:new("Capture","capture",{metadata=capture})
+    local repositories={}
+    for _,row in ipairs(capture.repositories) do
+      repositories[#repositories+1]=w:new("Repository","repo:"..row.name,{
+        name=row.name,scope=row.scope,owner=row.owner,status=row.status,
+        observed_at=row.observed_at,source_changes=row.source_changes,conflicts=row.conflicts,
+      })
+    end
+    w:new("Review","review",{repositories=repositories,captured_at=capture.completed_at})
+  end,
+}

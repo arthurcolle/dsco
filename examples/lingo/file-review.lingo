@@ -1,0 +1,21 @@
+-- Reads the requested file, computes a summary, optionally writes that summary.
+-- dsco lingo run examples/lingo/file-review.lingo '{"input":"README.md"}'
+local l=require("lingo")
+assert(type(args.input)=="string", "args.input is required")
+local read=l.call("read_file", {path=args.input})
+assert(read.ok, read.result)
+
+local w=l.world()
+w:define("Observation", {
+  text=l.stored("string"),
+  response_bytes=l.derived("integer", function(self) return #self.text end),
+})
+-- The existing tool's complete textual response is the observation.
+-- It may include metadata or truncation; this is not the raw file byte count.
+local observation=w:new("Observation", "input", {text=read.result})
+local summary={input=args.input,response_bytes=observation.response_bytes}
+if args.output then
+  local written=l.call("write_file", {path=args.output,content=l.encode(summary).."\n"})
+  assert(written.ok, written.result)
+end
+return summary

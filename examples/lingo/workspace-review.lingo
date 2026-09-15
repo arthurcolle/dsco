@@ -1,0 +1,125 @@
+-- Real workspace observations through governed DSCO tools; local calculations
+-- choose a review queue. No repository edits, inference, or service requests.
+-- Capture and reopen MUST use this same source file for source-bound worlds.
+local l=require("lingo")
+local d=require("lingo.dsco")
+local t=l.types
+local w=l.world{id="distributed-systems:workspace-review"}
+
+w:define("Collection",{metadata=l.stored(t.json)},{version="1",immutable=true})
+
+w:define("RepositoryObservation",{
+  name=l.stored(t.string),scope=l.stored(t.string),owner=l.stored(t.string),
+  observed_at=l.stored(t.integer),head=l.stored(t.string),
+  status=l.stored(t.string),error=l.stored(t.string),
+  tracked=l.stored(t.integer),untracked=l.stored(t.integer),
+  source_changes=l.stored(t.integer),conflicts=l.stored(t.integer),
+  source_sample=l.stored(t.list(t.string)),status_sha256=l.stored(t.string),
+},{version="1",immutable=true})
+
+w:define("ReviewBook",{
+  repositories=l.stored(t.list(t.ref("RepositoryObservation"))),
+  as_of=l.stored(t.integer),max_age_seconds=l.stored(t.integer,300),
+  focus=l.stored(t.string,"all"),order=l.stored(t.string,"largest"),
+  decision=l.derived(t.json,function(self)
+    assert(self.order=="largest" or self.order=="smallest","unknown review order")
+    assert(self.max_age_seconds>=0,"negative freshness window")
+    local queue,needs,excluded=l.array{},l.array{},l.array{}
+    for _,repo in ipairs(self.repositories) do
+      if self.focus~="all" and repo.name~=self.focus then
+        excluded[#excluded+1]={name=repo.name,reason="outside_focus"}
+      elseif repo.status~="ok" or repo.observed_at>self.as_of or
+          self.as_of-repo.observed_at>self.max_age_seconds then
+        needs[#needs+1]={name=repo.name,scope=repo.scope,
+          reason=repo.status~="ok" and "collection_failed" or "outside_freshness_window"}
+      elseif repo.source_changes==0 and repo.conflicts==0 then
+        excluded[#excluded+1]={name=repo.name,reason="no_pending_source_or_conflict"}
+      else
+        queue[#queue+1]={name=repo.name,scope=repo.scope,owner=repo.owner,
+          source_changes=repo.source_changes,conflicts=repo.conflicts,
+          tracked=repo.tracked,untracked=repo.untracked,
+          source_sample=repo.source_sample,
+          next_action=repo.conflicts>0 and "inspect unresolved merge entries" or
+            "review pending source changes"}
+      end
+    end
+    local order=self.order
+    table.sort(queue,function(a,b)
+      if (a.conflicts>0)~=(b.conflicts>0) then return a.conflicts>0 end
+      if a.source_changes~=b.source_changes then
+        if order=="largest" then return a.source_changes>b.source_changes end
+        return a.source_changes<b.source_changes
+      end
+      return a.name<b.name
+    end)
+    local status=#needs>0 and "needs_evidence" or (#queue>0 and "ready" or "no_work")
+    return {status=status,selected=status=="ready" and queue[1].name or l.null,
+      queue=queue,needs=needs,excluded=excluded,order=self.order,focus=self.focus,
+      as_of=self.as_of,max_age_seconds=self.max_age_seconds,
+      meaning="Review priority by changed source path count; not quality, size, or build health",
+      executes_review=false}
+  end),
+},{version="1"})
+
+local capture
+if args.action=="capture" then
+  assert(type(args.root)=="string" and type(args.collector)=="string","root and collector required")
+  local function quote(s) return "'"..s:gsub("'", "'\"'\"'").."'" end
+  capture=d.tool("bash"):json{command="python3 "..quote(args.collector)..
+    " --collect --root "..quote(args.root),cwd=args.root,timeout=120}
+  assert(capture.schema=="workspace-review-observation/v1","unexpected collector result")
+  w:new("Collection","collection",{metadata={schema=capture.schema,
+    collector_sha256=capture.collector_sha256,completed_at=capture.completed_at,
+    source_extensions=capture.source_extensions,
+    excluded_directory_names=capture.excluded_directory_names,
+    exclude_hidden_paths=capture.exclude_hidden_paths,scope=capture.scope,
+    atomic_snapshot=capture.atomic_snapshot}})
+  local repos={}
+  for _,row in ipairs(capture.repositories) do
+    repos[#repos+1]=w:new("RepositoryObservation","repo:"..row.name,row)
+  end
+  w:new("ReviewBook","review",{repositories=repos,as_of=capture.completed_at})
+elseif args.action=="reopen" then
+  w:load(args.snapshot)
+else
+  error("action must be capture or reopen")
+end
+
+local book=w:ref("review")
+local address=w:address(book,"decision")
+local before=w:explain(address)
+local baseline=w:read(address)
+local explanation=w:explain(address)
+local smallest=w:scenario("smallest review first",function(s)
+  s:override(book,"order","smallest")
+  return w:read(address)
+end)
+local sdk=w:scenario("focus Python SDK",function(s)
+  s:override(book,"focus","sdk")
+  return w:read(address)
+end)
+local expired=w:scenario("observations expired",function(s)
+  s:override(book,"as_of",book.as_of+book.max_age_seconds+1)
+  return w:read(address)
+end)
+local restored=w:read(address)
+local function equal(a,b)
+  if type(a)~=type(b) then return false end
+  if type(a)~="table" then return a==b end
+  for key,value in pairs(a) do if not equal(value,b[key]) then return false end end
+  for key in pairs(b) do if a[key]==nil then return false end end
+  return true
+end
+assert(equal(restored,baseline),"scenario leaked into base world")
+local snapshot=w:snapshot()
+if args.action=="capture" then
+  assert(type(args.output)=="string","snapshot output required")
+  d.tool("write_file"):run{path=args.output,content=l.encode(snapshot).."\n"}
+end
+return {baseline=baseline,smallest=smallest,sdk=sdk,expired=expired,
+  restored=restored,address=address,before=before,explanation=explanation,
+  manifest=w:manifest(),observations=capture or l.null,
+  collection=w:ref("collection").metadata,
+  object_count=#snapshot.objects,
+  effect_scope=args.action=="capture" and "read Git metadata and write one world snapshot" or
+    "recompute recorded observations without host calls"}

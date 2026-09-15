@@ -50,7 +50,7 @@ def classify(path: str) -> str:
         return "Runtime source and headers"
     if path.startswith("tests/"):
         return "Tests"
-    if path.startswith("scripts/") or path == "face_capture.py":
+    if path.startswith("scripts/"):
         return "Scripts and tooling"
     if path.startswith("data/"):
         return "Generated data assets"

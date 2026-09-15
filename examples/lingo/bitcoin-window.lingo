@@ -1,0 +1,26 @@
+-- In-session bounded ticker. Native windows belong to the calling process.
+-- Run with the Lingo tool, not a separate CLI process, to update this session.
+-- Each invocation refreshes 5 times. Closing the window stops the loop.
+local l = require('lingo')
+local d = require('lingo.dsco')
+local window = args.window_id
+if not window then
+  local opened = d.tool('native_window'):json{action='open',kind='note',title='Bitcoin / Lingo live',text='Connecting to Coinbase...',x=520,y=270,width=500,height=210}
+  assert(opened.ok, 'Could not open price window')
+  window = opened.id
+end
+local observations = l.array{}
+for tick=1,5 do
+  local receipt = d.tool('bash'):call{command="python3 - <<'PY'\nimport urllib.request,json,datetime\ns=json.load(urllib.request.urlopen('https://api.coinbase.com/v2/prices/BTC-USD/spot',timeout=4))\np=float(s['data']['amount'])\nassert 0 < p < 1e9\nprint(json.dumps({'price':p,'at':datetime.datetime.now(datetime.timezone.utc).isoformat()}))\nPY",timeout=6}
+  if not receipt.ok then
+    d.tool('native_window'):call{action='update',id=window,text='BTC / USD\n\nFeed error — quote unavailable.\nLingo ticker stopped; no stale value presented as live.'}
+    return {window_id=window,error=receipt.result}
+  end
+  local quote = l.decode(receipt.result)
+  observations[#observations+1]=quote
+  local state = tick == 5 and 'Bounded run finished — quote is now a snapshot.' or 'Auto-refreshing every ~2 seconds plus request latency.'
+  local updated = d.tool('native_window'):json{action='update',id=window,text=string.format('BTC / USD\n\n$%.2f\n\nCoinbase spot · %s\nLingo update %d / 5\n%s',quote.price,quote.at,tick,state),evidence='Fetched directly from Coinbase public spot API.',next_step='Run this Lingo program again with window_id to refresh; closing the window stops updates.'}
+  if not updated.ok then return {window_id=window,stopped='Window closed or update rejected',observations=observations} end
+  if tick < 5 then d.tool('bash'):run{command='sleep 2',timeout=3} end
+end
+return {window_id=window,observations=observations,mode='bounded polling; no background scheduler'}
