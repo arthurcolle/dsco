@@ -144,6 +144,42 @@ static void test_rgb_patch_contract(void) {
     }
 }
 
+static void test_multichunk_patch_frame_identity(void) {
+    unsigned char pixels[64 * 64 * 3];
+    uint32_t random = 0x31415926;
+    for (size_t i = 0; i < sizeof(pixels); i++) {
+        random ^= random << 13; random ^= random >> 17; random ^= random << 5;
+        pixels[i] = (unsigned char)random;
+    }
+    FILE *stream = tmpfile();
+    CHECK("multichunk patch tmpfile", stream != NULL);
+    if (!stream) return;
+    kitty_graphics_send_stats_t stats;
+    bool ok = kitty_graphics_send_rgb_patch(stream, 913, 7, 0, 0, 64, 64,
+                                           pixels, sizeof(pixels), &stats);
+    char output[32768];
+    size_t size = read_stream(stream, output, sizeof(output));
+    fclose(stream);
+    CHECK("actual RGB payload spans chunks", ok && size && stats.chunks > 1);
+    if (!ok || !size) return;
+    size_t count = 0;
+    for (const char *p = output; *p;) {
+        const char *semi = strchr(p, ';');
+        const char *end = semi ? strstr(semi + 1, "\033\\") : NULL;
+        CHECK("patch APC is complete", semi && end);
+        if (!semi || !end) break;
+        if (count) {
+            const char *prefix = "\033_Ga=f,i=913,r=7,q=2,m=";
+            CHECK("legacy Kitty continuation retains exact image and frame",
+                  strncmp(p, prefix, strlen(prefix)) == 0);
+        }
+        CHECK("patch payload fits protocol limit", end - semi - 1 <= 4096);
+        count++;
+        p = end + 2;
+    }
+    CHECK("every compressed patch chunk inspected", count == stats.chunks);
+}
+
 static void test_environment_hint(void) {
     const char *old_graphics = getenv("DSCO_KITTY_GRAPHICS");
     const char *old_pixel = getenv("DSCO_PIXEL_TUI");
@@ -170,13 +206,15 @@ static void test_environment_hint(void) {
     setenv("TERM_PROGRAM", "Ghostty", 1);
     CHECK("known terminal hint on", kitty_graphics_environment_hint());
     setenv("DSCO_PIXEL_TUI", "0", 1);
-    CHECK("pixel TUI opt-out wins", !kitty_graphics_environment_hint());
-    unsetenv("DSCO_PIXEL_TUI");
+    CHECK("text TUI preserves Kitty graphics", kitty_graphics_environment_hint());
     setenv("DSCO_KITTY_GRAPHICS", "off", 1);
-    CHECK("explicit off wins", !kitty_graphics_environment_hint());
+    CHECK("explicit graphics opt-out still wins in text TUI", !kitty_graphics_environment_hint());
+    setenv("DSCO_PIXEL_TUI", "1", 1);
+    CHECK("native compositor does not override graphics opt-out", !kitty_graphics_environment_hint());
+    setenv("DSCO_PIXEL_TUI", "0", 1);
     setenv("TERM_PROGRAM", "Apple_Terminal", 1);
     setenv("DSCO_KITTY_GRAPHICS", "force", 1);
-    CHECK("force wins", kitty_graphics_environment_hint());
+    CHECK("explicit graphics opt-in works in text TUI", kitty_graphics_environment_hint());
 
     if (had_graphics) setenv("DSCO_KITTY_GRAPHICS", saved_graphics, 1);
     else unsetenv("DSCO_KITTY_GRAPHICS");
@@ -197,6 +235,7 @@ int main(void) {
     test_empty_payload();
     test_send_stats();
     test_rgb_patch_contract();
+    test_multichunk_patch_frame_identity();
     test_environment_hint();
     printf("kitty graphics: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

@@ -1,0 +1,57 @@
+local l=require("lingo")
+local t=l.types
+local w=l.world{id="world-conformance"}
+w:define("Link",{
+  amount=l.stored(t.integer),
+  next=l.stored(t.optional(t.ref("Link")),l.null),
+  data=l.stored(t.json,{empty=l.array{},flag=false,nullable=l.null}),
+})
+w:define("Bundle",{
+  root=l.stored(t.ref("Link")),
+  links=l.stored(t.list(t.ref("Link"))),
+  metadata=l.stored(t.record{enabled=t.boolean,maybe=t.optional(t.ref("Link"))}),
+  enabled=l.stored(t.boolean,false),
+  scaled=l.derived(t.integer,function(self,ctx,a)
+    return self.root.amount*a.factor+a.other.amount
+  end,{params={factor=t.integer,other=t.ref("Link")}}),
+})
+if args.mode=="save" then
+  local first=w:new("Link","a",{amount=3})
+  local second=w:new("Link","z",{amount=5,next=first})
+  w:set(first,"next",second)
+  local bundle=w:new("Bundle","bundle",{root=first,links={second,first},metadata={enabled=false,maybe=second}})
+  local address=w:address(bundle,"scaled",{factor=2,other=second})
+  local baseline=w:read(address)
+  local hypothetical=w:scenario("different inputs",function(s)
+    s:override(first,"amount",7)
+    return w:read(address)
+  end)
+  assert(baseline==11 and hypothetical==19 and w:read(address)==11)
+  return {snapshot=w:snapshot(),address=address,baseline=baseline,hypothetical=hypothetical}
+end
+local ok,err=l.try(function() w:load(args.snapshot) end)
+if not ok then
+  assert(#w:objects("Link")==0 and #w:objects("Bundle")==0,"failed load leaked objects")
+  return {loaded=false,error=tostring(err),count=0}
+end
+local before=w:explain(args.address)
+if args.mode=="invalid_address" then
+  local valid,value=l.try(function() return w:read(args.address) end)
+  return {valid=valid,error=tostring(value)}
+end
+local value=w:read(args.address)
+local bundle=w:ref("bundle")
+if args.mode=="revision_limit" then
+  local changed,reason=l.try(function() w:set(bundle.root,"amount",4) end)
+  assert(not changed and tostring(reason):find("revision exhausted",1,true))
+  assert(bundle.root.amount==3 and w:describe(bundle.root).revision==9007199254740991)
+  return {unchanged=true}
+end
+assert(bundle.root.next.next==bundle.root and bundle.links[1]==bundle.metadata.maybe)
+assert(not bundle.enabled and not bundle.metadata.enabled)
+assert(l.encode(bundle.root.data.empty)=="[]" and bundle.root.data.nullable==l.null)
+local snapshot=w:snapshot()
+w:set(bundle.root,"amount",4)
+local after=w:read(args.address)
+return {loaded=true,before=before.state,value=value,after=after,
+  snapshot=snapshot,why=w:explain(args.address)}

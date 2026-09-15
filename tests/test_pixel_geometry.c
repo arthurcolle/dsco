@@ -10,6 +10,8 @@
  */
 
 #include "native_ui.h"
+#include "native_composer.h"
+#include <limits.h>
 #include "vm.h"
 
 #include <stdio.h>
@@ -201,7 +203,60 @@ static void test_composer_layout(void) {
           l.total_rows, l.cursor_row, l.cursor_column);
 }
 
+static void test_extreme_viewport_fallback(void) {
+    native_ui_viewport_metrics_t m =
+        native_ui_terminal_viewport(INT_MAX, INT_MAX, 0, 0, 1);
+    CHECK(m.logical_width == INT_MAX && m.logical_height == INT_MAX,
+          "fallback dimensions saturate rather than overflow: %d x %d",
+          m.logical_width, m.logical_height);
+    m = native_ui_terminal_viewport(INT_MAX / 10, INT_MAX / 20, 0, 0, 1);
+    CHECK(m.logical_width == (INT_MAX / 10) * 10 &&
+          m.logical_height == (INT_MAX / 20) * 20,
+          "representable fallback dimensions remain exact");
+}
+
+static void test_narrow_composer_status(void) {
+    native_ui_scene_t scene;
+    native_composer_model_t model = {
+        .text = "hello", .queue_depth = 2, .queue_capacity = 8,
+        .columns = 12, .compact = true,
+    };
+    CHECK(native_composer_build(&scene, 160, 56, &model),
+          "minimum advertised composer geometry builds");
+    for (int i = 0; i < scene.count; i++) {
+        const native_ui_node_t *node = &scene.nodes[i];
+        if (node->key == NATIVE_COMPOSER_KEY_LIVE) {
+            CHECK(node->frame.x >= 0 && node->frame.x + node->frame.width <= 160,
+                  "queue status remains within narrow viewport: x=%d width=%d",
+                  node->frame.x, node->frame.width);
+            CHECK(strstr(node->text, "2/8") != NULL,
+                  "compact status retains queue depth and capacity");
+        }
+    }
+}
+
+static void test_hit_test_extreme_endpoints(void) {
+    native_ui_scene_t scene;
+    native_ui_scene_init(&scene, INT_MAX, INT_MAX);
+    int child = native_ui_scene_add(&scene, scene.root, 99,
+                                    NATIVE_UI_ELEMENT_SURFACE, NATIVE_UI_ROLE_STATUS);
+    scene.nodes[child].frame = (native_ui_rect_t){INT_MAX - 4, INT_MAX - 4, 10, 10};
+    CHECK(native_ui_hit_test(&scene, INT_MAX - 1, INT_MAX - 1) == child,
+          "hit test widens positive endpoints before adding");
+    scene.nodes[child].frame = (native_ui_rect_t){-10, -10, 10, 10};
+    CHECK(native_ui_hit_test(&scene, -1, -1) == child,
+          "negative-origin rectangle accepts interior point");
+    CHECK(native_ui_hit_test(&scene, 0, 0) != child,
+          "right and bottom boundaries remain exclusive");
+    scene.nodes[child].frame.width = 0;
+    CHECK(native_ui_hit_test(&scene, -10, -1) != child,
+          "empty rectangle never captures input");
+}
+
 int main(void) {
+    test_hit_test_extreme_endpoints();
+    test_extreme_viewport_fallback();
+    test_narrow_composer_status();
     test_defaults_and_fallbacks();
     test_requested_scale_override();
     test_heuristic_boundaries();

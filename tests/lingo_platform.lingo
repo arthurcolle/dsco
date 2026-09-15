@@ -1,0 +1,124 @@
+local l=require("lingo")
+local p=require("lingo.platform")
+local checks=l.array{}
+local function check(name, condition)
+  assert(condition, name)
+  checks[#checks+1]=name
+end
+local function denied(name, run)
+  local ok=l.try(run)
+  check(name, not ok)
+end
+
+local w=p.world{id="platform-semantics"}
+local input={origin={system="fixture",operation="status",source_id="fixture-service"},
+  observed_at="2026-09-10T00:00:00Z",consistency="recorded",
+  payload={status="healthy",nested={value=1},empty=l.array{}}}
+local observation=p.observe(w,"obs/service/1",input)
+input.payload.nested.value=100
+local returned=observation.payload
+returned.nested.value=200
+check("observation input and reads are defensive copies",observation.payload.nested.value==1)
+check("provenance stays explicit",observation.summary.origin.source_id=="fixture-service"
+  and observation.summary.consistency=="recorded")
+denied("observation identity cannot be replaced",function() p.observe(w,"obs/service/1",input) end)
+denied("observation base fields are immutable",function() w:set(observation,"payload",{}) end)
+denied("observation rejects unknown fields",function()
+  p.observe(w,"obs/bad",{origin=input.origin,observed_at=input.observed_at,
+    consistency="live",payload={},secret="not accepted"})
+end)
+denied("observation requires source identity",function()
+  p.observe(w,"obs/bad",{origin={system="fixture",operation="status"},
+    observed_at=input.observed_at,consistency="live",payload={}})
+end)
+denied("observation rejects invented consistency",function()
+  p.observe(w,"obs/bad",{origin=input.origin,observed_at=input.observed_at,
+    consistency="globally_atomic",payload={}})
+end)
+denied("platform namespace is immutable",function() p.observe=false end)
+denied("platform world rejects unknown options",function() p.world{id="bad",url="ignored"} end)
+
+local service=w:new("Service","service/tool-management",{
+  observation=observation,availability="ready"})
+local policy=w:new("Policy","policy/default",{
+  allow_effects=true,max_cost_usd=.1,max_calls=2})
+local task=w:new("Task","task/uppercase",{service=service,policy=policy,
+  operation="local:uppercase",inputs={text="recorded fixture"},
+  estimated_cost_usd=.02,expected_calls=1})
+check("task is eligible against explicit local inputs",task.eligible and task.within_budget)
+check("calculation does not claim authorization or execution",task.summary.advisory
+  and not task.summary.grants_authority and not task.summary.submits_effects)
+local why=w:why(task,"within_budget")
+check("budget calculation records dependencies",#why.dependencies>=3)
+w:set(policy,"max_cost_usd",.01)
+check("policy mutation invalidates dependent values",not task.eligible and task.readiness=="over_budget")
+local scenario=w:scenario("larger hypothetical budget",function(s)
+  s:override(policy,"max_cost_usd",.2)
+  return task.summary
+end)
+check("scenario recalculates task eligibility",scenario.eligible)
+check("scenario does not mutate base policy",policy.max_cost_usd==.01 and not task.eligible)
+w:scenario("hypothetical observation",function(s)
+  s:override(observation,"payload",{status="unavailable"})
+  check("observation scenario is explicitly local",observation.payload.status=="unavailable")
+  denied("scenario cannot export a base snapshot",function() return w:snapshot() end)
+end)
+check("hypothetical observation restores base evidence",observation.payload.status=="healthy")
+w:set(policy,"max_cost_usd",.1)
+w:set(policy,"allow_effects",false)
+check("disabled effects are advisory ineligibility",task.readiness=="effects_disabled")
+w:set(policy,"allow_effects",true)
+w:set(policy,"max_calls",0)
+check("invalid policy does not become eligible",task.readiness=="invalid_policy")
+w:set(policy,"max_calls",2)
+w:set(task,"estimated_cost_usd",-1)
+check("negative estimates do not become eligible",task.readiness=="invalid_estimate")
+w:set(task,"estimated_cost_usd",.02)
+w:set(task,"operation","")
+check("empty operations do not become eligible",task.readiness=="invalid_operation")
+w:set(task,"operation","local:uppercase")
+w:set(service,"availability","unknown")
+check("unknown service availability does not become ready",task.readiness=="service_unavailable")
+w:set(service,"availability","ready")
+denied("domain reference classes are enforced",function()
+  w:new("Task","task/invalid",{service=service,policy=service,operation="bad",estimated_cost_usd=0})
+end)
+local other=p.world{id="another-world"}
+denied("references cannot silently cross worlds",function()
+  other:new("Object","foreign",{service=service,remote_id="opaque",observation=observation})
+end)
+local object=w:new("Object","object/native",{service=service,remote_id="czBuMTA",observation=observation})
+local artifact=w:new("Artifact","artifact/report",{observation=observation,locator="local:report.json"})
+local model=w:new("Model","model/selected",{service=service,model_id="fixture/model",observation=observation})
+local agent=w:new("Agent","agent/owner",{service=service,agent_id="fixture-agent",observation=observation})
+local run=w:new("Run","run/remote",{task=task,observation=observation,remote_id="backend-run",state="cancel_requested"})
+check("cancel request does not claim terminal completion",not run.terminal)
+w:set(run,"state","succeeded")
+check("run status retains distinct terminal semantics",run.terminal)
+check("object payload retains opaque remote identity",object.remote_id=="czBuMTA" and object.payload.status=="healthy")
+check("artifact locator is not verification",artifact.summary.verification=="not_performed_by_language")
+check("model and agent inherit only service readiness",model.service_ready and agent.service_ready)
+
+local address=w:address(task,"summary")
+local snapshot=w:snapshot()
+local reopened=p.world{id="platform-semantics"}
+reopened:load(l.decode(l.encode(snapshot)))
+local restored=reopened:read(l.decode(l.encode(address)))
+check("snapshot reconstructs typed graph and calculation",restored.eligible and restored.operation=="local:uppercase")
+check("snapshot preserves observation array shape",l.encode(reopened:ref("obs/service/1").payload.empty)=="[]")
+denied("load does not merge into populated worlds",function() reopened:load(snapshot) end)
+local function cycle_world()
+  local c=l.world{id="reference-cycle"}
+  c:define("Link",{next=l.stored(l.types.optional(l.types.ref("Link")),l.null)})
+  return c
+end
+local cycle=cycle_world()
+local first=cycle:new("Link","first",{})
+local second=cycle:new("Link","second",{next=first})
+cycle:set(first,"next",second)
+local cycle_reopened=cycle_world()
+cycle_reopened:load(l.decode(l.encode(cycle:snapshot())))
+check("snapshot resolves reference cycles without copying identities",
+  cycle_reopened:ref("first").next==cycle_reopened:ref("second")
+  and cycle_reopened:ref("second").next==cycle_reopened:ref("first"))
+return {checks=checks,snapshot=snapshot,address=address,summary=restored}

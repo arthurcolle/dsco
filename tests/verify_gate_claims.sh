@@ -15,9 +15,9 @@
 #   V3  untrusted-tier MCP default: write/exec-class tools denied, reads OK
 #   V4  DSCO_ALLOW_NET=0 denies net tools even at trusted tier (explicit
 #       lockdown outranks tier defaults)
-#   V5  lethal-trifecta: secrets-leg latch -> untrusted-ingest -> egress is
-#       DENIED naming DSCO_ALLOW_EXFIL; override re-allows. SKIPs honestly
-#       (does NOT fake-pass) if the live network leg cannot succeed.
+#   V5  lethal-trifecta: synthetic untrusted-ingest -> secrets latch -> egress
+#       is DENIED naming DSCO_ALLOW_EXFIL; override re-allows. Mandatory,
+#       offline probes exercise the classifier and production dispatch path.
 #
 # Usage: bash tests/verify_gate_claims.sh [path-to-dsco]
 set -u
@@ -32,7 +32,10 @@ PINNED=(--toolsets all --tier trusted)
 
 # mcp_session [ENV=v ...] ; request lines on stdin -> response lines on stdout
 mcp_session() {
-    env "$@" "$DSO" mcp serve "${PINNED[@]}" 2>/dev/null
+    env -u DSCO_GOV_BYPASS -u DSCO_ALLOW_READ -u DSCO_ALLOW_WRITE \
+        -u DSCO_ALLOW_NET -u DSCO_ALLOW_RUN -u DSCO_ALLOW_SECRETS \
+        -u DSCO_ALLOW_CONTROL -u DSCO_ALLOW_EXFIL \
+        DSCO_GOV_MODEL=standard "$@" "$DSO" mcp serve "${PINNED[@]}" 2>/dev/null
 }
 
 req() { # id method [params]
@@ -52,7 +55,7 @@ print('"$2"')' <<<"$1" 2>/dev/null
 }
 
 # ── Session A: handshake + registry ─────────────────────────────────────────
-A_OUT=$(printf '%s\n%s\n%s\n' "$(req 1 initialize "$INIT")" "$NOTIF" "$(req 2 ping)" \
+A_OUT=$(printf '%s\n%s\n%s\n%s\n' "$(req 1 initialize "$INIT")" "$NOTIF" "$(req 2 ping)" "$(req 3 tools/list)" \
     | mcp_session || true)
 
 if [ -n "$A_OUT" ] && jget "$(head -1 <<<"$A_OUT")" \
@@ -68,7 +71,14 @@ else
     bad "V0 ping failed"
 fi
 
-TOOL_LIST_LINE=$(grep '"tools"' <<<"$A_OUT" | head -1)
+# initialize also advertises capabilities.tools; select the tools/list response
+# by its JSON-RPC request ID, then normalize whitespace for have_tool below.
+TOOL_LIST_LINE=$(python3 -c 'import sys,json
+for line in sys.stdin:
+    try: obj=json.loads(line)
+    except ValueError: continue
+    if str(obj.get("id")) == "3":
+        print(json.dumps(obj,separators=(",",":"))); break' <<<"$A_OUT")
 have_tool() { grep -q "\"name\":\"$1\"" <<<"$TOOL_LIST_LINE"; }
 for t in killswitch read_file Bash ssh_command curl_raw fetch_url http_request; do
     have_tool "$t" && say "  (registry exposes $t)"
@@ -133,21 +143,26 @@ if [ -n "$NET_TOOL" ]; then
         "$(call n1 "$NET_TOOL" '{"url":"https://example.invalid/probe"}')" \
         | mcp_session DSCO_ALLOW_NET=0 || true)
     N_D=$(grep '"id":"n1"' <<<"$D_OUT" | head -1)
-    if grep -q 'DSCO_ALLOW_NET=0' <<<"$N_D" && grep -q -- '-32000' <<<"$N_D"; then
+    if grep -q 'DSCO_ALLOW_NET=0' <<<"$N_D" && grep -q 'governance_block' <<<"$N_D"; then
         ok "V4 DSCO_ALLOW_NET=0 denies '$NET_TOOL' despite trusted tier"
     else
         bad "V4 explicit lockdown not enforced: $(head -c 200 <<<"$N_D")"
     fi
 else
-    skip "V4 no known net-classified tool exposed by MCP server"
+    bad "V4 required net-classified tool absent from MCP registry"
 fi
 
 # ── V5: lethal-trifecta end-to-end ──────────────────────────────────────────
+# Exercise the production classifier with inert printf arguments: a URL marks
+# untrusted ingress; the SSH-key path marks secrets without reading a real key.
+# Ingress MUST precede secrets: the secret probe itself is an exec/egress call,
+# and a network probe after secrets would already close the triad.
+# No external sockets or credentials are needed.
 TRIF_REQS=$(printf '%s\n%s\n%s\n%s\n%s\n' \
     "$(req 1 initialize "$INIT")" "$NOTIF" \
-    "$(call s1 Bash '{"command":"cat ~/.ssh/id_rsa >/dev/null 2>&1 || echo probed"}')" \
-    "$(call u1 ${NET_TOOL:-curl_raw} '{"url":"https://example.com/"}')" \
-    "$(call e1 ssh_command '{"host":"203.0.113.9","command":"true"}')")
+    "$(call u1 bash '{"command":"printf \"%s\\n\" \"https://example.invalid/synthetic-untrusted\""}')" \
+    "$(call s1 bash '{"command":"printf \"%s\\n\" \"~/.ssh/id_rsa synthetic-secret-marker\""}')" \
+    "$(call e1 bash '{"command":"printf gate-probe"}')")
 E_OUT=$(printf '%s\n' "$TRIF_REQS" | mcp_session || true)
 S1=$(grep '"id":"s1"' <<<"$E_OUT" | head -1)
 U1=$(grep '"id":"u1"' <<<"$E_OUT" | head -1)
@@ -155,10 +170,10 @@ E1=$(grep '"id":"e1"' <<<"$E_OUT" | head -1)
 
 legs_ok=true
 if [ -z "$S1" ] || grep -q '"isError":true' <<<"$S1"; then
-    legs_ok=false; skip "V5 secrets-leg call did not complete cleanly"
+    legs_ok=false; bad "V5 secrets-leg call did not complete cleanly"
 fi
 if $legs_ok && { [ -z "$U1" ] || grep -q '"isError":true' <<<"$U1"; }; then
-    legs_ok=false; skip "V5 untrusted-ingest leg failed live (offline?) — trifecta covered by unit tests instead"
+    legs_ok=false; bad "V5 synthetic untrusted-ingest probe failed"
 fi
 if $legs_ok; then
     if grep -q 'lethal-trifecta block' <<<"$E1" && grep -q 'DSCO_ALLOW_EXFIL' <<<"$E1"; then
@@ -177,4 +192,4 @@ fi
 
 say ""
 say "gate claims: $PASS passed, $FAIL failed, $SKIP skipped"
-[ "$FAIL" -eq 0 ]
+[ "$FAIL" -eq 0 ] && [ "$SKIP" -eq 0 ]
