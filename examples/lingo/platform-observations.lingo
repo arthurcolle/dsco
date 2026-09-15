@@ -1,0 +1,61 @@
+-- Analyze real, previously recorded GraphSub/Autobot/Chimera observations.
+-- args: {graphsub=<native list envelope>, autobot=<native discovery result>,
+--        chimera=<native planning envelope>, recorded_at=<capture timestamp>}
+-- This script makes no remote calls. It neither executes the plan nor commits
+-- its local snapshot to GraphSub.
+local l=require("lingo")
+local p=require("lingo.platform")
+assert(type(args.recorded_at)=="string", "recorded_at must identify the evidence capture time")
+assert(args.graphsub.ok and args.graphsub.action=="list", "a GraphSub list observation is required")
+assert(args.autobot.source=="tool_management_api", "a ToolManagement discovery observation is required")
+assert(args.chimera.ok and args.chimera.executed==false, "a Chimera planning observation is required")
+
+local w=p.world{id="recorded-platform-analysis"}
+local graph=p.observe(w,"observation/graphsub",{
+  origin={system="graphsub",operation="recorded-list",source_id=args.graphsub.connection},
+  observed_at=args.graphsub.observed_at,consistency="recorded",payload=args.graphsub,
+})
+local tools=p.observe(w,"observation/autobot",{
+  origin={system="autobot",operation="recorded-discovery",source_id="tool_management_api"},
+  observed_at=args.recorded_at,consistency="recorded",payload=args.autobot,
+})
+local route=p.observe(w,"observation/chimera",{
+  origin={system="chimera",operation="recorded-plan",source_id="dsco-router/chimera:latest"},
+  observed_at=args.chimera.observed_at,consistency="recorded",payload=args.chimera,
+})
+local graph_service=w:new("Service","service/graphsub",{observation=graph,availability="ready"})
+local tool_service=w:new("Service","service/autobot",{observation=tools,availability="ready"})
+local route_service=w:new("Service","service/chimera",{observation=route,availability="ready"})
+local decision=route.payload.decision
+local cost=decision.orchestration.worst_case_cost_usd
+local calls=decision.orchestration.worst_case_calls
+local policy=w:new("Policy","policy/analysis",{
+  allow_effects=true,max_cost_usd=cost,max_calls=calls,
+})
+local model=w:new("Model","model/proposed",{
+  service=route_service,model_id=decision.selected_model,observation=route,
+})
+local task=w:new("Task","task/proposed-generation",{
+  service=route_service,policy=policy,operation="proposed-generation",
+  inputs={model=model.model_id,graphsub_observation=graph.payload,
+    available_tool_schemas=tools.payload.matches},
+  estimated_cost_usd=cost,expected_calls=calls,
+})
+local baseline=task.summary
+local hypothetical=w:scenario("effects disabled",function(s)
+  s:override(policy,"allow_effects",false)
+  return task.summary
+end)
+assert(baseline.eligible and not hypothetical.eligible and task.eligible,
+  "scenario must change advisory eligibility and restore the base")
+local address=w:address(task,"summary")
+local snapshot=w:snapshot()
+local reopened=p.world{id="recorded-platform-analysis"}
+reopened:load(snapshot)
+return {
+  kind="recorded-platform-analysis",consistency="recorded_independent_observations",
+  baseline=baseline,hypothetical=hypothetical,after=task.summary,
+  services={graphsub=graph_service.summary,autobot=tool_service.summary,chimera=route_service.summary},
+  model=model.model_id,address=address,reopened=reopened:read(address),snapshot=snapshot,
+  effects_executed=false,graphsub_commit=false,
+}

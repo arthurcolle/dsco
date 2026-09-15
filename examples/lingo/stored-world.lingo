@@ -1,0 +1,46 @@
+-- Same source is used by independent publish/open processes. Args choose data,
+-- never replace declarations or their source fingerprints.
+local l=require("lingo")
+local p=require("lingo.platform")
+local workspace=require("lingo.workspace")
+local operator=require("lingo.operator")
+local w=p.world{id=args.world_id or "distributed-systems:stored-world-proof"}
+
+local function inspect()
+  local task=w:ref("task:review")
+  local address=w:address(task,"eligible")
+  return {eligible=w:read(address),explanation=w:explain(address),
+    task=task.summary,service=task.service.summary,
+    observation=task.service.observation.summary,
+    observation_payload=task.service.observation.payload,
+    object_count=#w:snapshot().objects,value_address=address,
+    source_manifest=w:manifest()}
+end
+
+if args.action=="publish" then
+  local scope=operator.attach{connection="default",shard_id=0}
+  local status=scope:status()
+  local observation=p.observe(w,"observation:graphsub-health",{
+    origin={system="graphsub",operation="status",source_id="default/shard/0"},
+    observed_at=status.observed_at,consistency="live",payload=status.data})
+  local service=w:new("Service","service:graphsub",{
+    observation=observation,availability="ready"})
+  local policy=w:new("Policy","policy:review",{
+    allow_effects=false,max_cost_usd=0.1,max_calls=1})
+  w:new("Task","task:review",{service=service,policy=policy,
+    operation="graphsub_operator",inputs={action="status"},estimated_cost_usd=0})
+  -- Force calculation before publication; calculated values and caches are
+  -- deliberately absent from the stored image and recompute after reopening.
+  assert(w:ref("task:review").eligible==false)
+  local first,receipt1=workspace.publish(w)
+  w:set(policy,"allow_effects",true)
+  assert(w:ref("task:review").eligible==true)
+  local second,receipt2=workspace.publish(w)
+  return {first=first:inspect(),second=second:inspect(),
+    first_receipt=receipt1,second_receipt=receipt2,inspection=inspect()}
+elseif args.action=="open" then
+  local _,receipt=workspace.open(args.address,w)
+  return {receipt=receipt,inspection=inspect()}
+else
+  error("args.action must be publish or open")
+end

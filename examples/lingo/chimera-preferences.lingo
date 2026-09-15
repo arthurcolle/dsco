@@ -1,0 +1,47 @@
+-- Decision-only calls to the real Router. No model inference or global policy writes.
+local l = require("lingo")
+local chimera = require("lingo.chimera")
+
+local quality = chimera.preferences {
+  quality_weight = 2,
+  benchmark_weight = 1,
+  cost_weight = 0,
+  latency_weight = 0,
+}
+local economy = chimera.preferences {
+  quality_weight = 0,
+  benchmark_weight = 0,
+  cost_weight = 100000,
+  latency_weight = 0,
+}
+local request = {
+  task = args.task or "Explain durable distributed coordination in one paragraph.",
+  max_output_tokens = 64,
+  strategy = "direct",
+  max_calls = 1,
+  max_expected_cost_usd = 0.20,
+  max_worst_case_cost_usd = 0.25,
+}
+
+local quality_plan = quality:plan(request)
+local economy_plan = economy:plan(request)
+local impossible = chimera.preferences {
+  allowed_models = {"lingo/no-admissible-model"},
+}
+local accepted, refusal = l.try(function() return impossible:plan(request) end)
+assert(not accepted and tostring(refusal):find("route_refused", 1, true), tostring(refusal))
+
+local inspection = quality:inspect()
+inspection.quality_weight = 0
+assert(quality:inspect().quality_weight == 2)
+local mutable = l.try(function() quality.cost_weight = 10 end)
+assert(not mutable)
+
+return {
+  quality = quality_plan,
+  economy = economy_plan,
+  different_choices = quality_plan.decision.selected_model ~= economy_plan.decision.selected_model,
+  refusal = tostring(refusal),
+  preferences_immutable = true,
+  inference_executed = false,
+}

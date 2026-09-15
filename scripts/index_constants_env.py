@@ -29,6 +29,7 @@ RE_ENV_NAME = re.compile(r"\b[A-Z][A-Z0-9_]*(?:_[A-Z0-9]+)+\b")
 
 SENSITIVE_TOKENS = ("KEY", "TOKEN", "SECRET", "PASSPHRASE", "PASSWORD", "PRIVATE")
 STOP_TOKENS = {"DSCO", "ENV", "VAR", "VARS", "DEFAULT", "CONFIG", "VALUE", "VALUES"}
+DEFAULT_MAX_FILE_BYTES = 2 * 1024 * 1024
 
 @dataclass
 class Constant:
@@ -54,16 +55,22 @@ class EnvVar:
     mapped_constants: list[dict]
 
 
-def repo_files(root: Path) -> Iterable[Path]:
+def repo_files(root: Path, max_file_bytes: int = DEFAULT_MAX_FILE_BYTES) -> Iterable[Path]:
     candidates = [root / "include", root / "src"]
     for base in candidates:
         if not base.exists():
             continue
         for p in base.rglob("*"):
-            if p.suffix in {".c", ".h"} and p.is_file():
-                yield p
+            if p.suffix not in {".c", ".h"} or not p.is_file():
+                continue
+            try:
+                if max_file_bytes > 0 and p.stat().st_size > max_file_bytes:
+                    continue
+            except OSError:
+                continue
+            yield p
     dsc = root / "dsc.c"
-    if dsc.exists():
+    if dsc.exists() and (max_file_bytes <= 0 or dsc.stat().st_size <= max_file_bytes):
         yield dsc
 
 
@@ -76,6 +83,11 @@ def read_lines(p: Path) -> list[str]:
         return p.read_text(errors="ignore").splitlines()
     except UnicodeDecodeError:
         return []
+
+
+def read_sources(files: list[Path]) -> dict[Path, list[str]]:
+    """Read each source once; the constant and env passes share the lines."""
+    return {p: read_lines(p) for p in files}
 
 
 def clean_define_tail(tail: str) -> tuple[bool, str]:
@@ -168,10 +180,10 @@ def classify_constant(name: str, value: str, function_like: bool, file: str, lin
     return "macro_constant"
 
 
-def extract_constants(root: Path, files: list[Path]) -> list[Constant]:
+def extract_constants(root: Path, files: list[Path], sources: dict[Path, list[str]] | None = None) -> list[Constant]:
     out: list[Constant] = []
     for p in files:
-        lines = read_lines(p)
+        lines = sources[p] if sources is not None else read_lines(p)
         r = rel(root, p)
         for i, line in enumerate(lines):
             m = RE_DEFINE.match(line)
@@ -209,7 +221,7 @@ def inside_env_vars_block(lines: list[str], start: int) -> int:
     return j
 
 
-def extract_env_vars(root: Path, files: list[Path]) -> list[EnvVar]:
+def extract_env_vars(root: Path, files: list[Path], sources: dict[Path, list[str]] | None = None) -> list[EnvVar]:
     envs: list[EnvVar] = []
     seen_occ = set()
 
@@ -231,7 +243,7 @@ def extract_env_vars(root: Path, files: list[Path]) -> list[EnvVar]:
         ))
 
     for p in files:
-        lines = read_lines(p)
+        lines = sources[p] if sources is not None else read_lines(p)
         r = rel(root, p)
         i = 0
         while i < len(lines):
@@ -478,13 +490,16 @@ def main() -> int:
     ap.add_argument("--root", default=".", help="repo root")
     ap.add_argument("--json", default="data/constants_env_index.json", help="JSON output")
     ap.add_argument("--md", default="docs/CONSTANTS_ENV_INDEX.md", help="Markdown output")
+    ap.add_argument("--max-file-bytes", type=int, default=DEFAULT_MAX_FILE_BYTES,
+                    help="skip generated/source blobs larger than this (0 disables the cap)")
     ap.add_argument("--check", action="store_true", help="verify generated outputs are current without rewriting them")
     args = ap.parse_args()
 
     root = Path(args.root).resolve()
-    files = sorted(set(repo_files(root)))
-    constants = extract_constants(root, files)
-    envs = extract_env_vars(root, files)
+    files = sorted(set(repo_files(root, args.max_file_bytes)))
+    sources = read_sources(files)
+    constants = extract_constants(root, files, sources)
+    envs = extract_env_vars(root, files, sources)
     map_constants_to_env(constants, envs)
     summary = summarize(constants, envs)
 

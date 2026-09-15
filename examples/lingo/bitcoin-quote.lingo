@@ -1,0 +1,6 @@
+-- One governed observation. The terminal host schedules this program repeatedly.
+local l = require('lingo')
+local d = require('lingo.dsco')
+local receipt = d.tool('bash'):call{command="python3 - <<'PY'\nimport urllib.request,json,datetime\nreq=urllib.request.Request('https://api.coinbase.com/v2/prices/BTC-USD/spot',headers={'Cache-Control':'no-cache'})\ns=json.load(urllib.request.urlopen(req,timeout=5))\np=float(s['data']['amount'])\nassert s['data']['base']=='BTC' and s['data']['currency']=='USD' and 0<p<1e9\nprint(json.dumps({'price':p,'observed_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'source':'Coinbase spot','pair':'BTC-USD'}))\nPY",timeout=7}
+assert(receipt.ok,receipt.result)
+return l.decode(receipt.result)

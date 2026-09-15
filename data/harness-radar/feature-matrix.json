@@ -1,0 +1,1281 @@
+{
+  "as_of": "2026-09-07",
+  "legend": {
+    "D": "First-party documented; not runtime-tested",
+    "L": "Local source or help inspected; not task-tested",
+    "E": "Extension path; core support not established",
+    "O": "Optional documented feature",
+    "U": "Unknown/not verified, not absent"
+  },
+  "projects": [
+    "openai-codex",
+    "anthropics-claude-code",
+    "anomalyco-opencode",
+    "can1357-oh-my-pi",
+    "earendil-works-pi",
+    "nousresearch-hermes-agent",
+    "dsco-local"
+  ],
+  "observations": [
+    {
+      "project": "openai-codex",
+      "feature": "Implementation",
+      "evidence_level": "D",
+      "observation": "Rust",
+      "source": "https://github.com/openai/codex",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Implementation",
+      "evidence_level": "D",
+      "observation": "proprietary runtime",
+      "source": "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Implementation",
+      "evidence_level": "D",
+      "observation": "TypeScript",
+      "source": "https://github.com/anomalyco/opencode",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Implementation",
+      "evidence_level": "D",
+      "observation": "TypeScript + Rust",
+      "source": "https://github.com/can1357/oh-my-pi",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Implementation",
+      "evidence_level": "D",
+      "observation": "TypeScript",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Implementation",
+      "evidence_level": "D",
+      "observation": "Python",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Implementation",
+      "evidence_level": "L",
+      "observation": "C runtime",
+      "source": "../../docs/HARNESS_CONTROL.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "Provider posture",
+      "evidence_level": "D",
+      "observation": "OpenAI-first; configured alternatives",
+      "source": "https://github.com/openai/codex",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Provider posture",
+      "evidence_level": "D",
+      "observation": "Claude model family",
+      "source": "https://code.claude.com/docs/en/overview",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Provider posture",
+      "evidence_level": "D",
+      "observation": "multi-provider",
+      "source": "https://github.com/anomalyco/opencode",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Provider posture",
+      "evidence_level": "D",
+      "observation": "multi-provider; per-role models",
+      "source": "https://github.com/can1357/oh-my-pi",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Provider posture",
+      "evidence_level": "D",
+      "observation": "multi-provider",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Provider posture",
+      "evidence_level": "D",
+      "observation": "multi-provider",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Provider posture",
+      "evidence_level": "L",
+      "observation": "multi-provider adapters",
+      "source": "../../include/headless_accounting.h",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "Headless execution",
+      "evidence_level": "D",
+      "observation": "exec; JSONL; final schema",
+      "source": "https://learn.chatgpt.com/docs/non-interactive-mode",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Headless execution",
+      "evidence_level": "L",
+      "observation": "-p; stream-json; JSON schema",
+      "source": "local-cli-help/claude.txt",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Headless execution",
+      "evidence_level": "L",
+      "observation": "run --format json",
+      "source": "local-cli-help/opencode.txt",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Headless execution",
+      "evidence_level": "L",
+      "observation": "--mode json/rpc; print",
+      "source": "local-cli-help/omp.txt",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Headless execution",
+      "evidence_level": "D",
+      "observation": "print/JSON/RPC/SDK",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Headless execution",
+      "evidence_level": "D",
+      "observation": "CLI plus gateway",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Headless execution",
+      "evidence_level": "L",
+      "observation": "headless accounting module",
+      "source": "../../include/headless_accounting.h",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "Stateful external interface",
+      "evidence_level": "D",
+      "observation": "App Server thread/turn API",
+      "source": "https://learn.chatgpt.com/docs/app-server",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Stateful external interface",
+      "evidence_level": "D",
+      "observation": "Agent SDK; hooks",
+      "source": "https://code.claude.com/docs/en/hooks",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Stateful external interface",
+      "evidence_level": "D",
+      "observation": "HTTP OpenAPI + SSE",
+      "source": "https://opencode.ai/docs/server/",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Stateful external interface",
+      "evidence_level": "L",
+      "observation": "RPC mode",
+      "source": "local-cli-help/omp.txt",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Stateful external interface",
+      "evidence_level": "D",
+      "observation": "RPC and embeddable SDK",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Stateful external interface",
+      "evidence_level": "D",
+      "observation": "messaging gateway",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Stateful external interface",
+      "evidence_level": "L",
+      "observation": "MCP server + governed tools",
+      "source": "../../docs/HARNESS_CONTROL.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "MCP client",
+      "evidence_level": "D",
+      "observation": "CLI MCP management",
+      "source": "https://github.com/openai/codex",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "MCP client",
+      "evidence_level": "D",
+      "observation": "MCP servers",
+      "source": "https://code.claude.com/docs/en/overview",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "MCP client",
+      "evidence_level": "D",
+      "observation": "MCP servers",
+      "source": "https://github.com/anomalyco/opencode",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "MCP client",
+      "evidence_level": "D",
+      "observation": "integrated MCP",
+      "source": "https://github.com/can1357/oh-my-pi",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "MCP client",
+      "evidence_level": "E",
+      "observation": "extension/bridge; not core",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "MCP client",
+      "evidence_level": "D",
+      "observation": "integrated MCP",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "MCP client",
+      "evidence_level": "L",
+      "observation": "src/mcp.c",
+      "source": "../../docs/HARNESS_CONTROL.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "MCP server / ACP distinction",
+      "evidence_level": "D",
+      "observation": "MCP server; ACP via adapter",
+      "source": "https://learn.chatgpt.com/docs/app-server",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "MCP server / ACP distinction",
+      "evidence_level": "D",
+      "observation": "SDK is separate from ACP adapter",
+      "source": "https://code.claude.com/docs/en/overview",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "MCP server / ACP distinction",
+      "evidence_level": "D",
+      "observation": "ACP advertised",
+      "source": "https://github.com/anomalyco/opencode",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "MCP server / ACP distinction",
+      "evidence_level": "D",
+      "observation": "ACP editor mode",
+      "source": "https://github.com/can1357/oh-my-pi",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "MCP server / ACP distinction",
+      "evidence_level": "E",
+      "observation": "ACP adapter",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "MCP server / ACP distinction",
+      "evidence_level": "U",
+      "observation": "server/ACP parity not reviewed",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "MCP server / ACP distinction",
+      "evidence_level": "L",
+      "observation": "MCP serve; ACP unverified",
+      "source": "../../docs/HARNESS_CONTROL.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "Delegation",
+      "evidence_level": "D",
+      "observation": "custom agents; per-role model",
+      "source": "https://learn.chatgpt.com/docs/agent-configuration/subagents",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Delegation",
+      "evidence_level": "D",
+      "observation": "scoped tools/model/memory",
+      "source": "https://code.claude.com/docs/en/sub-agents",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Delegation",
+      "evidence_level": "D",
+      "observation": "primary + subagents",
+      "source": "https://opencode.ai/docs/agents/",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Delegation",
+      "evidence_level": "D",
+      "observation": "typed worker results",
+      "source": "https://github.com/can1357/oh-my-pi",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Delegation",
+      "evidence_level": "E",
+      "observation": "subagents not built in",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Delegation",
+      "evidence_level": "D",
+      "observation": "spawn parallel subagents",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Delegation",
+      "evidence_level": "L",
+      "observation": "native workers",
+      "source": "../../docs/NATIVE_DSCO_HARNESS_REVIEW.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "Work isolation",
+      "evidence_level": "U",
+      "observation": "per-subagent worktree defaults",
+      "source": "https://learn.chatgpt.com/docs/agent-configuration/subagents",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Work isolation",
+      "evidence_level": "D",
+      "observation": "optional worktree isolation",
+      "source": "https://code.claude.com/docs/en/sub-agents",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Work isolation",
+      "evidence_level": "U",
+      "observation": "worker isolation defaults",
+      "source": "https://opencode.ai/docs/agents/",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Work isolation",
+      "evidence_level": "D",
+      "observation": "optional worktree isolation",
+      "source": "https://github.com/can1357/oh-my-pi",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Work isolation",
+      "evidence_level": "E",
+      "observation": "package-defined",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Work isolation",
+      "evidence_level": "U",
+      "observation": "per-worker workspace semantics",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Work isolation",
+      "evidence_level": "L",
+      "observation": "spawn paths; full isolation proof needed",
+      "source": "../../docs/NATIVE_DSCO_HARNESS_REVIEW.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "Hooks and extensions",
+      "evidence_level": "D",
+      "observation": "plugins/skills ecosystem",
+      "source": "https://github.com/openai/codex",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Hooks and extensions",
+      "evidence_level": "D",
+      "observation": "lifecycle hooks + plugins",
+      "source": "https://code.claude.com/docs/en/hooks",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Hooks and extensions",
+      "evidence_level": "D",
+      "observation": "plugins/custom tools",
+      "source": "https://github.com/anomalyco/opencode",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Hooks and extensions",
+      "evidence_level": "D",
+      "observation": "extensions; stream rules",
+      "source": "https://github.com/can1357/oh-my-pi",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Hooks and extensions",
+      "evidence_level": "D",
+      "observation": "TypeScript extensions",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Hooks and extensions",
+      "evidence_level": "D",
+      "observation": "skills/tool extensions",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Hooks and extensions",
+      "evidence_level": "L",
+      "observation": "tool registry + modules",
+      "source": "../../docs/HARNESS_CONTROL.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "Editing contract",
+      "evidence_level": "D",
+      "observation": "repository patching",
+      "source": "https://github.com/openai/codex",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Editing contract",
+      "evidence_level": "L",
+      "observation": "read/write/edit tool controls",
+      "source": "local-cli-help/claude.txt",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Editing contract",
+      "evidence_level": "D",
+      "observation": "write/edit/apply_patch gated",
+      "source": "https://opencode.ai/docs/permissions/",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Editing contract",
+      "evidence_level": "D",
+      "observation": "hashline + AST edits",
+      "source": "https://github.com/can1357/oh-my-pi",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Editing contract",
+      "evidence_level": "D",
+      "observation": "four core tools",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Editing contract",
+      "evidence_level": "D",
+      "observation": "file/terminal tools",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Editing contract",
+      "evidence_level": "L",
+      "observation": "tool contracts; no native hashline found",
+      "source": "../../include/tool_grounding.h",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "LSP and code intelligence",
+      "evidence_level": "U",
+      "observation": "native LSP default not reviewed",
+      "source": "https://github.com/openai/codex",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "LSP and code intelligence",
+      "evidence_level": "U",
+      "observation": "plugin-dependent details not reviewed",
+      "source": "https://code.claude.com/docs/en/overview",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "LSP and code intelligence",
+      "evidence_level": "O",
+      "observation": "LSP disabled by default",
+      "source": "https://opencode.ai/docs/lsp/",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "LSP and code intelligence",
+      "evidence_level": "D",
+      "observation": "LSP write feedback",
+      "source": "https://github.com/can1357/oh-my-pi",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "LSP and code intelligence",
+      "evidence_level": "E",
+      "observation": "not a core default",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "LSP and code intelligence",
+      "evidence_level": "U",
+      "observation": "native LSP not reviewed",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "LSP and code intelligence",
+      "evidence_level": "L",
+      "observation": "no LSP implementation found in focused scan",
+      "source": "../../docs/HARNESS_CONTROL.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "Debugger protocol",
+      "evidence_level": "U",
+      "observation": "DAP not verified",
+      "source": "https://github.com/openai/codex",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Debugger protocol",
+      "evidence_level": "U",
+      "observation": "DAP not verified",
+      "source": "https://code.claude.com/docs/en/overview",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Debugger protocol",
+      "evidence_level": "U",
+      "observation": "DAP not verified",
+      "source": "https://github.com/anomalyco/opencode",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Debugger protocol",
+      "evidence_level": "D",
+      "observation": "DAP debugger tool",
+      "source": "https://github.com/can1357/oh-my-pi",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Debugger protocol",
+      "evidence_level": "E",
+      "observation": "custom extension possible",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Debugger protocol",
+      "evidence_level": "U",
+      "observation": "DAP not verified",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Debugger protocol",
+      "evidence_level": "L",
+      "observation": "no DAP implementation found in focused scan",
+      "source": "../../docs/HARNESS_CONTROL.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "Persistent code cells",
+      "evidence_level": "U",
+      "observation": "surface-dependent",
+      "source": "https://github.com/openai/codex",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Persistent code cells",
+      "evidence_level": "U",
+      "observation": "surface-dependent",
+      "source": "https://code.claude.com/docs/en/overview",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Persistent code cells",
+      "evidence_level": "U",
+      "observation": "not reviewed",
+      "source": "https://github.com/anomalyco/opencode",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Persistent code cells",
+      "evidence_level": "D",
+      "observation": "Python + JS tool re-entry",
+      "source": "https://github.com/can1357/oh-my-pi",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Persistent code cells",
+      "evidence_level": "E",
+      "observation": "custom tool surface",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Persistent code cells",
+      "evidence_level": "U",
+      "observation": "persistent-kernel parity not reviewed",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Persistent code cells",
+      "evidence_level": "L",
+      "observation": "process/PTY tools; cell parity unverified",
+      "source": "../../docs/HARNESS_CONTROL.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "Resume and branching",
+      "evidence_level": "D",
+      "observation": "resume/fork thread API",
+      "source": "https://learn.chatgpt.com/docs/app-server",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Resume and branching",
+      "evidence_level": "D",
+      "observation": "resume; context-preservation fixes",
+      "source": "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Resume and branching",
+      "evidence_level": "L",
+      "observation": "continue/session/fork flags",
+      "source": "local-cli-help/opencode.txt",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Resume and branching",
+      "evidence_level": "L",
+      "observation": "resume/session controls",
+      "source": "local-cli-help/omp.txt",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Resume and branching",
+      "evidence_level": "D",
+      "observation": "JSONL tree; fork/clone",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Resume and branching",
+      "evidence_level": "D",
+      "observation": "session history/search",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Resume and branching",
+      "evidence_level": "L",
+      "observation": "durable-agent module",
+      "source": "../../include/durable_agents.h",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "Context management",
+      "evidence_level": "D",
+      "observation": "resumable long-running sessions",
+      "source": "https://learn.chatgpt.com/docs/app-server",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Context management",
+      "evidence_level": "D",
+      "observation": "auto-compaction",
+      "source": "https://code.claude.com/docs/en/sub-agents",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Context management",
+      "evidence_level": "D",
+      "observation": "compaction agent",
+      "source": "https://opencode.ai/docs/agents/",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Context management",
+      "evidence_level": "D",
+      "observation": "checkpoint/rewind",
+      "source": "https://github.com/can1357/oh-my-pi",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Context management",
+      "evidence_level": "D",
+      "observation": "auto/manual compaction",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Context management",
+      "evidence_level": "D",
+      "observation": "history + persistent memory",
+      "source": "https://hermes-agent.nousresearch.com/docs/user-guide/features/memory",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Context management",
+      "evidence_level": "L",
+      "observation": "typed compaction; schema leases",
+      "source": "../../include/task_closeout.h",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "Experience to skill",
+      "evidence_level": "D",
+      "observation": "skills; learning quality unverified",
+      "source": "https://github.com/openai/codex",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Experience to skill",
+      "evidence_level": "D",
+      "observation": "skills + persistent subagent memory",
+      "source": "https://code.claude.com/docs/en/sub-agents",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Experience to skill",
+      "evidence_level": "D",
+      "observation": "agent skills; learning unverified",
+      "source": "https://github.com/anomalyco/opencode",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Experience to skill",
+      "evidence_level": "D",
+      "observation": "learn/managed skills",
+      "source": "https://github.com/can1357/oh-my-pi",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Experience to skill",
+      "evidence_level": "D",
+      "observation": "packages/skills; learning unverified",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Experience to skill",
+      "evidence_level": "D",
+      "observation": "experience-to-skill loop",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Experience to skill",
+      "evidence_level": "L",
+      "observation": "candidate scaffold; no auto-promotion",
+      "source": "../../include/skill_candidate.h",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "Scheduling / always-on",
+      "evidence_level": "U",
+      "observation": "CLI scheduler not reviewed",
+      "source": "https://github.com/openai/codex",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Scheduling / always-on",
+      "evidence_level": "D",
+      "observation": "documented schedule/goals surfaces",
+      "source": "https://code.claude.com/docs/en/overview",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Scheduling / always-on",
+      "evidence_level": "D",
+      "observation": "server; scheduling not established",
+      "source": "https://opencode.ai/docs/server/",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Scheduling / always-on",
+      "evidence_level": "D",
+      "observation": "loop controls",
+      "source": "https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/CHANGELOG.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Scheduling / always-on",
+      "evidence_level": "E",
+      "observation": "external scheduler/package",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Scheduling / always-on",
+      "evidence_level": "D",
+      "observation": "cron with platform delivery",
+      "source": "https://hermes-agent.nousresearch.com/docs/user-guide/features/cron",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Scheduling / always-on",
+      "evidence_level": "L",
+      "observation": "durable wake + operations substrate",
+      "source": "../../include/durable_agents.h",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "Permissions vs OS sandbox",
+      "evidence_level": "D",
+      "observation": "OS boundary + approval policy",
+      "source": "https://learn.chatgpt.com/docs/sandboxing",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Permissions vs OS sandbox",
+      "evidence_level": "O",
+      "observation": "Bash filesystem/network sandbox",
+      "source": "https://code.claude.com/docs/en/sandboxing",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Permissions vs OS sandbox",
+      "evidence_level": "D",
+      "observation": "allow/ask/deny; OS boundary unproven",
+      "source": "https://opencode.ai/docs/permissions/",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Permissions vs OS sandbox",
+      "evidence_level": "D",
+      "observation": "tool approval; OS boundary unproven",
+      "source": "https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/CHANGELOG.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Permissions vs OS sandbox",
+      "evidence_level": "U",
+      "observation": "OS boundary not established",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Permissions vs OS sandbox",
+      "evidence_level": "D",
+      "observation": "execution backends; boundary depends on setup",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Permissions vs OS sandbox",
+      "evidence_level": "L",
+      "observation": "capability gate; OS isolation separate",
+      "source": "../../include/capability.h",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "Cost and quota controls",
+      "evidence_level": "D",
+      "observation": "subagents consume separate work",
+      "source": "https://learn.chatgpt.com/docs/agent-configuration/subagents",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Cost and quota controls",
+      "evidence_level": "D",
+      "observation": "per-agent model; defaults can change",
+      "source": "https://code.claude.com/docs/en/sub-agents",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Cost and quota controls",
+      "evidence_level": "D",
+      "observation": "per-agent model and step limit",
+      "source": "https://opencode.ai/docs/agents/",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Cost and quota controls",
+      "evidence_level": "D",
+      "observation": "role routing; quota-reset wait",
+      "source": "https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/CHANGELOG.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Cost and quota controls",
+      "evidence_level": "D",
+      "observation": "token/cache/cost display",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Cost and quota controls",
+      "evidence_level": "D",
+      "observation": "provider choice; workload costing needed",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Cost and quota controls",
+      "evidence_level": "L",
+      "observation": "response accounting retains usage across routes",
+      "source": "../../include/headless_accounting.h",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "openai-codex",
+      "feature": "Crash-safe side effects",
+      "evidence_level": "U",
+      "observation": "not established by resume support",
+      "source": "https://learn.chatgpt.com/docs/app-server",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anthropics-claude-code",
+      "feature": "Crash-safe side effects",
+      "evidence_level": "U",
+      "observation": "not established by transcript resume",
+      "source": "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "anomalyco-opencode",
+      "feature": "Crash-safe side effects",
+      "evidence_level": "U",
+      "observation": "not established by sessions",
+      "source": "https://opencode.ai/docs/server/",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "can1357-oh-my-pi",
+      "feature": "Crash-safe side effects",
+      "evidence_level": "U",
+      "observation": "not established by checkpoints",
+      "source": "https://github.com/can1357/oh-my-pi",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "earendil-works-pi",
+      "feature": "Crash-safe side effects",
+      "evidence_level": "U",
+      "observation": "JSONL history is not effect replay",
+      "source": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "nousresearch-hermes-agent",
+      "feature": "Crash-safe side effects",
+      "evidence_level": "U",
+      "observation": "cron/memory is not effect replay",
+      "source": "https://github.com/NousResearch/hermes-agent",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    },
+    {
+      "project": "dsco-local",
+      "feature": "Crash-safe side effects",
+      "evidence_level": "L",
+      "observation": "substrate exists; kill/replay proof required",
+      "source": "../../include/durable_agents.h",
+      "as_of": "2026-09-07",
+      "runtime_tested": false
+    }
+  ]
+}

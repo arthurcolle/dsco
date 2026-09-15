@@ -1,0 +1,41 @@
+local l = require("lingo")
+local w = l.world()
+local t = l.types
+
+-- Illustrative units, not current provider prices.
+w:define("Model", {
+  unit_cost = l.stored(t.integer),
+})
+w:define("Task", {
+  units = l.stored(t.integer),
+  urgent = l.stored(t.boolean, false),
+  economy = l.stored(t.ref("Model")),
+  priority = l.stored(t.ref("Model")),
+  selected = l.derived(t.ref("Model"), function(self)
+    if self.urgent then return self.priority end
+    return self.economy
+  end),
+  cost = l.derived(t.integer, function(self)
+    return self.units * self.selected.unit_cost
+  end),
+})
+
+local economy = w:new("Model", "model/economy", {unit_cost=2})
+local priority = w:new("Model", "model/priority", {unit_cost=7})
+local task = w:new("Task", "task/review", {
+  units=100, economy=economy, priority=priority,
+})
+
+local baseline = task.cost                         -- 200
+local scenario = w:scenario("urgent", function(s)
+  s:override(task, "urgent", true)
+  return {cost=task.cost, why=s:why(task, "cost")}   -- 700
+end)
+assert(task.cost == baseline)                      -- scenario unwound
+
+w:set(economy, "unit_cost", 3)
+assert(w:why(task, "cost").state == "invalid")
+local repriced = task.cost                         -- 300, calculated on demand
+
+return {baseline=baseline, scenario=scenario, repriced=repriced,
+        selection=w:why(task, "selected"), cost=w:why(task, "cost")}

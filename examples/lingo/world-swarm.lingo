@@ -1,0 +1,86 @@
+-- Two independent perspectives, followed by one synthesizer.
+-- Uses the installed native DSCO swarm tool; this performs real inference.
+-- Run with DSCO_AUTO_GOAL=0 DSCO_TOOL_CHOICE=none for one-response workers.
+local l = require("lingo")
+local dsco = require("lingo.dsco")
+local swarm = dsco.tool("swarm")
+local model = args.model or "gpt-5.6-luna"
+local provider = args.provider or "openai-codex"
+
+local brief = [[
+Distributed Systems is developing Lingo: a language for expressing worlds.
+GraphSub stores shared world artifacts; DSCO is the operator; Autobot executes
+work; Chimera routes inference. The user wants higher abstractions: worlds,
+perspectives, possibilities, intentions, patterns and organizations.
+
+Current executable Lingo uses Lua 5.1 on LuaJIT. The actual API includes:
+local l=require("lingo"); local w=l.world{id="studio"}
+w:define("Class", {field=l.stored("string"),
+  answer=l.derived("boolean", function(self) return self.field~="" end)})
+w:new("Class", "id", {field="value"}); w:ref("id").answer
+Types include boolean, string, integer, json, l.types.ref("Class"),
+l.types.list(type). w:scenario(name, callback) provides temporary assumptions;
+w:override(object,field,value) applies inside that callback. Baseline is restored.
+w:why(object,field) exposes read dependencies. Calculated values and scenarios
+cannot execute tools. require("lingo.dsco").tool("swarm"):json{...} explicitly
+calls the real host swarm tool. Stored-world snapshots retain data and pinned
+definitions; they do not resume processes. Pattern, organization, intention,
+world:imagine, and durable goal-instance APIs remain DESIGN PROPOSALS.
+
+Task: design one compelling research-studio world in which two perspectives
+produce contributions and a synthesis makes their agreement and disagreement
+inspectable. Make the abstraction understandable to a programmer. No metaphysical
+claims. Do not claim proposed APIs exist. Work only from this supplied brief.
+Do not call tools, browse, spawn, or edit files. Return the requested answer now.
+]]
+
+local receipt = swarm:call {
+    action="map_reduce",
+    name="lingo-world-studio",
+    model=model,
+    tasks={
+        {provider=provider, model=model, effort="low", task=brief .. [[
+ROLE: ARCHITECT. In at most 300 words propose the domain objects and relationships,
+one meaningful calculated question, and one useful possible world. Include a tiny
+Lua-style example; clearly label any proposed convenience syntax.]]},
+        {provider=provider, model=model, effort="low", task=brief .. [[
+ROLE: SKEPTIC. In at most 300 words identify the three most consequential semantic
+mistakes this design could make and give concrete rules that avoid them. Explain
+how dissent remains visible and what would count as evidence for a conclusion.]]},
+    },
+    coordinator=brief .. [[
+ROLE: SYNTHESIZER. You receive the architect and skeptic outputs below. Produce a
+single useful Markdown proposal of at most 550 words. Start with the research
+world's purpose; define its objects and one calculated question; include one small
+example using current Lingo syntax if the supplied API suffices. Reconcile the
+perspectives explicitly, preserve a consequential disagreement, and distinguish
+working primitives from proposed extensions. End with one concrete operator
+interaction. Treat every worker statement as a proposal to evaluate, not proof.]],
+    coordinator_provider=provider,
+    coordinator_model=model,
+    coordinator_effort="low",
+    max_worker_turns=1,
+    max_coordinator_turns=1,
+    timeout=90,
+    map_total_timeout=90,
+    reduce_timeout=90,
+    op_total_timeout=180,
+    max_concurrency=2,
+    strict_success_count=true,
+    map_refill_rounds=0,
+    coordinator_fallback=false,
+    preserve_on_timeout=false,
+    budget=0.25,
+}
+
+-- Retain execution evidence even when a phase did not complete.
+local decoded, result = l.try(function() return l.decode(receipt.result) end)
+if not decoded then result = {error=receipt.result} end
+local status
+if type(result.group_id) == "number" then
+    status = swarm:call {action="status", group_id=result.group_id}
+end
+return {purpose="Express a research studio as a world",
+    roles={"architect", "skeptic", "synthesizer"},
+    succeeded=receipt.ok and result.complete == true and result.degraded == false,
+    run=result, execution=status, receipt=receipt}

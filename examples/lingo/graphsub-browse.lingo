@@ -1,0 +1,65 @@
+-- Read-only live browsing. This requires a reachable native GraphSub HTTP API.
+-- GRAPHSUB_HOST and optional GRAPHSUB_API_KEY belong to the DSCO host process.
+local l = require("lingo")
+local o = require("lingo.operator")
+
+local scope = o.attach {
+  connection = "default",
+  shard_id = args.shard_id or 0,
+}
+local status = scope:status()
+local schema = scope:schema()
+local page = scope:list {limit=args.limit or 5, offset=args.offset or 0}
+
+assert(type(page.data) == "table" and type(page.data.nodes) == "table",
+  "native GraphSub list response must contain data.nodes")
+assert(type(schema.data) == "table" and type(schema.data.schemas) == "table",
+  "native GraphSub schema response must contain data.schemas")
+
+local node_id = args.node_id
+if node_id == l.null then node_id = nil end
+if node_id == nil and page.data.nodes[1] then
+  node_id = page.data.nodes[1].id -- preserve the opaque backend ID verbatim
+end
+
+local selected = {
+  state="skipped",
+  reason="The returned page has no nodes and no node_id was supplied.",
+}
+if node_id ~= nil then
+  local response = scope:read(node_id)
+  local node = response.data
+  assert(type(node) == "table" and type(node.id) == "string",
+    "native GraphSub read response must contain data.id")
+  local payload = node.payload
+  local payload_bytes, payload_preview = l.null, l.null
+  if type(payload) == "string" then
+    payload_bytes = #payload
+    payload_preview = payload:sub(1, 256)
+  end
+  -- Keep the read's provenance while returning a deliberately bounded summary.
+  selected = {
+    state="read",
+    profile=response.profile,
+    consistency=response.consistency,
+    snapshot=response.snapshot,
+    connection=response.connection,
+    shard_id=response.shard_id,
+    observed_at=response.observed_at,
+    projection="example summary; payload preview is at most 256 bytes",
+    data={
+      id=node.id, node_id=node.node_id, name=node.name, type=node.type,
+      metadata=node.metadata, payload_bytes=payload_bytes,
+      payload_preview=payload_preview,
+    },
+  }
+end
+
+return {
+  status=status,
+  schema=schema,
+  page=page,
+  returned_nodes=#page.data.nodes,
+  selected=selected,
+  consistency_note="Independent live reads; this page is not a pinned or complete graph snapshot.",
+}

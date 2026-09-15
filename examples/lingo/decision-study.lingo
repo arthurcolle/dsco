@@ -1,0 +1,96 @@
+-- Design study using the CURRENT Lingo 0.2 API. No new language primitives.
+-- Offers, prices, quality and times are fictional decision inputs, not provider
+-- measurements. All computation is local; this program cannot execute a route.
+local l=require("lingo")
+local t=l.types
+local w=l.world{id="lingo:decision-study"}
+
+w:define("Offer",{
+  name=l.stored(t.string), cost_units=l.stored(t.integer),
+  latency_ms=l.stored(t.integer), quality_score=l.stored(t.integer),
+  evidence_key=l.stored(t.string), valid_until=l.stored(t.integer),
+})
+w:define("DecisionBook",{
+  offers=l.stored(t.list(t.ref("Offer"))),
+  budget_units=l.stored(t.integer), deadline_ms=l.stored(t.integer),
+  quality_floor=l.stored(t.integer), as_of=l.stored(t.integer),
+  preference=l.stored(t.string,"economy"),
+  decision=l.derived(t.json,function(self)
+    assert(self.preference=="economy" or self.preference=="quality","unknown preference")
+    assert(self.budget_units>=0 and self.deadline_ms>0,"invalid decision bounds")
+    local ledger,needs=l.array{},l.array{}
+    local seen,best={},nil
+    for _,offer in ipairs(self.offers) do
+      local name=offer.name
+      if offer.valid_until<self.as_of then
+        ledger[#ledger+1]={offer=name,status="unknown",reason="evidence_expired"}
+        local key=offer.evidence_key
+        if not seen[key] then
+          seen[key]=true
+          needs[#needs+1]={kind="refresh_observation",key=key,as_of=self.as_of}
+        end
+      else
+        local cost,latency,quality=offer.cost_units,offer.latency_ms,offer.quality_score
+        assert(cost>=0 and latency>=0 and quality>=0 and quality<=100,"invalid offer data")
+        local rejected=l.array{}
+        if cost>self.budget_units then rejected[#rejected+1]="over_budget" end
+        if latency>self.deadline_ms then rejected[#rejected+1]="too_slow" end
+        if quality<self.quality_floor then rejected[#rejected+1]="below_quality_floor" end
+        local entry={offer=name,cost_units=cost,latency_ms=latency,quality_score=quality,
+          status=#rejected==0 and "admissible" or "rejected",reasons=rejected}
+        ledger[#ledger+1]=entry
+        if #rejected==0 then
+          local better=not best
+          if best then
+            if self.preference=="economy" then
+              better=cost<best.cost_units or (cost==best.cost_units and
+                (quality>best.quality_score or (quality==best.quality_score and name<best.offer)))
+            else
+              better=quality>best.quality_score or (quality==best.quality_score and
+                (cost<best.cost_units or (cost==best.cost_units and name<best.offer)))
+            end
+          end
+          if better then best=entry end
+        end
+      end
+    end
+    -- Conservative closed comparison: a missing observation could change the
+    -- winner. Report the gap instead of claiming the best known row is best.
+    local status=#needs>0 and "needs_evidence" or (best and "ready" or "refused")
+    return {status=status,selected=status=="ready" and best.offer or l.null,
+      ledger=ledger,needs=needs,preference=self.preference,as_of=self.as_of,
+      comparison_scope="explicit_fictional_offer_set",effects_executed=false}
+  end),
+})
+
+local offers={
+  w:new("Offer","fast",{name="fast",cost_units=9,latency_ms=900,
+    quality_score=95,evidence_key="fixture:catalog",valid_until=1050}),
+  w:new("Offer","balanced",{name="balanced",cost_units=6,latency_ms=2000,
+    quality_score=90,evidence_key="fixture:catalog",valid_until=1050}),
+  w:new("Offer","economy",{name="economy",cost_units=2,latency_ms=4500,
+    quality_score=85,evidence_key="fixture:catalog",valid_until=1050}),
+}
+local book=w:new("DecisionBook","routes",{offers=offers,budget_units=10,
+  deadline_ms=3000,quality_floor=80,as_of=1000})
+local address=w:address(book,"decision")
+local baseline=w:read(address)
+local quality=w:scenario("prefer quality",function(s)
+  s:override(book,"preference","quality");return w:read(address)
+end)
+local patient=w:scenario("allow more time",function(s)
+  s:override(book,"deadline_ms",5000);return w:read(address)
+end)
+local constrained=w:scenario("budget cannot meet deadline",function(s)
+  s:override(book,"budget_units",3);return w:read(address)
+end)
+local expired=w:scenario("evidence is now older",function(s)
+  s:override(book,"as_of",1100);return w:read(address)
+end)
+assert(baseline.selected=="balanced" and quality.selected=="fast" and patient.selected=="economy")
+assert(constrained.status=="refused" and expired.status=="needs_evidence" and #expired.needs==1)
+assert(w:read(address).selected=="balanced","scenarios must restore the base decision")
+return {study="decisions and missing evidence",api=l.version,
+  inputs="fictional explicit observations; costs in synthetic decision units",
+  baseline=baseline,quality=quality,patient=patient,constrained=constrained,expired=expired,
+  value_address=address,explanation=w:explain(address),effects_executed=false}

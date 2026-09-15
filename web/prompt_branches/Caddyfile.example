@@ -1,0 +1,11 @@
+# Deployment template only. Requires approved host + DNS + edge access policy.
+# Native adapter must use --public-origin https://context.distributed.systems
+context.distributed.systems {
+    header Strict-Transport-Security "max-age=31536000"
+    request_body {
+        max_size 256KB
+    }
+    reverse_proxy 127.0.0.1:8791
+    # Do not enable request-header/body logging: requests contain bearer tokens
+    # and private prompt content. Apply edge access/rate limits before exposure.
+}
