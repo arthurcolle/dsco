@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include "env_config.h"
 
 /* Forward-declare event loop handle (avoid pulling in event_loop.h) */
 typedef struct ev_loop ev_loop_t;
@@ -28,10 +29,21 @@ typedef struct ev_loop ev_loop_t;
 #define IPC_HEARTBEAT_SEC    5
 #define IPC_STALE_SEC        30      /* agent considered dead after this */
 
+static inline int dsco_ipc_heartbeat_sec(void) {
+    return dsco_env_int("DSCO_IPC_HEARTBEAT_SEC", IPC_HEARTBEAT_SEC, 1, 3600);
+}
+static inline int dsco_ipc_stale_sec(void) {
+    return dsco_env_int("DSCO_IPC_STALE_SEC", IPC_STALE_SEC, 2, 86400);
+}
+static inline size_t dsco_ipc_max_body(void) {
+    return dsco_env_size("DSCO_IPC_MAX_BODY", IPC_MAX_BODY, 1024, IPC_MAX_BODY);
+}
+
 /* ── Agent Status ──────────────────────────────────────────────────────── */
 
 typedef enum {
     IPC_AGENT_STARTING,
+    IPC_AGENT_DURABLE,
     IPC_AGENT_IDLE,
     IPC_AGENT_WORKING,
     IPC_AGENT_DONE,
@@ -46,11 +58,35 @@ typedef struct {
     int    depth;
     ipc_agent_status_t status;
     char   role[64];             /* e.g., "researcher", "coder", "reviewer" */
+    char   model[128];           /* preferred model for durable agents */
     char   current_task[256];
     double started_at;
     double last_heartbeat;
     char   toolkit[2048];        /* JSON array of tool names, or "*" for all */
+    char   organization_id[64];
+    char   deployment_id[64];
+    char   role_id[64];
+    char   policy_sha256[65];
+    char   capsule_sha256[65];
+    char   graphsub_namespace[192];
+    char   router_project_id[64];
+    char   capabilities[4096];   /* JSON capability envelope */
+    double budget_gsu;
+    double budget_usd;
 } ipc_agent_info_t;
+
+typedef struct {
+    const char *organization_id;
+    const char *deployment_id;
+    const char *role_id;
+    const char *policy_sha256;
+    const char *capsule_sha256;
+    const char *graphsub_namespace;
+    const char *router_project_id;
+    const char *capabilities;
+    double budget_gsu;
+    double budget_usd;
+} ipc_agent_binding_t;
 
 /* ── Message ───────────────────────────────────────────────────────────── */
 
@@ -76,7 +112,9 @@ typedef enum {
 
 typedef struct {
     int    id;
-    char   assigned_to[IPC_MAX_AGENT_ID]; /* empty = unassigned */
+    long long generation;                 /* attempt fence; returned by claim */
+    char   assigned_to[IPC_MAX_AGENT_ID]; /* current owner; pending rows retain target */
+    char   target_agent_id[IPC_MAX_AGENT_ID]; /* durable routing; empty = shared work */
     char   created_by[IPC_MAX_AGENT_ID];
     int    parent_task_id;                 /* for sub-tasks */
     int    priority;                       /* higher = more urgent */
@@ -116,6 +154,21 @@ void ipc_set_event_loop(ev_loop_t *loop);
 bool ipc_register(const char *parent_id, int depth, const char *role,
                   const char *toolkit);
 
+/* Define or update a durable named agent without requiring a live process.
+ * Durable agents are mailbox identities and hierarchy nodes; long-running
+ * workers can later register with the same ID to become live. */
+bool ipc_agent_define(const char *agent_id, const char *parent_id, int depth,
+                      const char *role, const char *model, const char *toolkit);
+
+/* Define a durable agent and atomically bind it to one admitted organization
+ * deployment. Existing callers may continue to use ipc_agent_define(). */
+bool ipc_agent_define_bound(const char *agent_id, const char *parent_id, int depth,
+                            const char *role, const char *model, const char *toolkit,
+                            const ipc_agent_binding_t *binding);
+/* Materialize this process as an existing durable identity. Fails if another
+ * live process owns the identity; preserves its hierarchy and policy fields. */
+bool ipc_agent_activate(void);
+
 /* Update own status */
 bool ipc_set_status(ipc_agent_status_t status, const char *current_task);
 
@@ -137,7 +190,9 @@ int ipc_reap_dead_agents(double stale_s);
 
 /* ── Messaging ─────────────────────────────────────────────────────────── */
 
-/* Send a message to a specific agent (or broadcast if to_agent=NULL) */
+/* Send a message to a specific agent. NULL/empty broadcasts to registered
+ * nonterminal recipients at send time, excluding the sender. Each recipient
+ * gets an independent durable row/acknowledgment; future agents do not replay it. */
 bool ipc_send(const char *to_agent, const char *topic, const char *body);
 
 /* Read unread messages for this agent. Returns count. Caller frees body ptrs. */
@@ -146,6 +201,13 @@ int ipc_recv(ipc_message_t *out, int max);
 /* Read messages on a specific topic (for this agent + broadcasts). */
 int ipc_recv_topic(const char *topic, ipc_message_t *out, int max);
 
+/* Inspect mailboxes without forcing the current process identity.
+ * inbox marks messages read only when mark_read=true. */
+int ipc_list_inbox(const char *agent_id, bool unread_only, bool mark_read,
+                   ipc_message_t *out, int max);
+int ipc_list_sent(const char *agent_id, ipc_message_t *out, int max);
+int ipc_list_bus(ipc_message_t *out, int max);
+
 /* Get message count (unread) */
 int ipc_unread_count(void);
 
@@ -153,18 +215,26 @@ int ipc_unread_count(void);
 
 /* Submit a task to the queue. Returns task ID or -1 on error. */
 int ipc_task_submit(const char *description, int priority, int parent_task_id);
+/* Submit directly to a durable agent. The target exclusively claims it. */
+int ipc_task_submit_to(const char *agent_id, const char *description,
+                       int priority, int parent_task_id);
 
-/* Claim the highest-priority unassigned task. Returns true + fills out. */
+/* Claim the highest-priority unassigned task or one targeted to this agent. */
 bool ipc_task_claim(ipc_task_t *out);
+/* Claim only work explicitly targeted to this durable identity. */
+bool ipc_task_claim_targeted(ipc_task_t *out);
 
-/* Mark a task as running */
-bool ipc_task_start(int task_id);
+/* Claim one exact pending task addressed to this identity (durable boot). */
+bool ipc_task_claim_id(int task_id, ipc_task_t *out);
+
+/* Transitions require the current owner, attempt, and an active state. */
+bool ipc_task_start(int task_id, long long generation);
 
 /* Complete a task with result */
-bool ipc_task_complete(int task_id, const char *result);
+bool ipc_task_complete(int task_id, long long generation, const char *result);
 
 /* Fail a task with error */
-bool ipc_task_fail(int task_id, const char *error);
+bool ipc_task_fail(int task_id, long long generation, const char *error);
 
 /* List tasks (optionally filtered by assigned_to, NULL=all). */
 int ipc_task_list(const char *assigned_to, ipc_task_t *out, int max);
@@ -198,5 +268,32 @@ int ipc_poll(void);
 
 /* Format a status summary as JSON */
 int ipc_status_json(char *buf, size_t len);
+
+/* ── Agent Checkpoint System (Workstream B1) ─────────────────────────── */
+
+/* Save agent state (memory, conversation, plan) to checkpoint table.
+ * Returns true on success. Multiple generations per agent supported. */
+bool ipc_checkpoint_save(const char *agent_id, int generation,
+                          const char *memory_json,
+                          const char *conv_json,
+                          const char *plan_json,
+                          const char *task_json);
+
+/* Restore agent state from latest (or specific generation) checkpoint.
+ * Returns malloc'd strings (caller frees each non-NULL output).
+ * If generation < 0, uses the latest checkpoint for agent_id.
+ * Returns true on success. */
+bool ipc_checkpoint_restore(const char *agent_id, int generation,
+                             char **memory_json_out,
+                             char **conv_json_out,
+                             char **plan_json_out,
+                             char **task_json_out);
+
+/* List checkpoints for an agent. Returns count. */
+int ipc_checkpoint_list(const char *agent_id, int *generations_out,
+                         double *timestamps_out, int max);
+
+/* Delete old checkpoints, keeping only the latest N. */
+int ipc_checkpoint_prune(const char *agent_id, int keep_generations);
 
 #endif

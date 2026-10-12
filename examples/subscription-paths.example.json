@@ -1,0 +1,24 @@
+{
+  "schema": "dsco.subscription-paths.v1",
+  "paths": [
+    {
+      "id": "vendor-plan-default",
+      "lane_id": "subscription:vendor-plan:default:vendor-model",
+      "provider": "vendor",
+      "product": "Vendor paid plan",
+      "principal_profile": "default",
+      "transport": "external_process",
+      "billing": "included",
+      "auth_mode": "vendor-cli-session",
+      "model": "vendor-model",
+      "endpoint": "",
+      "executable": "vendor-cli",
+      "argv": ["run", "--model", "{model}", "--prompt", "{prompt}"],
+      "prompt_transport": "argv",
+      "authenticated": "unknown",
+      "enabled": false,
+      "qualified": false,
+      "automatic_eligible": false
+    }
+  ]
+}

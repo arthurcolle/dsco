@@ -1,0 +1,251 @@
+{
+  "impl_signals": {
+    "cache_control": true,
+    "cached_tokens_parse": true,
+    "prompt_cache_key": true,
+    "prompt_cache_retention": true,
+    "x-grok-conv-id": true
+  },
+  "providers": {
+    "anthropic": {
+      "api_coverage_groups": 0,
+      "cache_status": "explicit",
+      "confidence": 0.82,
+      "cost_levers": 0,
+      "errors": [],
+      "implemented": "cache_control_ephemeral,cache_read_usage_parse",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "cache_control_ephemeral",
+      "missing": [
+        "1h beta cache controls if enabled by header"
+      ],
+      "risk": "low",
+      "valid": true
+    },
+    "cerebras": {
+      "api_coverage_groups": 0,
+      "cache_status": "explicit",
+      "confidence": 0.82,
+      "cost_levers": 0,
+      "errors": [],
+      "implemented": "prompt_cache_key",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "prompt_cache_key",
+      "missing": [
+        "request-shape test for cerebras profile"
+      ],
+      "risk": "medium",
+      "valid": true
+    },
+    "cohere": {
+      "api_coverage_groups": 0,
+      "cache_status": "unknown",
+      "confidence": 0.45,
+      "cost_levers": 0,
+      "errors": [],
+      "implemented": "-",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "-",
+      "missing": [
+        "provider metadata refresh",
+        "prompt cache docs verification"
+      ],
+      "risk": "high",
+      "valid": true
+    },
+    "deepseek": {
+      "api_coverage_groups": 0,
+      "cache_status": "automatic",
+      "confidence": 0.82,
+      "cost_levers": 0,
+      "errors": [],
+      "implemented": "automatic_prompt_cache_policy",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "disk_context_cache",
+      "missing": [
+        "prompt_cache_hit_tokens parse mapped to cache_read_tokens"
+      ],
+      "risk": "medium",
+      "valid": true
+    },
+    "google": {
+      "api_coverage_groups": 0,
+      "cache_status": "resource",
+      "confidence": 0.82,
+      "cost_levers": 0,
+      "errors": [],
+      "implemented": "openai_compat_chat",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "cachedContent",
+      "missing": [
+        "Gemini native cachedContent resource lifecycle",
+        "usageMetadata parse on native transport"
+      ],
+      "risk": "high",
+      "valid": true
+    },
+    "groq": {
+      "api_coverage_groups": 0,
+      "cache_status": "automatic",
+      "confidence": 0.82,
+      "cost_levers": 0,
+      "errors": [],
+      "implemented": "automatic_prompt_cache_policy",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "automatic_prompt_cache",
+      "missing": [
+        "live model capability refresh"
+      ],
+      "risk": "medium",
+      "valid": true
+    },
+    "mistral": {
+      "api_coverage_groups": 0,
+      "cache_status": "explicit",
+      "confidence": 0.82,
+      "cost_levers": 0,
+      "errors": [],
+      "implemented": "prompt_cache_key",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "prompt_cache_key",
+      "missing": [
+        "provider-specific cached-token usage verification"
+      ],
+      "risk": "medium",
+      "valid": true
+    },
+    "moonshot": {
+      "api_coverage_groups": 0,
+      "cache_status": "unknown",
+      "confidence": 0.45,
+      "cost_levers": 0,
+      "errors": [],
+      "implemented": "-",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "-",
+      "missing": [
+        "provider metadata refresh",
+        "prompt cache docs verification"
+      ],
+      "risk": "high",
+      "valid": true
+    },
+    "openai": {
+      "api_coverage_groups": 21,
+      "cache_status": "explicit",
+      "confidence": 0.9,
+      "cost_levers": 8,
+      "errors": [],
+      "implemented": "openai_api_coverage_map,openai_cost_management_map,openai_image_generation_tool,automatic_prompt_cache,prompt_cache_key,prompt_cache_retention,cached_token_usage_parse",
+      "last_reviewed": "2026-07-08",
+      "mechanisms": "automatic_prefix_cache,prompt_cache_key,prompt_cache_retention",
+      "missing": [
+        "Responses transport default migration",
+        "Batch API JSONL planner and result ingester",
+        "Responses input-token preflight estimator",
+        "OpenAI built-in tool/session/storage cost ledger",
+        "OpenAI image edits and variations native tools",
+        "Responses image_generation hosted tool wiring",
+        "Realtime response.done usage import",
+        "OpenAI admin usage reconciliation"
+      ],
+      "risk": "medium",
+      "valid": true
+    },
+    "openrouter": {
+      "api_coverage_groups": 0,
+      "cache_status": "explicit",
+      "confidence": 0.82,
+      "cost_levers": 0,
+      "errors": [],
+      "implemented": "cache_control_for_claude_qwen,model_catalog_cache",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "provider_forwarded_cache_control",
+      "missing": [
+        "per-model cache capability ingestion from /models"
+      ],
+      "risk": "medium",
+      "valid": true
+    },
+    "perplexity": {
+      "api_coverage_groups": 0,
+      "cache_status": "unknown",
+      "confidence": 0.45,
+      "cost_levers": 0,
+      "errors": [],
+      "implemented": "-",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "-",
+      "missing": [
+        "provider metadata refresh",
+        "prompt cache docs verification"
+      ],
+      "risk": "high",
+      "valid": true
+    },
+    "sakana": {
+      "api_coverage_groups": 0,
+      "cache_status": "unknown",
+      "confidence": 0.82,
+      "cost_levers": 0,
+      "errors": [],
+      "implemented": "effort_normalization,long_stream_idle,responses_codex_profile_metadata",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "-",
+      "missing": [
+        "direct Responses transport default",
+        "prompt cache syntax unknown"
+      ],
+      "risk": "medium",
+      "valid": true
+    },
+    "together": {
+      "api_coverage_groups": 0,
+      "cache_status": "unknown",
+      "confidence": 0.45,
+      "cost_levers": 0,
+      "errors": [],
+      "implemented": "-",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "-",
+      "missing": [
+        "provider metadata refresh",
+        "prompt cache docs verification"
+      ],
+      "risk": "high",
+      "valid": true
+    },
+    "xai": {
+      "api_coverage_groups": 0,
+      "cache_status": "automatic",
+      "confidence": 0.82,
+      "cost_levers": 0,
+      "errors": [],
+      "implemented": "x-grok-conv-id_header,automatic_prompt_cache_policy",
+      "last_reviewed": "2026-06-24",
+      "mechanisms": "x-grok-conv-id",
+      "missing": [
+        "live cache-hit telemetry test"
+      ],
+      "risk": "low",
+      "valid": true
+    }
+  },
+  "summary": {
+    "errors": 0,
+    "high_risk": [
+      "cohere",
+      "google",
+      "moonshot",
+      "perplexity",
+      "together"
+    ],
+    "needs_review": [
+      "cohere",
+      "moonshot",
+      "perplexity",
+      "together"
+    ],
+    "providers": 14
+  }
+}

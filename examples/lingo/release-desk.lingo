@@ -1,0 +1,117 @@
+-- One source for collection, GraphSub publication, stored review and saved desks.
+local l=require("lingo")
+local workflows=require("lingo.workflow")
+local workspace=require("lingo.workspace")
+local t=l.types
+local w=l.world{id="distributed-systems:release-evidence"}
+
+w:define("Evidence",{
+  payload=l.stored(t.json),source_current=l.stored(t.boolean),passed=l.stored(t.boolean),
+  observed_at=l.stored(t.integer),validation_ms=l.stored(t.integer),checks=l.stored(t.integer),
+},{version="1",immutable=true})
+w:define("Execution",{id=l.stored(t.string),request_hash=l.stored(t.string),
+  profile=l.stored(t.string),status=l.stored(t.string),candidate_id=l.stored(t.string),
+},{version="1",immutable=true})
+w:define("Release",{
+  historical=l.stored(t.ref("Evidence")),refreshed=l.stored(t.ref("Evidence")),
+  evidence_set=l.stored(t.string,"refreshed"),captured_at=l.stored(t.integer),
+  max_age_seconds=l.stored(t.integer,86400),elapsed_seconds=l.stored(t.integer,0),
+  max_validation_ms=l.stored(t.integer,120000),
+  decision=l.derived(t.json,function(self)
+    assert(self.max_age_seconds>=0 and self.elapsed_seconds>=0 and self.max_validation_ms>=0,
+      "policy limits must be nonnegative")
+    local evidence=self.evidence_set=="historical" and self.historical or self.refreshed
+    local age=self.captured_at+self.elapsed_seconds-evidence.observed_at
+    local status="PASS"
+    if not evidence.source_current then status="HOLD_STALE"
+    elseif not evidence.passed then status="HOLD_FAILED_CHECKS"
+    elseif age<0 or age>self.max_age_seconds then status="HOLD_AGE"
+    elseif evidence.validation_ms>self.max_validation_ms then status="HOLD_VALIDATION_BUDGET" end
+    return {status=status,accepted=status=="PASS",evidence_set=self.evidence_set,
+      checks=evidence.checks,validation_ms=evidence.validation_ms,age_seconds=age,
+      source_current=evidence.source_current,all_checks_passed=evidence.passed,
+      effects_executed=false,deploys=false,
+      meaning="Accepts evidence for the captured candidate; does not deploy or authorize tools"}
+  end),
+},{version="1"})
+
+local specification=workflows.create{
+  id="integration-release-evidence",name="Integration release evidence",version="1",
+  timeout_seconds=120,
+  steps={
+    {id="collect",tool="lingo_release:collect",mode="passthrough"},
+    {id="verify",tool="lingo_release:verify",mode="passthrough",input_from="collect",input_mapping={run_id="run_id"}},
+    {id="seal",tool="lingo_release:seal",mode="passthrough",input_from="verify",input_mapping={run_id="run_id"}},
+  },
+}
+
+local function execute()
+  assert(type(args.idempotency_key)=="string","a stable idempotency_key is required for a fresh workflow")
+  return specification:execute{inputs=args.inputs or {},idempotency_key=args.idempotency_key,trace_id=args.trace_id}
+end
+
+local function populate()
+  local receipt=execute()
+  assert(receipt.execution_profile=="lingo.v1" and receipt.status=="completed",
+    "Autobot composition did not complete; inspect its durable execution")
+  local evidence=receipt.output
+  assert(evidence.format=="lingo.release.evidence/1" and evidence.source_current,
+    "a sealed current-source evidence record is required")
+  local verification=evidence.verification
+  assert(verification.router_inference_rows==0,"release verification must not execute provider inference")
+  local count=0
+  for _,check in ipairs(verification.checks) do assert(check.passed,"a focused contract check failed");count=count+check.cases end
+  local historical=w:new("Evidence","evidence:historical",{
+    payload=evidence.baseline,source_current=evidence.baseline.source_current,
+    passed=evidence.baseline.status=="PASS",observed_at=evidence.baseline.observed_at_epoch,
+    validation_ms=0,checks=evidence.baseline.checks_passed,
+  })
+  local refreshed=w:new("Evidence","evidence:refreshed",{
+    payload=evidence,source_current=evidence.source_current and verification.source_current,
+    passed=verification.all_passed,observed_at=verification.observed_at,
+    validation_ms=verification.duration_ms,checks=count,
+  })
+  w:new("Execution","execution",{id=receipt.execution_id,request_hash=receipt.request_hash,
+    profile=receipt.execution_profile,status=receipt.status,candidate_id=evidence.candidate_id})
+  w:new("Release","release",{historical=historical,refreshed=refreshed,captured_at=evidence.sealed_at})
+  return receipt
+end
+
+local function inspect()
+  local release=w:ref("release")
+  local address=w:address(release,"decision")
+  local historical=w:scenario("historical",function()
+    w:override(release,"evidence_set","historical")
+    return release.decision
+  end)
+  return {decision=w:read(address),historical=historical,value_address=address,
+    explanation=w:explain(address),execution_id=w:ref("execution").id,
+    candidate_id=w:ref("execution").candidate_id}
+end
+
+if args.mode=="publish" then
+  local receipt=populate()
+  local artifact,publication=workspace.publish(w)
+  return {artifact=artifact:inspect(),publication=publication,review=inspect(),
+    execution_id=receipt.execution_id,request_hash=receipt.request_hash,
+    idempotent_replay=receipt.idempotent_replay}
+elseif args.mode=="replay" then
+  return execute()
+elseif args.mode=="read" then
+  workspace.open(args.artifact,w)
+  return inspect()
+end
+
+return l.view{
+  title="Integration release desk",world=w,target={object="release",field="decision"},
+  controls={
+    {object="release",field="evidence_set",label="Evidence",choices={"historical","refreshed"}},
+    {object="release",field="max_validation_ms",label="Validation budget milliseconds"},
+    {object="release",field="elapsed_seconds",label="Assumed elapsed seconds"},
+    {object="release",field="max_age_seconds",label="Maximum evidence age seconds"},
+  },
+  initialize=function()
+    assert(args.artifact,"open the published GraphSub artifact, or restore a saved desk")
+    workspace.open(args.artifact,w)
+  end,
+}

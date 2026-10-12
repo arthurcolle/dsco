@@ -1,0 +1,1574 @@
+#include "chronicle.h"
+#include "tool_telemetry.h"
+#include "agent_event.h"
+#include "callbacks.h"
+#include "json_util.h"
+#include "execution_recovery.h"
+#include "event_stream.h"
+
+#include <sqlite3.h>
+
+#include <ctype.h>
+#include <errno.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <math.h>
+#include <pthread.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <time.h>
+#include <unistd.h>
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+#define CHRONICLE_SCHEMA_VERSION "chronicle.v1"
+
+extern volatile int g_interrupted;
+
+/* This sink does not call Chronicle: retaining an event must not recurse into
+ * the recorder. A failed durable append stops active work, never samples it. */
+static bool stream_record(const char *source, const char *event, const char *json) {
+    if (!event_stream_active()) return true;
+    bool ok = event_stream_emit(source, event, json);
+    if (!ok) g_interrupted = 1;
+    return ok;
+}
+
+/* Small embedded SHA-256 implementation (public-domain style primitives).
+ * Used for content addressing and tamper-evident event payload hashes without
+ * adding a new dependency. */
+typedef struct {
+    uint8_t data[64];
+    uint32_t datalen;
+    uint64_t bitlen;
+    uint32_t state[8];
+} sha256_ctx_t;
+
+#define ROTRIGHT(a,b) (((a) >> (b)) | ((a) << (32-(b))))
+#define CH(x,y,z) (((x) & (y)) ^ (~(x) & (z)))
+#define MAJ(x,y,z) (((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
+#define EP0(x) (ROTRIGHT(x,2) ^ ROTRIGHT(x,13) ^ ROTRIGHT(x,22))
+#define EP1(x) (ROTRIGHT(x,6) ^ ROTRIGHT(x,11) ^ ROTRIGHT(x,25))
+#define SIG0(x) (ROTRIGHT(x,7) ^ ROTRIGHT(x,18) ^ ((x) >> 3))
+#define SIG1(x) (ROTRIGHT(x,17) ^ ROTRIGHT(x,19) ^ ((x) >> 10))
+
+static const uint32_t k256[64] = {
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+
+static void sha256_transform(sha256_ctx_t *ctx, const uint8_t data[]) {
+    uint32_t a,b,c,d,e,f,g,h,i,j,t1,t2,m[64];
+    for (i = 0, j = 0; i < 16; ++i, j += 4)
+        m[i] = ((uint32_t)data[j] << 24) | ((uint32_t)data[j+1] << 16) |
+               ((uint32_t)data[j+2] << 8) | ((uint32_t)data[j+3]);
+    for (; i < 64; ++i) m[i] = SIG1(m[i-2]) + m[i-7] + SIG0(m[i-15]) + m[i-16];
+    a=ctx->state[0]; b=ctx->state[1]; c=ctx->state[2]; d=ctx->state[3];
+    e=ctx->state[4]; f=ctx->state[5]; g=ctx->state[6]; h=ctx->state[7];
+    for (i = 0; i < 64; ++i) {
+        t1 = h + EP1(e) + CH(e,f,g) + k256[i] + m[i];
+        t2 = EP0(a) + MAJ(a,b,c);
+        h=g; g=f; f=e; e=d+t1; d=c; c=b; b=a; a=t1+t2;
+    }
+    ctx->state[0]+=a; ctx->state[1]+=b; ctx->state[2]+=c; ctx->state[3]+=d;
+    ctx->state[4]+=e; ctx->state[5]+=f; ctx->state[6]+=g; ctx->state[7]+=h;
+}
+
+static void sha256_init(sha256_ctx_t *ctx) {
+    ctx->datalen = 0; ctx->bitlen = 0;
+    ctx->state[0]=0x6a09e667; ctx->state[1]=0xbb67ae85; ctx->state[2]=0x3c6ef372; ctx->state[3]=0xa54ff53a;
+    ctx->state[4]=0x510e527f; ctx->state[5]=0x9b05688c; ctx->state[6]=0x1f83d9ab; ctx->state[7]=0x5be0cd19;
+}
+
+static void sha256_update(sha256_ctx_t *ctx, const uint8_t data[], size_t len) {
+    if (!ctx || !data || len == 0) return;
+
+    /* Fast path: hash whole 64-byte blocks directly from caller memory instead
+     * of copying one byte at a time through ctx->data. Chronicle hashes every
+     * event payload/blob, so large tool results and transcript blobs were
+     * paying avoidable per-byte loop overhead here. */
+    if (ctx->datalen != 0) {
+        size_t fill = 64U - (size_t)ctx->datalen;
+        if (fill > len) fill = len;
+        memcpy(ctx->data + ctx->datalen, data, fill);
+        ctx->datalen += (uint32_t)fill;
+        data += fill;
+        len -= fill;
+        if (ctx->datalen == 64) {
+            sha256_transform(ctx, ctx->data);
+            ctx->bitlen += 512;
+            ctx->datalen = 0;
+        }
+    }
+
+    while (len >= 64U) {
+        sha256_transform(ctx, data);
+        ctx->bitlen += 512;
+        data += 64U;
+        len -= 64U;
+    }
+
+    if (len != 0) {
+        memcpy(ctx->data, data, len);
+        ctx->datalen = (uint32_t)len;
+    }
+}
+
+static void sha256_final(sha256_ctx_t *ctx, uint8_t hash[]) {
+    uint32_t i = ctx->datalen;
+    if (ctx->datalen < 56) {
+        ctx->data[i++] = 0x80;
+        while (i < 56) ctx->data[i++] = 0x00;
+    } else {
+        ctx->data[i++] = 0x80;
+        while (i < 64) ctx->data[i++] = 0x00;
+        sha256_transform(ctx, ctx->data);
+        memset(ctx->data, 0, 56);
+    }
+    ctx->bitlen += (uint64_t)ctx->datalen * 8;
+    ctx->data[63] = (uint8_t)(ctx->bitlen);
+    ctx->data[62] = (uint8_t)(ctx->bitlen >> 8);
+    ctx->data[61] = (uint8_t)(ctx->bitlen >> 16);
+    ctx->data[60] = (uint8_t)(ctx->bitlen >> 24);
+    ctx->data[59] = (uint8_t)(ctx->bitlen >> 32);
+    ctx->data[58] = (uint8_t)(ctx->bitlen >> 40);
+    ctx->data[57] = (uint8_t)(ctx->bitlen >> 48);
+    ctx->data[56] = (uint8_t)(ctx->bitlen >> 56);
+    sha256_transform(ctx, ctx->data);
+    for (i = 0; i < 4; ++i) {
+        hash[i]      = (ctx->state[0] >> (24 - i * 8)) & 0xff;
+        hash[i + 4]  = (ctx->state[1] >> (24 - i * 8)) & 0xff;
+        hash[i + 8]  = (ctx->state[2] >> (24 - i * 8)) & 0xff;
+        hash[i + 12] = (ctx->state[3] >> (24 - i * 8)) & 0xff;
+        hash[i + 16] = (ctx->state[4] >> (24 - i * 8)) & 0xff;
+        hash[i + 20] = (ctx->state[5] >> (24 - i * 8)) & 0xff;
+        hash[i + 24] = (ctx->state[6] >> (24 - i * 8)) & 0xff;
+        hash[i + 28] = (ctx->state[7] >> (24 - i * 8)) & 0xff;
+    }
+}
+
+static void sha256_hex(const void *data, size_t len, char out[65]) {
+    uint8_t hash[32];
+    sha256_ctx_t ctx;
+    sha256_init(&ctx);
+    if (data && len) sha256_update(&ctx, (const uint8_t *)data, len);
+    sha256_final(&ctx, hash);
+    static const char hexd[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        out[i*2] = hexd[hash[i] >> 4];
+        out[i*2+1] = hexd[hash[i] & 15];
+    }
+    out[64] = '\0';
+}
+
+typedef struct {
+    sqlite3 *db;
+    FILE *events_fp;
+    bool ready;
+    chronicle_mode_t mode;
+    char root[PATH_MAX];
+    char db_path[PATH_MAX];
+    char event_log_path[PATH_MAX];
+    char journal_path[PATH_MAX];
+    int journal_fd;
+    bool journal_enabled;
+    char installation_id[37];
+    char session_id[37];
+    char instance_id[128];
+    time_t started_at;
+    _Atomic unsigned long long seq;
+    char prev_event_hash[65];
+} chronicle_state_t;
+
+static chronicle_state_t g_chronicle = {0};
+#ifdef DSCO_INTERNAL_TESTS
+static FILE *g_test_saved_events_fp;
+bool chronicle_test_fail_jsonl_write(bool enabled) {
+    if (!g_chronicle.ready) return false;
+    if (enabled) {
+        if (g_test_saved_events_fp) return false;
+        FILE *read_only = fopen("/dev/null", "r");
+        if (!read_only) return false;
+        g_test_saved_events_fp = g_chronicle.events_fp;
+        g_chronicle.events_fp = read_only;
+        return true;
+    }
+    if (!g_test_saved_events_fp) return false;
+    fclose(g_chronicle.events_fp);
+    g_chronicle.events_fp = g_test_saved_events_fp;
+    g_test_saved_events_fp = NULL;
+    return true;
+}
+#endif
+/* One ordering boundary for every WAL producer and the event hash chain.
+ * Lifecycle start/stop still belong to the coordinator, after workers join. */
+static pthread_mutex_t g_append_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static const char *nz(const char *s) { return s ? s : ""; }
+
+static uint32_t crc32_update(uint32_t crc, const void *data, size_t len) {
+    static uint32_t table[256];
+    static bool ready = false;
+    if (!ready) {
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t c = i;
+            for (int j = 0; j < 8; j++) c = (c & 1U) ? (0xEDB88320U ^ (c >> 1)) : (c >> 1);
+            table[i] = c;
+        }
+        ready = true;
+    }
+    crc = ~crc;
+    const unsigned char *p = (const unsigned char *)data;
+    for (size_t i = 0; i < len; i++) crc = table[(crc ^ p[i]) & 0xffU] ^ (crc >> 8);
+    return ~crc;
+}
+
+static bool write_all_fd(int fd, const void *buf, size_t len) {
+    const char *p = (const char *)buf;
+    while (len > 0) {
+        ssize_t n = write(fd, p, len);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (n == 0) return false;
+        p += n;
+        len -= (size_t)n;
+    }
+    return true;
+}
+
+static bool mkdir_p(const char *path) {
+    char tmp[PATH_MAX];
+    size_t n = strlen(path);
+    if (n == 0 || n >= sizeof(tmp)) return false;
+    memcpy(tmp, path, n + 1);
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return false;
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return false;
+    return true;
+}
+
+static bool ensure_parent_dir(const char *file_path) {
+    char tmp[PATH_MAX];
+    size_t n = strlen(file_path);
+    if (n == 0 || n >= sizeof(tmp)) return false;
+    memcpy(tmp, file_path, n + 1);
+    char *slash = strrchr(tmp, '/');
+    if (!slash) return true;
+    *slash = '\0';
+    return tmp[0] ? mkdir_p(tmp) : true;
+}
+
+static bool file_matches_data(const char *path, const void *data, size_t len) {
+    int flags = O_RDONLY;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    int fd = open(path, flags);
+    if (fd < 0) return false;
+    struct stat st, path_st;
+    bool ok = fstat(fd, &st) == 0 && lstat(path, &path_st) == 0 &&
+              S_ISREG(st.st_mode) && !S_ISLNK(path_st.st_mode) &&
+              st.st_dev == path_st.st_dev && st.st_ino == path_st.st_ino &&
+              st.st_size == (off_t)len;
+    unsigned char buffer[8192];
+    size_t offset = 0;
+    while (ok && offset < len) {
+        size_t want = len - offset < sizeof(buffer) ? len - offset : sizeof(buffer);
+        ssize_t got = read(fd, buffer, want);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0 || memcmp(buffer, (const unsigned char *)data + offset, (size_t)got) != 0) {
+            ok = false;
+            break;
+        }
+        offset += (size_t)got;
+    }
+    if (close(fd) != 0) ok = false;
+    return ok;
+}
+
+static bool write_all_file(const char *path, const void *data, size_t len) {
+    if (!ensure_parent_dir(path)) return false;
+    struct stat existing;
+    if (lstat(path, &existing) == 0) return file_matches_data(path, data, len);
+    if (errno != ENOENT) return false;
+    char temporary[PATH_MAX];
+    if (snprintf(temporary, sizeof(temporary), "%s.tmp.XXXXXX", path) >= (int)sizeof(temporary))
+        return false;
+    int fd = mkstemp(temporary);
+    if (fd < 0) return false;
+    const uint8_t *p = (const uint8_t *)data;
+    size_t off = 0;
+    bool ok = true;
+    while (off < len) {
+        ssize_t n = write(fd, p + off, len - off);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { ok = false; break; }
+        off += (size_t)n;
+    }
+    if (ok) ok = fsync(fd) == 0;
+    if (close(fd) != 0) ok = false;
+    if (ok) {
+        if (link(temporary, path) != 0)
+            ok = errno == EEXIST && file_matches_data(path, data, len);
+    }
+    unlink(temporary);
+    return ok;
+}
+
+static bool path_has_unsafe_component(const char *path) {
+    if (!path || !path[0]) return true;
+    const char *p = path;
+    while (*p) {
+        while (*p == '/') p++;
+        const char *start = p;
+        while (*p && *p != '/') p++;
+        size_t n = (size_t)(p - start);
+        if (n == 2 && start[0] == '.' && start[1] == '.') return true;
+    }
+    return false;
+}
+
+static bool path_is_safe_dir(const char *path) {
+    if (path_has_unsafe_component(path)) return false;
+    struct stat st;
+    if (lstat(path, &st) != 0) return false;
+    if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) return false;
+    return true;
+}
+
+static bool write_file_atomic_replace(const char *path, const char *body, mode_t mode) {
+    if (!path || !path[0] || path_has_unsafe_component(path)) return false;
+    if (!ensure_parent_dir(path)) return false;
+
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (!slash) snprintf(dir, sizeof(dir), ".");
+    else if (slash == dir) slash[1] = '\0';
+    else *slash = '\0';
+    if (!path_is_safe_dir(dir)) return false;
+
+    struct stat st;
+    if (lstat(path, &st) == 0 && (!S_ISREG(st.st_mode) || S_ISLNK(st.st_mode))) return false;
+
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%ld.XXXXXX", path, (long)getpid());
+    int fd = mkstemp(tmp);
+    if (fd < 0) return false;
+    fchmod(fd, mode);
+    const char *p = body ? body : "";
+    size_t len = strlen(p);
+    while (len > 0) {
+        ssize_t n = write(fd, p, len);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { close(fd); unlink(tmp); return false; }
+        p += n;
+        len -= (size_t)n;
+    }
+    if (fsync(fd) != 0) { close(fd); unlink(tmp); return false; }
+    if (close(fd) != 0) { unlink(tmp); return false; }
+    if (rename(tmp, path) != 0) { unlink(tmp); return false; }
+
+    int dfd = open(dir, O_RDONLY);
+    if (dfd >= 0) { fsync(dfd); close(dfd); }
+    return true;
+}
+
+void chronicle_new_id(char *out, size_t out_len) {
+    unsigned char bytes[16];
+    FILE *f = fopen("/dev/urandom", "rb");
+    if (f) {
+        size_t n = fread(bytes, 1, sizeof(bytes), f);
+        fclose(f);
+        if (n != sizeof(bytes)) memset(bytes, 0, sizeof(bytes));
+    } else memset(bytes, 0, sizeof(bytes));
+    if (bytes[0] == 0 && bytes[1] == 0) {
+        struct timeval tv; gettimeofday(&tv, NULL);
+        memcpy(bytes, &tv, sizeof(tv) < sizeof(bytes) ? sizeof(tv) : sizeof(bytes));
+        bytes[0] ^= (unsigned char)getpid();
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    snprintf(out, out_len,
+             "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             bytes[0],bytes[1],bytes[2],bytes[3],bytes[4],bytes[5],bytes[6],bytes[7],
+             bytes[8],bytes[9],bytes[10],bytes[11],bytes[12],bytes[13],bytes[14],bytes[15]);
+}
+
+static chronicle_mode_t parse_mode(const char *s) {
+    if (!s || !s[0]) return CHRONICLE_MODE_FULL_LOCAL;
+    if (strcmp(s, "0") == 0 || strcmp(s, "off") == 0 || strcmp(s, "false") == 0) return CHRONICLE_MODE_OFF;
+    if (strcmp(s, "metadata") == 0) return CHRONICLE_MODE_METADATA;
+    if (strcmp(s, "blackbox") == 0 || strcmp(s, "full") == 0 || strcmp(s, "forensic") == 0) return CHRONICLE_MODE_BLACKBOX;
+    return CHRONICLE_MODE_FULL_LOCAL;
+}
+
+static const char *mode_str(chronicle_mode_t m) {
+    switch (m) {
+        case CHRONICLE_MODE_OFF: return "off";
+        case CHRONICLE_MODE_METADATA: return "metadata";
+        case CHRONICLE_MODE_FULL_LOCAL: return "full-local";
+        case CHRONICLE_MODE_BLACKBOX: return "blackbox";
+    }
+    return "unknown";
+}
+
+static void resolve_root(char *out, size_t out_len) {
+    const char *override = getenv("DSCO_CHRONICLE_DIR");
+    if (override && override[0]) { snprintf(out, out_len, "%s", override); return; }
+    const char *home = getenv("HOME");
+    snprintf(out, out_len, "%s/.dsco/chronicle", home && home[0] ? home : ".");
+}
+
+static bool read_or_create_installation_id(void) {
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/installation_id", g_chronicle.root);
+    FILE *f = fopen(path, "r");
+    if (f) {
+        if (fgets(g_chronicle.installation_id, sizeof(g_chronicle.installation_id), f)) {
+            g_chronicle.installation_id[strcspn(g_chronicle.installation_id, "\r\n")] = '\0';
+        }
+        fclose(f);
+        if (g_chronicle.installation_id[0]) return true;
+    }
+    chronicle_new_id(g_chronicle.installation_id, sizeof(g_chronicle.installation_id));
+    if (!ensure_parent_dir(path)) return false;
+    f = fopen(path, "w");
+    if (!f) return false;
+    fprintf(f, "%s\n", g_chronicle.installation_id);
+    fclose(f);
+    return true;
+}
+
+static bool exec_sql(const char *sql) {
+    char *err = NULL;
+    if (sqlite3_exec(g_chronicle.db, sql, NULL, NULL, &err) != SQLITE_OK) {
+        fprintf(stderr, "chronicle: sqlite error: %s\n", err ? err : "unknown");
+        sqlite3_free(err);
+        return false;
+    }
+    return true;
+}
+
+static bool chronicle_journal_open(void);
+static bool chronicle_run_manifest_write(const char *status);
+
+static bool ensure_schema(void) {
+    const char *schema =
+        "CREATE TABLE IF NOT EXISTS sessions ("
+        " session_id TEXT PRIMARY KEY, installation_id TEXT, instance_id TEXT, provider TEXT, model TEXT, mode TEXT,"
+        " started_at INTEGER NOT NULL, ended_at INTEGER, root TEXT, policy_json TEXT);"
+        "CREATE TABLE IF NOT EXISTS events ("
+        " event_id TEXT PRIMARY KEY, installation_id TEXT NOT NULL, session_id TEXT NOT NULL,"
+        " trace_id TEXT, span_id TEXT, parent_span_id TEXT, seq INTEGER NOT NULL, wall_time INTEGER NOT NULL,"
+        " event_type TEXT NOT NULL, actor_type TEXT, actor_id TEXT, payload_json TEXT, payload_hash TEXT,"
+        " sensitivity TEXT, prev_event_hash TEXT, event_hash TEXT, sync_state TEXT DEFAULT 'local');"
+        "CREATE INDEX IF NOT EXISTS idx_chronicle_events_session_seq ON events(session_id, seq);"
+        "CREATE INDEX IF NOT EXISTS idx_chronicle_events_type_time ON events(event_type, wall_time DESC);"
+        "CREATE INDEX IF NOT EXISTS idx_chronicle_events_type_session ON events(event_type, session_id);"
+        "CREATE TABLE IF NOT EXISTS spans ("
+        " span_id TEXT PRIMARY KEY, trace_id TEXT NOT NULL, parent_span_id TEXT, span_type TEXT NOT NULL, name TEXT,"
+        " started_at INTEGER NOT NULL, ended_at INTEGER, status TEXT, payload_json TEXT);"
+        "CREATE INDEX IF NOT EXISTS idx_chronicle_spans_trace ON spans(trace_id, started_at);"
+        "CREATE TABLE IF NOT EXISTS blobs ("
+        " sha256 TEXT PRIMARY KEY, byte_len INTEGER NOT NULL, content_type TEXT, logical_type TEXT,"
+        " codec TEXT, encryption TEXT, sensitivity TEXT, local_path TEXT, created_at INTEGER);"
+        "CREATE TABLE IF NOT EXISTS edges ("
+        " edge_id TEXT PRIMARY KEY, from_id TEXT NOT NULL, to_id TEXT NOT NULL, relation TEXT NOT NULL,"
+        " confidence REAL, metadata_json TEXT, created_at INTEGER);"
+        "CREATE INDEX IF NOT EXISTS idx_chronicle_edges_from ON edges(from_id);"
+        "CREATE INDEX IF NOT EXISTS idx_chronicle_edges_to ON edges(to_id);"
+        "CREATE TABLE IF NOT EXISTS training_examples ("
+        " example_id TEXT PRIMARY KEY, source_trace_id TEXT, source_span_ids TEXT, task_type TEXT, dataset_type TEXT,"
+        " quality_score REAL, consent_state TEXT, redaction_state TEXT, input_blob TEXT, output_blob TEXT, label_blob TEXT,"
+        " metadata_json TEXT, created_at INTEGER);";
+    return exec_sql(schema);
+}
+
+bool chronicle_start(const chronicle_start_opts_t *opts) {
+    if (g_chronicle.ready) {
+        if (opts) {
+            if (opts->instance_id && opts->instance_id[0])
+                snprintf(g_chronicle.instance_id, sizeof(g_chronicle.instance_id), "%s", opts->instance_id);
+            sqlite3_stmt *st = NULL;
+            const char *sql = "UPDATE sessions SET instance_id=COALESCE(NULLIF(?1,''),instance_id),"
+                              "provider=COALESCE(NULLIF(?2,''),provider),"
+                              "model=COALESCE(NULLIF(?3,''),model),"
+                              "mode=COALESCE(NULLIF(?4,''),mode) WHERE session_id=?5;";
+            if (g_chronicle.db && sqlite3_prepare_v2(g_chronicle.db, sql, -1, &st, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(st, 1, nz(opts->instance_id), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(st, 2, nz(opts->provider), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(st, 3, nz(opts->model), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(st, 4, nz(opts->mode), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_text(st, 5, g_chronicle.session_id, -1, SQLITE_TRANSIENT);
+                sqlite3_step(st);
+                sqlite3_finalize(st);
+            }
+            jbuf_t p;
+            jbuf_init(&p, 256);
+            jbuf_append(&p, "{\"provider\":"); jbuf_append_json_str(&p, nz(opts->provider));
+            jbuf_append(&p, ",\"model\":"); jbuf_append_json_str(&p, nz(opts->model));
+            jbuf_append(&p, ",\"mode\":"); jbuf_append_json_str(&p, nz(opts->mode));
+            jbuf_append(&p, ",\"instance_id\":"); jbuf_append_json_str(&p, nz(opts->instance_id));
+            jbuf_append(&p, "}");
+            chronicle_event("runtime.configured", NULL, NULL, NULL, "runtime", "dsco", p.data, "product_telemetry");
+            jbuf_free(&p);
+        }
+        return true;
+    }
+    memset(&g_chronicle, 0, sizeof(g_chronicle));
+    g_chronicle.journal_fd = -1;
+    g_chronicle.mode = parse_mode(getenv("DSCO_CHRONICLE_MODE"));
+    if (g_chronicle.mode == CHRONICLE_MODE_OFF) return false;
+    resolve_root(g_chronicle.root, sizeof(g_chronicle.root));
+    if (!mkdir_p(g_chronicle.root)) return false;
+    if (!read_or_create_installation_id()) return false;
+    chronicle_new_id(g_chronicle.session_id, sizeof(g_chronicle.session_id));
+    if (opts && opts->instance_id) snprintf(g_chronicle.instance_id, sizeof(g_chronicle.instance_id), "%s", opts->instance_id);
+
+    snprintf(g_chronicle.db_path, sizeof(g_chronicle.db_path), "%s/indexes/chronicle.sqlite", g_chronicle.root);
+    if (!ensure_parent_dir(g_chronicle.db_path)) return false;
+    /* This connection is shared by provider, tool and telemetry threads.
+     * Do not depend on a process-global sqlite3_config call succeeding before
+     * another subsystem initializes SQLite. */
+    if (sqlite3_open_v2(g_chronicle.db_path, &g_chronicle.db,
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+                        NULL) != SQLITE_OK) {
+        fprintf(stderr, "chronicle: failed to open %s: %s\n", g_chronicle.db_path, sqlite3_errmsg(g_chronicle.db));
+        if (g_chronicle.db) sqlite3_close(g_chronicle.db);
+        return false;
+    }
+    sqlite3_busy_timeout(g_chronicle.db, 3000);
+    exec_sql("PRAGMA journal_mode=WAL;");
+    exec_sql("PRAGMA synchronous=NORMAL;");
+    exec_sql("PRAGMA temp_store=MEMORY;");
+    if (!ensure_schema()) { sqlite3_close(g_chronicle.db); g_chronicle.db = NULL; return false; }
+
+    time_t now = time(NULL);
+    g_chronicle.started_at = now;
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    snprintf(g_chronicle.event_log_path, sizeof(g_chronicle.event_log_path),
+             "%s/events/%04d/%02d/%02d/session-%s.jsonl", g_chronicle.root,
+             tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, g_chronicle.session_id);
+    if (!ensure_parent_dir(g_chronicle.event_log_path)) { sqlite3_close(g_chronicle.db); return false; }
+    g_chronicle.events_fp = fopen(g_chronicle.event_log_path, "a");
+    if (!g_chronicle.events_fp) { sqlite3_close(g_chronicle.db); return false; }
+    g_chronicle.prev_event_hash[0] = '\0';
+    g_chronicle.ready = true;
+    setenv("DSCO_CHRONICLE_SESSION_ID", g_chronicle.session_id, 1);
+
+    sqlite3_stmt *st = NULL;
+    const char *sql = "INSERT INTO sessions(session_id,installation_id,instance_id,provider,model,mode,started_at,root,policy_json)"
+                      " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9);";
+    if (sqlite3_prepare_v2(g_chronicle.db, sql, -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, g_chronicle.session_id, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 2, g_chronicle.installation_id, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 3, g_chronicle.instance_id, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 4, opts ? nz(opts->provider) : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 5, opts ? nz(opts->model) : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 6, opts ? nz(opts->mode) : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(st, 7, (sqlite3_int64)now);
+        sqlite3_bind_text(st, 8, g_chronicle.root, -1, SQLITE_TRANSIENT);
+        char policy[256];
+        snprintf(policy, sizeof(policy), "{\"capture_mode\":\"%s\",\"sync\":\"local-only\",\"training\":\"not-consented\"}", mode_str(g_chronicle.mode));
+        sqlite3_bind_text(st, 9, policy, -1, SQLITE_TRANSIENT);
+        sqlite3_step(st);
+        sqlite3_finalize(st);
+    }
+    char payload[512];
+    snprintf(payload, sizeof(payload), "{\"schema\":\"%s\",\"capture_mode\":\"%s\",\"provider\":", CHRONICLE_SCHEMA_VERSION, mode_str(g_chronicle.mode));
+    jbuf_t b; jbuf_init(&b, 512); jbuf_append(&b, payload); jbuf_append_json_str(&b, opts ? nz(opts->provider) : "");
+    jbuf_append(&b, ",\"model\":"); jbuf_append_json_str(&b, opts ? nz(opts->model) : "");
+    jbuf_append(&b, ",\"mode\":"); jbuf_append_json_str(&b, opts ? nz(opts->mode) : "");
+    jbuf_append(&b, "}");
+    chronicle_event("session.started", NULL, NULL, NULL, "runtime", "dsco", b.data, "product_telemetry");
+    jbuf_free(&b);
+    chronicle_journal_open();
+    return true;
+}
+
+static bool chronicle_name_has_suffix(const char *s, const char *suffix) {
+    if (!s || !suffix) return false;
+    size_t n = strlen(s), m = strlen(suffix);
+    return n >= m && strcmp(s + n - m, suffix) == 0;
+}
+
+static char *chronicle_read_small_file(const char *path, size_t max_bytes) {
+    if (!path || !path[0]) return NULL;
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return NULL;
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return NULL; }
+    long n = ftell(fp);
+    if (n < 0 || (size_t)n > max_bytes) { fclose(fp); return NULL; }
+    rewind(fp);
+    char *buf = (char *)malloc((size_t)n + 1);
+    if (!buf) { fclose(fp); return NULL; }
+    size_t got = fread(buf, 1, (size_t)n, fp);
+    fclose(fp);
+    buf[got] = '\0';
+    return buf;
+}
+
+typedef struct {
+    int enqueued;
+    int pending;
+    int retry_scheduled;
+    int delivered;
+    int dead_lettered;
+    int unknown;
+} chronicle_callback_counts_t;
+
+static void chronicle_callback_counts(chronicle_callback_counts_t *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    const char *run_dir = chronicle_run_dir();
+    if (!run_dir || !run_dir[0]) return;
+    char outbox[PATH_MAX];
+    snprintf(outbox, sizeof(outbox), "%s/outbox", run_dir);
+    DIR *d = opendir(outbox);
+    if (!d) return;
+    struct dirent *ent;
+    while ((ent = readdir(d))) {
+        if (ent->d_name[0] == '.') continue;
+        if (chronicle_name_has_suffix(ent->d_name, ".json")) {
+            out->enqueued++;
+            continue;
+        }
+        if (!chronicle_name_has_suffix(ent->d_name, ".state")) continue;
+        char path[PATH_MAX];
+        snprintf(path, sizeof(path), "%s/%s", outbox, ent->d_name);
+        char *st = chronicle_read_small_file(path, 64 * 1024);
+        if (!st) { out->unknown++; continue; }
+        if (strstr(st, "\"state\":\"pending\"")) out->pending++;
+        else if (strstr(st, "\"state\":\"retry_scheduled\"")) out->retry_scheduled++;
+        else if (strstr(st, "\"state\":\"delivered\"")) out->delivered++;
+        else if (strstr(st, "\"state\":\"dead_lettered\"")) out->dead_lettered++;
+        else out->unknown++;
+        free(st);
+    }
+    closedir(d);
+}
+
+static void chronicle_emit_run_receipt(void) {
+    chronicle_callback_counts_t cb;
+    chronicle_callback_counts(&cb);
+    chronicle_cost_totals_t cost;
+    bool have_cost = chronicle_cost_totals_for_session(g_chronicle.session_id, &cost);
+    if (!have_cost) memset(&cost, 0, sizeof(cost));
+
+    long long ended_at = (long long)time(NULL);
+    jbuf_t p;
+    jbuf_init(&p, 768);
+    jbuf_append(&p, "{\"schema\":\"dsco.run_receipt.v1\",\"status\":\"completed\"");
+    jbuf_append(&p, ",\"run_id\":"); jbuf_append_json_str(&p, g_chronicle.session_id);
+    jbuf_appendf(&p, ",\"started_at\":%lld,\"ended_at\":%lld", (long long)g_chronicle.started_at, ended_at);
+    jbuf_appendf(&p, ",\"duration_ms\":%lld", g_chronicle.started_at ? (ended_at - (long long)g_chronicle.started_at) * 1000LL : 0LL);
+    jbuf_appendf(&p, ",\"journal_records\":%llu", g_chronicle.seq);
+    jbuf_appendf(&p, ",\"callbacks\":{\"enqueued\":%d,\"pending\":%d,\"retry_scheduled\":%d,\"delivered\":%d,\"dead_lettered\":%d,\"unknown\":%d}",
+                 cb.enqueued, cb.pending, cb.retry_scheduled, cb.delivered, cb.dead_lettered, cb.unknown);
+    jbuf_appendf(&p, ",\"cost\":{\"placeholder\":%s,\"usd_total\":%.8f,\"input_tokens\":%lld,\"output_tokens\":%lld,\"cache_read_tokens\":%lld,\"cache_write_tokens\":%lld,\"reasoning_tokens\":%lld,\"response_count\":%d,\"unknown_cost_count\":%d}",
+                 have_cost ? "false" : "true", cost.cost_usd, cost.input_tokens, cost.output_tokens,
+                 cost.cache_read_tokens, cost.cache_write_tokens, cost.reasoning_tokens, cost.response_count,
+                 cost.unknown_cost_count);
+    jbuf_append(&p, "}");
+    agent_event_emit_simple("run.receipt", "ok", p.data, AGENT_EVENT_DURABLE | AGENT_EVENT_CALLBACK);
+    jbuf_free(&p);
+}
+
+void chronicle_stop(void) {
+    if (!g_chronicle.ready) return;
+    static bool stopping = false;
+    if (stopping) return;
+    stopping = true;
+    agent_event_emit_simple("run.completed", "ok", "{\"status\":\"completed\"}",
+                            AGENT_EVENT_DURABLE | AGENT_EVENT_CALLBACK);
+    chronicle_emit_run_receipt();
+    chronicle_event("session.completed", NULL, NULL, NULL, "runtime", "dsco", NULL, "product_telemetry");
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(g_chronicle.db, "UPDATE sessions SET ended_at=?1 WHERE session_id=?2;", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_int64(st, 1, (sqlite3_int64)time(NULL));
+        sqlite3_bind_text(st, 2, g_chronicle.session_id, -1, SQLITE_TRANSIENT);
+        sqlite3_step(st); sqlite3_finalize(st);
+    }
+    if (g_chronicle.events_fp) { fflush(g_chronicle.events_fp); fclose(g_chronicle.events_fp); }
+    chronicle_run_manifest_write("completed");
+    if (g_chronicle.journal_fd >= 0) { fsync(g_chronicle.journal_fd); close(g_chronicle.journal_fd); }
+    if (g_chronicle.db) sqlite3_close(g_chronicle.db);
+    memset(&g_chronicle, 0, sizeof(g_chronicle));
+    stopping = false;
+}
+
+bool chronicle_ready(void) { return g_chronicle.ready; }
+chronicle_mode_t chronicle_mode(void) { return g_chronicle.mode; }
+const char *chronicle_installation_id(void) { return g_chronicle.installation_id; }
+const char *chronicle_session_id(void) { return g_chronicle.session_id; }
+const char *chronicle_root(void) { return g_chronicle.root; }
+const char *chronicle_db_path(void) { return g_chronicle.db_path; }
+
+const char *chronicle_run_id(void) { return g_chronicle.session_id; }
+const char *chronicle_journal_path(void) { return g_chronicle.journal_path; }
+const char *chronicle_run_dir(void) {
+    static char dir[PATH_MAX];
+    if (g_chronicle.journal_path[0]) {
+        snprintf(dir, sizeof(dir), "%s", g_chronicle.journal_path);
+        char *slash = strrchr(dir, '/');
+        if (slash) *slash = '\0';
+        return dir;
+    }
+    return "";
+}
+
+
+static uint32_t load_le32(const unsigned char b[4]) {
+    return (uint32_t)b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+}
+
+static int journal_print_file(const char *path, FILE *out, bool summary_only) {
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return -1;
+    unsigned long long n = 0, bad = 0;
+    for (;;) {
+        unsigned char hdr[8];
+        size_t got = fread(hdr, 1, sizeof(hdr), fp);
+        if (got == 0) break;
+        if (got != sizeof(hdr)) { bad++; break; }
+        uint32_t len = load_le32(hdr);
+        uint32_t want_crc = load_le32(hdr + 4);
+        if (len == 0 || len > (32U * 1024U * 1024U)) { bad++; break; }
+        char *buf = (char *)malloc((size_t)len + 1);
+        if (!buf) { bad++; break; }
+        got = fread(buf, 1, len, fp);
+        if (got != len) { free(buf); bad++; break; }
+        buf[len] = 0;
+        uint32_t got_crc = crc32_update(0, buf, len);
+        if (got_crc != want_crc) { free(buf); bad++; break; }
+        n++;
+        if (!summary_only) fputs(buf, out);
+        free(buf);
+    }
+    fclose(fp);
+    if (summary_only) fprintf(out, "%llu records%s\n", n, bad ? " (truncated/corrupt tail ignored)" : "");
+    return bad ? 1 : 0;
+}
+
+static void runs_dir_path(char *out, size_t out_len) {
+    const char *override = getenv("DSCO_RUNS_DIR");
+    if (override && override[0]) snprintf(out, out_len, "%s", override);
+    else {
+        const char *home = getenv("HOME");
+        snprintf(out, out_len, "%s/.dsco/runs", home && home[0] ? home : ".");
+    }
+}
+
+int chronicle_runs_cli(int argc, char **argv) {
+    const char *cmd = argc >= 3 ? argv[2] : "list";
+    char runs[PATH_MAX];
+    runs_dir_path(runs, sizeof(runs));
+    if (strcmp(cmd, "list") == 0 || strcmp(cmd, "ls") == 0) {
+        DIR *d = opendir(runs);
+        if (!d) { fprintf(stderr, "no runs directory: %s\n", runs); return 1; }
+        struct dirent *ent;
+        while ((ent = readdir(d))) {
+            if (ent->d_name[0] == '.') continue;
+            char jp[PATH_MAX];
+            snprintf(jp, sizeof(jp), "%s/%s/journal.wal", runs, ent->d_name);
+            struct stat st;
+            if (stat(jp, &st) == 0) printf("%s\t%lld bytes\t%lld\n", ent->d_name, (long long)st.st_size, (long long)st.st_mtime);
+        }
+        closedir(d);
+        return 0;
+    }
+    if (strcmp(cmd, "show") == 0) {
+        if (argc < 4) { fprintf(stderr, "usage: dsco runs show <run-id>\n"); return 2; }
+        char jp[PATH_MAX];
+        snprintf(jp, sizeof(jp), "%s/%s/journal.wal", runs, argv[3]);
+        int rc = journal_print_file(jp, stdout, false);
+        return rc < 0 ? 1 : rc;
+    }
+    if (strcmp(cmd, "check") == 0) {
+        if (argc < 4) { fprintf(stderr, "usage: dsco runs check <run-id>\n"); return 2; }
+        char jp[PATH_MAX];
+        snprintf(jp, sizeof(jp), "%s/%s/journal.wal", runs, argv[3]);
+        int rc = journal_print_file(jp, stdout, true);
+        return rc < 0 ? 1 : rc;
+    }
+    if (strcmp(cmd, "gc") == 0) {
+        fprintf(stderr, "dsco runs gc: not implemented yet (Wave B P1.3)\n");
+        return 2;
+    }
+    if (strcmp(cmd, "inspect") == 0) {
+        if (argc != 4 || !execution_recovery_valid_run_id(argv[3])) {
+            fprintf(stderr, "usage: dsco runs inspect <run-id> (read-only recovery report)\n");
+            return 2;
+        }
+        char jp[PATH_MAX];
+        int n = snprintf(jp, sizeof(jp), "%s/%s/journal.wal", runs, argv[3]);
+        if (n < 0 || (size_t)n >= sizeof(jp)) return 2;
+        return execution_recovery_report(jp, argv[3], stdout);
+    }
+    fprintf(stderr, "usage: dsco runs [list|show <run-id>|check <run-id>|inspect <run-id>|gc]\n");
+    return 2;
+}
+
+static bool journal_disabled_env(void) {
+    const char *v = getenv("DSCO_JOURNAL");
+    return v && (strcmp(v, "0") == 0 || strcasecmp(v, "off") == 0 || strcasecmp(v, "false") == 0);
+}
+
+static bool chronicle_run_manifest_write(const char *status) {
+    if (!g_chronicle.ready || !g_chronicle.journal_path[0]) return false;
+    const char *run_dir = chronicle_run_dir();
+    if (!run_dir || !run_dir[0] || !path_is_safe_dir(run_dir)) return false;
+
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/manifest.json", run_dir);
+    struct stat st;
+    if (lstat(path, &st) == 0 && (!S_ISREG(st.st_mode) || S_ISLNK(st.st_mode))) return false;
+
+    char cwd[PATH_MAX];
+    const char *cwdp = getcwd(cwd, sizeof(cwd)) ? cwd : "";
+    long long ended_at = 0;
+    if (status && strcmp(status, "running") != 0) ended_at = (long long)time(NULL);
+
+    jbuf_t b;
+    jbuf_init(&b, 1024);
+    jbuf_append(&b, "{\n  \"schema\": \"dsco.run_manifest.v1\",");
+    jbuf_append(&b, "\n  \"run_id\": "); jbuf_append_json_str(&b, g_chronicle.session_id);
+    jbuf_append(&b, ",\n  \"session_id\": "); jbuf_append_json_str(&b, g_chronicle.session_id);
+    jbuf_append(&b, ",\n  \"installation_id\": "); jbuf_append_json_str(&b, g_chronicle.installation_id);
+    jbuf_append(&b, ",\n  \"status\": "); jbuf_append_json_str(&b, status && status[0] ? status : "running");
+    jbuf_appendf(&b, ",\n  \"started_at\": %lld", (long long)g_chronicle.started_at);
+    if (ended_at > 0) jbuf_appendf(&b, ",\n  \"ended_at\": %lld", ended_at);
+    else jbuf_append(&b, ",\n  \"ended_at\": null");
+    jbuf_appendf(&b, ",\n  \"updated_at\": %lld", (long long)time(NULL));
+    jbuf_append(&b, ",\n  \"schema_version\": "); jbuf_append_json_str(&b, CHRONICLE_SCHEMA_VERSION);
+    jbuf_append(&b, ",\n  \"capture_mode\": "); jbuf_append_json_str(&b, mode_str(g_chronicle.mode));
+    jbuf_append(&b, ",\n  \"instance_id\": "); jbuf_append_json_str(&b, g_chronicle.instance_id);
+    jbuf_append(&b, ",\n  \"chronicle_root\": "); jbuf_append_json_str(&b, g_chronicle.root);
+    jbuf_append(&b, ",\n  \"db_path\": "); jbuf_append_json_str(&b, g_chronicle.db_path);
+    jbuf_append(&b, ",\n  \"event_log_path\": "); jbuf_append_json_str(&b, g_chronicle.event_log_path);
+    jbuf_append(&b, ",\n  \"journal_path\": "); jbuf_append_json_str(&b, g_chronicle.journal_path);
+    jbuf_append(&b, ",\n  \"cwd\": "); jbuf_append_json_str(&b, cwdp);
+    jbuf_appendf(&b, ",\n  \"seq\": %llu", g_chronicle.seq);
+    jbuf_append(&b, "\n}\n");
+
+    bool ok = write_file_atomic_replace(path, b.data, 0644);
+    jbuf_free(&b);
+    return ok;
+}
+
+static bool chronicle_journal_open(void) {
+    if (!g_chronicle.ready || journal_disabled_env()) return false;
+    const char *home = getenv("HOME");
+    char runs_root[PATH_MAX];
+    const char *override = getenv("DSCO_RUNS_DIR");
+    if (override && override[0]) snprintf(runs_root, sizeof(runs_root), "%s", override);
+    else snprintf(runs_root, sizeof(runs_root), "%s/.dsco/runs", home && home[0] ? home : ".");
+    snprintf(g_chronicle.journal_path, sizeof(g_chronicle.journal_path), "%s/%s/journal.wal", runs_root, g_chronicle.session_id);
+    if (!ensure_parent_dir(g_chronicle.journal_path)) return false;
+    const char *run_dir = chronicle_run_dir();
+    if (!run_dir || !run_dir[0] || !path_is_safe_dir(run_dir)) return false;
+    if (!chronicle_run_manifest_write("running")) return false;
+    g_chronicle.journal_fd = open(g_chronicle.journal_path, O_CREAT | O_APPEND | O_WRONLY, 0644);
+    if (g_chronicle.journal_fd < 0) return false;
+    g_chronicle.journal_enabled = true;
+    jbuf_t p;
+    jbuf_init(&p, 512);
+    jbuf_append(&p, "{\"schema\":\"dsco.run_journal.v1\",\"run_id\":");
+    jbuf_append_json_str(&p, g_chronicle.session_id);
+    jbuf_append(&p, ",\"chronicle_root\":"); jbuf_append_json_str(&p, g_chronicle.root);
+    jbuf_append(&p, ",\"db_path\":"); jbuf_append_json_str(&p, g_chronicle.db_path);
+    jbuf_append(&p, ",\"cwd\":");
+    char cwd[PATH_MAX];
+    jbuf_append_json_str(&p, getcwd(cwd, sizeof(cwd)) ? cwd : "");
+    jbuf_append(&p, "}");
+    bool ok = agent_event_emit_simple("run.started", "ok", p.data,
+                                      AGENT_EVENT_DURABLE | AGENT_EVENT_CALLBACK);
+    jbuf_free(&p);
+    return ok;
+}
+
+bool chronicle_journal_append(const char *record_type, const char *payload_json, bool durable) {
+    if (!record_type || !record_type[0]) return false;
+    pthread_mutex_lock(&g_append_mu);
+    bool legacy_ready = g_chronicle.ready && g_chronicle.journal_enabled &&
+                        g_chronicle.journal_fd >= 0;
+    if (!legacy_ready && !event_stream_active()) {
+        pthread_mutex_unlock(&g_append_mu);
+        return false;
+    }
+    long long ms = 0;
+    struct timeval tv;
+    if (gettimeofday(&tv, NULL) == 0) ms = (long long)tv.tv_sec * 1000LL + tv.tv_usec / 1000;
+    jbuf_t rec;
+    jbuf_init(&rec, 1024);
+    jbuf_append(&rec, "{\"v\":1,\"type\":"); jbuf_append_json_str(&rec, record_type);
+    jbuf_append(&rec, ",\"run_id\":"); jbuf_append_json_str(&rec, g_chronicle.session_id);
+    jbuf_appendf(&rec, ",\"seq\":%llu,\"wall_ms\":%lld,\"payload\":", ++g_chronicle.seq, ms);
+    if (payload_json && json_is_valid_container(payload_json)) jbuf_append(&rec, payload_json);
+    else { jbuf_append(&rec, "{\"text\":"); jbuf_append_json_str(&rec, nz(payload_json)); jbuf_append(&rec, "}"); }
+    jbuf_append(&rec, "}\n");
+    bool captured = stream_record("journal", record_type, rec.data);
+    if (!legacy_ready) {
+        jbuf_free(&rec);
+        pthread_mutex_unlock(&g_append_mu);
+        return captured;
+    }
+    if (rec.len > 32U * 1024U * 1024U) {
+        jbuf_free(&rec);
+        pthread_mutex_unlock(&g_append_mu);
+        return false;
+    }
+    uint32_t len = (uint32_t)rec.len;
+    uint32_t crc = crc32_update(0, rec.data, rec.len);
+    unsigned char hdr[8];
+    hdr[0] = (unsigned char)(len & 0xff); hdr[1] = (unsigned char)((len >> 8) & 0xff);
+    hdr[2] = (unsigned char)((len >> 16) & 0xff); hdr[3] = (unsigned char)((len >> 24) & 0xff);
+    hdr[4] = (unsigned char)(crc & 0xff); hdr[5] = (unsigned char)((crc >> 8) & 0xff);
+    hdr[6] = (unsigned char)((crc >> 16) & 0xff); hdr[7] = (unsigned char)((crc >> 24) & 0xff);
+    bool ok = write_all_fd(g_chronicle.journal_fd, hdr, sizeof(hdr)) && write_all_fd(g_chronicle.journal_fd, rec.data, rec.len);
+    if (ok && durable) ok = (fsync(g_chronicle.journal_fd) == 0);
+    /* A partial frame is a recoverable tail only if nothing follows it.
+     * Preserve the evidence and refuse subsequent appends after I/O failure. */
+    if (!ok) g_chronicle.journal_enabled = false;
+    jbuf_free(&rec);
+    pthread_mutex_unlock(&g_append_mu);
+    return ok && captured;
+}
+
+static bool append_event_to_sqlite(const char *event_id, const char *trace_id, const char *span_id,
+                                   const char *parent_span_id, const char *event_type,
+                                   const char *actor_type, const char *actor_id,
+                                   const char *payload_json, const char *payload_hash,
+                                   const char *sensitivity, const char *prev_hash,
+                                   const char *event_hash, sqlite3_int64 wall_time,
+                                   unsigned long long seq) {
+    sqlite3_stmt *st = NULL;
+    const char *sql = "INSERT INTO events(event_id,installation_id,session_id,trace_id,span_id,parent_span_id,seq,wall_time,"
+                      "event_type,actor_type,actor_id,payload_json,payload_hash,sensitivity,prev_event_hash,event_hash)"
+                      " VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16);";
+    if (sqlite3_prepare_v2(g_chronicle.db, sql, -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, event_id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, g_chronicle.installation_id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 3, g_chronicle.session_id, -1, SQLITE_TRANSIENT);
+    if (trace_id && trace_id[0]) sqlite3_bind_text(st, 4, trace_id, -1, SQLITE_TRANSIENT); else sqlite3_bind_null(st, 4);
+    if (span_id && span_id[0]) sqlite3_bind_text(st, 5, span_id, -1, SQLITE_TRANSIENT); else sqlite3_bind_null(st, 5);
+    if (parent_span_id && parent_span_id[0]) sqlite3_bind_text(st, 6, parent_span_id, -1, SQLITE_TRANSIENT); else sqlite3_bind_null(st, 6);
+    sqlite3_bind_int64(st, 7, (sqlite3_int64)seq);
+    sqlite3_bind_int64(st, 8, wall_time);
+    sqlite3_bind_text(st, 9, event_type, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 10, nz(actor_type), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 11, nz(actor_id), -1, SQLITE_TRANSIENT);
+    if (payload_json) sqlite3_bind_text(st, 12, payload_json, -1, SQLITE_TRANSIENT); else sqlite3_bind_null(st, 12);
+    sqlite3_bind_text(st, 13, payload_hash, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 14, nz(sensitivity), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 15, nz(prev_hash), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 16, event_hash, -1, SQLITE_TRANSIENT);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+bool chronicle_event(const char *event_type, const char *trace_id, const char *span_id,
+                     const char *parent_span_id, const char *actor_type, const char *actor_id,
+                     const char *payload_json, const char *sensitivity) {
+    if (!event_type || !event_type[0]) return false;
+    pthread_mutex_lock(&g_append_mu);
+    bool legacy_ready = g_chronicle.ready;
+    if (!legacy_ready && !event_stream_active()) {
+        pthread_mutex_unlock(&g_append_mu);
+        return false;
+    }
+    char event_id[37]; chronicle_new_id(event_id, sizeof(event_id));
+    char payload_hash[65]; sha256_hex(payload_json ? payload_json : "", payload_json ? strlen(payload_json) : 0, payload_hash);
+    sqlite3_int64 now = (sqlite3_int64)time(NULL);
+    unsigned long long seq = ++g_chronicle.seq;
+
+    jbuf_t line; jbuf_init(&line, 1024 + (payload_json ? strlen(payload_json) : 0));
+    jbuf_append(&line, "{\"schema_version\":\"" CHRONICLE_SCHEMA_VERSION "\",");
+    jbuf_append(&line, "\"event_id\":"); jbuf_append_json_str(&line, event_id);
+    jbuf_append(&line, ",\"installation_id\":"); jbuf_append_json_str(&line, g_chronicle.installation_id);
+    jbuf_append(&line, ",\"session_id\":"); jbuf_append_json_str(&line, g_chronicle.session_id);
+    jbuf_append(&line, ",\"trace_id\":"); if (trace_id && trace_id[0]) jbuf_append_json_str(&line, trace_id); else jbuf_append(&line, "null");
+    jbuf_append(&line, ",\"span_id\":"); if (span_id && span_id[0]) jbuf_append_json_str(&line, span_id); else jbuf_append(&line, "null");
+    jbuf_append(&line, ",\"parent_span_id\":"); if (parent_span_id && parent_span_id[0]) jbuf_append_json_str(&line, parent_span_id); else jbuf_append(&line, "null");
+    jbuf_append(&line, ",\"seq\":"); jbuf_appendf(&line, "%llu", seq);
+    jbuf_append(&line, ",\"wall_time\":"); jbuf_appendf(&line, "%lld", (long long)now);
+    jbuf_append(&line, ",\"event_type\":"); jbuf_append_json_str(&line, event_type);
+    jbuf_append(&line, ",\"actor_type\":"); jbuf_append_json_str(&line, nz(actor_type));
+    jbuf_append(&line, ",\"actor_id\":"); jbuf_append_json_str(&line, nz(actor_id));
+    jbuf_append(&line, ",\"payload\":");
+    if (payload_json && payload_json[0]) jbuf_append(&line, payload_json); else jbuf_append(&line, "{}");
+    jbuf_append(&line, ",\"sensitivity\":"); jbuf_append_json_str(&line, nz(sensitivity));
+    jbuf_append(&line, ",\"payload_hash\":"); jbuf_append_json_str(&line, payload_hash);
+    jbuf_append(&line, ",\"prev_event_hash\":"); jbuf_append_json_str(&line, g_chronicle.prev_event_hash);
+    jbuf_append(&line, "}");
+
+    char event_hash[65]; sha256_hex(line.data, line.len, event_hash);
+    bool captured = stream_record("chronicle", event_type, line.data);
+    bool indexed = true, logged = true;
+    if (legacy_ready)
+        indexed = append_event_to_sqlite(event_id, trace_id, span_id, parent_span_id, event_type, actor_type, actor_id,
+                               payload_json, payload_hash, sensitivity, g_chronicle.prev_event_hash,
+                               event_hash, now, seq);
+    if (legacy_ready) {
+        logged = g_chronicle.events_fp &&
+                 fputs(line.data, g_chronicle.events_fp) >= 0 &&
+                 fputc('\n', g_chronicle.events_fp) != EOF &&
+                 fflush(g_chronicle.events_fp) == 0;
+    }
+    snprintf(g_chronicle.prev_event_hash, sizeof(g_chronicle.prev_event_hash), "%s", event_hash);
+    jbuf_free(&line);
+    pthread_mutex_unlock(&g_append_mu);
+    return captured && indexed && logged;
+}
+
+bool chronicle_blob_put(const void *data, size_t len, const char *logical_type, const char *content_type,
+                        const char *sensitivity, char *sha_out, size_t sha_out_len) {
+    if (sha_out && sha_out_len > 0) sha_out[0] = '\0';
+    if (sha_out && sha_out_len < 65) return false;
+    if (!g_chronicle.ready) return false;
+    if (!data && len) return false;
+    char sha[65]; sha256_hex(data ? data : "", len, sha);
+    char rel[PATH_MAX];
+    snprintf(rel, sizeof(rel), "blobs/sha256/%c%c/%c%c/%s.blob", sha[0], sha[1], sha[2], sha[3], sha);
+    char path[PATH_MAX]; snprintf(path, sizeof(path), "%s/%s", g_chronicle.root, rel);
+    if (!write_all_file(path, data ? data : "", len)) return false;
+
+    sqlite3_stmt *st = NULL;
+    const char *sql = "INSERT OR IGNORE INTO blobs(sha256,byte_len,content_type,logical_type,codec,encryption,sensitivity,local_path,created_at)"
+                      " VALUES(?1,?2,?3,?4,'raw','none',?5,?6,?7);";
+    bool indexed = false;
+    if (sqlite3_prepare_v2(g_chronicle.db, sql, -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, sha, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(st, 2, (sqlite3_int64)len);
+        sqlite3_bind_text(st, 3, nz(content_type), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 4, nz(logical_type), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 5, nz(sensitivity), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(st, 6, rel, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(st, 7, (sqlite3_int64)time(NULL));
+        indexed = sqlite3_step(st) == SQLITE_DONE;
+        if (sqlite3_finalize(st) != SQLITE_OK) indexed = false;
+    }
+    if (indexed && sha_out && sha_out_len >= sizeof(sha))
+        snprintf(sha_out, sha_out_len, "%s", sha);
+    return indexed;
+}
+
+bool chronicle_blob_put_text(const char *text, const char *logical_type, const char *sensitivity,
+                             char *sha_out, size_t sha_out_len) {
+    return chronicle_blob_put(text ? text : "", text ? strlen(text) : 0, logical_type, "text/plain; charset=utf-8", sensitivity, sha_out, sha_out_len);
+}
+
+bool chronicle_span_begin(const char *trace_id, const char *parent_span_id, const char *span_type,
+                          const char *name, const char *payload_json, char *span_id_out) {
+    if (!g_chronicle.ready || !trace_id || !trace_id[0] || !span_id_out) return false;
+    chronicle_new_id(span_id_out, 37);
+    sqlite3_stmt *st = NULL;
+    const char *sql = "INSERT INTO spans(span_id,trace_id,parent_span_id,span_type,name,started_at,status,payload_json)"
+                      " VALUES(?1,?2,?3,?4,?5,?6,'running',?7);";
+    if (sqlite3_prepare_v2(g_chronicle.db, sql, -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, span_id_out, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, trace_id, -1, SQLITE_TRANSIENT);
+    if (parent_span_id && parent_span_id[0]) sqlite3_bind_text(st, 3, parent_span_id, -1, SQLITE_TRANSIENT); else sqlite3_bind_null(st, 3);
+    sqlite3_bind_text(st, 4, nz(span_type), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 5, nz(name), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 6, (sqlite3_int64)time(NULL));
+    if (payload_json) sqlite3_bind_text(st, 7, payload_json, -1, SQLITE_TRANSIENT); else sqlite3_bind_null(st, 7);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    if (ok) {
+        jbuf_t p; jbuf_init(&p, 256);
+        jbuf_append(&p, "{\"span_type\":"); jbuf_append_json_str(&p, nz(span_type));
+        jbuf_append(&p, ",\"name\":"); jbuf_append_json_str(&p, nz(name));
+        if (payload_json && payload_json[0]) { jbuf_append(&p, ",\"data\":"); jbuf_append(&p, payload_json); }
+        jbuf_append(&p, "}");
+        chronicle_event("span.started", trace_id, span_id_out, parent_span_id, "agent", "dsco", p.data, "product_telemetry");
+        jbuf_free(&p);
+    }
+    return ok;
+}
+
+bool chronicle_span_end(const char *span_id, const char *status, const char *payload_json) {
+    if (!g_chronicle.ready || !span_id || !span_id[0]) return false;
+    char trace_id[64] = "";
+    char parent[64] = "";
+    sqlite3_stmt *q = NULL;
+    if (sqlite3_prepare_v2(g_chronicle.db, "SELECT trace_id,COALESCE(parent_span_id,'') FROM spans WHERE span_id=?1;", -1, &q, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(q, 1, span_id, -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(q) == SQLITE_ROW) {
+            const char *t = (const char *)sqlite3_column_text(q, 0);
+            const char *p = (const char *)sqlite3_column_text(q, 1);
+            snprintf(trace_id, sizeof(trace_id), "%s", nz(t));
+            snprintf(parent, sizeof(parent), "%s", nz(p));
+        }
+        sqlite3_finalize(q);
+    }
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(g_chronicle.db, "UPDATE spans SET ended_at=?1,status=?2,payload_json=COALESCE(?3,payload_json) WHERE span_id=?4;", -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_int64(st, 1, (sqlite3_int64)time(NULL));
+    sqlite3_bind_text(st, 2, status ? status : "ok", -1, SQLITE_TRANSIENT);
+    if (payload_json) sqlite3_bind_text(st, 3, payload_json, -1, SQLITE_TRANSIENT); else sqlite3_bind_null(st, 3);
+    sqlite3_bind_text(st, 4, span_id, -1, SQLITE_TRANSIENT);
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    if (ok) {
+        jbuf_t p; jbuf_init(&p, 256);
+        jbuf_append(&p, "{\"status\":"); jbuf_append_json_str(&p, status ? status : "ok");
+        if (payload_json && payload_json[0]) { jbuf_append(&p, ",\"data\":"); jbuf_append(&p, payload_json); }
+        jbuf_append(&p, "}");
+        chronicle_event("span.completed", trace_id, span_id, parent, "agent", "dsco", p.data, "product_telemetry");
+        jbuf_free(&p);
+    }
+    return ok;
+}
+
+bool chronicle_edge(const char *from_id, const char *to_id, const char *relation,
+                    double confidence, const char *metadata_json) {
+    if (!g_chronicle.ready || !from_id || !to_id || !relation) return false;
+    char edge_id[37]; chronicle_new_id(edge_id, sizeof(edge_id));
+    sqlite3_stmt *st = NULL;
+    const char *sql = "INSERT INTO edges(edge_id,from_id,to_id,relation,confidence,metadata_json,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7);";
+    if (sqlite3_prepare_v2(g_chronicle.db, sql, -1, &st, NULL) != SQLITE_OK) return false;
+    sqlite3_bind_text(st, 1, edge_id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 2, from_id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 3, to_id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 4, relation, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_double(st, 5, confidence);
+    if (metadata_json) sqlite3_bind_text(st, 6, metadata_json, -1, SQLITE_TRANSIENT); else sqlite3_bind_null(st, 6);
+    sqlite3_bind_int64(st, 7, (sqlite3_int64)time(NULL));
+    bool ok = sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    return ok;
+}
+
+static bool capture_full_payload(void) {
+    return g_chronicle.mode == CHRONICLE_MODE_FULL_LOCAL || g_chronicle.mode == CHRONICLE_MODE_BLACKBOX;
+}
+
+bool chronicle_user_message(const char *trace_id, const char *span_id, const char *text) {
+    if (!g_chronicle.ready) return false;
+    char sha[65] = "";
+    if (capture_full_payload()) chronicle_blob_put_text(text, "user_message", "private_user_content", sha, sizeof(sha));
+    jbuf_t p; jbuf_init(&p, 256);
+    jbuf_append(&p, "{\"byte_len\":"); jbuf_appendf(&p, "%zu", text ? strlen(text) : 0);
+    jbuf_append(&p, ",\"blob_sha256\":"); if (sha[0]) jbuf_append_json_str(&p, sha); else jbuf_append(&p, "null");
+    if (g_chronicle.mode == CHRONICLE_MODE_METADATA && text) {
+        jbuf_append(&p, ",\"redacted\":true");
+    }
+    jbuf_append(&p, "}");
+    bool ok = chronicle_event("user.message", trace_id, span_id, NULL, "user", "local", p.data, "private_user_content");
+    jbuf_free(&p); return ok;
+}
+
+bool chronicle_context_materialized(const char *trace_id, const char *span_id,
+                                    const char *request_json, int estimated_tokens) {
+    char sha[65] = "";
+    if (capture_full_payload()) chronicle_blob_put(request_json ? request_json : "", request_json ? strlen(request_json) : 0,
+                                                   "context.materialized.request_json", "application/json", "private_user_content", sha, sizeof(sha));
+    jbuf_t p; jbuf_init(&p, 256);
+    jbuf_append(&p, "{\"estimated_tokens\":"); jbuf_appendf(&p, "%d", estimated_tokens);
+    jbuf_append(&p, ",\"request_blob_sha256\":"); if (sha[0]) jbuf_append_json_str(&p, sha); else jbuf_append(&p, "null");
+    jbuf_append(&p, "}");
+    bool ok = chronicle_event("context.materialized", trace_id, span_id, NULL, "agent", "dsco", p.data, "private_user_content");
+    jbuf_free(&p); return ok;
+}
+
+bool chronicle_llm_request(const char *trace_id, const char *span_id, const char *provider,
+                           const char *model, const char *request_json, int estimated_tokens) {
+    /* Cache attribution without retaining raw content in telemetry. The
+     * stable-prefix fingerprint separates instruction/schema churn from
+     * conversation rewrites; common-prefix bytes show how much of the prior
+     * request remained cache-addressable on this execution thread. */
+    static _Thread_local char *previous_request;
+    static _Thread_local size_t previous_request_len;
+    size_t request_len = request_json ? strlen(request_json) : 0;
+    const char *history = request_json ? strstr(request_json, "\"input\":[") : NULL;
+    if (!history && request_json) history = strstr(request_json, "\"messages\":[");
+    size_t stable_prefix_len = history ? (size_t)(history - request_json) : request_len;
+    size_t common_prefix = 0;
+    size_t common_limit = request_len < previous_request_len ? request_len : previous_request_len;
+    while (previous_request && common_prefix < common_limit &&
+           request_json[common_prefix] == previous_request[common_prefix])
+        common_prefix++;
+    char request_fp_hex[65], stable_prefix_fp_hex[65];
+    sha256_hex(request_json ? request_json : "", request_len, request_fp_hex);
+    sha256_hex(request_json ? request_json : "", stable_prefix_len, stable_prefix_fp_hex);
+    char sha[65] = "";
+    if (capture_full_payload() && !chronicle_blob_put(request_json ? request_json : "", request_json ? strlen(request_json) : 0,
+                                                   "llm.request.raw_json", "application/json", "private_user_content", sha, sizeof(sha)))
+        return false;
+    jbuf_t p; jbuf_init(&p, 768);
+    jbuf_append(&p, "{\"provider\":"); jbuf_append_json_str(&p, nz(provider));
+    jbuf_append(&p, ",\"model\":"); jbuf_append_json_str(&p, nz(model));
+    jbuf_append(&p, ",\"estimated_input_tokens\":"); jbuf_appendf(&p, "%d", estimated_tokens);
+    jbuf_append(&p, ",\"byte_len\":"); jbuf_appendf(&p, "%zu", request_json ? strlen(request_json) : 0);
+    jbuf_append(&p, ",\"request_fingerprint_sha256\":"); jbuf_append_json_str(&p, request_fp_hex);
+    jbuf_append(&p, ",\"stable_prefix_fingerprint_sha256\":"); jbuf_append_json_str(&p, stable_prefix_fp_hex);
+    jbuf_append(&p, ",\"stable_prefix_bytes\":"); jbuf_appendf(&p, "%zu", stable_prefix_len);
+    jbuf_append(&p, ",\"previous_byte_len\":"); jbuf_appendf(&p, "%zu", previous_request_len);
+    jbuf_append(&p, ",\"common_prefix_bytes\":"); jbuf_appendf(&p, "%zu", common_prefix);
+    jbuf_append(&p, ",\"same_as_previous\":");
+    jbuf_append(&p, previous_request && request_len == previous_request_len &&
+                         common_prefix == request_len ? "true" : "false");
+    jbuf_append(&p, ",\"request_blob_sha256\":"); if (sha[0]) jbuf_append_json_str(&p, sha); else jbuf_append(&p, "null");
+    jbuf_append(&p, "}");
+    bool ok = chronicle_event("llm.request.created", trace_id, span_id, NULL, "agent", "dsco", p.data, "private_user_content");
+    jbuf_free(&p);
+    char *next_previous = request_json ? strdup(request_json) : NULL;
+    if (next_previous || !request_json) {
+        free(previous_request);
+        previous_request = next_previous;
+        previous_request_len = request_len;
+    }
+    return ok;
+}
+
+bool chronicle_llm_delta(const char *trace_id, const char *span_id, const char *kind, const char *text) {
+    bool streamed = event_stream_active();
+    bool captured = true;
+    if (streamed) {
+        jbuf_t delta; jbuf_init(&delta, 256);
+        jbuf_append(&delta, "{\"kind\":"); jbuf_append_json_str(&delta, nz(kind));
+        jbuf_append(&delta, ",\"text\":"); jbuf_append_json_str(&delta, nz(text));
+        jbuf_append(&delta, ",\"trace_id\":"); jbuf_append_json_str(&delta, nz(trace_id));
+        jbuf_append(&delta, ",\"span_id\":"); jbuf_append_json_str(&delta, nz(span_id));
+        jbuf_append(&delta, "}");
+        captured = stream_record("llm", "llm.response.delta", delta.data);
+        jbuf_free(&delta);
+    }
+    if (!g_chronicle.ready || g_chronicle.mode != CHRONICLE_MODE_BLACKBOX)
+        return streamed && captured;
+    char sha[65] = ""; chronicle_blob_put_text(text, kind && strcmp(kind, "thinking") == 0 ? "llm.response.thinking_delta" : "llm.response.text_delta", "model_output", sha, sizeof(sha));
+    jbuf_t p; jbuf_init(&p, 256);
+    jbuf_append(&p, "{\"kind\":"); jbuf_append_json_str(&p, nz(kind));
+    jbuf_append(&p, ",\"byte_len\":"); jbuf_appendf(&p, "%zu", text ? strlen(text) : 0);
+    jbuf_append(&p, ",\"blob_sha256\":"); jbuf_append_json_str(&p, sha);
+    jbuf_append(&p, "}");
+    bool ok = chronicle_event("llm.response.delta", trace_id, span_id, NULL, "model", "provider", p.data, "model_output");
+    jbuf_free(&p); return ok && captured;
+}
+
+bool chronicle_llm_response_ex(const char *trace_id, const char *span_id, const char *provider,
+                               const char *model, const char *output_text, const char *raw_response_json,
+                               int input_tokens, int output_tokens, int cache_read_tokens,
+                               int cache_write_tokens, int reasoning_tokens, double cost_usd,
+                               double latency_ms, const char *finish_reason, const char *generation_id,
+                               bool cost_known, const char *response_status, const char *output_kind) {
+    char out_sha[65] = "", raw_sha[65] = "";
+    if (capture_full_payload()) {
+        if (!chronicle_blob_put_text(output_text, "llm.response.output_text", "model_output", out_sha, sizeof(out_sha)))
+            return false;
+        if (raw_response_json && !chronicle_blob_put(raw_response_json, strlen(raw_response_json), "llm.response.raw_json", "application/json", "model_output", raw_sha, sizeof(raw_sha)))
+            return false;
+    }
+    jbuf_t p; jbuf_init(&p, 512);
+    jbuf_append(&p, "{\"provider\":"); jbuf_append_json_str(&p, nz(provider));
+    jbuf_append(&p, ",\"model\":"); jbuf_append_json_str(&p, nz(model));
+    int cache_side_tokens = input_tokens + cache_read_tokens + cache_write_tokens;
+    double cache_hit_ratio =
+        cache_side_tokens > 0 ? (double)cache_read_tokens / (double)cache_side_tokens : 0.0;
+    jbuf_append(&p, ",\"usage\":{");
+    jbuf_appendf(&p, "\"input_tokens\":%d,\"output_tokens\":%d,\"cache_read_tokens\":%d,\"cache_write_tokens\":%d,\"reasoning_tokens\":%d,\"cache_hit_ratio\":%.6f}",
+                 input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                 reasoning_tokens, cache_hit_ratio);
+    jbuf_append(&p, ",\"cost_usd\":");
+    if (cost_known && isfinite(cost_usd)) jbuf_appendf(&p, "%.8f", cost_usd);
+    else jbuf_append(&p, "null");
+    jbuf_append(&p, ",\"cost_known\":"); jbuf_append(&p, cost_known && isfinite(cost_usd) ? "true" : "false");
+    jbuf_append(&p, ",\"response_status\":"); jbuf_append_json_str(&p, nz(response_status));
+    jbuf_append(&p, ",\"output_kind\":"); jbuf_append_json_str(&p, nz(output_kind));
+    jbuf_append(&p, ",\"output_byte_len\":"); jbuf_appendf(&p, "%zu", output_text ? strlen(output_text) : 0);
+    jbuf_append(&p, ",\"latency_ms\":"); jbuf_appendf(&p, "%.3f", latency_ms);
+    jbuf_append(&p, ",\"finish_reason\":"); jbuf_append_json_str(&p, nz(finish_reason));
+    jbuf_append(&p, ",\"generation_id\":"); jbuf_append_json_str(&p, nz(generation_id));
+    jbuf_append(&p, ",\"output_blob_sha256\":"); if (out_sha[0]) jbuf_append_json_str(&p, out_sha); else jbuf_append(&p, "null");
+    jbuf_append(&p, ",\"raw_response_blob_sha256\":"); if (raw_sha[0]) jbuf_append_json_str(&p, raw_sha); else jbuf_append(&p, "null");
+    jbuf_append(&p, "}");
+    bool ok = chronicle_event("llm.response.completed", trace_id, span_id, NULL, "model", "provider", p.data, "model_output");
+    jbuf_free(&p); return ok;
+}
+
+bool chronicle_llm_response(const char *trace_id, const char *span_id, const char *provider,
+                            const char *model, const char *output_text, const char *raw_response_json,
+                            int input_tokens, int output_tokens, int cache_read_tokens,
+                            int cache_write_tokens, int reasoning_tokens, double cost_usd,
+                            double latency_ms, const char *finish_reason, const char *generation_id) {
+    return chronicle_llm_response_ex(trace_id, span_id, provider, model, output_text,
+                                      raw_response_json, input_tokens, output_tokens,
+                                      cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                                      cost_usd, latency_ms, finish_reason, generation_id,
+                                      true, "completed", output_text && output_text[0] ? "text" : "empty");
+}
+
+bool chronicle_tool_call_start(const char *trace_id, const char *parent_span_id, const char *tool_name,
+                               const char *tool_id, const char *args_json, char *tool_span_id_out) {
+    char arg_sha[65] = "";
+    if (capture_full_payload() && !chronicle_blob_put(args_json ? args_json : "", args_json ? strlen(args_json) : 0, "tool.args_json", "application/json", "private_user_content", arg_sha, sizeof(arg_sha)))
+        return false;
+    jbuf_t p; jbuf_init(&p, 512);
+    jbuf_append(&p, "{\"tool_name\":"); jbuf_append_json_str(&p, nz(tool_name));
+    jbuf_append(&p, ",\"tool_id\":"); jbuf_append_json_str(&p, nz(tool_id));
+    /* Requested routing identity only: not proof of downstream resolution. */
+    char *requested_target = tool_name && strcmp(tool_name, "invoke_tool") == 0
+                                 ? json_get_str(args_json ? args_json : "{}", "name") : NULL;
+    jbuf_append(&p, ",\"wrapper_tool_name\":"); jbuf_append_json_str(&p, nz(tool_name));
+    jbuf_append(&p, ",\"requested_tool_name\":");
+    if (requested_target) jbuf_append_json_str(&p, requested_target); else jbuf_append(&p, "null");
+    free(requested_target);
+    jbuf_append(&p, ",\"args_blob_sha256\":"); if (arg_sha[0]) jbuf_append_json_str(&p, arg_sha); else jbuf_append(&p, "null");
+    jbuf_append(&p, ",\"args_byte_len\":"); jbuf_appendf(&p, "%zu", args_json ? strlen(args_json) : 0);
+    jbuf_append(&p, "}");
+    bool ok = chronicle_span_begin(trace_id, parent_span_id, "tool", tool_name, p.data, tool_span_id_out);
+    if (ok) ok = chronicle_event("tool.call.created", trace_id, tool_span_id_out, parent_span_id, "agent", "dsco", p.data, "private_user_content");
+    jbuf_free(&p); return ok;
+}
+
+bool chronicle_tool_call_end(const char *trace_id, const char *tool_span_id, const char *tool_name,
+                             const char *result_text, bool ok, bool timeout, double latency_ms) {
+    tool_timeout_origin_t origin = timeout ? tool_telemetry_origin() : TOOL_TIMEOUT_NONE;
+    if (timeout && origin == TOOL_TIMEOUT_NONE) origin = TOOL_TIMEOUT_WATCHDOG;
+    char res_sha[65] = "";
+    if (capture_full_payload() && !chronicle_blob_put_text(result_text, "tool.result_text", "tool_output", res_sha, sizeof(res_sha)))
+        return false;
+    jbuf_t p; jbuf_init(&p, 512);
+    jbuf_append(&p, "{\"tool_name\":"); jbuf_append_json_str(&p, nz(tool_name));
+    jbuf_append(&p, ",\"ok\":"); jbuf_append(&p, ok ? "true" : "false");
+    jbuf_append(&p, ",\"timeout\":"); jbuf_append(&p, timeout ? "true" : "false");
+    jbuf_append(&p, ",\"timeout_origin\":"); jbuf_append_json_str(&p, tool_timeout_origin_name(origin));
+    jbuf_append(&p, ",\"execution_status\":"); jbuf_append_json_str(&p, timeout ? "timeout" : (ok ? "succeeded" : "failed"));
+    jbuf_append(&p, ",\"failure_class\":"); jbuf_append_json_str(&p, timeout ? "timeout" : (ok ? "none" : "unspecified"));
+    jbuf_append(&p, ",\"latency_ms\":"); jbuf_appendf(&p, "%.3f", latency_ms);
+    jbuf_append(&p, ",\"result_byte_len\":"); jbuf_appendf(&p, "%zu", result_text ? strlen(result_text) : 0);
+    jbuf_append(&p, ",\"result_blob_sha256\":"); if (res_sha[0]) jbuf_append_json_str(&p, res_sha); else jbuf_append(&p, "null");
+    jbuf_append(&p, "}");
+    bool event_ok = chronicle_event("tool.call.completed", trace_id, tool_span_id, NULL, "tool", nz(tool_name), p.data, "tool_output");
+    bool ret = chronicle_span_end(tool_span_id, timeout ? "timeout" : (ok ? "ok" : "error"), p.data);
+    jbuf_free(&p); return event_ok && ret;
+}
+
+static void chronicle_cost_totals_add_payload(chronicle_cost_totals_t *out, const char *payload_json) {
+    if (!out || !payload_json) return;
+    out->response_count++;
+    char *cost = json_get_raw(payload_json, "cost_usd");
+    if (cost && strcmp(cost, "null") != 0) out->cost_usd += json_get_double(payload_json, "cost_usd", 0.0);
+    else out->unknown_cost_count++;
+    free(cost);
+    char *usage = json_get_raw(payload_json, "usage");
+    if (usage) {
+        out->input_tokens += json_get_int(usage, "input_tokens", 0);
+        out->output_tokens += json_get_int(usage, "output_tokens", 0);
+        out->cache_read_tokens += json_get_int(usage, "cache_read_tokens", 0);
+        out->cache_write_tokens += json_get_int(usage, "cache_write_tokens", 0);
+        out->reasoning_tokens += json_get_int(usage, "reasoning_tokens", 0);
+        free(usage);
+    }
+}
+
+static bool chronicle_cost_totals_query(const char *sql, const char *session_id,
+                                        sqlite3_int64 start_time, sqlite3_int64 end_time,
+                                        chronicle_cost_totals_t *out) {
+    if (!g_chronicle.db || !out) return false;
+    memset(out, 0, sizeof(*out));
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(g_chronicle.db, sql, -1, &st, NULL) != SQLITE_OK) return false;
+    if (session_id) sqlite3_bind_text(st, 1, session_id, -1, SQLITE_TRANSIENT);
+    else {
+        sqlite3_bind_int64(st, 1, start_time);
+        sqlite3_bind_int64(st, 2, end_time);
+    }
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        chronicle_cost_totals_add_payload(out, (const char *)sqlite3_column_text(st, 0));
+    }
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE;
+}
+
+bool chronicle_cost_totals_for_session(const char *session_id, chronicle_cost_totals_t *out) {
+    const char *sid = (session_id && session_id[0]) ? session_id : g_chronicle.session_id;
+    if (!sid || !sid[0]) return false;
+    return chronicle_cost_totals_query(
+        "SELECT COALESCE(payload_json,'{}') FROM events "
+        "WHERE event_type='llm.response.completed' AND session_id=?1;",
+        sid, 0, 0, out);
+}
+
+bool chronicle_cost_totals_today(chronicle_cost_totals_t *out) {
+    time_t now = time(NULL);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    tmv.tm_hour = 0;
+    tmv.tm_min = 0;
+    tmv.tm_sec = 0;
+    time_t start = mktime(&tmv);
+    if (start == (time_t)-1) return false;
+    return chronicle_cost_totals_query(
+        "SELECT COALESCE(payload_json,'{}') FROM events "
+        "WHERE event_type='llm.response.completed' AND wall_time>=?1 AND wall_time<?2;",
+        NULL, (sqlite3_int64)start, (sqlite3_int64)(start + 86400), out);
+}
+
+char *chronicle_build_activity_json(int limit, const char *session_filter) {
+    if (!g_chronicle.db) return safe_strdup("{\"events\":[]}");
+    if (limit <= 0 || limit > 5000) limit = 500;
+    sqlite3_stmt *st = NULL;
+    const char *sql = "SELECT event_id,session_id,trace_id,span_id,parent_span_id,seq,wall_time,event_type,actor_type,actor_id,"
+                      "COALESCE(payload_json,'{}'),COALESCE(sensitivity,''),COALESCE(event_hash,'') FROM events "
+                      "WHERE (?1 IS NULL OR session_id=?1) ORDER BY wall_time DESC, seq DESC LIMIT ?2;";
+    if (sqlite3_prepare_v2(g_chronicle.db, sql, -1, &st, NULL) != SQLITE_OK) return safe_strdup("{\"error\":\"query failed\"}");
+    if (session_filter && session_filter[0]) sqlite3_bind_text(st, 1, session_filter, -1, SQLITE_TRANSIENT); else sqlite3_bind_null(st, 1);
+    sqlite3_bind_int(st, 2, limit);
+    jbuf_t b; jbuf_init(&b, 8192);
+    jbuf_append(&b, "{\"session_filter\":"); if (session_filter && session_filter[0]) jbuf_append_json_str(&b, session_filter); else jbuf_append(&b, "null");
+    jbuf_append(&b, ",\"events\":[");
+    bool first = true;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (!first) jbuf_append(&b, ","); first = false;
+        jbuf_append(&b, "{\"event_id\":"); jbuf_append_json_str(&b, nz((const char *)sqlite3_column_text(st,0)));
+        jbuf_append(&b, ",\"session_id\":"); jbuf_append_json_str(&b, nz((const char *)sqlite3_column_text(st,1)));
+        jbuf_append(&b, ",\"trace_id\":"); jbuf_append_json_str(&b, nz((const char *)sqlite3_column_text(st,2)));
+        jbuf_append(&b, ",\"span_id\":"); jbuf_append_json_str(&b, nz((const char *)sqlite3_column_text(st,3)));
+        jbuf_append(&b, ",\"parent_span_id\":"); jbuf_append_json_str(&b, nz((const char *)sqlite3_column_text(st,4)));
+        jbuf_append(&b, ",\"seq\":"); jbuf_appendf(&b, "%lld", sqlite3_column_int64(st,5));
+        jbuf_append(&b, ",\"wall_time\":"); jbuf_appendf(&b, "%lld", sqlite3_column_int64(st,6));
+        jbuf_append(&b, ",\"event_type\":"); jbuf_append_json_str(&b, nz((const char *)sqlite3_column_text(st,7)));
+        jbuf_append(&b, ",\"actor_type\":"); jbuf_append_json_str(&b, nz((const char *)sqlite3_column_text(st,8)));
+        jbuf_append(&b, ",\"actor_id\":"); jbuf_append_json_str(&b, nz((const char *)sqlite3_column_text(st,9)));
+        jbuf_append(&b, ",\"payload\":"); jbuf_append(&b, nz((const char *)sqlite3_column_text(st,10)));
+        jbuf_append(&b, ",\"sensitivity\":"); jbuf_append_json_str(&b, nz((const char *)sqlite3_column_text(st,11)));
+        jbuf_append(&b, ",\"event_hash\":"); jbuf_append_json_str(&b, nz((const char *)sqlite3_column_text(st,12)));
+        jbuf_append(&b, "}");
+    }
+    sqlite3_finalize(st);
+    jbuf_append(&b, "]}");
+    return b.data;
+}
+
+static void html_escape(jbuf_t *b, const char *s) {
+    if (!s) return;
+    for (; *s; s++) {
+        switch (*s) {
+            case '&': jbuf_append(b, "&amp;"); break;
+            case '<': jbuf_append(b, "&lt;"); break;
+            case '>': jbuf_append(b, "&gt;"); break;
+            case '"': jbuf_append(b, "&quot;"); break;
+            case '\'': jbuf_append(b, "&#39;"); break;
+            default: jbuf_append_char(b, *s); break;
+        }
+    }
+}
+
+char *chronicle_build_activity_html_ex(int limit, const char *session_filter,
+                                       const char *type_filter,
+                                       const char *search_filter) {
+    (void)type_filter;
+    (void)search_filter;
+    if (limit <= 0 || limit > 5000)
+        limit = 1000;
+
+    jbuf_t b;
+    jbuf_init(&b, 32768);
+    jbuf_append(&b,
+                "<!doctype html><html><head><meta charset='utf-8'>"
+                "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                "<title>DSCO Chronicle</title>"
+                "<style>"
+                ":root{--bg:#05070d;--panel:#0b1220;--panel2:#0f1a2d;--line:#21314d;--text:#e8f1ff;--muted:#8da2c0;--accent:#7dd3fc;--good:#34d399;--warn:#fbbf24;--bad:#fb7185;--violet:#a78bfa;--blue:#60a5fa}"
+                "*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 20% 0%,#14213f 0,#05070d 34%,#03050a 100%);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Helvetica,Arial;min-height:100vh}"
+                "header{position:sticky;top:0;z-index:10;padding:18px 24px;border-bottom:1px solid rgba(125,211,252,.22);background:rgba(5,7,13,.82);backdrop-filter:blur(16px)}"
+                ".top{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.brand{display:flex;align-items:center;gap:12px}.orb{width:42px;height:42px;border-radius:50%;background:conic-gradient(from 180deg,var(--accent),var(--violet),var(--good),var(--accent));box-shadow:0 0 34px rgba(125,211,252,.45)}"
+                "h1{font-size:24px;margin:0;letter-spacing:.02em}.sub{color:var(--muted);font-size:12px;margin-top:3px}.pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--line);background:rgba(15,26,45,.78);border-radius:999px;color:#b9c8df;font-size:12px}.dot{width:8px;height:8px;border-radius:50%;background:var(--good);box-shadow:0 0 18px var(--good)}"
+                ".controls{display:grid;grid-template-columns:2fr 1fr 1fr auto auto;gap:10px;margin-top:16px}.controls input,.controls select,.controls button{border:1px solid var(--line);background:rgba(11,18,32,.92);color:var(--text);border-radius:12px;padding:10px 12px}.controls button{cursor:pointer;background:linear-gradient(135deg,#155e75,#3730a3);font-weight:700}.controls button:hover{filter:brightness(1.14)}"
+                "main{padding:22px 24px 50px;display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:18px}.stats{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-bottom:16px}.stat{background:linear-gradient(180deg,rgba(15,26,45,.92),rgba(11,18,32,.82));border:1px solid var(--line);border-radius:18px;padding:14px;box-shadow:0 10px 30px rgba(0,0,0,.22)}.stat .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}.stat .v{font-size:28px;font-weight:800;margin-top:6px}.stat.good .v{color:var(--good)}.stat.warn .v{color:var(--warn)}.stat.bad .v{color:var(--bad)}"
+                ".rail{position:sticky;top:154px;align-self:start;background:rgba(11,18,32,.82);border:1px solid var(--line);border-radius:18px;padding:14px;max-height:calc(100vh - 174px);overflow:auto}.rail h3{margin:4px 0 10px}.bar{height:8px;background:#0a1020;border-radius:999px;overflow:hidden;margin:8px 0 12px}.bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--violet));width:0%}.legend{display:flex;justify-content:space-between;gap:10px;color:var(--muted);font-size:12px;margin:6px 0}.typebtn{display:flex;width:100%;align-items:center;justify-content:space-between;border:1px solid var(--line);background:#0b1426;color:var(--text);border-radius:12px;padding:8px 10px;margin:7px 0;cursor:pointer}.typebtn.active{border-color:var(--accent);box-shadow:0 0 0 1px rgba(125,211,252,.28) inset}.mini{font-size:11px;color:var(--muted)}"
+                ".timeline{position:relative}.timeline:before{content:'';position:absolute;left:18px;top:0;bottom:0;width:2px;background:linear-gradient(var(--accent),rgba(167,139,250,.18))}.event{position:relative;margin:0 0 12px 42px;background:rgba(11,18,32,.86);border:1px solid var(--line);border-radius:18px;padding:13px 14px;box-shadow:0 10px 24px rgba(0,0,0,.20)}.event:before{content:'';position:absolute;left:-31px;top:18px;width:12px;height:12px;border-radius:50%;background:var(--accent);box-shadow:0 0 18px var(--accent)}"
+                ".event.tool:before{background:var(--good);box-shadow:0 0 18px var(--good)}.event.llm:before{background:var(--violet);box-shadow:0 0 18px var(--violet)}.event.err:before{background:var(--bad);box-shadow:0 0 18px var(--bad)}"
+                ".evhead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.etype{font-weight:800}.meta{color:var(--muted);font-size:12px;margin-top:4px}.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}.chip{font-size:11px;border:1px solid var(--line);border-radius:999px;padding:3px 7px;color:#c5d4eb;background:#101b2f}.hash{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#9dccff}.payload{display:none;margin-top:10px;white-space:pre-wrap;word-break:break-word;background:#050914;border:1px solid #1b2943;border-radius:12px;padding:10px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;color:#dbeafe;max-height:360px;overflow:auto}.event.open .payload{display:block}.actions{display:flex;gap:8px;flex-wrap:wrap}.ghost{background:transparent;border:1px solid var(--line);color:#bdd0ea;border-radius:10px;padding:6px 8px;cursor:pointer}.ghost:hover{border-color:var(--accent);color:white}"
+                ".empty{border:1px dashed var(--line);border-radius:18px;padding:40px;text-align:center;color:var(--muted);background:rgba(11,18,32,.55)}a{color:var(--accent);text-decoration:none}@media(max-width:980px){main{grid-template-columns:1fr}.rail{position:relative;top:auto}.stats{grid-template-columns:repeat(2,1fr)}.controls{grid-template-columns:1fr}.timeline:before{display:none}.event{margin-left:0}.event:before{display:none}}"
+                "</style></head><body><header><div class='top'><div class='brand'><div class='orb'></div><div><h1>DSCO Chronicle</h1><div class='sub'>local-first provenance · blob-backed payloads · cost, replay, forensic timeline</div></div></div><div class='pill'><span class='dot'></span><span id='live'>live</span></div></div>");
+    jbuf_append(&b,
+                "<div class='controls'><input id='q' placeholder='Search event type, tool, model, hash, payload…' autofocus>"
+                "<select id='type'><option value=''>all event types</option></select>"
+                "<input id='session' placeholder='session filter' value='");
+    html_escape(&b, session_filter ? session_filter : "");
+    jbuf_append(&b,
+                "'><button id='refresh'>Refresh</button><button id='auto'>Auto: on</button></div>"
+                 "<div class='sub'>store: ");
+    html_escape(&b, chronicle_root());
+    jbuf_appendf(&b,
+                 " · <a href='/chronicle.json'>json</a> · <a href='/'>baseline</a></div></header>"
+                 "<main><section><div class='stats' id='stats'></div><div class='timeline' id='timeline'><div class='empty'>Loading Chronicle…</div></div></section>"
+                 "<aside class='rail'><h3>Signal</h3><div id='signal'></div><h3>Event Types</h3><div id='types'></div><h3>Blob Links</h3><div class='mini' id='blobs'>No blobs selected yet.</div></aside></main>"
+                 "<script>"
+                 "const LIMIT=%d;let raw=[],filtered=[],auto=true,lastCount=0;"
+                 "const $=id=>document.getElementById(id);"
+                 "const esc=s=>String(s||'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c]));"
+                 "const cls=e=>e.event_type.includes('tool')?'tool':e.event_type.includes('llm')?'llm':JSON.stringify(e.payload).includes('error')?'err':'';"
+                 "const short=s=>s?String(s).slice(0,12)+'…':'';"
+                 "function walk(o,a=[]){if(!o||typeof o!=='object')return a;for(const[k,v]of Object.entries(o)){if(k.includes('sha256')&&typeof v==='string'&&v.length===64)a.push(v);else if(typeof v==='object')walk(v,a)}return a}"
+                 "async function load(){const sess=$('session').value.trim();const url='/chronicle.json'+(sess?'?session='+encodeURIComponent(sess):'');$('live').textContent='loading';const r=await fetch(url,{cache:'no-store'});const j=await r.json();raw=j.events||[];$('live').textContent='live · '+raw.length;render()}"
+                 "function render(){const q=$('q').value.toLowerCase();const t=$('type').value;filtered=raw.filter(e=>(!t||e.event_type===t)&&(!q||JSON.stringify(e).toLowerCase().includes(q)));renderStats();renderTypes();renderTimeline();}"
+                 "function renderStats(){const llm=raw.filter(e=>e.event_type.startsWith('llm.')).length,tools=raw.filter(e=>e.event_type.startsWith('tool.')).length,ctx=raw.filter(e=>e.event_type==='context.materialized').length,blobs=raw.reduce((n,e)=>n+walk(e.payload).length,0);$('stats').innerHTML=[['Events',raw.length,''],['Shown',filtered.length,'good'],['LLM',llm,''],['Tools',tools,'warn'],['Blobs',blobs,'bad']].map(x=>`<div class='stat ${x[2]}'><div class='k'>${x[0]}</div><div class='v'>${x[1]}</div></div>`).join('');const max=Math.max(1,raw.length);$('signal').innerHTML=`<div class='legend'><span>tool I/O</span><b>${tools}</b></div><div class='bar'><i style='width:${Math.min(100,tools/max*100)}%%'></i></div><div class='legend'><span>model events</span><b>${llm}</b></div><div class='bar'><i style='width:${Math.min(100,llm/max*100)}%%'></i></div><div class='legend'><span>contexts</span><b>${ctx}</b></div><div class='bar'><i style='width:${Math.min(100,ctx/max*100)}%%'></i></div>`}"
+                 "function renderTypes(){const counts={};raw.forEach(e=>counts[e.event_type]=(counts[e.event_type]||0)+1);const keys=Object.keys(counts).sort((a,b)=>counts[b]-counts[a]);const sel=$('type'),cur=sel.value;sel.innerHTML='<option value=\"\">all event types</option>'+keys.map(k=>`<option value=\"${esc(k)}\">${esc(k)} (${counts[k]})</option>`).join('');sel.value=cur;$('types').innerHTML=keys.slice(0,18).map(k=>`<button class='typebtn ${cur===k?'active':''}' onclick=\"document.getElementById('type').value='${esc(k)}';render()\"><span>${esc(k)}</span><b>${counts[k]}</b></button>`).join('')}"
+                 "function renderTimeline(){const el=$('timeline');if(!filtered.length){el.innerHTML='<div class=empty>No matching Chronicle events.</div>';return}el.innerHTML=filtered.slice(0,LIMIT).map((e,i)=>{const p=JSON.stringify(e.payload,null,2);const blobs=walk(e.payload);const when=new Date((e.wall_time||0)*1000).toLocaleString();return `<article class='event ${cls(e)}' data-i='${i}'><div class='evhead'><div><div class='etype'>${esc(e.event_type)}</div><div class='meta'>#${e.seq} · ${esc(when)} · ${esc(short(e.session_id))} · ${esc(e.actor_type)}/${esc(e.actor_id)}</div></div><div class='actions'><button class='ghost' onclick='toggle(${i})'>payload</button>${blobs.length?`<button class='ghost' onclick='showBlobs(${i})'>${blobs.length} blobs</button>`:''}</div></div><div class='chips'><span class='chip'>${esc(e.sensitivity||'')}</span>${e.trace_id?`<span class='chip'>trace ${esc(short(e.trace_id))}</span>`:''}${e.span_id?`<span class='chip'>span ${esc(short(e.span_id))}</span>`:''}${blobs.slice(0,2).map(h=>`<span class='chip hash'>${esc(short(h))}</span>`).join('')}</div><pre class='payload'>${esc(p)}</pre></article>`}).join('')}"
+                 "window.toggle=i=>document.querySelector(`[data-i=\"${i}\"]`).classList.toggle('open');"
+                 "window.showBlobs=i=>{const e=filtered[i],bs=walk(e.payload);$('blobs').innerHTML=bs.map(h=>`<div style='margin:8px 0'><a class='hash' href='/chronicle/blob/${h}' target='_blank'>${h}</a></div>`).join('')||'No blobs.'};"
+                 "$('q').oninput=render;$('type').onchange=render;$('session').onkeydown=e=>{if(e.key==='Enter')load()};$('refresh').onclick=load;$('auto').onclick=()=>{auto=!auto;$('auto').textContent='Auto: '+(auto?'on':'off')};setInterval(()=>{if(auto)load()},5000);load();"
+                 "</script></body></html>",
+                 limit);
+    return b.data;
+}
+
+char *chronicle_build_activity_html(int limit, const char *session_filter) {
+    return chronicle_build_activity_html_ex(limit, session_filter, NULL, NULL);
+}
+
+char *chronicle_read_blob_hex(const char *sha256, size_t max_bytes, const char **content_type_out) {
+    if (content_type_out) *content_type_out = "application/octet-stream";
+    if (!g_chronicle.db || !sha256 || strlen(sha256) != 64) return NULL;
+    for (const char *p = sha256; *p; p++) if (!isxdigit((unsigned char)*p)) return NULL;
+    sqlite3_stmt *st = NULL;
+    char rel[PATH_MAX] = "";
+    static char ctype[128]; ctype[0] = '\0';
+    if (sqlite3_prepare_v2(g_chronicle.db, "SELECT local_path,COALESCE(content_type,'application/octet-stream') FROM blobs WHERE sha256=?1;", -1, &st, NULL) != SQLITE_OK) return NULL;
+    sqlite3_bind_text(st, 1, sha256, -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(st) == SQLITE_ROW) {
+        snprintf(rel, sizeof(rel), "%s", nz((const char *)sqlite3_column_text(st,0)));
+        snprintf(ctype, sizeof(ctype), "%s", nz((const char *)sqlite3_column_text(st,1)));
+    }
+    sqlite3_finalize(st);
+    if (!rel[0] || strstr(rel, "..")) return NULL;
+    char path[PATH_MAX]; snprintf(path, sizeof(path), "%s/%s", g_chronicle.root, rel);
+    FILE *f = fopen(path, "rb"); if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    if (sz < 0) { fclose(f); return NULL; }
+    size_t n = (size_t)sz;
+    if (max_bytes > 0 && n > max_bytes) n = max_bytes;
+    char *buf = safe_malloc(n + 1);
+    size_t r = fread(buf, 1, n, f); fclose(f); buf[r] = '\0';
+    if (content_type_out) *content_type_out = ctype[0] ? ctype : "application/octet-stream";
+    return buf;
+}

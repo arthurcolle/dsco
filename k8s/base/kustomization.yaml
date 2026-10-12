@@ -1,0 +1,28 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: dsco-agent
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: dsco-agent
+      app.kubernetes.io/part-of: dsco-cli
+    includeSelectors: true
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - statefulset.yaml
+  - service.yaml
+  - networkpolicy.yaml
+
+# dsco-agent-secrets is deliberately not listed here — see
+# secret.example.yaml for why (no safe default; create it with `kubectl
+# create secret` or a secrets operator, not by applying this base directly).
+
+images:
+  # Base defaults to the locally-built tag; overlays/CI override newName
+  # (point at a real registry) and newTag (a real version) from here.
+  - name: dsco-agent
+    newName: dsco-agent
+    newTag: local

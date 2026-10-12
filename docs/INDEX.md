@@ -4,10 +4,10 @@ This documentation set is intended as a full-codebase reference for `dsco-cli`, 
 
 ## Scope
 
-- All C source/header modules in the root
-- Build/test surfaces (`Makefile`, `test.c`)
-- Python utilities in `scripts/` and root `valuation.py`
-- Web assets in `www/`
+- C source/header modules and supported build/test surfaces
+- Public CLI, API, operations, plugin, and runbook documentation
+- Supported helper scripts under `scripts/`
+- Web assets under `web/`
 - Runtime configuration, environment, storage, and observability
 
 ## Document Map
@@ -16,17 +16,41 @@ This documentation set is intended as a full-codebase reference for `dsco-cli`, 
 - [C Module Reference](C_MODULE_REFERENCE.md)
 - [API Reference](API_REFERENCE.md)
 - [Built-in Tool Catalog](TOOL_CATALOG.md)
+- [External Tool and Integration Catalog](EXTERNAL_TOOL_CATALOG.md)
 - [MetaConstruct DSL](META_CONSTRUCT_DSL.md)
-- [Claude Code Pure Adapter Map](CLAUDE_CODE_PURE_ADAPTER_MAP.md)
-- [Python & Web Asset Reference](PYTHON_AND_WEB_REFERENCE.md)
 - [Operations, Config, Storage, and Troubleshooting](OPERATIONS.md)
+- [Constants and Environment Index](CONSTANTS_ENV_INDEX.md)
+- [Repository Coverage Manifest](REPO_COVERAGE.md)
+- [Chronicle TokenLedger](CHRONICLE_TOKENLEDGER.md)
+- [Execution Spine](EXECUTION_SPINE.md)
+- [Harness Execution Lexicon (HX/1)](HARNESS_LEXICON.md) — phase hierarchies, exact state distinctions, and compact operator/DSL notation.
+- [Agent-system Interoperability](AGENT_INTEROP.md)
+- [Two-Queue Goal Controller](GOAL_CONTROLLER.md)
+- [Shared Blackboard: Claims, Artifacts, and Acceptance](BLACKBOARD.md)
+- [Integration Catalog](INTEGRATION_CATALOG.md)
+- [Swarm Parallelism Proof](SWARM_PARALLELISM_PROOF.md)
+- [Cosmopolitan Build Lane](COSMOPOLITAN.md)
+- [Local Control Plane](LOCAL_CONTROL_PLANE.md)
+- [Harness Control: Kitty, PTYs, Desktop and Browser](HARNESS_CONTROL.md)
+- [Tool Hooks](TOOL_HOOKS.md)
+- [Native UI Component Timelines](NATIVE_UI_TRACE.md)
+- [Distributed Agent Performance Doctrine](DISTRIBUTED_AGENT_PERFORMANCE.md)
+- [DHT Improvement Sync](DHT_IMPROVEMENT_SYNC.md)
+- [The Math Behind the Glossary](THE_MATH_BEHIND_THE_GLOSSARY.md)
+  ([HTML wiki](THE_MATH_BEHIND_THE_GLOSSARY.html)) — hyperlinked HATEOAS-style
+  mathematics with stable concept, symbol, and equation resources
+- [Blog: Modal Tool Calling and Hosted Tools](BLOG_MODAL_TOOL_CALLING.md) ([HTML](BLOG_MODAL_TOOL_CALLING.html))
+- [Avian Mechanisms](AVIAN_MECHANISMS.md)
+- [Sakana Fugu Provider](SAKANA_FUGU_PROVIDER.md)
 - [Plugin Manifest + Lockfile Spec](PLUGIN_MANIFEST_LOCK_SPEC.md)
-- [Hardening-to-Monetization Roadmap (2026)](HARDENING_MONETIZATION_ROADMAP_2026.md)
-- [Hardening Sprint Backlog (2026)](HARDENING_SPRINT_BACKLOG_2026.md)
 - [How-To Guides](HOW_TO.md)
+- [Examples Cookbook](EXAMPLES.md)
 - [Architecture Diagrams](DIAGRAMS.md)
 - [Docs Contributing Guide](DOCS_CONTRIBUTING.md)
 - [Runbooks](RUNBOOKS.md)
+- [Founder-Led Go-to-Market Operating Kit](GO_TO_MARKET.md)
+- [DSCO Governed Workflow Pilot Proposal Template](DSCO_WORKFLOW_PILOT_PROPOSAL.md)
+- [Revenue Pipeline Template](DSCO_REVENUE_PIPELINE.csv)
 
 ## Repository Hygiene
 
@@ -46,57 +70,40 @@ This documentation set is intended as a full-codebase reference for `dsco-cli`, 
 - Clang-format check script: `../scripts/clang_format_check.sh`
 - Clang-format apply script: `../scripts/clang_format_apply.sh`
 
-## Supplementary In-Repo Design Notes
+## Root-Level References
 
-- `TOOL_SCHEMA_REFERENCE.md`
-- `TOOL_SCALING_MATHEMATICS.md`
-- `LLM_AS_POLICY_AND_REWARD.md`
-- `JINA_RL_LOOP_ARCHITECTURE.md`
-- `POST_LLM_VIRTUAL_OS_READING_LIST.md`
-- `EXTREME_TOOLKITS_EXECUTION_PLAN.md`
+- [`README.md`](../README.md)
+- [`CHANGELOG.md`](../CHANGELOG.md)
+- [`CONTRIBUTING.md`](../CONTRIBUTING.md)
+- [`SECURITY.md`](../SECURITY.md)
 
-## Codebase Snapshot
+## Public Code Areas
 
-| File | LOC |
-|---|---:|
-| `Makefile` | 160 |
-| `main.c` | 405 |
-| `agent.c` | 2142 |
-| `llm.c` | 2680 |
-| `provider.c` | 573 |
-| `tools.c` | 9191 |
-| `integrations.c` | 1487 |
-| `json_util.c` | 795 |
-| `baseline.c` | 1052 |
-| `setup.c` | 700 |
-| `swarm.c` | 556 |
-| `ipc.c` | 781 |
-| `mcp.c` | 445 |
-| `plugin.c` | 230 |
-| `semantic.c` | 532 |
-| `md.c` | 2235 |
-| `tui.c` | 1241 |
-| `pipeline.c` | 727 |
-| `ast.c` | 813 |
-| `eval.c` | 686 |
-| `crypto.c` | 511 |
-| `error.c` | 83 |
-| `test.c` | 695 |
-| all `.h` files (combined) | 2057 |
-| `scripts/analyst_swarm.py` | 9019 |
-| `scripts/equity_kb.py` | 2479 |
-| `scripts/valuation.py` | 1336 |
-| `scripts/freight_api.py` | 652 |
-| `scripts/freight_quant_tools.py` | 2197 |
-| `scripts/hormuz_ffa.py` | 883 |
-| `valuation.py` | 440 |
-| `www/freight.html` | 2135 |
-| `www/freight_intelligence_report.html` | 4015 |
+- `src/` and `include/` for the C runtime
+- `tests/` for supported runtime and CLI tests
+- `scripts/` for build, packaging, docs-generation, and provider smoke helpers
+- `web/` for the local web surface
+- `provider_metadata/`, `npm/`, `Formula/`, `demos/`, `gsl/`, and `vendor/` for metadata, packaging, examples, and compatibility code
 
 ## Reading Order
 
 1. Read [Architecture & Runtime Flows](ARCHITECTURE.md) for system-level mental model.
 2. Use [C Module Reference](C_MODULE_REFERENCE.md) for per-file implementation details.
 3. Use [Tool Catalog](TOOL_CATALOG.md) when working on tool selection/execution behavior.
-4. Use [Python & Web Asset Reference](PYTHON_AND_WEB_REFERENCE.md) for ancillary scripts/UI.
-5. Use [Operations](OPERATIONS.md) for env/config/runtime storage and troubleshooting.
+4. Use [External Tool and Integration Catalog](EXTERNAL_TOOL_CATALOG.md) for the cached Codex app-directory universe.
+5. Use [Chronicle TokenLedger](CHRONICLE_TOKENLEDGER.md) for local activity/provenance semantics.
+6. Use [Integration Catalog](INTEGRATION_CATALOG.md) when working on external app/MCP metadata.
+7. Use [Operations](OPERATIONS.md) for env/config/runtime storage and troubleshooting.
+8. Use [Runbooks](RUNBOOKS.md) for operational procedures.
+
+- [Native windows](NATIVE_WINDOWS.md) — draggable native panels, buffer snapshots and workflow steering.
+- [Native compositor continuation plan](NATIVE_COMPOSITOR_NEXT.md) — verified state, remaining limits, next-session priorities and acceptance criteria.
+
+- [Lingo language and DSCO scripting](LINGO.md) — object values, dependency tracking, scenarios, and governed LuaJIT interactions.
+- [Interactive Lingo workbench](lingo/WORKBENCH.md) — open a worksheet, inspect dependencies, change typed controls, and save or restore the selected scenario through terminal or agent tools.
+- [Shared platform objects](LINGO_PLATFORM.md) — Observation, Service, Object, Artifact, Policy, Task, Run, Model and Agent contracts.
+- [Named worlds and GraphSub artifacts](lingo/WORLDS.md) — source identity, portable value addresses, atomic load, actual persistence and restart evidence.
+- [Lingo across systems](lingo/SYSTEMS.md) — real Autobot discovery/execution, GraphSub observations, DSCO artifacts and Chimera routing preferences in one script.
+- [Lingo design explorations](lingo/DESIGN_EXPLORATIONS.md) — proposed decisions, evidence needs, pinned selections, packages and executable work; includes a runnable 0.2 decision study.
+- [DSCO as the primary GraphSub operator](DSCO_GRAPHSUB_OPERATOR.md) — target world, workbench and language definition, with links to implementation evidence.
+- [Live GraphSub browsing from Lingo](operator/LIVE_BROWSE.md) — implemented attachment, schema, node pages and object reads through the DSCO capability gate.

@@ -1,0 +1,1141 @@
+{
+  "schema": "dsco.model_lab_registry.v1",
+  "scope": "Model creators and publishers observed in provider catalogs; not a census of every AI company worldwide",
+  "attribution_rule": "Namespace and model-family attribution; hosting-provider owned_by is not sufficient evidence of model authorship. Corporate parentage and model-training independence are not inferred.",
+  "labs": [
+    {
+      "id": "openai",
+      "name": "OpenAI",
+      "kind": "model_lab",
+      "aliases": [
+        "openai"
+      ],
+      "families": [
+        "gpt-",
+        "chatgpt-",
+        "chat-latest",
+        "o1",
+        "o3",
+        "o4",
+        "text-embedding-",
+        "whisper-",
+        "tts-",
+        "sora-",
+        "davinci-",
+        "babbage-",
+        "omni-moderation-",
+        "computer-use-"
+      ]
+    },
+    {
+      "id": "anthropic",
+      "name": "Anthropic",
+      "kind": "model_lab",
+      "aliases": [
+        "anthropic"
+      ],
+      "families": [
+        "claude-"
+      ]
+    },
+    {
+      "id": "google",
+      "name": "Google DeepMind",
+      "kind": "model_lab",
+      "aliases": [
+        "google"
+      ],
+      "families": [
+        "gemini-",
+        "gemma",
+        "learnlm-"
+      ]
+    },
+    {
+      "id": "moonshot",
+      "name": "Moonshot AI",
+      "kind": "model_lab",
+      "aliases": [
+        "moonshot",
+        "moonshotai",
+        "kimi-code"
+      ],
+      "families": [
+        "kimi-",
+        "moonshot-",
+        "k3"
+      ]
+    },
+    {
+      "id": "alibaba",
+      "name": "Alibaba / Qwen",
+      "kind": "model_lab",
+      "aliases": [
+        "alibaba",
+        "qwen",
+        "wan-ai",
+        "happyhorse"
+      ],
+      "families": [
+        "qwen",
+        "qwq-",
+        "wan-"
+      ],
+      "sources": [
+        "https://home.alibabagroup.com/en-US/about-alibaba"
+      ]
+    },
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "kind": "model_lab",
+      "aliases": [
+        "deepseek",
+        "deepseek-ai"
+      ],
+      "families": [
+        "deepseek-"
+      ]
+    },
+    {
+      "id": "xai",
+      "name": "SpaceXAI (xAI)",
+      "kind": "model_lab",
+      "aliases": [
+        "xai",
+        "x-ai",
+        "spacexai"
+      ],
+      "families": [
+        "grok-"
+      ],
+      "sources": [
+        "https://docs.x.ai/grok/overview"
+      ]
+    },
+    {
+      "id": "zai",
+      "name": "Z.ai / GLM",
+      "kind": "model_lab",
+      "aliases": [
+        "zai",
+        "z-ai",
+        "zai-org",
+        "thudm"
+      ],
+      "families": [
+        "glm-"
+      ]
+    },
+    {
+      "id": "sakana",
+      "name": "Sakana AI",
+      "kind": "model_lab",
+      "aliases": [
+        "sakana"
+      ],
+      "families": [
+        "fugu"
+      ]
+    },
+    {
+      "id": "meta",
+      "name": "Meta",
+      "kind": "model_lab",
+      "aliases": [
+        "meta",
+        "meta-llama",
+        "meta-models",
+        "facebook"
+      ],
+      "families": [
+        "llama",
+        "meta-",
+        "muse-"
+      ],
+      "sources": [
+        "https://dev.meta.ai/docs/coding-agents"
+      ]
+    },
+    {
+      "id": "mistral",
+      "name": "Mistral AI",
+      "kind": "model_lab",
+      "aliases": [
+        "mistral",
+        "mistralai"
+      ],
+      "families": [
+        "mistral",
+        "ministral",
+        "magistral",
+        "codestral",
+        "devstral",
+        "voxtral",
+        "pixtral"
+      ]
+    },
+    {
+      "id": "minimax",
+      "name": "MiniMax",
+      "kind": "model_lab",
+      "aliases": [
+        "minimax",
+        "minimaxai"
+      ],
+      "families": [
+        "minimax-"
+      ]
+    },
+    {
+      "id": "cohere",
+      "name": "Cohere",
+      "kind": "model_lab",
+      "aliases": [
+        "cohere",
+        "coherelabs"
+      ],
+      "families": [
+        "command-",
+        "embed-"
+      ]
+    },
+    {
+      "id": "nvidia",
+      "name": "NVIDIA",
+      "kind": "model_lab",
+      "aliases": [
+        "nvidia"
+      ],
+      "families": [
+        "nemotron",
+        "nvidia-"
+      ]
+    },
+    {
+      "id": "microsoft",
+      "name": "Microsoft",
+      "kind": "model_lab",
+      "aliases": [
+        "microsoft"
+      ],
+      "families": [
+        "phi-",
+        "mai-"
+      ]
+    },
+    {
+      "id": "amazon",
+      "name": "Amazon",
+      "kind": "model_lab",
+      "aliases": [
+        "amazon"
+      ],
+      "families": [
+        "nova-"
+      ]
+    },
+    {
+      "id": "ibm",
+      "name": "IBM / Granite",
+      "kind": "model_lab",
+      "aliases": [
+        "ibm",
+        "ibm-granite"
+      ],
+      "families": [
+        "granite-"
+      ]
+    },
+    {
+      "id": "bytedance",
+      "name": "ByteDance",
+      "kind": "model_lab",
+      "aliases": [
+        "bytedance",
+        "bytedance-seed"
+      ],
+      "families": [
+        "seed-",
+        "seedream",
+        "seedance",
+        "doubao-"
+      ]
+    },
+    {
+      "id": "tencent",
+      "name": "Tencent / Hunyuan",
+      "kind": "model_lab",
+      "aliases": [
+        "tencent"
+      ],
+      "families": [
+        "hunyuan-",
+        "hy3",
+        "hy4"
+      ],
+      "sources": [
+        "https://www.tencent.com/tencent-hunyuan-officially-releases-hy3-advancing-agent-capabilities-and-deeper-product-integration/"
+      ]
+    },
+    {
+      "id": "baidu",
+      "name": "Baidu",
+      "kind": "model_lab",
+      "aliases": [
+        "baidu",
+        "paddlepaddle"
+      ],
+      "families": [
+        "ernie-",
+        "paddleocr-"
+      ]
+    },
+    {
+      "id": "xiaomi",
+      "name": "Xiaomi / MiMo",
+      "kind": "model_lab",
+      "aliases": [
+        "xiaomi",
+        "xiaomimimo"
+      ],
+      "families": [
+        "mimo-"
+      ]
+    },
+    {
+      "id": "stepfun",
+      "name": "StepFun",
+      "kind": "model_lab",
+      "aliases": [
+        "stepfun",
+        "stepfun-ai"
+      ],
+      "families": [
+        "step-"
+      ]
+    },
+    {
+      "id": "prism-ml",
+      "name": "PrismML",
+      "kind": "model_lab",
+      "aliases": [
+        "prism-ml"
+      ],
+      "families": [
+        "bonsai-"
+      ],
+      "sources": [
+        "https://prismml.com/news/bonsai-27b"
+      ],
+      "lineage_notes": "Bonsai 27B derives from Qwen3.6 27B; other family members require per-model lineage checks."
+    },
+    {
+      "id": "inclusionai",
+      "name": "InclusionAI",
+      "kind": "model_lab",
+      "aliases": [
+        "inclusionai"
+      ],
+      "families": [
+        "ling-",
+        "ring-"
+      ]
+    },
+    {
+      "id": "inception",
+      "name": "Inception Labs",
+      "kind": "model_lab",
+      "aliases": [
+        "inception"
+      ],
+      "families": [
+        "mercury-"
+      ]
+    },
+    {
+      "id": "thinkingmachines",
+      "name": "Thinking Machines Lab",
+      "kind": "model_lab",
+      "aliases": [
+        "thinkingmachines"
+      ],
+      "families": [
+        "tinker-",
+        "tm-",
+        "inkling"
+      ],
+      "sources": [
+        "https://thinkingmachines.ai/news/introducing-inkling/"
+      ]
+    },
+    {
+      "id": "poolside",
+      "name": "Poolside",
+      "kind": "model_lab",
+      "aliases": [
+        "poolside"
+      ],
+      "families": [
+        "laguna-",
+        "malibu-"
+      ]
+    },
+    {
+      "id": "nous",
+      "name": "Nous Research",
+      "kind": "model_lab",
+      "aliases": [
+        "nousresearch"
+      ],
+      "families": [
+        "hermes-"
+      ]
+    },
+    {
+      "id": "arcee",
+      "name": "Arcee AI",
+      "kind": "model_lab",
+      "aliases": [
+        "arcee-ai"
+      ],
+      "families": [
+        "trinity-"
+      ]
+    },
+    {
+      "id": "liquid",
+      "name": "Liquid AI",
+      "kind": "model_lab",
+      "aliases": [
+        "liquid"
+      ],
+      "families": [
+        "lfm"
+      ]
+    },
+    {
+      "id": "upstage",
+      "name": "Upstage",
+      "kind": "model_lab",
+      "aliases": [
+        "upstage"
+      ],
+      "families": [
+        "solar-"
+      ]
+    },
+    {
+      "id": "reka",
+      "name": "Reka AI",
+      "kind": "model_lab",
+      "aliases": [
+        "rekaai"
+      ],
+      "families": [
+        "reka-"
+      ]
+    },
+    {
+      "id": "writer",
+      "name": "Writer",
+      "kind": "model_lab",
+      "aliases": [
+        "writer"
+      ],
+      "families": [
+        "palmyra-"
+      ]
+    },
+    {
+      "id": "relace",
+      "name": "Relace",
+      "kind": "model_lab",
+      "aliases": [
+        "relace"
+      ],
+      "families": [
+        "relace-"
+      ]
+    },
+    {
+      "id": "morph",
+      "name": "Morph",
+      "kind": "model_lab",
+      "aliases": [
+        "morph"
+      ],
+      "families": [
+        "morph-"
+      ]
+    },
+    {
+      "id": "perplexity",
+      "name": "Perplexity",
+      "kind": "model_lab",
+      "aliases": [
+        "perplexity"
+      ],
+      "families": [
+        "sonar"
+      ]
+    },
+    {
+      "id": "kling",
+      "name": "Kuaishou / Kling / Kwai",
+      "kind": "model_lab",
+      "aliases": [
+        "kwaipilot",
+        "klingai",
+        "kwaivgi"
+      ],
+      "families": [
+        "kat-",
+        "kling-"
+      ],
+      "sources": [
+        "https://huggingface.co/Kwaipilot",
+        "https://ir.kuaishou.com/news-releases/news-release-details/kuaishou-unveils-proprietary-video-generation-model-kling"
+      ],
+      "lineage_notes": "Preserve Kwaipilot coding versus Kling video model contract; kwaivgI is a Together namespace attribution."
+    },
+    {
+      "id": "baichuan",
+      "name": "Baichuan",
+      "kind": "model_lab",
+      "aliases": [
+        "baichuan"
+      ],
+      "families": [
+        "baichuan-"
+      ]
+    },
+    {
+      "id": "01-ai",
+      "name": "01.AI",
+      "kind": "model_lab",
+      "aliases": [
+        "01-ai"
+      ],
+      "families": [
+        "yi-"
+      ]
+    },
+    {
+      "id": "ai21",
+      "name": "AI21 Labs",
+      "kind": "model_lab",
+      "aliases": [
+        "ai21labs"
+      ],
+      "families": [
+        "jamba-"
+      ]
+    },
+    {
+      "id": "adept",
+      "name": "Adept",
+      "kind": "model_lab",
+      "aliases": [
+        "adept"
+      ],
+      "families": []
+    },
+    {
+      "id": "allenai",
+      "name": "Allen Institute for AI",
+      "kind": "model_lab",
+      "aliases": [
+        "allenai"
+      ],
+      "families": [
+        "olmo-"
+      ]
+    },
+    {
+      "id": "databricks",
+      "name": "Databricks",
+      "kind": "model_lab",
+      "aliases": [
+        "databricks"
+      ],
+      "families": [
+        "dbrx-"
+      ]
+    },
+    {
+      "id": "snowflake",
+      "name": "Snowflake",
+      "kind": "model_lab",
+      "aliases": [
+        "snowflake"
+      ],
+      "families": [
+        "arctic-"
+      ]
+    },
+    {
+      "id": "salesforce",
+      "name": "Salesforce",
+      "kind": "model_lab",
+      "aliases": [
+        "salesforce"
+      ],
+      "families": []
+    },
+    {
+      "id": "zyphra",
+      "name": "Zyphra",
+      "kind": "model_lab",
+      "aliases": [
+        "zyphra"
+      ],
+      "families": [
+        "zamba-"
+      ]
+    },
+    {
+      "id": "deepcogito",
+      "name": "Deep Cogito",
+      "kind": "model_lab",
+      "aliases": [
+        "deepcogito"
+      ],
+      "families": [
+        "cogito-"
+      ]
+    },
+    {
+      "id": "black-forest-labs",
+      "name": "Black Forest Labs",
+      "kind": "model_lab",
+      "aliases": [
+        "black-forest-labs",
+        "bfl"
+      ],
+      "families": [
+        "flux-"
+      ]
+    },
+    {
+      "id": "stability",
+      "name": "Stability AI",
+      "kind": "model_lab",
+      "aliases": [
+        "stabilityai"
+      ],
+      "families": [
+        "stable-diffusion-"
+      ]
+    },
+    {
+      "id": "ideogram",
+      "name": "Ideogram",
+      "kind": "model_lab",
+      "aliases": [
+        "ideogram"
+      ],
+      "families": []
+    },
+    {
+      "id": "recraft",
+      "name": "Recraft",
+      "kind": "model_lab",
+      "aliases": [
+        "recraft"
+      ],
+      "families": []
+    },
+    {
+      "id": "quiverai",
+      "name": "QuiverAI",
+      "kind": "model_lab",
+      "aliases": [
+        "quiverai"
+      ],
+      "families": [],
+      "sources": [
+        "https://quiver.ai/"
+      ]
+    },
+    {
+      "id": "cartesia",
+      "name": "Cartesia",
+      "kind": "model_lab",
+      "aliases": [
+        "cartesia"
+      ],
+      "families": []
+    },
+    {
+      "id": "deepgram",
+      "name": "Deepgram",
+      "kind": "model_lab",
+      "aliases": [
+        "deepgram"
+      ],
+      "families": []
+    },
+    {
+      "id": "fish-audio",
+      "name": "Fish Audio",
+      "kind": "model_lab",
+      "aliases": [
+        "fish-audio"
+      ],
+      "families": []
+    },
+    {
+      "id": "canopylabs",
+      "name": "Canopy Labs",
+      "kind": "model_lab",
+      "aliases": [
+        "canopylabs"
+      ],
+      "families": [
+        "orpheus-"
+      ]
+    },
+    {
+      "id": "rime-labs",
+      "name": "Rime",
+      "kind": "model_lab",
+      "aliases": [
+        "rime-labs"
+      ],
+      "families": []
+    },
+    {
+      "id": "sarvam",
+      "name": "Sarvam AI",
+      "kind": "model_lab",
+      "aliases": [
+        "sarvamai"
+      ],
+      "families": []
+    },
+    {
+      "id": "voyage",
+      "name": "Voyage AI",
+      "kind": "model_lab",
+      "aliases": [
+        "voyage"
+      ],
+      "families": [
+        "voyage-"
+      ]
+    },
+    {
+      "id": "mixedbread",
+      "name": "Mixedbread",
+      "kind": "model_lab",
+      "aliases": [
+        "mixedbread-ai"
+      ],
+      "families": []
+    },
+    {
+      "id": "vidu",
+      "name": "Vidu",
+      "kind": "model_lab",
+      "aliases": [
+        "vidu"
+      ],
+      "families": []
+    },
+    {
+      "id": "pixverse",
+      "name": "PixVerse",
+      "kind": "model_lab",
+      "aliases": [
+        "pixverse"
+      ],
+      "families": []
+    },
+    {
+      "id": "inference-net",
+      "name": "Inference.net / Schematron",
+      "kind": "model_lab",
+      "aliases": [
+        "inference-net"
+      ],
+      "families": [
+        "schematron-"
+      ],
+      "sources": [
+        "https://docs.inference.net/workhorse-models/schematron"
+      ],
+      "lineage_notes": "Schematron uses schema-guided extraction; a serving-provider record alone is not authorship."
+    },
+    {
+      "id": "meituan",
+      "name": "Meituan",
+      "kind": "model_lab",
+      "aliases": [
+        "meituan"
+      ],
+      "families": [
+        "longcat-"
+      ]
+    },
+    {
+      "id": "perceptron",
+      "name": "Perceptron",
+      "kind": "model_lab",
+      "aliases": [
+        "perceptron"
+      ],
+      "families": []
+    },
+    {
+      "id": "nex-agi",
+      "name": "Nex-AGI",
+      "kind": "research_consortium",
+      "aliases": [
+        "nex-agi"
+      ],
+      "families": [],
+      "sources": [
+        "https://huggingface.co/nex-agi"
+      ]
+    },
+    {
+      "id": "hcompany",
+      "name": "H Company",
+      "kind": "model_lab",
+      "aliases": [
+        "hcompany"
+      ],
+      "families": []
+    },
+    {
+      "id": "aion-labs",
+      "name": "Aion Labs (aionlabs.ai)",
+      "kind": "composite_service",
+      "aliases": [
+        "aion-labs"
+      ],
+      "families": [],
+      "sources": [
+        "https://www.aionlabs.ai/docs/models/"
+      ],
+      "lineage_notes": "Aion 3 uses GLM; Aion 3 Mini uses DeepSeek; Aion 2 derives from DeepSeek V3.2; Aion RP derives from Llama 3.1. Not the pharma venture studio."
+    },
+    {
+      "id": "dots-studio",
+      "name": "Dots Studio",
+      "kind": "model_lab",
+      "aliases": [
+        "dots-studio"
+      ],
+      "families": [],
+      "sources": [
+        "https://huggingface.co/dots-studio/models",
+        "https://studio.dots.ai/"
+      ]
+    },
+    {
+      "id": "interfaze",
+      "name": "Interfaze",
+      "kind": "model_lab",
+      "aliases": [
+        "interfaze"
+      ],
+      "families": [],
+      "sources": [
+        "https://interfaze.ai/",
+        "https://arxiv.org/abs/2602.04101"
+      ]
+    },
+    {
+      "id": "unbiased",
+      "name": "Unbiased / Circuit & Chisel",
+      "kind": "composite_service",
+      "aliases": [
+        "unbiased"
+      ],
+      "families": [],
+      "sources": [
+        "https://circuitandchisel.com/"
+      ],
+      "lineage_notes": "Pareto blends frontier and open models; not verified independent pretraining."
+    },
+    {
+      "id": "abliteration-ai",
+      "name": "Abliteration.ai",
+      "kind": "publisher",
+      "aliases": [
+        "abliteration-ai"
+      ],
+      "families": [
+        "abliterated-"
+      ]
+    },
+    {
+      "id": "prunaai",
+      "name": "Pruna AI",
+      "kind": "publisher",
+      "aliases": [
+        "prunaai"
+      ],
+      "families": []
+    },
+    {
+      "id": "prodia",
+      "name": "Prodia",
+      "kind": "publisher",
+      "aliases": [
+        "prodia"
+      ],
+      "families": []
+    },
+    {
+      "id": "typesafe-ai",
+      "name": "Typesafe AI",
+      "kind": "model_lab",
+      "aliases": [
+        "typesafe-ai"
+      ],
+      "families": [],
+      "sources": [
+        "https://typesafe.ai/"
+      ],
+      "lineage_notes": "Jev is an evaluation specialist; do not infer general chat-worker capability."
+    },
+    {
+      "id": "arize-ai",
+      "name": "Arize AI",
+      "kind": "publisher",
+      "aliases": [
+        "arize-ai"
+      ],
+      "families": []
+    },
+    {
+      "id": "together",
+      "name": "Together AI (own published models)",
+      "kind": "publisher",
+      "aliases": [
+        "togethercomputer"
+      ],
+      "families": []
+    },
+    {
+      "id": "baai",
+      "name": "Beijing Academy of Artificial Intelligence",
+      "kind": "research_group",
+      "aliases": [
+        "baai"
+      ],
+      "families": [
+        "bge-"
+      ]
+    },
+    {
+      "id": "aisingapore",
+      "name": "AI Singapore",
+      "kind": "research_group",
+      "aliases": [
+        "aisingapore"
+      ],
+      "families": []
+    },
+    {
+      "id": "swiss-ai",
+      "name": "Swiss AI Initiative",
+      "kind": "research_group",
+      "aliases": [
+        "swiss-ai"
+      ],
+      "families": []
+    },
+    {
+      "id": "speakleash",
+      "name": "SpeakLeash",
+      "kind": "research_group",
+      "aliases": [
+        "speakleash"
+      ],
+      "families": []
+    },
+    {
+      "id": "bigcode",
+      "name": "BigCode",
+      "kind": "research_group",
+      "aliases": [
+        "bigcode"
+      ],
+      "families": []
+    },
+    {
+      "id": "nv-mistralai",
+      "name": "NVIDIA / Mistral collaboration",
+      "kind": "collaboration",
+      "aliases": [
+        "nv-mistralai"
+      ],
+      "families": [],
+      "members": [
+        "nvidia",
+        "mistral"
+      ],
+      "sources": [
+        "https://mistral.ai/news/mistral-nemo/"
+      ]
+    },
+    {
+      "id": "sao10k",
+      "name": "Sao10K",
+      "kind": "community_publisher",
+      "aliases": [
+        "sao10k"
+      ],
+      "families": []
+    },
+    {
+      "id": "thedrummer",
+      "name": "TheDrummer",
+      "kind": "community_publisher",
+      "aliases": [
+        "thedrummer"
+      ],
+      "families": []
+    },
+    {
+      "id": "cognitivecomputations",
+      "name": "Cognitive Computations",
+      "kind": "community_publisher",
+      "aliases": [
+        "cognitivecomputations"
+      ],
+      "families": []
+    },
+    {
+      "id": "anthracite-org",
+      "name": "Anthracite",
+      "kind": "community_publisher",
+      "aliases": [
+        "anthracite-org"
+      ],
+      "families": []
+    },
+    {
+      "id": "mancer",
+      "name": "Mancer",
+      "kind": "community_publisher",
+      "aliases": [
+        "mancer"
+      ],
+      "families": []
+    },
+    {
+      "id": "undi95",
+      "name": "Undi95",
+      "kind": "community_publisher",
+      "aliases": [
+        "undi95"
+      ],
+      "families": []
+    },
+    {
+      "id": "gryphe",
+      "name": "Gryphe",
+      "kind": "community_publisher",
+      "aliases": [
+        "gryphe"
+      ],
+      "families": []
+    },
+    {
+      "id": "alpindale",
+      "name": "Alpindale",
+      "kind": "community_publisher",
+      "aliases": [
+        "alpindale"
+      ],
+      "families": [],
+      "sources": [
+        "https://huggingface.co/alpindale/WizardLM-2-8x22B"
+      ],
+      "lineage_notes": "WizardLM-2 is republished; publisher identity does not establish independent model training."
+    },
+    {
+      "id": "rundiffusion",
+      "name": "RunDiffusion",
+      "kind": "community_publisher",
+      "aliases": [
+        "rundiffusion"
+      ],
+      "families": []
+    },
+    {
+      "id": "hexgrad",
+      "name": "Hexgrad",
+      "kind": "community_publisher",
+      "aliases": [
+        "hexgrad"
+      ],
+      "families": []
+    },
+    {
+      "id": "agentica-org",
+      "name": "Agentica",
+      "kind": "community_publisher",
+      "aliases": [
+        "agentica-org"
+      ],
+      "families": []
+    },
+    {
+      "id": "mindai",
+      "name": "MindAI (catalog publisher)",
+      "kind": "publisher",
+      "aliases": [
+        "mindai"
+      ],
+      "families": []
+    },
+    {
+      "id": "openrouter",
+      "name": "OpenRouter automatic/composite routes",
+      "kind": "router",
+      "aliases": [
+        "openrouter"
+      ],
+      "families": []
+    },
+    {
+      "id": "kilo-auto",
+      "name": "Kilo automatic routes",
+      "kind": "router",
+      "aliases": [
+        "kilo-auto"
+      ],
+      "families": []
+    },
+    {
+      "id": "groq",
+      "name": "Groq compound systems",
+      "kind": "composite_service",
+      "aliases": [
+        "groq"
+      ],
+      "families": []
+    },
+    {
+      "id": "sdaia",
+      "name": "SDAIA / NCAI",
+      "kind": "model_lab",
+      "aliases": [
+        "sdaia",
+        "allam-ai"
+      ],
+      "families": [
+        "allam-"
+      ],
+      "sources": [
+        "https://console.groq.com/docs/model/allam-2-7b"
+      ]
+    }
+  ]
+}

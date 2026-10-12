@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <ctype.h>
 #include <errno.h>
+#include <time.h>
 
 /* ── Redis fast-path (optional) ─────────────────────────────────────────────
  * When HAVE_REDIS is defined and Redis is reachable, ipc_send() uses Redis
@@ -22,19 +23,24 @@
 #include <pthread.h>
 
 static redisContext *g_redis = NULL;
-static __attribute__((unused)) redisContext *g_redis_sub = NULL;   /* dedicated subscribe connection */
+static __attribute__((unused)) redisContext *g_redis_sub =
+    NULL; /* dedicated subscribe connection */
 static pthread_mutex_t g_redis_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static void redis_connect(void) {
     const char *host = getenv("DSCO_REDIS_HOST") ? getenv("DSCO_REDIS_HOST") : "127.0.0.1";
     int port = 6379;
     const char *pstr = getenv("DSCO_REDIS_PORT");
-    if (pstr) port = atoi(pstr);
+    if (pstr)
+        port = atoi(pstr);
 
-    struct timeval tv = { .tv_sec = 0, .tv_usec = 50000 };  /* 50ms timeout */
+    struct timeval tv = {.tv_sec = 0, .tv_usec = 50000}; /* 50ms timeout */
     g_redis = redisConnectWithTimeout(host, port, tv);
     if (!g_redis || g_redis->err) {
-        if (g_redis) { redisFree(g_redis); g_redis = NULL; }
+        if (g_redis) {
+            redisFree(g_redis);
+            g_redis = NULL;
+        }
         return;
     }
     redisSetTimeout(g_redis, tv);
@@ -43,54 +49,78 @@ static void redis_connect(void) {
     const char *pw = getenv("DSCO_REDIS_PASSWORD");
     if (pw && pw[0]) {
         redisReply *r = redisCommand(g_redis, "AUTH %s", pw);
-        if (r) freeReplyObject(r);
+        if (r)
+            freeReplyObject(r);
     }
 }
 
 static bool redis_publish(const char *channel, const char *msg) {
-    if (!g_redis) return false;
+    if (!g_redis)
+        return false;
     pthread_mutex_lock(&g_redis_mu);
     redisReply *r = redisCommand(g_redis, "PUBLISH dsco:%s %s", channel, msg);
     bool ok = r && r->type == REDIS_REPLY_INTEGER;
-    if (r) freeReplyObject(r);
-    if (!ok && g_redis->err) { redisFree(g_redis); g_redis = NULL; }
+    if (r)
+        freeReplyObject(r);
+    if (!ok && g_redis->err) {
+        redisFree(g_redis);
+        g_redis = NULL;
+    }
     pthread_mutex_unlock(&g_redis_mu);
     return ok;
 }
 
 /* Push to a Redis list (task queue) — O(1) */
 static bool redis_lpush(const char *list, const char *val) {
-    if (!g_redis) return false;
+    if (!g_redis)
+        return false;
     pthread_mutex_lock(&g_redis_mu);
     redisReply *r = redisCommand(g_redis, "LPUSH dsco:q:%s %s", list, val);
     bool ok = r && r->type == REDIS_REPLY_INTEGER;
-    if (r) freeReplyObject(r);
+    if (r)
+        freeReplyObject(r);
     pthread_mutex_unlock(&g_redis_mu);
     return ok;
 }
 
 /* Non-blocking pop from Redis list */
 static char *redis_rpop(const char *list) {
-    if (!g_redis) return NULL;
+    if (!g_redis)
+        return NULL;
     pthread_mutex_lock(&g_redis_mu);
     redisReply *r = redisCommand(g_redis, "RPOP dsco:q:%s", list);
     char *val = NULL;
     if (r && r->type == REDIS_REPLY_STRING)
         val = strdup(r->str);
-    if (r) freeReplyObject(r);
+    if (r)
+        freeReplyObject(r);
     pthread_mutex_unlock(&g_redis_mu);
     return val;
 }
 
-bool ipc_redis_available(void) { return g_redis != NULL; }
+bool ipc_redis_available(void) {
+    return g_redis != NULL;
+}
 
-void ipc_redis_lpush(const char *list, const char *val) { redis_lpush(list, val); }
-char *ipc_redis_rpop(const char *list) { return redis_rpop(list); }
+void ipc_redis_lpush(const char *list, const char *val) {
+    redis_lpush(list, val);
+}
+char *ipc_redis_rpop(const char *list) {
+    return redis_rpop(list);
+}
 
 #else
-bool  ipc_redis_available(void)                            { return false; }
-void  ipc_redis_lpush(const char *l, const char *v)        { (void)l; (void)v; }
-char *ipc_redis_rpop(const char *l)                        { (void)l; return NULL; }
+bool ipc_redis_available(void) {
+    return false;
+}
+void ipc_redis_lpush(const char *l, const char *v) {
+    (void)l;
+    (void)v;
+}
+char *ipc_redis_rpop(const char *l) {
+    (void)l;
+    return NULL;
+}
 #endif /* HAVE_REDIS */
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -99,9 +129,9 @@ char *ipc_redis_rpop(const char *l)                        { (void)l; return NUL
 
 static struct {
     sqlite3 *db;
-    bool     ready;
-    char     self_id[IPC_MAX_AGENT_ID];
-    char     db_path[4096];
+    bool ready;
+    char self_id[IPC_MAX_AGENT_ID];
+    char db_path[4096];
 } g_ipc = {0};
 
 /* Event-loop driven heartbeat (non-blocking) */
@@ -140,9 +170,11 @@ static void gen_agent_id(char *buf, size_t len) {
 }
 
 static bool ipc_agent_id_is_valid(const char *id) {
-    if (!id || !id[0]) return false;
+    if (!id || !id[0])
+        return false;
     size_t n = strlen(id);
-    if (n >= IPC_MAX_AGENT_ID) return false;
+    if (n >= IPC_MAX_AGENT_ID)
+        return false;
     for (const unsigned char *p = (const unsigned char *)id; *p; p++) {
         if (isalnum(*p) || *p == '-' || *p == '_' || *p == '.' || *p == ':')
             continue;
@@ -152,43 +184,51 @@ static bool ipc_agent_id_is_valid(const char *id) {
 }
 
 static bool ipc_mkdir_p(const char *path) {
-    if (!path || !path[0]) return false;
+    if (!path || !path[0])
+        return false;
 
     char tmp[4096];
     size_t n = strlen(path);
-    if (n >= sizeof(tmp)) return false;
+    if (n >= sizeof(tmp))
+        return false;
     memcpy(tmp, path, n + 1);
 
     for (char *p = tmp + 1; *p; p++) {
-        if (*p != '/') continue;
+        if (*p != '/')
+            continue;
         *p = '\0';
-        if (tmp[0] != '\0' && mkdir(tmp, 0700) != 0 && errno != EEXIST) return false;
+        if (tmp[0] != '\0' && mkdir(tmp, 0700) != 0 && errno != EEXIST)
+            return false;
         *p = '/';
     }
-    if (mkdir(tmp, 0700) != 0 && errno != EEXIST) return false;
+    if (mkdir(tmp, 0700) != 0 && errno != EEXIST)
+        return false;
     return true;
 }
 
 static bool ipc_ensure_parent_dir(const char *path) {
-    if (!path || !path[0]) return false;
+    if (!path || !path[0])
+        return false;
 
     char tmp[4096];
     size_t n = strlen(path);
-    if (n >= sizeof(tmp)) return false;
+    if (n >= sizeof(tmp))
+        return false;
     memcpy(tmp, path, n + 1);
 
     char *slash = strrchr(tmp, '/');
-    if (!slash) return true;
+    if (!slash)
+        return true;
     *slash = '\0';
-    if (tmp[0] == '\0') return true;
+    if (tmp[0] == '\0')
+        return true;
     return ipc_mkdir_p(tmp);
 }
 
 static void ipc_default_db_path(char *buf, size_t len) {
     const char *home = getenv("HOME");
     if (home && home[0]) {
-        snprintf(buf, len, "%s/.dsco/ipc/dsco_ipc_%d_%d.db",
-                 home, (int)geteuid(), (int)getppid());
+        snprintf(buf, len, "%s/.dsco/ipc/dsco_ipc_%d_%d.db", home, (int)geteuid(), (int)getppid());
         return;
     }
     snprintf(buf, len, "/tmp/dsco_ipc_%d_%d.db", (int)geteuid(), (int)getppid());
@@ -199,8 +239,10 @@ static bool ipc_db_path_is_safe(const char *path) {
     if (lstat(path, &st) != 0) {
         return errno == ENOENT;
     }
-    if (S_ISLNK(st.st_mode) || !S_ISREG(st.st_mode)) return false;
-    if (st.st_uid != geteuid()) return false;
+    if (S_ISLNK(st.st_mode) || !S_ISREG(st.st_mode))
+        return false;
+    if (st.st_uid != geteuid())
+        return false;
     return true;
 }
 
@@ -216,8 +258,19 @@ static const char *SCHEMA_SQL =
     "  depth INTEGER DEFAULT 0,"
     "  status TEXT DEFAULT 'starting',"
     "  role TEXT DEFAULT '',"
+    "  model TEXT DEFAULT '',"
     "  current_task TEXT DEFAULT '',"
     "  toolkit TEXT DEFAULT '*',"
+    "  organization_id TEXT DEFAULT '',"
+    "  deployment_id TEXT DEFAULT '',"
+    "  role_id TEXT DEFAULT '',"
+    "  policy_sha256 TEXT DEFAULT '',"
+    "  capsule_sha256 TEXT DEFAULT '',"
+    "  graphsub_namespace TEXT DEFAULT '',"
+    "  router_project_id TEXT DEFAULT '',"
+    "  capabilities TEXT DEFAULT '[]',"
+    "  budget_gsu REAL DEFAULT 0,"
+    "  budget_usd REAL DEFAULT 0,"
     "  started_at REAL,"
     "  last_heartbeat REAL"
     ");"
@@ -235,6 +288,9 @@ static const char *SCHEMA_SQL =
     "CREATE TABLE IF NOT EXISTS tasks ("
     "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
     "  assigned_to TEXT,"
+    "  target_agent_id TEXT,"
+    "  generation INTEGER NOT NULL DEFAULT 0,"
+    "  claim_pid INTEGER NOT NULL DEFAULT 0,"
     "  created_by TEXT,"
     "  parent_task_id INTEGER DEFAULT 0,"
     "  priority INTEGER DEFAULT 0,"
@@ -258,7 +314,8 @@ static const char *SCHEMA_SQL =
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 bool ipc_init(const char *db_path, const char *agent_id) {
-    if (g_ipc.ready) return true;
+    if (g_ipc.ready)
+        return true;
 
     /* Determine DB path */
     if (db_path && db_path[0]) {
@@ -272,8 +329,8 @@ bool ipc_init(const char *db_path, const char *agent_id) {
         }
     }
     if (!ipc_ensure_parent_dir(g_ipc.db_path)) {
-        fprintf(stderr, "ipc: failed to create parent directory for %s: %s\n",
-                g_ipc.db_path, strerror(errno));
+        fprintf(stderr, "ipc: failed to create parent directory for %s: %s\n", g_ipc.db_path,
+                strerror(errno));
         return false;
     }
     if (!ipc_db_path_is_safe(g_ipc.db_path)) {
@@ -289,8 +346,8 @@ bool ipc_init(const char *db_path, const char *agent_id) {
     }
 
     /* Open SQLite in WAL mode for concurrent access */
-    int rc = sqlite3_open_v2(g_ipc.db_path, &g_ipc.db,
-                             SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
+    int rc =
+        sqlite3_open_v2(g_ipc.db_path, &g_ipc.db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
     if (rc != SQLITE_OK) {
         fprintf(stderr, "ipc: sqlite open failed: %s\n", sqlite3_errmsg(g_ipc.db));
         sqlite3_close(g_ipc.db);
@@ -312,23 +369,60 @@ bool ipc_init(const char *db_path, const char *agent_id) {
         sqlite3_close(g_ipc.db);
         return false;
     }
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN model TEXT DEFAULT ''", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN organization_id TEXT DEFAULT ''", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN deployment_id TEXT DEFAULT ''", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN role_id TEXT DEFAULT ''", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN policy_sha256 TEXT DEFAULT ''", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN capsule_sha256 TEXT DEFAULT ''", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN graphsub_namespace TEXT DEFAULT ''", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN router_project_id TEXT DEFAULT ''", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN capabilities TEXT DEFAULT '[]'", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN budget_gsu REAL DEFAULT 0", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE agents ADD COLUMN budget_usd REAL DEFAULT 0", NULL, NULL, NULL);
+
+    /* Older rows overload assigned_to with both routing and ownership. Preserve
+     * every nonempty legacy assignment conservatively: discarding it can expose
+     * targeted work to unrelated workers. New shared submissions store "". */
+    sqlite3_exec(g_ipc.db, "ALTER TABLE tasks ADD COLUMN target_agent_id TEXT", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE tasks ADD COLUMN generation INTEGER NOT NULL DEFAULT 0", NULL, NULL, NULL);
+    sqlite3_exec(g_ipc.db, "ALTER TABLE tasks ADD COLUMN claim_pid INTEGER NOT NULL DEFAULT 0", NULL, NULL, NULL);
+    if (sqlite3_exec(g_ipc.db,
+            "UPDATE tasks SET target_agent_id=COALESCE(assigned_to,'') "
+            "WHERE target_agent_id IS NULL", NULL, NULL, NULL) != SQLITE_OK) {
+        sqlite3_close(g_ipc.db);
+        g_ipc.db = NULL;
+        return false;
+    }
+    /* Keep claims proportional to one destination's ready work, rather than
+       scanning every other agent's pending tasks. Create after the legacy
+       target column migration so existing databases upgrade in place. */
+    if (sqlite3_exec(g_ipc.db,
+            "CREATE INDEX IF NOT EXISTS idx_task_pending_target "
+            "ON tasks(target_agent_id, priority DESC, created_at ASC) "
+            "WHERE status='pending'", NULL, NULL, NULL) != SQLITE_OK) {
+        sqlite3_close(g_ipc.db);
+        g_ipc.db = NULL;
+        return false;
+    }
 
     /* Clean up orphaned tasks — tasks assigned to agents that are no longer alive */
     sqlite3_exec(g_ipc.db,
-        "UPDATE tasks SET status='pending', assigned_to=NULL "
-        "WHERE status IN ('assigned','running') "
-        "AND assigned_to NOT IN (SELECT id FROM agents WHERE last_heartbeat > strftime('%s','now') - 60)",
-        NULL, NULL, NULL);
+                 "UPDATE tasks SET status='pending', assigned_to=target_agent_id "
+                 "WHERE status IN ('assigned','running') "
+                 "AND assigned_to NOT IN (SELECT id FROM agents WHERE status='durable' OR "
+                 "last_heartbeat > strftime('%s','now') - 60)",
+                 NULL, NULL, NULL);
 
-    /* Mark dead agents */
+    /* Mark dead live agents; durable mailbox identities are not heartbeating
+     * processes and must not be reaped by wall-clock staleness. */
     {
-        const char *dead_sql =
-            "UPDATE agents SET status='dead' "
-            "WHERE status NOT IN ('done','error','dead') "
-            "AND last_heartbeat < ?";
+        const char *dead_sql = "UPDATE agents SET status='dead' "
+                               "WHERE status NOT IN ('durable','done','error','dead') "
+                               "AND last_heartbeat < ?";
         sqlite3_stmt *dead_stmt;
         if (sqlite3_prepare_v2(g_ipc.db, dead_sql, -1, &dead_stmt, NULL) == SQLITE_OK) {
-            sqlite3_bind_double(dead_stmt, 1, now_ts() - IPC_STALE_SEC);
+            sqlite3_bind_double(dead_stmt, 1, now_ts() - dsco_ipc_stale_sec());
             sqlite3_step(dead_stmt);
             sqlite3_finalize(dead_stmt);
         }
@@ -348,7 +442,8 @@ bool ipc_init(const char *db_path, const char *agent_id) {
 }
 
 void ipc_shutdown(void) {
-    if (!g_ipc.ready) return;
+    if (!g_ipc.ready)
+        return;
 
     /* Cancel event-loop heartbeat timer if active */
     if (g_ipc_heartbeat_timer >= 0 && g_ipc_ev_loop) {
@@ -357,28 +452,54 @@ void ipc_shutdown(void) {
     }
     g_ipc_ev_loop = NULL;
 
-    /* Fail any tasks we had claimed but didn't finish */
-    {
+    /* Fail tasks owned by a terminating live worker. A durable activation may
+     * claim its boot task in the lightweight launcher and then exec the worker;
+     * preserve that assignment across the exec boundary. */
+    if (!getenv("DSCO_DURABLE_BOOT_TASK_ID")) {
         const char *fail_sql =
             "UPDATE tasks SET status='failed', result='agent shutdown', completed_at=? "
-            "WHERE assigned_to=? AND status IN ('assigned','running')";
+            "WHERE assigned_to=? AND claim_pid=? AND status IN ('assigned','running')";
         sqlite3_stmt *stmt;
         if (sqlite3_prepare_v2(g_ipc.db, fail_sql, -1, &stmt, NULL) == SQLITE_OK) {
             sqlite3_bind_double(stmt, 1, now_ts());
             sqlite3_bind_text(stmt, 2, g_ipc.self_id, -1, SQLITE_STATIC);
+            sqlite3_bind_int(stmt, 3, getpid());
             sqlite3_step(stmt);
             sqlite3_finalize(stmt);
         }
     }
 
-    ipc_set_status(IPC_AGENT_DONE, "");
+    /* CLI inspectors and mailbox senders can open the bus using an existing
+     * durable agent id without becoming that agent's live process. Only mark a
+     * process-owned registry row done on shutdown. */
+    ipc_agent_info_t self;
+    if (ipc_get_agent(g_ipc.self_id, &self) && self.pid == getpid()) {
+        const char *durable_id = getenv("DSCO_DURABLE_AGENT_ID");
+        if (durable_id && strcmp(durable_id, g_ipc.self_id) == 0) {
+            const char *sql = "UPDATE agents SET pid=0, status='durable', current_task='', "
+                              "last_heartbeat=0 WHERE id=? AND pid=?";
+            sqlite3_stmt *stmt = NULL;
+            if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+                sqlite3_bind_text(stmt, 1, g_ipc.self_id, -1, SQLITE_STATIC);
+                sqlite3_bind_int(stmt, 2, getpid());
+                sqlite3_step(stmt);
+                sqlite3_finalize(stmt);
+            }
+        } else if (self.status != IPC_AGENT_DURABLE) {
+            ipc_set_status(IPC_AGENT_DONE, "");
+        }
+    }
     sqlite3_close(g_ipc.db);
     g_ipc.db = NULL;
     g_ipc.ready = false;
 }
 
-const char *ipc_self_id(void) { return g_ipc.self_id; }
-const char *ipc_db_path(void) { return g_ipc.db_path; }
+const char *ipc_self_id(void) {
+    return g_ipc.self_id;
+}
+const char *ipc_db_path(void) {
+    return g_ipc.db_path;
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Agent Registry
@@ -386,44 +507,61 @@ const char *ipc_db_path(void) { return g_ipc.db_path; }
 
 static const char *status_str(ipc_agent_status_t s) {
     switch (s) {
-        case IPC_AGENT_STARTING: return "starting";
-        case IPC_AGENT_IDLE:     return "idle";
-        case IPC_AGENT_WORKING:  return "working";
-        case IPC_AGENT_DONE:     return "done";
-        case IPC_AGENT_ERROR:    return "error";
-        case IPC_AGENT_DEAD:     return "dead";
+        case IPC_AGENT_STARTING:
+            return "starting";
+        case IPC_AGENT_DURABLE:
+            return "durable";
+        case IPC_AGENT_IDLE:
+            return "idle";
+        case IPC_AGENT_WORKING:
+            return "working";
+        case IPC_AGENT_DONE:
+            return "done";
+        case IPC_AGENT_ERROR:
+            return "error";
+        case IPC_AGENT_DEAD:
+            return "dead";
     }
     return "unknown";
 }
 
 static ipc_agent_status_t parse_status(const char *s) {
-    if (!s) return IPC_AGENT_DEAD;
-    if (strcmp(s, "starting") == 0) return IPC_AGENT_STARTING;
-    if (strcmp(s, "idle") == 0)     return IPC_AGENT_IDLE;
-    if (strcmp(s, "working") == 0)  return IPC_AGENT_WORKING;
-    if (strcmp(s, "done") == 0)     return IPC_AGENT_DONE;
-    if (strcmp(s, "error") == 0)    return IPC_AGENT_ERROR;
+    if (!s)
+        return IPC_AGENT_DEAD;
+    if (strcmp(s, "starting") == 0)
+        return IPC_AGENT_STARTING;
+    if (strcmp(s, "durable") == 0)
+        return IPC_AGENT_DURABLE;
+    if (strcmp(s, "idle") == 0)
+        return IPC_AGENT_IDLE;
+    if (strcmp(s, "working") == 0)
+        return IPC_AGENT_WORKING;
+    if (strcmp(s, "done") == 0)
+        return IPC_AGENT_DONE;
+    if (strcmp(s, "error") == 0)
+        return IPC_AGENT_ERROR;
     return IPC_AGENT_DEAD;
 }
 
-bool ipc_register(const char *parent_id, int depth, const char *role,
-                  const char *toolkit) {
-    if (!g_ipc.ready) return false;
+bool ipc_register(const char *parent_id, int depth, const char *role, const char *toolkit) {
+    if (!g_ipc.ready)
+        return false;
 
     const char *safe_parent = (parent_id && ipc_agent_id_is_valid(parent_id)) ? parent_id : "";
-    const char *sql =
-        "INSERT INTO agents (id, parent_id, pid, depth, status, role, toolkit, started_at, last_heartbeat) "
-        "VALUES (?, ?, ?, ?, 'idle', ?, ?, ?, ?) "
-        "ON CONFLICT(id) DO UPDATE SET "
-        "parent_id=excluded.parent_id, "
-        "pid=excluded.pid, "
-        "depth=excluded.depth, "
-        "status='idle', "
-        "role=excluded.role, "
-        "toolkit=excluded.toolkit, "
-        "started_at=excluded.started_at, "
-        "last_heartbeat=excluded.last_heartbeat "
-        "WHERE agents.pid = excluded.pid";
+    const char *sql = "INSERT INTO agents (id, parent_id, pid, depth, status, role, model, toolkit, "
+                      "started_at, last_heartbeat) "
+                      "VALUES (?, ?, ?, ?, 'idle', ?, '', ?, ?, ?) "
+                      "ON CONFLICT(id) DO UPDATE SET "
+                      "parent_id=excluded.parent_id, "
+                      "pid=excluded.pid, "
+                      "depth=excluded.depth, "
+                      "status='idle', "
+                      "role=excluded.role, "
+                      "model=excluded.model, "
+                      "toolkit=excluded.toolkit, "
+                      "started_at=excluded.started_at, "
+                      "last_heartbeat=excluded.last_heartbeat "
+                      "WHERE agents.pid = excluded.pid";
 
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -444,11 +582,97 @@ bool ipc_register(const char *parent_id, int depth, const char *role,
     return ok;
 }
 
-bool ipc_set_status(ipc_agent_status_t status, const char *current_task) {
-    if (!g_ipc.ready) return false;
+bool ipc_agent_define(const char *agent_id, const char *parent_id, int depth, const char *role,
+                      const char *model, const char *toolkit) {
+    return ipc_agent_define_bound(agent_id, parent_id, depth, role, model, toolkit, NULL);
+}
 
+bool ipc_agent_define_bound(const char *agent_id, const char *parent_id, int depth, const char *role,
+                            const char *model, const char *toolkit,
+                            const ipc_agent_binding_t *binding) {
+    if (!g_ipc.ready || !agent_id || !ipc_agent_id_is_valid(agent_id))
+        return false;
+    const char *safe_parent = (parent_id && ipc_agent_id_is_valid(parent_id)) ? parent_id : "";
     const char *sql =
-        "UPDATE agents SET status=?, current_task=?, last_heartbeat=? WHERE id=?";
+        "INSERT INTO agents (id, parent_id, pid, depth, status, role, model, current_task, "
+        "toolkit, organization_id, deployment_id, role_id, policy_sha256, capsule_sha256, "
+        "graphsub_namespace, router_project_id, capabilities, budget_gsu, budget_usd, "
+        "started_at, last_heartbeat) "
+        "VALUES (?, ?, 0, ?, 'durable', ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0) "
+        "ON CONFLICT(id) DO UPDATE SET "
+        "parent_id=excluded.parent_id, "
+        "depth=excluded.depth, "
+        "status='durable', "
+        "role=excluded.role, "
+        "model=excluded.model, "
+        "toolkit=excluded.toolkit, "
+        "organization_id=excluded.organization_id, "
+        "deployment_id=excluded.deployment_id, "
+        "role_id=excluded.role_id, "
+        "policy_sha256=excluded.policy_sha256, "
+        "capsule_sha256=excluded.capsule_sha256, "
+        "graphsub_namespace=excluded.graphsub_namespace, "
+        "router_project_id=excluded.router_project_id, "
+        "capabilities=excluded.capabilities, "
+        "budget_gsu=excluded.budget_gsu, "
+        "budget_usd=excluded.budget_usd";
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_bind_text(stmt, 1, agent_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, safe_parent, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 3, depth < 0 ? 0 : depth);
+    sqlite3_bind_text(stmt, 4, role ? role : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, model ? model : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 6, toolkit ? toolkit : "*", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 7, binding && binding->organization_id ? binding->organization_id : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 8, binding && binding->deployment_id ? binding->deployment_id : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 9, binding && binding->role_id ? binding->role_id : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 10, binding && binding->policy_sha256 ? binding->policy_sha256 : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 11, binding && binding->capsule_sha256 ? binding->capsule_sha256 : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 12, binding && binding->graphsub_namespace ? binding->graphsub_namespace : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 13, binding && binding->router_project_id ? binding->router_project_id : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 14, binding && binding->capabilities ? binding->capabilities : "[]", -1, SQLITE_STATIC);
+    sqlite3_bind_double(stmt, 15, binding ? binding->budget_gsu : 0.0);
+    sqlite3_bind_double(stmt, 16, binding ? binding->budget_usd : 0.0);
+    sqlite3_bind_double(stmt, 17, now_ts());
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+bool ipc_agent_activate(void) {
+    if (!g_ipc.ready)
+        return false;
+    /* Claim rules are ownership-based, not status-based: a crashed worker
+     * leaves its row in any non-'durable' state, and a status-only predicate
+     * would lock that agent out of every future activation. A row is
+     * claimable when it has never been activated (pid=0), never heartbeated
+     * (last_heartbeat=0), or its heartbeat is stale. A live worker keeps its
+     * heartbeat fresh and cannot be taken over. */
+    const char *sql =
+        "UPDATE agents SET pid=?, status='idle', current_task='', started_at=?, last_heartbeat=? "
+        "WHERE id=? AND (pid=0 OR last_heartbeat=0 OR last_heartbeat<?)";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return false;
+    double now = now_ts();
+    sqlite3_bind_int(stmt, 1, getpid());
+    sqlite3_bind_double(stmt, 2, now);
+    sqlite3_bind_double(stmt, 3, now);
+    sqlite3_bind_text(stmt, 4, g_ipc.self_id, -1, SQLITE_STATIC);
+    sqlite3_bind_double(stmt, 5, now - dsco_ipc_stale_sec());
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(g_ipc.db) == 1;
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+bool ipc_set_status(ipc_agent_status_t status, const char *current_task) {
+    if (!g_ipc.ready)
+        return false;
+
+    const char *sql = "UPDATE agents SET status=?, current_task=?, last_heartbeat=? WHERE id=?";
 
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -465,7 +689,8 @@ bool ipc_set_status(ipc_agent_status_t status, const char *current_task) {
 }
 
 bool ipc_heartbeat(void) {
-    if (!g_ipc.ready) return false;
+    if (!g_ipc.ready)
+        return false;
 
     const char *sql = "UPDATE agents SET last_heartbeat=? WHERE id=?";
     sqlite3_stmt *stmt;
@@ -483,7 +708,8 @@ bool ipc_heartbeat(void) {
 /* ── Event-loop integration ────────────────────────────────────────── */
 
 static void ipc_heartbeat_timer_cb(int timer_id, void *ctx) {
-    (void)timer_id; (void)ctx;
+    (void)timer_id;
+    (void)ctx;
     ipc_heartbeat();
 }
 
@@ -495,16 +721,19 @@ void ipc_set_event_loop(ev_loop_t *loop) {
     }
     g_ipc_ev_loop = loop;
     if (loop) {
-        g_ipc_heartbeat_timer = ev_timer_repeat(loop,
-            IPC_HEARTBEAT_SEC * 1000, ipc_heartbeat_timer_cb, NULL);
+        g_ipc_heartbeat_timer =
+            ev_timer_repeat(loop, dsco_ipc_heartbeat_sec() * 1000, ipc_heartbeat_timer_cb, NULL);
     }
 }
 
 int ipc_list_agents(ipc_agent_info_t *out, int max) {
-    if (!g_ipc.ready) return 0;
+    if (!g_ipc.ready)
+        return 0;
 
     const char *sql = "SELECT id, parent_id, pid, depth, status, role, "
-                      "current_task, toolkit, started_at, last_heartbeat "
+                      "model, current_task, toolkit, started_at, last_heartbeat, "
+                      "organization_id, deployment_id, role_id, policy_sha256, capsule_sha256, "
+                      "graphsub_namespace, router_project_id, capabilities, budget_gsu, budget_usd "
                       "FROM agents ORDER BY depth, started_at";
 
     sqlite3_stmt *stmt;
@@ -514,8 +743,7 @@ int ipc_list_agents(ipc_agent_info_t *out, int max) {
     int count = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && count < max) {
         ipc_agent_info_t *a = &out[count];
-        snprintf(a->id, sizeof(a->id), "%s",
-                 (const char *)sqlite3_column_text(stmt, 0));
+        snprintf(a->id, sizeof(a->id), "%s", (const char *)sqlite3_column_text(stmt, 0));
         snprintf(a->parent_id, sizeof(a->parent_id), "%s",
                  sqlite3_column_text(stmt, 1) ? (const char *)sqlite3_column_text(stmt, 1) : "");
         a->pid = sqlite3_column_int(stmt, 2);
@@ -523,12 +751,24 @@ int ipc_list_agents(ipc_agent_info_t *out, int max) {
         a->status = parse_status((const char *)sqlite3_column_text(stmt, 4));
         snprintf(a->role, sizeof(a->role), "%s",
                  sqlite3_column_text(stmt, 5) ? (const char *)sqlite3_column_text(stmt, 5) : "");
-        snprintf(a->current_task, sizeof(a->current_task), "%s",
+        snprintf(a->model, sizeof(a->model), "%s",
                  sqlite3_column_text(stmt, 6) ? (const char *)sqlite3_column_text(stmt, 6) : "");
+        snprintf(a->current_task, sizeof(a->current_task), "%s",
+                 sqlite3_column_text(stmt, 7) ? (const char *)sqlite3_column_text(stmt, 7) : "");
         snprintf(a->toolkit, sizeof(a->toolkit), "%s",
-                 sqlite3_column_text(stmt, 7) ? (const char *)sqlite3_column_text(stmt, 7) : "*");
-        a->started_at = sqlite3_column_double(stmt, 8);
-        a->last_heartbeat = sqlite3_column_double(stmt, 9);
+                 sqlite3_column_text(stmt, 8) ? (const char *)sqlite3_column_text(stmt, 8) : "*");
+        a->started_at = sqlite3_column_double(stmt, 9);
+        a->last_heartbeat = sqlite3_column_double(stmt, 10);
+        snprintf(a->organization_id, sizeof(a->organization_id), "%s", sqlite3_column_text(stmt, 11) ? (const char *)sqlite3_column_text(stmt, 11) : "");
+        snprintf(a->deployment_id, sizeof(a->deployment_id), "%s", sqlite3_column_text(stmt, 12) ? (const char *)sqlite3_column_text(stmt, 12) : "");
+        snprintf(a->role_id, sizeof(a->role_id), "%s", sqlite3_column_text(stmt, 13) ? (const char *)sqlite3_column_text(stmt, 13) : "");
+        snprintf(a->policy_sha256, sizeof(a->policy_sha256), "%s", sqlite3_column_text(stmt, 14) ? (const char *)sqlite3_column_text(stmt, 14) : "");
+        snprintf(a->capsule_sha256, sizeof(a->capsule_sha256), "%s", sqlite3_column_text(stmt, 15) ? (const char *)sqlite3_column_text(stmt, 15) : "");
+        snprintf(a->graphsub_namespace, sizeof(a->graphsub_namespace), "%s", sqlite3_column_text(stmt, 16) ? (const char *)sqlite3_column_text(stmt, 16) : "");
+        snprintf(a->router_project_id, sizeof(a->router_project_id), "%s", sqlite3_column_text(stmt, 17) ? (const char *)sqlite3_column_text(stmt, 17) : "");
+        snprintf(a->capabilities, sizeof(a->capabilities), "%s", sqlite3_column_text(stmt, 18) ? (const char *)sqlite3_column_text(stmt, 18) : "[]");
+        a->budget_gsu = sqlite3_column_double(stmt, 19);
+        a->budget_usd = sqlite3_column_double(stmt, 20);
         count++;
     }
     sqlite3_finalize(stmt);
@@ -537,10 +777,13 @@ int ipc_list_agents(ipc_agent_info_t *out, int max) {
 
 bool ipc_get_agent(const char *agent_id, ipc_agent_info_t *out) {
     ipc_agent_info_t agents[1];
-    if (!g_ipc.ready) return false;
+    if (!g_ipc.ready)
+        return false;
 
     const char *sql = "SELECT id, parent_id, pid, depth, status, role, "
-                      "current_task, toolkit, started_at, last_heartbeat "
+                      "model, current_task, toolkit, started_at, last_heartbeat, "
+                      "organization_id, deployment_id, role_id, policy_sha256, capsule_sha256, "
+                      "graphsub_namespace, router_project_id, capabilities, budget_gsu, budget_usd "
                       "FROM agents WHERE id=?";
 
     sqlite3_stmt *stmt;
@@ -550,8 +793,7 @@ bool ipc_get_agent(const char *agent_id, ipc_agent_info_t *out) {
 
     bool found = false;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
-        snprintf(out->id, sizeof(out->id), "%s",
-                 (const char *)sqlite3_column_text(stmt, 0));
+        snprintf(out->id, sizeof(out->id), "%s", (const char *)sqlite3_column_text(stmt, 0));
         snprintf(out->parent_id, sizeof(out->parent_id), "%s",
                  sqlite3_column_text(stmt, 1) ? (const char *)sqlite3_column_text(stmt, 1) : "");
         out->pid = sqlite3_column_int(stmt, 2);
@@ -559,12 +801,24 @@ bool ipc_get_agent(const char *agent_id, ipc_agent_info_t *out) {
         out->status = parse_status((const char *)sqlite3_column_text(stmt, 4));
         snprintf(out->role, sizeof(out->role), "%s",
                  sqlite3_column_text(stmt, 5) ? (const char *)sqlite3_column_text(stmt, 5) : "");
-        snprintf(out->current_task, sizeof(out->current_task), "%s",
+        snprintf(out->model, sizeof(out->model), "%s",
                  sqlite3_column_text(stmt, 6) ? (const char *)sqlite3_column_text(stmt, 6) : "");
+        snprintf(out->current_task, sizeof(out->current_task), "%s",
+                 sqlite3_column_text(stmt, 7) ? (const char *)sqlite3_column_text(stmt, 7) : "");
         snprintf(out->toolkit, sizeof(out->toolkit), "%s",
-                 sqlite3_column_text(stmt, 7) ? (const char *)sqlite3_column_text(stmt, 7) : "*");
-        out->started_at = sqlite3_column_double(stmt, 8);
-        out->last_heartbeat = sqlite3_column_double(stmt, 9);
+                 sqlite3_column_text(stmt, 8) ? (const char *)sqlite3_column_text(stmt, 8) : "*");
+        out->started_at = sqlite3_column_double(stmt, 9);
+        out->last_heartbeat = sqlite3_column_double(stmt, 10);
+        snprintf(out->organization_id, sizeof(out->organization_id), "%s", sqlite3_column_text(stmt, 11) ? (const char *)sqlite3_column_text(stmt, 11) : "");
+        snprintf(out->deployment_id, sizeof(out->deployment_id), "%s", sqlite3_column_text(stmt, 12) ? (const char *)sqlite3_column_text(stmt, 12) : "");
+        snprintf(out->role_id, sizeof(out->role_id), "%s", sqlite3_column_text(stmt, 13) ? (const char *)sqlite3_column_text(stmt, 13) : "");
+        snprintf(out->policy_sha256, sizeof(out->policy_sha256), "%s", sqlite3_column_text(stmt, 14) ? (const char *)sqlite3_column_text(stmt, 14) : "");
+        snprintf(out->capsule_sha256, sizeof(out->capsule_sha256), "%s", sqlite3_column_text(stmt, 15) ? (const char *)sqlite3_column_text(stmt, 15) : "");
+        snprintf(out->graphsub_namespace, sizeof(out->graphsub_namespace), "%s", sqlite3_column_text(stmt, 16) ? (const char *)sqlite3_column_text(stmt, 16) : "");
+        snprintf(out->router_project_id, sizeof(out->router_project_id), "%s", sqlite3_column_text(stmt, 17) ? (const char *)sqlite3_column_text(stmt, 17) : "");
+        snprintf(out->capabilities, sizeof(out->capabilities), "%s", sqlite3_column_text(stmt, 18) ? (const char *)sqlite3_column_text(stmt, 18) : "[]");
+        out->budget_gsu = sqlite3_column_double(stmt, 19);
+        out->budget_usd = sqlite3_column_double(stmt, 20);
         found = true;
     }
     sqlite3_finalize(stmt);
@@ -574,19 +828,23 @@ bool ipc_get_agent(const char *agent_id, ipc_agent_info_t *out) {
 
 bool ipc_agent_alive(const char *agent_id) {
     ipc_agent_info_t info;
-    if (!ipc_get_agent(agent_id, &info)) return false;
+    if (!ipc_get_agent(agent_id, &info))
+        return false;
     if (info.status == IPC_AGENT_DONE || info.status == IPC_AGENT_ERROR ||
-        info.status == IPC_AGENT_DEAD) return false;
-    return (now_ts() - info.last_heartbeat) < IPC_STALE_SEC;
+        info.status == IPC_AGENT_DEAD)
+        return false;
+    return (now_ts() - info.last_heartbeat) < dsco_ipc_stale_sec();
 }
 
 int ipc_reap_dead_agents(double stale_s) {
-    if (!g_ipc.ready) return 0;
+    if (!g_ipc.ready)
+        return 0;
     const char *sql = "UPDATE agents SET status='dead' "
                       "WHERE status IN ('starting','running','idle') "
                       "AND last_heartbeat > 0 AND (?1 - last_heartbeat) > ?2";
     sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+    if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
     sqlite3_bind_double(stmt, 1, now_ts());
     sqlite3_bind_double(stmt, 2, stale_s);
     int rc = sqlite3_step(stmt);
@@ -600,31 +858,29 @@ int ipc_reap_dead_agents(double stale_s) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 bool ipc_send(const char *to_agent, const char *topic, const char *body) {
-    if (!g_ipc.ready) return false;
+    if (!g_ipc.ready)
+        return false;
 
 #ifdef HAVE_REDIS
     /* Fast-path: PUBLISH on Redis (~10μs) — SQLite write still follows for durability */
     if (g_redis) {
         char chan[512];
-        snprintf(chan, sizeof(chan), "%s:%s",
-                 to_agent ? to_agent : "broadcast",
-                 topic    ? topic    : "");
+        snprintf(chan, sizeof(chan), "%s:%s", to_agent ? to_agent : "broadcast",
+                 topic ? topic : "");
         char payload[4096];
         snprintf(payload, sizeof(payload),
-                 "{\"from\":\"%s\",\"to\":\"%s\",\"topic\":\"%s\",\"body\":%s%s%s}",
-                 g_ipc.self_id,
-                 to_agent ? to_agent : "",
-                 topic    ? topic    : "",
-                 body && body[0] == '{' ? "" : "\"",
-                 body     ? body     : "",
-                 body && body[0] == '{' ? "" : "\"");
+                 "{\"from\":\"%s\",\"to\":\"%s\",\"topic\":\"%s\",\"body\":%s%s%s}", g_ipc.self_id,
+                 to_agent ? to_agent : "", topic ? topic : "", body && body[0] == '{' ? "" : "\"",
+                 body ? body : "", body && body[0] == '{' ? "" : "\"");
         redis_publish(chan, payload);
     }
 #endif
 
-    const char *sql =
-        "INSERT INTO messages (from_agent, to_agent, topic, body, created_at) "
-        "VALUES (?, ?, ?, ?, ?)";
+    const char *sql = to_agent && to_agent[0]
+        ? "INSERT INTO messages (from_agent, to_agent, topic, body, created_at) VALUES (?1,?2,?3,?4,?5)"
+        : "INSERT INTO messages (from_agent, to_agent, topic, body, created_at) "
+          "SELECT ?1,id,?3,?4,?5 FROM agents WHERE id<>?1 "
+          "AND status IN ('starting','working','idle','durable')";
 
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -641,9 +897,26 @@ bool ipc_send(const char *to_agent, const char *topic, const char *body) {
     return ok;
 }
 
-static int recv_messages(const char *extra_where, const char *bind1,
-                         ipc_message_t *out, int max) {
-    if (!g_ipc.ready) return 0;
+/* Reuse the statement across one drain without opening a transaction on the
+   shared connection. Each acknowledgement keeps its own timestamp and commit;
+   one rejected row must not prevent the remaining messages being marked read. */
+static void ipc_messages_mark_read(const int *ids, int count) {
+    sqlite3_stmt *stmt = NULL;
+    for (int i = 0; i < count; i++) {
+        if (!stmt && sqlite3_prepare_v2(g_ipc.db,
+                "UPDATE messages SET read_at=? WHERE id=?", -1, &stmt, NULL) != SQLITE_OK)
+            continue;
+        sqlite3_bind_double(stmt, 1, now_ts());
+        sqlite3_bind_int(stmt, 2, ids[i]);
+        sqlite3_step(stmt);
+        sqlite3_reset(stmt);
+    }
+    sqlite3_finalize(stmt);
+}
+
+static int recv_messages(const char *extra_where, const char *bind1, ipc_message_t *out, int max) {
+    if (!g_ipc.ready || !out || max <= 0)
+        return 0;
 
     char sql[512];
     snprintf(sql, sizeof(sql),
@@ -658,7 +931,8 @@ static int recv_messages(const char *extra_where, const char *bind1,
         return 0;
 
     sqlite3_bind_text(stmt, 1, g_ipc.self_id, -1, SQLITE_STATIC);
-    if (bind1) sqlite3_bind_text(stmt, 2, bind1, -1, SQLITE_STATIC);
+    if (bind1)
+        sqlite3_bind_text(stmt, 2, bind1, -1, SQLITE_STATIC);
 
     int count = 0;
     int ids_cap = max < 256 ? max : 256;
@@ -681,19 +955,7 @@ static int recv_messages(const char *extra_where, const char *bind1,
     }
     sqlite3_finalize(stmt);
 
-    /* Mark as read */
-    if (count > 0) {
-        for (int i = 0; i < count; i++) {
-            const char *mark = "UPDATE messages SET read_at=? WHERE id=?";
-            sqlite3_stmt *ms;
-            if (sqlite3_prepare_v2(g_ipc.db, mark, -1, &ms, NULL) == SQLITE_OK) {
-                sqlite3_bind_double(ms, 1, now_ts());
-                sqlite3_bind_int(ms, 2, ids[i]);
-                sqlite3_step(ms);
-                sqlite3_finalize(ms);
-            }
-        }
-    }
+    ipc_messages_mark_read(ids, count);
 
     return count;
 }
@@ -707,11 +969,11 @@ int ipc_recv_topic(const char *topic, ipc_message_t *out, int max) {
 }
 
 int ipc_unread_count(void) {
-    if (!g_ipc.ready) return 0;
+    if (!g_ipc.ready)
+        return 0;
 
-    const char *sql =
-        "SELECT COUNT(*) FROM messages WHERE read_at IS NULL "
-        "AND (to_agent=? OR to_agent='')";
+    const char *sql = "SELECT COUNT(*) FROM messages WHERE read_at IS NULL "
+                      "AND (to_agent=? OR to_agent='')";
 
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -726,26 +988,94 @@ int ipc_unread_count(void) {
     return count;
 }
 
+static int ipc_message_query(const char *sql, const char *agent_id, bool mark_read,
+                             ipc_message_t *out, int max) {
+    if (!g_ipc.ready || !out || max <= 0)
+        return 0;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
+    int bind = 1;
+    if (agent_id)
+        sqlite3_bind_text(stmt, bind++, agent_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, bind++, max);
+
+    int ids[256];
+    int count = 0;
+    while (sqlite3_step(stmt) == SQLITE_ROW && count < max && count < 256) {
+        ipc_message_t *m = &out[count];
+        m->id = sqlite3_column_int(stmt, 0);
+        ids[count] = m->id;
+        snprintf(m->from_agent, sizeof(m->from_agent), "%s",
+                 sqlite3_column_text(stmt, 1) ? (const char *)sqlite3_column_text(stmt, 1) : "");
+        snprintf(m->to_agent, sizeof(m->to_agent), "%s",
+                 sqlite3_column_text(stmt, 2) ? (const char *)sqlite3_column_text(stmt, 2) : "");
+        snprintf(m->topic, sizeof(m->topic), "%s",
+                 sqlite3_column_text(stmt, 3) ? (const char *)sqlite3_column_text(stmt, 3) : "");
+        const char *body = (const char *)sqlite3_column_text(stmt, 4);
+        m->body = body ? safe_strdup(body) : safe_strdup("");
+        m->created_at = sqlite3_column_double(stmt, 5);
+        m->read = sqlite3_column_type(stmt, 6) != SQLITE_NULL;
+        count++;
+    }
+    sqlite3_finalize(stmt);
+
+    if (mark_read)
+        ipc_messages_mark_read(ids, count);
+    return count;
+}
+
+int ipc_list_inbox(const char *agent_id, bool unread_only, bool mark_read, ipc_message_t *out,
+                   int max) {
+    const char *sql_all =
+        "SELECT id, from_agent, to_agent, topic, body, created_at, read_at "
+        "FROM messages WHERE (to_agent=? OR to_agent='') "
+        "ORDER BY created_at DESC LIMIT ?";
+    const char *sql_unread =
+        "SELECT id, from_agent, to_agent, topic, body, created_at, read_at "
+        "FROM messages WHERE read_at IS NULL AND (to_agent=? OR to_agent='') "
+        "ORDER BY created_at DESC LIMIT ?";
+    return ipc_message_query(unread_only ? sql_unread : sql_all, agent_id ? agent_id : "",
+                             mark_read, out, max);
+}
+
+int ipc_list_sent(const char *agent_id, ipc_message_t *out, int max) {
+    const char *sql =
+        "SELECT id, from_agent, to_agent, topic, body, created_at, read_at "
+        "FROM messages WHERE from_agent=? ORDER BY created_at DESC LIMIT ?";
+    return ipc_message_query(sql, agent_id ? agent_id : "", false, out, max);
+}
+
+int ipc_list_bus(ipc_message_t *out, int max) {
+    const char *sql =
+        "SELECT id, from_agent, to_agent, topic, body, created_at, read_at "
+        "FROM messages ORDER BY created_at DESC LIMIT ?";
+    return ipc_message_query(sql, NULL, false, out, max);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * Task Queue
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-int ipc_task_submit(const char *description, int priority, int parent_task_id) {
-    if (!g_ipc.ready) return -1;
+int ipc_task_submit_to(const char *agent_id, const char *description,
+                       int priority, int parent_task_id) {
+    if (!g_ipc.ready || !description ||
+        (agent_id && agent_id[0] && !ipc_agent_id_is_valid(agent_id)))
+        return -1;
 
-    const char *sql =
-        "INSERT INTO tasks (created_by, priority, parent_task_id, status, "
-        "description, created_at) VALUES (?, ?, ?, 'pending', ?, ?)";
+    const char *sql = "INSERT INTO tasks (assigned_to, target_agent_id, created_by, priority, parent_task_id, status, "
+                      "description, created_at) VALUES (?1, ?1, ?2, ?3, ?4, 'pending', ?5, ?6)";
 
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return -1;
 
-    sqlite3_bind_text(stmt, 1, g_ipc.self_id, -1, SQLITE_STATIC);
-    sqlite3_bind_int(stmt, 2, priority);
-    sqlite3_bind_int(stmt, 3, parent_task_id);
-    sqlite3_bind_text(stmt, 4, description, -1, SQLITE_STATIC);
-    sqlite3_bind_double(stmt, 5, now_ts());
+    sqlite3_bind_text(stmt, 1, agent_id ? agent_id : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, g_ipc.self_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 3, priority);
+    sqlite3_bind_int(stmt, 4, parent_task_id);
+    sqlite3_bind_text(stmt, 5, description, -1, SQLITE_STATIC);
+    sqlite3_bind_double(stmt, 6, now_ts());
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         sqlite3_finalize(stmt);
@@ -756,27 +1086,48 @@ int ipc_task_submit(const char *description, int priority, int parent_task_id) {
     return id;
 }
 
-bool ipc_task_claim(ipc_task_t *out) {
-    if (!g_ipc.ready) return false;
+int ipc_task_submit(const char *description, int priority, int parent_task_id) {
+    return ipc_task_submit_to(NULL, description, priority, parent_task_id);
+}
 
-    /* Atomically claim highest-priority pending task */
-    const char *sql =
-        "UPDATE tasks SET assigned_to=?, status='assigned', started_at=? "
-        "WHERE id = ("
-        "  SELECT id FROM tasks WHERE status='pending' "
-        "  ORDER BY priority DESC, created_at ASC LIMIT 1"
-        ") RETURNING id, created_by, parent_task_id, priority, description, created_at";
+static bool ipc_task_claim_mode(ipc_task_t *out, bool targeted_only, int task_id) {
+    if (!g_ipc.ready || !out)
+        return false;
+
+    /* Atomically claim highest-priority eligible task. Directed work always
+       precedes shared work, so two indexed LIMIT 1 probes preserve the policy
+       without sorting the entire eligible backlog. Selection stays inside
+       the UPDATE: competing processes cannot claim the same row. */
+    const char *sql_shared =
+        "UPDATE tasks SET assigned_to=?2, status='assigned', started_at=?1, "
+        "generation=generation+1, claim_pid=?4 "
+        "WHERE id = COALESCE("
+        "  (SELECT id FROM tasks WHERE status='pending' AND target_agent_id=?2 AND (?3=0 OR id=?3) "
+        "   ORDER BY priority DESC, created_at ASC LIMIT 1),"
+        "  (SELECT id FROM tasks WHERE status='pending' AND target_agent_id='' AND (?3=0 OR id=?3) "
+        "   ORDER BY priority DESC, created_at ASC LIMIT 1)"
+        ") RETURNING id, created_by, parent_task_id, priority, description, created_at, target_agent_id, generation";
+    const char *sql_targeted =
+        "UPDATE tasks SET assigned_to=?2, status='assigned', started_at=?1, "
+        "generation=generation+1, claim_pid=?4 "
+        "WHERE id = (SELECT id FROM tasks WHERE status='pending' AND target_agent_id=?2 AND (?3=0 OR id=?3) "
+        "ORDER BY priority DESC, created_at ASC LIMIT 1) "
+        "RETURNING id, created_by, parent_task_id, priority, description, created_at, target_agent_id, generation";
 
     sqlite3_stmt *stmt;
+    const char *sql = targeted_only ? sql_targeted : sql_shared;
     if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return false;
 
-    sqlite3_bind_text(stmt, 1, g_ipc.self_id, -1, SQLITE_STATIC);
-    sqlite3_bind_double(stmt, 2, now_ts());
+    sqlite3_bind_double(stmt, 1, now_ts());
+    sqlite3_bind_text(stmt, 2, g_ipc.self_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 3, task_id);
+    sqlite3_bind_int(stmt, 4, getpid());
 
     bool found = false;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         out->id = sqlite3_column_int(stmt, 0);
+        out->generation = sqlite3_column_int64(stmt, 7);
         snprintf(out->assigned_to, sizeof(out->assigned_to), "%s", g_ipc.self_id);
         snprintf(out->created_by, sizeof(out->created_by), "%s",
                  (const char *)sqlite3_column_text(stmt, 1));
@@ -789,77 +1140,88 @@ bool ipc_task_claim(ipc_task_t *out) {
         out->created_at = sqlite3_column_double(stmt, 5);
         out->started_at = now_ts();
         out->completed_at = 0;
+        snprintf(out->target_agent_id, sizeof(out->target_agent_id), "%s",
+                 sqlite3_column_text(stmt, 6) ? (const char *)sqlite3_column_text(stmt, 6) : "");
         found = true;
     }
-    sqlite3_finalize(stmt);
-    return found;
+    return sqlite3_finalize(stmt) == SQLITE_OK && found;
 }
 
-bool ipc_task_start(int task_id) {
-    if (!g_ipc.ready) return false;
-    const char *sql = "UPDATE tasks SET status='running', started_at=? WHERE id=?";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
+bool ipc_task_claim(ipc_task_t *out) {
+    return ipc_task_claim_mode(out, false, 0);
+}
+
+bool ipc_task_claim_targeted(ipc_task_t *out) {
+    return ipc_task_claim_mode(out, true, 0);
+}
+
+bool ipc_task_claim_id(int task_id, ipc_task_t *out) {
+    return task_id > 0 && ipc_task_claim_mode(out, true, task_id);
+}
+
+/* Do not report SQLITE_DONE as success: an UPDATE matching zero rows is a
+ * rejected stale transition, not a completion. The generation also fences a
+ * previous incarnation of the same named durable identity. */
+static bool ipc_task_transition(int task_id, long long generation,
+                                const char *state, const char *result) {
+    if (!g_ipc.ready || generation < 1)
         return false;
-    sqlite3_bind_double(stmt, 1, now_ts());
-    sqlite3_bind_int(stmt, 2, task_id);
-    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
-    return ok;
-}
-
-bool ipc_task_complete(int task_id, const char *result) {
-    if (!g_ipc.ready) return false;
     const char *sql =
-        "UPDATE tasks SET status='done', result=?, completed_at=? WHERE id=?";
+        "UPDATE tasks SET status=?1, result=CASE WHEN ?1='running' THEN result ELSE ?2 END, "
+        "started_at=CASE WHEN ?1='running' THEN ?3 ELSE started_at END, "
+        "completed_at=CASE WHEN ?1='running' THEN completed_at ELSE ?3 END "
+        "WHERE id=?4 AND generation=?5 AND assigned_to=?6 AND claim_pid=?7 "
+        "AND (status='assigned' OR (status='running' AND ?1!='running'))";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return false;
-    sqlite3_bind_text(stmt, 1, result ? result : "", -1, SQLITE_STATIC);
-    sqlite3_bind_double(stmt, 2, now_ts());
-    sqlite3_bind_int(stmt, 3, task_id);
-    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_bind_text(stmt, 1, state, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, result ? result : "", -1, SQLITE_STATIC);
+    sqlite3_bind_double(stmt, 3, now_ts());
+    sqlite3_bind_int(stmt, 4, task_id);
+    sqlite3_bind_int64(stmt, 5, generation);
+    sqlite3_bind_text(stmt, 6, g_ipc.self_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 7, getpid());
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE && sqlite3_changes(g_ipc.db) == 1;
     sqlite3_finalize(stmt);
     return ok;
 }
 
-bool ipc_task_fail(int task_id, const char *error) {
-    if (!g_ipc.ready) return false;
-    const char *sql =
-        "UPDATE tasks SET status='failed', result=?, completed_at=? WHERE id=?";
-    sqlite3_stmt *stmt;
-    if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
-        return false;
-    sqlite3_bind_text(stmt, 1, error ? error : "", -1, SQLITE_STATIC);
-    sqlite3_bind_double(stmt, 2, now_ts());
-    sqlite3_bind_int(stmt, 3, task_id);
-    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
-    sqlite3_finalize(stmt);
-    return ok;
+bool ipc_task_start(int task_id, long long generation) {
+    return ipc_task_transition(task_id, generation, "running", NULL);
+}
+
+bool ipc_task_complete(int task_id, long long generation, const char *result) {
+    return ipc_task_transition(task_id, generation, "done", result);
+}
+
+bool ipc_task_fail(int task_id, long long generation, const char *error) {
+    return ipc_task_transition(task_id, generation, "failed", error);
 }
 
 int ipc_task_list(const char *assigned_to, ipc_task_t *out, int max) {
-    if (!g_ipc.ready) return 0;
+    if (!g_ipc.ready)
+        return 0;
 
-    const char *sql_all =
-        "SELECT id, assigned_to, created_by, parent_task_id, priority, "
-        "status, description, result, created_at, started_at, completed_at "
-        "FROM tasks ORDER BY priority DESC, created_at";
-    const char *sql_filter =
-        "SELECT id, assigned_to, created_by, parent_task_id, priority, "
-        "status, description, result, created_at, started_at, completed_at "
-        "FROM tasks WHERE assigned_to=? ORDER BY priority DESC, created_at";
+    const char *sql_all = "SELECT id, assigned_to, created_by, parent_task_id, priority, "
+                          "status, description, result, created_at, started_at, completed_at, target_agent_id, generation "
+                          "FROM tasks ORDER BY priority DESC, created_at";
+    const char *sql_filter = "SELECT id, assigned_to, created_by, parent_task_id, priority, "
+                             "status, description, result, created_at, started_at, completed_at, target_agent_id, generation "
+                             "FROM tasks WHERE assigned_to=? ORDER BY priority DESC, created_at";
 
     sqlite3_stmt *stmt;
     const char *sql = assigned_to ? sql_filter : sql_all;
     if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return 0;
-    if (assigned_to) sqlite3_bind_text(stmt, 1, assigned_to, -1, SQLITE_STATIC);
+    if (assigned_to)
+        sqlite3_bind_text(stmt, 1, assigned_to, -1, SQLITE_STATIC);
 
     int count = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && count < max) {
         ipc_task_t *t = &out[count];
         t->id = sqlite3_column_int(stmt, 0);
+        t->generation = sqlite3_column_int64(stmt, 12);
         snprintf(t->assigned_to, sizeof(t->assigned_to), "%s",
                  sqlite3_column_text(stmt, 1) ? (const char *)sqlite3_column_text(stmt, 1) : "");
         snprintf(t->created_by, sizeof(t->created_by), "%s",
@@ -867,12 +1229,18 @@ int ipc_task_list(const char *assigned_to, ipc_task_t *out, int max) {
         t->parent_task_id = sqlite3_column_int(stmt, 3);
         t->priority = sqlite3_column_int(stmt, 4);
         const char *st = (const char *)sqlite3_column_text(stmt, 5);
-        if (st && strcmp(st, "pending") == 0)  t->status = IPC_TASK_PENDING;
-        else if (st && strcmp(st, "assigned") == 0) t->status = IPC_TASK_ASSIGNED;
-        else if (st && strcmp(st, "running") == 0)  t->status = IPC_TASK_RUNNING;
-        else if (st && strcmp(st, "done") == 0)     t->status = IPC_TASK_DONE;
-        else if (st && strcmp(st, "failed") == 0)   t->status = IPC_TASK_FAILED;
-        else t->status = IPC_TASK_PENDING;
+        if (st && strcmp(st, "pending") == 0)
+            t->status = IPC_TASK_PENDING;
+        else if (st && strcmp(st, "assigned") == 0)
+            t->status = IPC_TASK_ASSIGNED;
+        else if (st && strcmp(st, "running") == 0)
+            t->status = IPC_TASK_RUNNING;
+        else if (st && strcmp(st, "done") == 0)
+            t->status = IPC_TASK_DONE;
+        else if (st && strcmp(st, "failed") == 0)
+            t->status = IPC_TASK_FAILED;
+        else
+            t->status = IPC_TASK_PENDING;
         snprintf(t->description, sizeof(t->description), "%s",
                  sqlite3_column_text(stmt, 6) ? (const char *)sqlite3_column_text(stmt, 6) : "");
         const char *res = (const char *)sqlite3_column_text(stmt, 7);
@@ -880,6 +1248,8 @@ int ipc_task_list(const char *assigned_to, ipc_task_t *out, int max) {
         t->created_at = sqlite3_column_double(stmt, 8);
         t->started_at = sqlite3_column_double(stmt, 9);
         t->completed_at = sqlite3_column_double(stmt, 10);
+        snprintf(t->target_agent_id, sizeof(t->target_agent_id), "%s",
+                 sqlite3_column_text(stmt, 11) ? (const char *)sqlite3_column_text(stmt, 11) : "");
         count++;
     }
     sqlite3_finalize(stmt);
@@ -887,24 +1257,28 @@ int ipc_task_list(const char *assigned_to, ipc_task_t *out, int max) {
 }
 
 int ipc_task_pending_count(void) {
-    if (!g_ipc.ready) return 0;
+    if (!g_ipc.ready)
+        return 0;
     const char *sql = "SELECT COUNT(*) FROM tasks WHERE status='pending'";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
         return 0;
     int count = 0;
-    if (sqlite3_step(stmt) == SQLITE_ROW) count = sqlite3_column_int(stmt, 0);
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        count = sqlite3_column_int(stmt, 0);
     sqlite3_finalize(stmt);
     return count;
 }
 
 int ipc_task_requeue_stale(double timeout_s) {
-    if (!g_ipc.ready) return 0;
-    const char *sql = "UPDATE tasks SET status='pending', assigned_to='', started_at=0 "
+    if (!g_ipc.ready)
+        return 0;
+    const char *sql = "UPDATE tasks SET status='pending', assigned_to=target_agent_id, started_at=0 "
                       "WHERE status IN ('assigned','running') "
                       "AND started_at > 0 AND (?1 - started_at) > ?2";
     sqlite3_stmt *stmt = NULL;
-    if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+    if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
     sqlite3_bind_double(stmt, 1, now_ts());
     sqlite3_bind_double(stmt, 2, timeout_s);
     int rc = sqlite3_step(stmt);
@@ -918,11 +1292,11 @@ int ipc_task_requeue_stale(double timeout_s) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 bool ipc_scratch_put(const char *key, const char *value) {
-    if (!g_ipc.ready) return false;
+    if (!g_ipc.ready)
+        return false;
 
-    const char *sql =
-        "INSERT OR REPLACE INTO scratchpad (key, value, agent_id, updated_at) "
-        "VALUES (?, ?, ?, ?)";
+    const char *sql = "INSERT OR REPLACE INTO scratchpad (key, value, agent_id, updated_at) "
+                      "VALUES (?, ?, ?, ?)";
 
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -938,7 +1312,8 @@ bool ipc_scratch_put(const char *key, const char *value) {
 }
 
 char *ipc_scratch_get(const char *key) {
-    if (!g_ipc.ready) return NULL;
+    if (!g_ipc.ready)
+        return NULL;
 
     const char *sql = "SELECT value FROM scratchpad WHERE key=?";
     sqlite3_stmt *stmt;
@@ -956,7 +1331,8 @@ char *ipc_scratch_get(const char *key) {
 }
 
 bool ipc_scratch_del(const char *key) {
-    if (!g_ipc.ready) return false;
+    if (!g_ipc.ready)
+        return false;
     const char *sql = "DELETE FROM scratchpad WHERE key=?";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -968,11 +1344,12 @@ bool ipc_scratch_del(const char *key) {
 }
 
 int ipc_scratch_keys(const char *prefix, char keys[][IPC_MAX_KEY], int max) {
-    if (!g_ipc.ready) return 0;
+    if (!g_ipc.ready)
+        return 0;
 
     const char *sql = prefix && prefix[0]
-        ? "SELECT key FROM scratchpad WHERE key LIKE ? || '%' ORDER BY key"
-        : "SELECT key FROM scratchpad ORDER BY key";
+                          ? "SELECT key FROM scratchpad WHERE key LIKE ? || '%' ORDER BY key"
+                          : "SELECT key FROM scratchpad ORDER BY key";
 
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
@@ -984,7 +1361,8 @@ int ipc_scratch_keys(const char *prefix, char keys[][IPC_MAX_KEY], int max) {
     int count = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && count < max) {
         const char *k = (const char *)sqlite3_column_text(stmt, 0);
-        if (k) snprintf(keys[count], IPC_MAX_KEY, "%s", k);
+        if (k)
+            snprintf(keys[count], IPC_MAX_KEY, "%s", k);
         count++;
     }
     sqlite3_finalize(stmt);
@@ -997,8 +1375,10 @@ int ipc_scratch_keys(const char *prefix, char keys[][IPC_MAX_KEY], int max) {
 
 int ipc_poll(void) {
     int flags = 0;
-    if (ipc_unread_count() > 0) flags |= 1;
-    if (ipc_task_pending_count() > 0) flags |= 2;
+    if (ipc_unread_count() > 0)
+        flags |= 1;
+    if (ipc_task_pending_count() > 0)
+        flags |= 2;
     return flags;
 }
 
@@ -1014,7 +1394,8 @@ int ipc_status_json(char *buf, size_t len) {
     int agent_count = ipc_list_agents(agents, 64);
     jbuf_append(&b, ",\"agents\":[");
     for (int i = 0; i < agent_count; i++) {
-        if (i > 0) jbuf_append(&b, ",");
+        if (i > 0)
+            jbuf_append(&b, ",");
         jbuf_append(&b, "{\"id\":");
         jbuf_append_json_str(&b, agents[i].id);
         jbuf_append(&b, ",\"parent\":");
@@ -1025,6 +1406,8 @@ int ipc_status_json(char *buf, size_t len) {
         jbuf_append_json_str(&b, status_str(agents[i].status));
         jbuf_append(&b, ",\"role\":");
         jbuf_append_json_str(&b, agents[i].role);
+        jbuf_append(&b, ",\"model\":");
+        jbuf_append_json_str(&b, agents[i].model);
         jbuf_append(&b, ",\"task\":");
         jbuf_append_json_str(&b, agents[i].current_task);
         jbuf_append(&b, ",\"alive\":");
@@ -1044,4 +1427,162 @@ int ipc_status_json(char *buf, size_t len) {
     buf[written] = '\0';
     jbuf_free(&b);
     return written;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Agent Checkpoint System (Workstream B1 — Persistent Agents)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static const char *CHECKPOINT_SCHEMA = "CREATE TABLE IF NOT EXISTS agent_checkpoint ("
+                                       "  agent_id    TEXT NOT NULL,"
+                                       "  generation  INTEGER NOT NULL,"
+                                       "  memory_json TEXT,"
+                                       "  conv_json   TEXT,"
+                                       "  plan_json   TEXT,"
+                                       "  task_json   TEXT,"
+                                       "  saved_at    REAL NOT NULL,"
+                                       "  PRIMARY KEY (agent_id, generation)"
+                                       ") WITHOUT ROWID;";
+
+static void ipc_ensure_checkpoint_table(void) {
+    if (!g_ipc.db)
+        return;
+    sqlite3_exec(g_ipc.db, CHECKPOINT_SCHEMA, NULL, NULL, NULL);
+}
+
+bool ipc_checkpoint_save(const char *agent_id, int generation, const char *memory_json,
+                         const char *conv_json, const char *plan_json, const char *task_json) {
+    if (!g_ipc.db || !agent_id)
+        return false;
+    ipc_ensure_checkpoint_table();
+
+    const char *sql =
+        "INSERT OR REPLACE INTO agent_checkpoint "
+        "(agent_id, generation, memory_json, conv_json, plan_json, task_json, saved_at) "
+        "VALUES (?,?,?,?,?,?,?);";
+
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return false;
+
+    sqlite3_bind_text(stmt, 1, agent_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, generation);
+    sqlite3_bind_text(stmt, 3, memory_json ? memory_json : "null", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, conv_json ? conv_json : "null", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, plan_json ? plan_json : "null", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 6, task_json ? task_json : "null", -1, SQLITE_STATIC);
+    sqlite3_bind_double(stmt, 7, (double)time(NULL));
+
+    bool ok = (sqlite3_step(stmt) == SQLITE_DONE);
+    sqlite3_finalize(stmt);
+    return ok;
+}
+
+bool ipc_checkpoint_restore(const char *agent_id, int generation, char **memory_json_out,
+                            char **conv_json_out, char **plan_json_out, char **task_json_out) {
+    if (!g_ipc.db || !agent_id)
+        return false;
+    if (memory_json_out)
+        *memory_json_out = NULL;
+    if (conv_json_out)
+        *conv_json_out = NULL;
+    if (plan_json_out)
+        *plan_json_out = NULL;
+    if (task_json_out)
+        *task_json_out = NULL;
+    ipc_ensure_checkpoint_table();
+
+    sqlite3_stmt *stmt = NULL;
+    const char *sql;
+
+    if (generation < 0) {
+        sql = "SELECT memory_json, conv_json, plan_json, task_json "
+              "FROM agent_checkpoint WHERE agent_id=? "
+              "ORDER BY generation DESC LIMIT 1;";
+        sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL);
+        sqlite3_bind_text(stmt, 1, agent_id, -1, SQLITE_STATIC);
+    } else {
+        sql = "SELECT memory_json, conv_json, plan_json, task_json "
+              "FROM agent_checkpoint WHERE agent_id=? AND generation=?;";
+        sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL);
+        sqlite3_bind_text(stmt, 1, agent_id, -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 2, generation);
+    }
+
+    bool ok = false;
+    if (stmt && sqlite3_step(stmt) == SQLITE_ROW) {
+        if (memory_json_out) {
+            const char *t = (const char *)sqlite3_column_text(stmt, 0);
+            *memory_json_out = t ? strdup(t) : NULL;
+        }
+        if (conv_json_out) {
+            const char *t = (const char *)sqlite3_column_text(stmt, 1);
+            *conv_json_out = t ? strdup(t) : NULL;
+        }
+        if (plan_json_out) {
+            const char *t = (const char *)sqlite3_column_text(stmt, 2);
+            *plan_json_out = t ? strdup(t) : NULL;
+        }
+        if (task_json_out) {
+            const char *t = (const char *)sqlite3_column_text(stmt, 3);
+            *task_json_out = t ? strdup(t) : NULL;
+        }
+        ok = true;
+    }
+    if (stmt)
+        sqlite3_finalize(stmt);
+    return ok;
+}
+
+int ipc_checkpoint_list(const char *agent_id, int *generations_out, double *timestamps_out,
+                        int max) {
+    if (!g_ipc.db || !agent_id)
+        return 0;
+    ipc_ensure_checkpoint_table();
+
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "SELECT generation, saved_at FROM agent_checkpoint "
+                      "WHERE agent_id=? ORDER BY generation DESC LIMIT ?;";
+    if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return 0;
+
+    sqlite3_bind_text(stmt, 1, agent_id, -1, SQLITE_STATIC);
+    sqlite3_bind_int(stmt, 2, max);
+
+    int count = 0;
+    while (count < max && sqlite3_step(stmt) == SQLITE_ROW) {
+        if (generations_out)
+            generations_out[count] = sqlite3_column_int(stmt, 0);
+        if (timestamps_out)
+            timestamps_out[count] = sqlite3_column_double(stmt, 1);
+        count++;
+    }
+    sqlite3_finalize(stmt);
+    return count;
+}
+
+int ipc_checkpoint_prune(const char *agent_id, int keep_generations) {
+    if (!g_ipc.db || !agent_id)
+        return 0;
+    ipc_ensure_checkpoint_table();
+
+    /* Get all generations sorted desc */
+    int gens[256];
+    int total = ipc_checkpoint_list(agent_id, gens, NULL, 256);
+    if (total <= keep_generations)
+        return 0;
+
+    int pruned = 0;
+    for (int i = keep_generations; i < total; i++) {
+        sqlite3_stmt *stmt = NULL;
+        const char *sql = "DELETE FROM agent_checkpoint WHERE agent_id=? AND generation=?;";
+        if (sqlite3_prepare_v2(g_ipc.db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+            sqlite3_bind_text(stmt, 1, agent_id, -1, SQLITE_STATIC);
+            sqlite3_bind_int(stmt, 2, gens[i]);
+            if (sqlite3_step(stmt) == SQLITE_DONE)
+                pruned++;
+            sqlite3_finalize(stmt);
+        }
+    }
+    return pruned;
 }

@@ -1,0 +1,173 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="880" viewBox="0 0 1400 880" role="img" aria-labelledby="title desc">
+  <title id="title">DSCO provider fabric</title>
+  <desc id="desc">A diagram showing DSCO routing requests into separate provider worker processes for Anthropic, OpenAI, Sakana Fugu, and Z.AI, with concurrent fanout and health based fallback.</desc>
+  <defs>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#19202a" flood-opacity="0.14"/>
+    </filter>
+    <marker id="arrow-dark" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 1 1 L 11 6 L 1 11 z" fill="#28313f"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 12 12" refX="10" refY="6" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M 1 1 L 11 6 L 1 11 z" fill="#d94141"/>
+    </marker>
+    <style>
+      .bg { fill: #f7f8fb; }
+      .title { font: 800 44px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #111827; letter-spacing: 0; }
+      .subtitle { font: 500 18px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #4b5563; letter-spacing: 0; }
+      .section { font: 800 19px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #111827; letter-spacing: 0; }
+      .label { font: 700 15px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #111827; letter-spacing: 0; }
+      .small { font: 500 13px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #4b5563; letter-spacing: 0; }
+      .mono { font: 600 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #374151; letter-spacing: 0; }
+      .card { fill: #ffffff; stroke: #d8dee8; stroke-width: 1.5; rx: 8; filter: url(#shadow); }
+      .subcard { fill: #ffffff; stroke: #d8dee8; stroke-width: 1.2; rx: 8; }
+      .chip { fill: #eef2f7; stroke: #d8dee8; stroke-width: 1; rx: 6; }
+      .line { fill: none; stroke: #28313f; stroke-width: 2.4; marker-end: url(#arrow-dark); }
+      .thin { fill: none; stroke: #8b95a7; stroke-width: 1.6; marker-end: url(#arrow-dark); }
+      .fallback { fill: none; stroke: #d94141; stroke-width: 2.3; stroke-dasharray: 7 7; marker-end: url(#arrow-red); }
+      .lane-title { font: 800 17px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #111827; letter-spacing: 0; }
+      .lane-sub { font: 600 12px Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #5d6676; letter-spacing: 0; }
+      .pid { font: 700 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #111827; letter-spacing: 0; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1400" height="880"/>
+  <text x="60" y="70" class="title">DSCO Provider Fabric</text>
+  <text x="62" y="101" class="subtitle">Subscription-aware routing with one or more live worker processes per provider, concurrent fanout, and health-driven fallback.</text>
+
+  <!-- Ingress -->
+  <rect x="58" y="150" width="250" height="210" class="card"/>
+  <text x="82" y="188" class="section">Request Ingress</text>
+  <rect x="82" y="212" width="202" height="38" class="chip"/>
+  <text x="100" y="236" class="label">prompt / task / tool call</text>
+  <rect x="82" y="264" width="202" height="38" class="chip"/>
+  <text x="100" y="288" class="label">budget + trust tier</text>
+  <rect x="82" y="316" width="202" height="38" class="chip"/>
+  <text x="100" y="340" class="label">model family hint</text>
+
+  <!-- Router -->
+  <rect x="390" y="126" width="620" height="250" class="card"/>
+  <text x="425" y="166" class="section">DSCO Routing Control Plane</text>
+  <text x="425" y="192" class="small">provider_route_for_model + provider_pool + topology throughput lanes</text>
+  <g>
+    <rect x="425" y="222" width="165" height="84" class="subcard"/>
+    <text x="445" y="252" class="label">Auth resolver</text>
+    <text x="445" y="276" class="small">Claude Code OAuth</text>
+    <text x="445" y="296" class="small">ChatGPT OAuth</text>
+  </g>
+  <g>
+    <rect x="612" y="222" width="165" height="84" class="subcard"/>
+    <text x="632" y="252" class="label">Health state</text>
+    <text x="632" y="276" class="small">rate limits</text>
+    <text x="632" y="296" class="small">exhaustion windows</text>
+  </g>
+  <g>
+    <rect x="799" y="222" width="175" height="84" class="subcard"/>
+    <text x="819" y="252" class="label">Policy</text>
+    <text x="819" y="276" class="small">prefer flat-rate lanes</text>
+    <text x="819" y="296" class="small">avoid metered leaks</text>
+  </g>
+  <rect x="425" y="322" width="549" height="34" rx="7" fill="#fff7ed" stroke="#e7a03c" stroke-width="1.2"/>
+  <text x="444" y="344" class="mono">fork/exec dsco --profile worker --provider &lt;lane&gt; -m &lt;model&gt;</text>
+
+  <!-- Fanout -->
+  <rect x="1082" y="150" width="260" height="210" class="card"/>
+  <text x="1110" y="188" class="section">Concurrent Modes</text>
+  <rect x="1110" y="214" width="202" height="32" rx="6" fill="#eef7f1" stroke="#55a574" stroke-width="1"/>
+  <text x="1130" y="235" class="label">fanout</text>
+  <rect x="1110" y="256" width="202" height="32" rx="6" fill="#eef4ff" stroke="#6a80d9" stroke-width="1"/>
+  <text x="1130" y="277" class="label">race first success</text>
+  <rect x="1110" y="298" width="202" height="32" rx="6" fill="#fff4f4" stroke="#e07171" stroke-width="1"/>
+  <text x="1130" y="319" class="label">quorum / debate</text>
+  <text x="1110" y="346" class="small">Many provider-bound workers run at once.</text>
+
+  <path d="M 308 252 C 340 252 352 252 388 252" class="line"/>
+  <path d="M 1010 252 C 1042 252 1052 252 1080 252" class="line"/>
+
+  <!-- Provider lanes container -->
+  <rect x="58" y="430" width="1284" height="300" class="card"/>
+  <text x="82" y="468" class="section">Provider Process Pool</text>
+  <text x="82" y="493" class="small">Each lane can hold multiple independent DSCO worker processes. Failures trip lane health without stopping the whole run.</text>
+
+  <!-- Lane 1 -->
+  <g transform="translate(84 525)">
+    <rect width="280" height="150" rx="8" fill="#fbfcff" stroke="#6a80d9" stroke-width="2"/>
+    <rect x="0" y="0" width="280" height="38" rx="8" fill="#eef4ff" stroke="#6a80d9" stroke-width="0"/>
+    <text x="20" y="25" class="lane-title">Anthropic</text>
+    <text x="132" y="25" class="lane-sub">Claude Code subscription</text>
+    <rect x="22" y="56" width="110" height="56" rx="7" fill="#ffffff" stroke="#6a80d9" stroke-width="1.5"/>
+    <circle cx="38" cy="72" r="4" fill="#6a80d9"/>
+    <circle cx="52" cy="72" r="4" fill="#8fa0ee"/>
+    <text x="38" y="97" class="pid">pid 4127</text>
+    <rect x="148" y="56" width="110" height="56" rx="7" fill="#ffffff" stroke="#6a80d9" stroke-width="1.5"/>
+    <circle cx="164" cy="72" r="4" fill="#6a80d9"/>
+    <circle cx="178" cy="72" r="4" fill="#8fa0ee"/>
+    <text x="164" y="97" class="pid">pid 4139</text>
+    <text x="22" y="132" class="small">models: sonnet / opus / haiku</text>
+  </g>
+
+  <!-- Lane 2 -->
+  <g transform="translate(390 525)">
+    <rect width="280" height="150" rx="8" fill="#fbfffc" stroke="#2f9d69" stroke-width="2"/>
+    <rect x="0" y="0" width="280" height="38" rx="8" fill="#eef8f1" stroke="#2f9d69" stroke-width="0"/>
+    <text x="20" y="25" class="lane-title">OpenAI</text>
+    <text x="112" y="25" class="lane-sub">ChatGPT / Codex OAuth</text>
+    <rect x="22" y="56" width="110" height="56" rx="7" fill="#ffffff" stroke="#2f9d69" stroke-width="1.5"/>
+    <circle cx="38" cy="72" r="4" fill="#2f9d69"/>
+    <circle cx="52" cy="72" r="4" fill="#86c79f"/>
+    <text x="38" y="97" class="pid">pid 4211</text>
+    <rect x="148" y="56" width="110" height="56" rx="7" fill="#ffffff" stroke="#2f9d69" stroke-width="1.5"/>
+    <circle cx="164" cy="72" r="4" fill="#2f9d69"/>
+    <circle cx="178" cy="72" r="4" fill="#86c79f"/>
+    <text x="164" y="97" class="pid">pid 4220</text>
+    <text x="22" y="132" class="small">models: gpt / codex family</text>
+  </g>
+
+  <!-- Lane 3 -->
+  <g transform="translate(696 525)">
+    <rect width="280" height="150" rx="8" fill="#fffdfd" stroke="#ff4b4b" stroke-width="2"/>
+    <rect x="0" y="0" width="280" height="38" rx="8" fill="#fff1f1" stroke="#ff4b4b" stroke-width="0"/>
+    <text x="20" y="25" class="lane-title">Sakana Fugu</text>
+    <text x="152" y="25" class="lane-sub">subscription + PAYG overflow</text>
+    <rect x="22" y="56" width="110" height="56" rx="7" fill="#ffffff" stroke="#ff4b4b" stroke-width="1.5"/>
+    <circle cx="38" cy="72" r="4" fill="#ff4b4b"/>
+    <circle cx="52" cy="72" r="4" fill="#ff9a9a"/>
+    <text x="38" y="97" class="pid">pid 4304</text>
+    <rect x="148" y="56" width="110" height="56" rx="7" fill="#ffffff" stroke="#ff4b4b" stroke-width="1.5"/>
+    <circle cx="164" cy="72" r="4" fill="#ff4b4b"/>
+    <circle cx="178" cy="72" r="4" fill="#ff9a9a"/>
+    <text x="164" y="97" class="pid">pid 4318</text>
+    <text x="22" y="132" class="small">models: fugu / fugu-ultra</text>
+  </g>
+
+  <!-- Lane 4 -->
+  <g transform="translate(1002 525)">
+    <rect width="280" height="150" rx="8" fill="#fffef9" stroke="#cc8a1a" stroke-width="2"/>
+    <rect x="0" y="0" width="280" height="38" rx="8" fill="#fff7e8" stroke="#cc8a1a" stroke-width="0"/>
+    <text x="20" y="25" class="lane-title">Z.AI GLM</text>
+    <text x="128" y="25" class="lane-sub">coding plan lane</text>
+    <rect x="22" y="56" width="110" height="56" rx="7" fill="#ffffff" stroke="#cc8a1a" stroke-width="1.5"/>
+    <circle cx="38" cy="72" r="4" fill="#cc8a1a"/>
+    <circle cx="52" cy="72" r="4" fill="#efc06e"/>
+    <text x="38" y="97" class="pid">pid 4402</text>
+    <rect x="148" y="56" width="110" height="56" rx="7" fill="#ffffff" stroke="#cc8a1a" stroke-width="1.5"/>
+    <circle cx="164" cy="72" r="4" fill="#cc8a1a"/>
+    <circle cx="178" cy="72" r="4" fill="#efc06e"/>
+    <text x="164" y="97" class="pid">pid 4415</text>
+    <text x="22" y="132" class="small">models: glm-5.2 / glm aliases</text>
+  </g>
+
+  <path d="M 700 376 L 700 430" class="line"/>
+  <path d="M 700 430 C 700 495 224 490 224 522" class="thin"/>
+  <path d="M 700 430 C 700 494 530 490 530 522" class="thin"/>
+  <path d="M 700 430 C 700 494 836 490 836 522" class="thin"/>
+  <path d="M 700 430 C 700 494 1142 490 1142 522" class="thin"/>
+
+  <!-- Fallback loop -->
+  <rect x="58" y="770" width="1284" height="70" rx="8" fill="#ffffff" stroke="#d8dee8" stroke-width="1.5"/>
+  <text x="84" y="812" class="section">Fallback Loop</text>
+  <text x="236" y="798" class="small">HTTP 401/402/403/429, context overflow, or model gating marks a lane unhealthy.</text>
+  <text x="236" y="822" class="small">The next request is rebuilt against the next eligible process lane while preserving conversation, tools, and budget state.</text>
+  <path d="M 1160 770 C 1228 724 1240 468 1008 418 C 930 402 818 398 733 408" class="fallback"/>
+  <text x="1072" y="752" class="small" fill="#b42323">health event reroutes traffic</text>
+</svg>

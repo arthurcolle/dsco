@@ -1,0 +1,108 @@
+# A StatefulSet, not a Deployment: dsco keeps all of its durable state
+# (sessions, the SQLite baseline/timeline DB, auth, plugins, chronicle) under
+# ~/.dsco with no built-in replication or clustering across instances. A
+# StatefulSet gives this one instance a stable name and a PVC that follows it
+# across rescheduling — exactly "persistent and durable" for a single agent.
+#
+# replicas is intentionally pinned to 1. Raising it does NOT scale this agent
+# — it creates N independent agents, each with its own empty ~/.dsco (a fresh
+# PVC per ordinal, per volumeClaimTemplates semantics), no shared state, no
+# coordination. To run more than one agent, deploy this StatefulSet again
+# under a different name (see k8s/overlays/*), not by bumping replicas here.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dsco-agent
+  namespace: dsco-agent
+  labels:
+    app.kubernetes.io/name: dsco-agent
+spec:
+  serviceName: dsco-agent-headless
+  replicas: 1
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dsco-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dsco-agent
+    spec:
+      # dsco's own compiled binary already runs as the image's `dsco` user
+      # (uid 10001, see Dockerfile); fsGroup makes the PVC mount writable by
+      # that same uid regardless of which node/CSI driver provisions it.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # Agent tool calls (shell commands, in-flight HTTP requests to model
+      # providers) can be mid-flight at shutdown; give SIGTERM real time to
+      # drain before SIGKILL rather than the 30s-ish default feeling tight.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: dsco
+          image: dsco-agent:local  # override via kustomize `images:` transformer or CI
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: dsco-agent-config
+            - secretRef:
+                name: dsco-agent-secrets
+                optional: true  # allow booting without credentials for non-LLM toolsets/debugging
+          ports:
+            - name: bridge
+              containerPort: 8765  # must match DSCO_BIND_PORT in configmap.yaml
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false  # dsco writes transient files under $HOME beyond ~/.dsco
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: dsco-state
+              mountPath: /home/dsco/.dsco
+          # Compiled C binary — starts in well under a second once the image
+          # is warm; failureThreshold*periodSeconds gives slow-pull/cold-node
+          # cases a generous 2 minutes before liveness/readiness even start
+          # counting against it.
+          startupProbe:
+            exec:
+              command: ["dsco", "--tool-exec", "cwd", "{}"]
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            exec:
+              command: ["dsco", "--tool-exec", "cwd", "{}"]
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["dsco", "--tool-exec", "cwd", "{}"]
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            # Baseline for the MCP-server mode itself; tool calls that shell
+            # out or load embeddings can spike higher — tune per workload via
+            # the overlays rather than raising the shared base defaults.
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: dsco-state
+        labels:
+          app.kubernetes.io/name: dsco-agent
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi

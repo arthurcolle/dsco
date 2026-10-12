@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include "claude_models.h"
 
 /* ── Model tier shorthand ─────────────────────────────────────────────── */
 
@@ -10,15 +11,17 @@ typedef enum {
     TIER_HAIKU  = 0,   /* fast / cheap / classifier / executor */
     TIER_SONNET = 1,   /* mid-tier / implementer / analyst */
     TIER_OPUS   = 2,   /* strategic / planner / synthesizer */
+    TIER_FABLE  = 3,   /* root / frontier delegator */
 } model_tier_t;
 
 static inline const char *tier_model_id(model_tier_t t) {
     switch (t) {
-        case TIER_HAIKU:  return "claude-haiku-4-5-20251001";
-        case TIER_SONNET: return "claude-sonnet-4-6";
-        case TIER_OPUS:   return "claude-opus-4-6";
+        case TIER_HAIKU:  return DSCO_CLAUDE_HAIKU_MODEL;
+        case TIER_SONNET: return DSCO_CLAUDE_SONNET_MODEL;
+        case TIER_OPUS:   return DSCO_CLAUDE_OPUS_MODEL;
+        case TIER_FABLE:  return DSCO_CLAUDE_FABLE_MODEL;
     }
-    return "claude-sonnet-4-6";
+    return DSCO_CLAUDE_SONNET_MODEL;
 }
 
 static inline const char *tier_label(model_tier_t t) {
@@ -26,6 +29,7 @@ static inline const char *tier_label(model_tier_t t) {
         case TIER_HAIKU:  return "H";
         case TIER_SONNET: return "S";
         case TIER_OPUS:   return "O";
+        case TIER_FABLE:  return "F";
     }
     return "?";
 }
@@ -204,6 +208,15 @@ const char *topology_resolve_model_for_tier(const char *coordinator_model,
                                             const char *api_key,
                                             model_tier_t tier,
                                             char *buf, size_t buflen);
+/* True when provider-throughput fanout is explicitly requested via env. */
+bool topology_throughput_enabled(void);
+/* Resolve a provider-pinned throughput lane for a tier. The returned model is
+ * native to provider_buf; callers should use swarm_spawn_provider(). */
+bool topology_resolve_throughput_lane_for_tier(const char *api_key,
+                                               model_tier_t tier,
+                                               int slot,
+                                               char *provider_buf, size_t provider_len,
+                                               char *model_buf, size_t model_len);
 /* True when DSCO_TOPO_HETERO is set: tiers resolve to a cross-provider model
  * pool (stepfun/kimi/glm) regardless of the coordinator's own provider. */
 bool topology_hetero_enabled(void);

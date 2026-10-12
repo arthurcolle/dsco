@@ -1,0 +1,29 @@
+#!/data/data/com.termux/files/usr/bin/bash
+set -Eeuo pipefail
+
+REPO_URL="${DSCO_REPO_URL:-https://github.com/arthurcolle/dsco.git}"
+DSCO_ROOT="${DSCO_ROOT:-$HOME/dsco/dsco-cli}"
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+
+fail() { printf 'install-termux: %s\n' "$*" >&2; exit 1; }
+command -v pkg >/dev/null 2>&1 || fail 'run this inside the official Termux app'
+
+pkg update -y
+pkg install -y clang make git pkg-config libcurl sqlite zlib readline
+
+if [ ! -d "$DSCO_ROOT/.git" ]; then
+  mkdir -p "$(dirname "$DSCO_ROOT")"
+  git clone "$REPO_URL" "$DSCO_ROOT"
+fi
+
+cd "$DSCO_ROOT"
+make -j"$(nproc 2>/dev/null || printf 4)" DSCO_ARCH=aarch64 STATIC_DEPS=0 dsco
+
+install -d "$PREFIX/bin" "$HOME/.dsco/device" "$HOME/.dsco/sessions" "$HOME/.dsco/debug"
+install -m 0755 scripts/pixel-fold/dsco-device "$PREFIX/bin/dsco-device"
+
+"$PREFIX/bin/dsco-device" --version
+"$PREFIX/bin/dsco-device" --tool-exec cwd '{}'
+printf '\nInstalled. Launch with: dsco-device\n'
+printf 'Local-first defaults deny network, subprocess execution, secrets, and control.\n'
+printf 'Grant only per session, for example: DSCO_ALLOW_NET=1 dsco-device\n'

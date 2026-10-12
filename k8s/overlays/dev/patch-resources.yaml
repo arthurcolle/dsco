@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dsco-agent
+spec:
+  template:
+    spec:
+      containers:
+        - name: dsco
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+  # Full replacement, not a partial diff — StatefulSet's volumeClaimTemplates
+  # is a plain list with no merge key kustomize can patch by name, so a
+  # strategic-merge patch here has to restate the whole entry.
+  volumeClaimTemplates:
+    - metadata:
+        name: dsco-state
+        labels:
+          app.kubernetes.io/name: dsco-agent
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

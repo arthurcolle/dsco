@@ -1,15 +1,14 @@
-#ifndef DSCO_CRYPTO_H
-#define DSCO_CRYPTO_H
+#ifndef DSCO_CRYPTO_PRIMITIVES_H
+#define DSCO_CRYPTO_PRIMITIVES_H
 
 /* dsco_crypto.h — 2026-standard crypto chokepoint.
  *
- * All call-sites in the codebase route through this header so primitives can
- * be rotated in one place. Direct calls to libsodium / liboqs / blake3 are
- * forbidden outside the src/crypto_*.c implementation files.
+ * Public primitive layer implemented in src/crypto_primitives.c. Existing
+ * legacy crypto.h callers retain their current implementation and wire formats.
  *
  * Symmetric AEAD:     AEGIS-256 (libsodium ≥ 1.0.19), XChaCha20-Poly1305 fallback.
  * KDF:                HKDF-SHA-512 (per-purpose subkeys from a 32-byte root).
- * Password KDF:       Argon2id (m=256MiB, t=4, p=2).
+ * Password KDF:       Argon2id via libsodium (m=256MiB, opslimit=4, p=1).
  * Hash / keyed-MAC:   BLAKE3 when HAVE_BLAKE3, SHA-256 fallback.
  * Hybrid signing:     Ed25519 + ML-DSA-65 (liboqs) when HAVE_LIBOQS.
  * Hybrid KEM:         X25519 + ML-KEM-768 (liboqs) when HAVE_LIBOQS.
@@ -30,7 +29,9 @@ extern "C" {
 
 /* ── Initialization ───────────────────────────────────────────────────── */
 
-/* Call once at program start. Returns 0 on success.
+/* Safe to call repeatedly or concurrently; also called lazily by primitives.
+ * Without libsodium, init returns -1 and dependent operations fail closed.
+ * No secret buffers are allocated by this wrapper layer. Call once at program start. Returns 0 on success.
  * Internally initialises libsodium (and liboqs / blake3 if compiled in). */
 int  dsco_crypto_init(void);
 
@@ -47,12 +48,14 @@ const char *dsco_crypto_suite_id(void);
 
 /* ── Constants ────────────────────────────────────────────────────────── */
 
-/* AEAD: AEGIS-256 if HAVE_AEGIS256 else XChaCha20-Poly1305.
- * Both have 32-byte keys; AEGIS-256 nonce is 32B, XChaCha20 nonce is 24B.
- * We always reserve 32B in the wire format and zero-pad on XChaCha20.        */
+/* AEAD: AEGIS-256 with library support and CPU AES, otherwise XChaCha20-Poly1305.
+ * Both have 32-byte keys; AEGIS-256 nonce/tag are 32B/32B, XChaCha20
+ * nonce/tag are 24B/16B. Reserve 32B for each. The last eight nonce bytes
+ * MUST be zero for XChaCha20. Persist suite_id with ciphertext: different
+ * suites are not wire-compatible, and must never be auto-downgraded.        */
 #define DSCO_AEAD_KEY_BYTES   32u
 #define DSCO_AEAD_NONCE_BYTES 32u
-#define DSCO_AEAD_TAG_BYTES   16u
+#define DSCO_AEAD_TAG_BYTES   32u /* maximum; seal returns actual length */
 
 /* HKDF / hash. */
 #define DSCO_HASH_BYTES       32u   /* BLAKE3-256 or SHA-256 */
@@ -75,13 +78,14 @@ const char *dsco_crypto_suite_id(void);
 #define DSCO_X25519_SK_BYTES  32u
 #define DSCO_X25519_SS_BYTES  32u
 /* ML-KEM-768: pk=1184, ct=1088, ss=32. */
+#define DSCO_MLKEM_SK_BYTES   2400u
 #define DSCO_MLKEM_PK_BYTES   1184u
 #define DSCO_MLKEM_CT_BYTES   1088u
 #define DSCO_MLKEM_SS_BYTES   32u
 
 #define DSCO_HYBRID_KEM_PK_BYTES (DSCO_X25519_PK_BYTES + DSCO_MLKEM_PK_BYTES)
 #define DSCO_HYBRID_KEM_CT_BYTES (DSCO_X25519_PK_BYTES + DSCO_MLKEM_CT_BYTES)
-#define DSCO_HYBRID_KEM_SS_BYTES 64u   /* HKDF-BLAKE3(x25519_ss || mlkem_ss) */
+#define DSCO_HYBRID_KEM_SS_BYTES 64u   /* HKDF-SHA512, binding recipient X25519 key and ciphertext */
 
 /* ── Random ───────────────────────────────────────────────────────────── */
 
@@ -119,14 +123,14 @@ int dsco_pwhash_argon2id(const uint8_t *password, size_t pw_len,
 /* One-shot hash (BLAKE3-256 or SHA-256 depending on build). */
 void dsco_hash(const uint8_t *msg, size_t msg_len, uint8_t out[DSCO_HASH_BYTES]);
 
-/* Keyed MAC. */
+/* Keyed MAC: keyed BLAKE3 if enabled, HMAC-SHA256 otherwise. */
 void dsco_keyed_mac(const uint8_t key[32],
                     const uint8_t *msg, size_t msg_len,
                     uint8_t out[DSCO_HASH_BYTES]);
 
 /* ── AEAD ─────────────────────────────────────────────────────────────── */
 
-/* Encrypt-then-MAC AEAD. The output ciphertext buffer must hold
+/* Authenticated encryption. The output ciphertext buffer must hold
  *   pt_len + DSCO_AEAD_TAG_BYTES.
  * Nonce MUST be unique per (key, message). Use dsco_random_bytes for nonces
  * or a monotonic counter where replay is bounded.
@@ -190,4 +194,4 @@ int dsco_kem_decap(const uint8_t sk_x25519[DSCO_X25519_SK_BYTES],
 }
 #endif
 
-#endif /* DSCO_CRYPTO_H */
+#endif /* DSCO_CRYPTO_PRIMITIVES_H */

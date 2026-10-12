@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LC_ALL=C
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$ROOT/docs/API_REFERENCE.md"
@@ -10,12 +11,15 @@ if [[ "${1:-}" == "--check" ]]; then
   CHECK=1
 fi
 
-mapfile -t HEADERS < <(cd "$ROOT/include" && ls *.h 2>/dev/null | sort)
+HEADERS=()
+while IFS= read -r header; do
+  HEADERS+=("$header")
+done < <(cd "$ROOT/include" && find . -type f -name '*.h' ! -name '*.gen.h' ! -name 'embedded_data_registry.h' | sed 's#^\./##' | sort)
 
 {
   echo "# API Reference"
   echo
-  echo "This file is auto-generated from header declarations in the repository root."
+  echo "This file is auto-generated from header declarations in \`include/\`."
   echo
   echo "- Generator: \`./scripts/gen_api_reference.sh\`"
   echo "- Headers scanned: ${#HEADERS[@]}"
@@ -27,7 +31,7 @@ mapfile -t HEADERS < <(cd "$ROOT/include" && ls *.h 2>/dev/null | sort)
   echo "\`\`\`"
 
   for h in "${HEADERS[@]}"; do
-    path="$ROOT/$h"
+    path="$ROOT/include/$h"
     echo
     echo "## \`$h\`"
     echo

@@ -1,0 +1,33 @@
+services:
+  dsco:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dsco-agent:local
+    container_name: dsco-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      # Only meaningful when DSCO_BIND_PORT is set in .env — see
+      # docker/entrypoint.sh for what it bridges depending on DSCO_MODE.
+      - "${DSCO_BIND_PORT:-8765}:${DSCO_BIND_PORT:-8765}"
+    volumes:
+      # Everything dsco needs to survive a restart lives under ~/.dsco —
+      # sessions, baseline.db (SQLite timeline), auth, plugins, capsules,
+      # chronicle. Named volume so `docker compose down` (without -v) keeps it.
+      - dsco-state:/home/dsco/.dsco
+    healthcheck:
+      test: ["CMD", "dsco", "--tool-exec", "cwd", "{}"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  dsco-state:

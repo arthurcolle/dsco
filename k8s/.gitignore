@@ -1,0 +1,4 @@
+# Real secrets, if you choose the copy-and-fill-in workflow instead of
+# `kubectl create secret` imperatively or a proper secrets operator.
+secret.yaml
+*.secret.yaml

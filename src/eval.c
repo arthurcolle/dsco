@@ -53,12 +53,16 @@ static double parse_primary(eval_ctx_t *ctx);
 /* ── Helpers ──────────────────────────────────────────────────────────── */
 
 static void skip_ws(eval_ctx_t *ctx) {
-    while (*ctx->pos && isspace((unsigned char)*ctx->pos)) ctx->pos++;
+    while (*ctx->pos && isspace((unsigned char)*ctx->pos))
+        ctx->pos++;
 }
 
 static bool match_char(eval_ctx_t *ctx, char c) {
     skip_ws(ctx);
-    if (*ctx->pos == c) { ctx->pos++; return true; }
+    if (*ctx->pos == c) {
+        ctx->pos++;
+        return true;
+    }
     return false;
 }
 
@@ -79,23 +83,30 @@ static bool peek_char(eval_ctx_t *ctx, char c) {
 
 static void set_error(eval_ctx_t *ctx, const char *msg) {
     if (!ctx->has_error) {
-        snprintf(ctx->error, sizeof(ctx->error), "%s at position %ld",
-                 msg, (long)(ctx->pos - ctx->input));
+        snprintf(ctx->error, sizeof(ctx->error), "%s at position %ld", msg,
+                 (long)(ctx->pos - ctx->input));
         ctx->has_error = true;
     }
 }
 
 static double factorial_f(double n) {
-    if (n < 0) return NAN;
-    if (n > 170) return INFINITY;
+    if (n < 0)
+        return NAN;
+    if (n > 170)
+        return INFINITY;
     double result = 1;
-    for (int i = 2; i <= (int)n; i++) result *= i;
+    for (int i = 2; i <= (int)n; i++)
+        result *= i;
     return result;
 }
 
 static double gcd_f(double a, double b) {
     long la = (long)fabs(a), lb = (long)fabs(b);
-    while (lb) { long t = lb; lb = la % lb; la = t; }
+    while (lb) {
+        long t = lb;
+        lb = la % lb;
+        la = t;
+    }
     return (double)la;
 }
 
@@ -104,11 +115,17 @@ static double lcm_f(double a, double b) {
 }
 
 static double fib_f(double n) {
-    if (n < 0) return NAN;
+    if (n < 0)
+        return NAN;
     int ni = (int)n;
-    if (ni <= 1) return ni;
+    if (ni <= 1)
+        return ni;
     double a = 0, b = 1;
-    for (int i = 2; i <= ni; i++) { double t = a + b; a = b; b = t; }
+    for (int i = 2; i <= ni; i++) {
+        double t = a + b;
+        a = b;
+        b = t;
+    }
     return b;
 }
 
@@ -118,8 +135,8 @@ void eval_init(eval_ctx_t *ctx) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->base = 10;
     /* Pre-define constants */
-    eval_set_var(ctx, "pi",  3.14159265358979323846);
-    eval_set_var(ctx, "e",   2.71828182845904523536);
+    eval_set_var(ctx, "pi", 3.14159265358979323846);
+    eval_set_var(ctx, "e", 2.71828182845904523536);
     eval_set_var(ctx, "tau", 6.28318530717958647692);
     eval_set_var(ctx, "phi", 1.61803398874989484820);
     eval_set_var(ctx, "inf", INFINITY);
@@ -200,54 +217,102 @@ static double call_function(eval_ctx_t *ctx, const char *name) {
     }
 
     /* Built-in functions */
-    if (strcmp(name, "sqrt") == 0)     return sqrt(args[0]);
-    if (strcmp(name, "cbrt") == 0)     return cbrt(args[0]);
-    if (strcmp(name, "abs") == 0)      return fabs(args[0]);
-    if (strcmp(name, "ceil") == 0)     return ceil(args[0]);
-    if (strcmp(name, "floor") == 0)    return floor(args[0]);
-    if (strcmp(name, "round") == 0)    return round(args[0]);
-    if (strcmp(name, "trunc") == 0)    return trunc(args[0]);
+    if (strcmp(name, "sqrt") == 0)
+        return sqrt(args[0]);
+    if (strcmp(name, "cbrt") == 0)
+        return cbrt(args[0]);
+    if (strcmp(name, "abs") == 0)
+        return fabs(args[0]);
+    if (strcmp(name, "ceil") == 0)
+        return ceil(args[0]);
+    if (strcmp(name, "floor") == 0)
+        return floor(args[0]);
+    if (strcmp(name, "round") == 0)
+        return round(args[0]);
+    if (strcmp(name, "trunc") == 0)
+        return trunc(args[0]);
 
-    if (strcmp(name, "sin") == 0)      return sin(args[0]);
-    if (strcmp(name, "cos") == 0)      return cos(args[0]);
-    if (strcmp(name, "tan") == 0)      return tan(args[0]);
-    if (strcmp(name, "asin") == 0)     return asin(args[0]);
-    if (strcmp(name, "acos") == 0)     return acos(args[0]);
-    if (strcmp(name, "atan") == 0)     return atan(args[0]);
-    if (strcmp(name, "atan2") == 0)    return atan2(args[0], args[1]);
-    if (strcmp(name, "sinh") == 0)     return sinh(args[0]);
-    if (strcmp(name, "cosh") == 0)     return cosh(args[0]);
-    if (strcmp(name, "tanh") == 0)     return tanh(args[0]);
+    if (strcmp(name, "sin") == 0)
+        return sin(args[0]);
+    if (strcmp(name, "cos") == 0)
+        return cos(args[0]);
+    if (strcmp(name, "tan") == 0)
+        return tan(args[0]);
+    if (strcmp(name, "asin") == 0)
+        return asin(args[0]);
+    if (strcmp(name, "acos") == 0)
+        return acos(args[0]);
+    if (strcmp(name, "atan") == 0)
+        return atan(args[0]);
+    if (strcmp(name, "atan2") == 0)
+        return atan2(args[0], args[1]);
+    if (strcmp(name, "sinh") == 0)
+        return sinh(args[0]);
+    if (strcmp(name, "cosh") == 0)
+        return cosh(args[0]);
+    if (strcmp(name, "tanh") == 0)
+        return tanh(args[0]);
 
-    if (strcmp(name, "log") == 0)      return log10(args[0]);
-    if (strcmp(name, "log2") == 0)     return log2(args[0]);
-    if (strcmp(name, "log10") == 0)    return log10(args[0]);
-    if (strcmp(name, "ln") == 0)       return log(args[0]);
-    if (strcmp(name, "exp") == 0)      return exp(args[0]);
-    if (strcmp(name, "exp2") == 0)     return exp2(args[0]);
-    if (strcmp(name, "pow") == 0)      return pow(args[0], args[1]);
+    if (strcmp(name, "log") == 0)
+        return log10(args[0]);
+    if (strcmp(name, "log2") == 0)
+        return log2(args[0]);
+    if (strcmp(name, "log10") == 0)
+        return log10(args[0]);
+    if (strcmp(name, "ln") == 0)
+        return log(args[0]);
+    if (strcmp(name, "exp") == 0)
+        return exp(args[0]);
+    if (strcmp(name, "exp2") == 0)
+        return exp2(args[0]);
+    if (strcmp(name, "pow") == 0)
+        return pow(args[0], args[1]);
 
-    if (strcmp(name, "min") == 0)      return fmin(args[0], args[1]);
-    if (strcmp(name, "max") == 0)      return fmax(args[0], args[1]);
-    if (strcmp(name, "clamp") == 0)    return fmin(fmax(args[0], args[1]), args[2]);
+    if (strcmp(name, "min") == 0)
+        return fmin(args[0], args[1]);
+    if (strcmp(name, "max") == 0)
+        return fmax(args[0], args[1]);
+    if (strcmp(name, "clamp") == 0)
+        return fmin(fmax(args[0], args[1]), args[2]);
 
-    if (strcmp(name, "gcd") == 0)      return gcd_f(args[0], args[1]);
-    if (strcmp(name, "lcm") == 0)      return lcm_f(args[0], args[1]);
-    if (strcmp(name, "fib") == 0)      return fib_f(args[0]);
-    if (strcmp(name, "factorial") == 0) return factorial_f(args[0]);
+    if (strcmp(name, "gcd") == 0)
+        return gcd_f(args[0], args[1]);
+    if (strcmp(name, "lcm") == 0)
+        return lcm_f(args[0], args[1]);
+    if (strcmp(name, "fib") == 0)
+        return fib_f(args[0]);
+    if (strcmp(name, "factorial") == 0)
+        return factorial_f(args[0]);
 
-    if (strcmp(name, "deg") == 0)      return args[0] * 180.0 / M_PI;
-    if (strcmp(name, "rad") == 0)      return args[0] * M_PI / 180.0;
+    if (strcmp(name, "deg") == 0)
+        return args[0] * 180.0 / M_PI;
+    if (strcmp(name, "rad") == 0)
+        return args[0] * M_PI / 180.0;
 
-    if (strcmp(name, "sign") == 0)     return (args[0] > 0) - (args[0] < 0);
-    if (strcmp(name, "fmod") == 0)     return fmod(args[0], args[1]);
-    if (strcmp(name, "hypot") == 0)    return hypot(args[0], args[1]);
+    if (strcmp(name, "sign") == 0)
+        return (args[0] > 0) - (args[0] < 0);
+    if (strcmp(name, "fmod") == 0)
+        return fmod(args[0], args[1]);
+    if (strcmp(name, "hypot") == 0)
+        return hypot(args[0], args[1]);
 
     /* Format conversions — set output base */
-    if (strcmp(name, "hex") == 0)      { ctx->base = 16; return args[0]; }
-    if (strcmp(name, "oct") == 0)      { ctx->base = 8;  return args[0]; }
-    if (strcmp(name, "bin") == 0)      { ctx->base = 2;  return args[0]; }
-    if (strcmp(name, "dec") == 0)      { ctx->base = 10; return args[0]; }
+    if (strcmp(name, "hex") == 0) {
+        ctx->base = 16;
+        return args[0];
+    }
+    if (strcmp(name, "oct") == 0) {
+        ctx->base = 8;
+        return args[0];
+    }
+    if (strcmp(name, "bin") == 0) {
+        ctx->base = 2;
+        return args[0];
+    }
+    if (strcmp(name, "dec") == 0) {
+        ctx->base = 10;
+        return args[0];
+    }
 
     char msg[128];
     snprintf(msg, sizeof(msg), "unknown function '%s'", name);
@@ -258,13 +323,15 @@ static double call_function(eval_ctx_t *ctx, const char *name) {
 /* ── Recursive descent parser ────────────────────────────────────────── */
 
 static double parse_primary(eval_ctx_t *ctx) {
-    if (ctx->has_error) return NAN;
+    if (ctx->has_error)
+        return NAN;
     skip_ws(ctx);
 
     /* Parenthesized expression */
     if (match_char(ctx, '(')) {
         double val = parse_expr(ctx);
-        if (!match_char(ctx, ')')) set_error(ctx, "expected ')'");
+        if (!match_char(ctx, ')'))
+            set_error(ctx, "expected ')'");
         return val;
     }
 
@@ -276,10 +343,12 @@ static double parse_primary(eval_ctx_t *ctx) {
     /* Identifier or function call */
     if (isalpha((unsigned char)*ctx->pos) || *ctx->pos == '_') {
         const char *start = ctx->pos;
-        while (isalnum((unsigned char)*ctx->pos) || *ctx->pos == '_') ctx->pos++;
+        while (isalnum((unsigned char)*ctx->pos) || *ctx->pos == '_')
+            ctx->pos++;
         size_t len = (size_t)(ctx->pos - start);
         char name[64];
-        if (len >= sizeof(name)) len = sizeof(name) - 1;
+        if (len >= sizeof(name))
+            len = sizeof(name) - 1;
         memcpy(name, start, len);
         name[len] = '\0';
 
@@ -318,7 +387,8 @@ static double parse_power(eval_ctx_t *ctx) {
     double base = parse_postfix(ctx);
     skip_ws(ctx);
     if (match_str(ctx, "**") || (*ctx->pos == '^' && *(ctx->pos + 1) != '^')) {
-        if (*ctx->pos == '^') ctx->pos++;
+        if (*ctx->pos == '^')
+            ctx->pos++;
         double exp_val = parse_unary(ctx); /* right-associative */
         return pow(base, exp_val);
     }
@@ -327,9 +397,12 @@ static double parse_power(eval_ctx_t *ctx) {
 
 static double parse_unary(eval_ctx_t *ctx) {
     skip_ws(ctx);
-    if (match_char(ctx, '-')) return -parse_unary(ctx);
-    if (match_char(ctx, '+')) return parse_unary(ctx);
-    if (match_char(ctx, '~')) return (double)(~(long)parse_unary(ctx));
+    if (match_char(ctx, '-'))
+        return -parse_unary(ctx);
+    if (match_char(ctx, '+'))
+        return parse_unary(ctx);
+    if (match_char(ctx, '~'))
+        return (double)(~(long)parse_unary(ctx));
     if (*ctx->pos == '!' && *(ctx->pos + 1) != '=') {
         ctx->pos++;
         return parse_unary(ctx) == 0.0 ? 1.0 : 0.0;
@@ -341,10 +414,16 @@ static double parse_product(eval_ctx_t *ctx) {
     double val = parse_unary(ctx);
     while (!ctx->has_error) {
         skip_ws(ctx);
-        if (match_char(ctx, '*') && *ctx->pos != '*') val *= parse_unary(ctx);
-        else if (match_char(ctx, '/')) { double d = parse_unary(ctx); val = d != 0 ? val / d : (set_error(ctx, "division by zero"), NAN); }
-        else if (match_char(ctx, '%')) { double d = parse_unary(ctx); val = fmod(val, d); }
-        else break;
+        if (match_char(ctx, '*') && *ctx->pos != '*')
+            val *= parse_unary(ctx);
+        else if (match_char(ctx, '/')) {
+            double d = parse_unary(ctx);
+            val = d != 0 ? val / d : (set_error(ctx, "division by zero"), NAN);
+        } else if (match_char(ctx, '%')) {
+            double d = parse_unary(ctx);
+            val = fmod(val, d);
+        } else
+            break;
     }
     return val;
 }
@@ -353,9 +432,12 @@ static double parse_sum(eval_ctx_t *ctx) {
     double val = parse_product(ctx);
     while (!ctx->has_error) {
         skip_ws(ctx);
-        if (match_char(ctx, '+')) val += parse_product(ctx);
-        else if (match_char(ctx, '-')) val -= parse_product(ctx);
-        else break;
+        if (match_char(ctx, '+'))
+            val += parse_product(ctx);
+        else if (match_char(ctx, '-'))
+            val -= parse_product(ctx);
+        else
+            break;
     }
     return val;
 }
@@ -364,9 +446,12 @@ static double parse_shift(eval_ctx_t *ctx) {
     double val = parse_sum(ctx);
     while (!ctx->has_error) {
         skip_ws(ctx);
-        if (match_str(ctx, "<<")) val = (double)((long)val << (long)parse_sum(ctx));
-        else if (match_str(ctx, ">>")) val = (double)((long)val >> (long)parse_sum(ctx));
-        else break;
+        if (match_str(ctx, "<<"))
+            val = (double)((long)val << (long)parse_sum(ctx));
+        else if (match_str(ctx, ">>"))
+            val = (double)((long)val >> (long)parse_sum(ctx));
+        else
+            break;
     }
     return val;
 }
@@ -375,11 +460,16 @@ static double parse_compare(eval_ctx_t *ctx) {
     double val = parse_shift(ctx);
     while (!ctx->has_error) {
         skip_ws(ctx);
-        if (match_str(ctx, "<=")) val = val <= parse_shift(ctx) ? 1.0 : 0.0;
-        else if (match_str(ctx, ">=")) val = val >= parse_shift(ctx) ? 1.0 : 0.0;
-        else if (match_char(ctx, '<')) val = val < parse_shift(ctx) ? 1.0 : 0.0;
-        else if (match_char(ctx, '>')) val = val > parse_shift(ctx) ? 1.0 : 0.0;
-        else break;
+        if (match_str(ctx, "<="))
+            val = val <= parse_shift(ctx) ? 1.0 : 0.0;
+        else if (match_str(ctx, ">="))
+            val = val >= parse_shift(ctx) ? 1.0 : 0.0;
+        else if (match_char(ctx, '<'))
+            val = val < parse_shift(ctx) ? 1.0 : 0.0;
+        else if (match_char(ctx, '>'))
+            val = val > parse_shift(ctx) ? 1.0 : 0.0;
+        else
+            break;
     }
     return val;
 }
@@ -388,9 +478,12 @@ static double parse_equality(eval_ctx_t *ctx) {
     double val = parse_compare(ctx);
     while (!ctx->has_error) {
         skip_ws(ctx);
-        if (match_str(ctx, "==")) val = val == parse_compare(ctx) ? 1.0 : 0.0;
-        else if (match_str(ctx, "!=")) val = val != parse_compare(ctx) ? 1.0 : 0.0;
-        else break;
+        if (match_str(ctx, "=="))
+            val = val == parse_compare(ctx) ? 1.0 : 0.0;
+        else if (match_str(ctx, "!="))
+            val = val != parse_compare(ctx) ? 1.0 : 0.0;
+        else
+            break;
     }
     return val;
 }
@@ -399,10 +492,11 @@ static double parse_bitand(eval_ctx_t *ctx) {
     double val = parse_equality(ctx);
     while (!ctx->has_error) {
         skip_ws(ctx);
-        if (*ctx->pos == '&' && *(ctx->pos+1) != '&') {
+        if (*ctx->pos == '&' && *(ctx->pos + 1) != '&') {
             ctx->pos++;
             val = (double)((long)val & (long)parse_equality(ctx));
-        } else break;
+        } else
+            break;
     }
     return val;
 }
@@ -413,8 +507,10 @@ static double parse_bitxor(eval_ctx_t *ctx) {
        is handled only if we see ^^ */
     while (!ctx->has_error) {
         skip_ws(ctx);
-        if (match_str(ctx, "^^")) val = (double)((long)val ^ (long)parse_bitand(ctx));
-        else break;
+        if (match_str(ctx, "^^"))
+            val = (double)((long)val ^ (long)parse_bitand(ctx));
+        else
+            break;
     }
     return val;
 }
@@ -423,10 +519,11 @@ static double parse_bitor(eval_ctx_t *ctx) {
     double val = parse_bitxor(ctx);
     while (!ctx->has_error) {
         skip_ws(ctx);
-        if (*ctx->pos == '|' && *(ctx->pos+1) != '|') {
+        if (*ctx->pos == '|' && *(ctx->pos + 1) != '|') {
             ctx->pos++;
             val = (double)((long)val | (long)parse_bitxor(ctx));
-        } else break;
+        } else
+            break;
     }
     return val;
 }
@@ -438,7 +535,8 @@ static double parse_and(eval_ctx_t *ctx) {
         if (match_str(ctx, "&&")) {
             double right = parse_bitor(ctx);
             val = (val != 0.0 && right != 0.0) ? 1.0 : 0.0;
-        } else break;
+        } else
+            break;
     }
     return val;
 }
@@ -450,7 +548,8 @@ static double parse_or(eval_ctx_t *ctx) {
         if (match_str(ctx, "||")) {
             double right = parse_and(ctx);
             val = (val != 0.0 || right != 0.0) ? 1.0 : 0.0;
-        } else break;
+        } else
+            break;
     }
     return val;
 }
@@ -460,7 +559,8 @@ static double parse_ternary(eval_ctx_t *ctx) {
     skip_ws(ctx);
     if (match_char(ctx, '?')) {
         double then_val = parse_expr(ctx);
-        if (!match_char(ctx, ':')) set_error(ctx, "expected ':'");
+        if (!match_char(ctx, ':'))
+            set_error(ctx, "expected ':'");
         double else_val = parse_expr(ctx);
         return val != 0.0 ? then_val : else_val;
     }
@@ -474,13 +574,15 @@ static double parse_assign(eval_ctx_t *ctx) {
 
     if (isalpha((unsigned char)*ctx->pos) || *ctx->pos == '_') {
         const char *name_start = ctx->pos;
-        while (isalnum((unsigned char)*ctx->pos) || *ctx->pos == '_') ctx->pos++;
+        while (isalnum((unsigned char)*ctx->pos) || *ctx->pos == '_')
+            ctx->pos++;
         size_t len = (size_t)(ctx->pos - name_start);
         skip_ws(ctx);
-        if (*ctx->pos == '=' && *(ctx->pos+1) != '=') {
+        if (*ctx->pos == '=' && *(ctx->pos + 1) != '=') {
             ctx->pos++; /* skip '=' */
             char name[64];
-            if (len >= sizeof(name)) len = sizeof(name) - 1;
+            if (len >= sizeof(name))
+                len = sizeof(name) - 1;
             memcpy(name, name_start, len);
             name[len] = '\0';
             double val = parse_assign(ctx);
@@ -497,7 +599,8 @@ static double parse_assign(eval_ctx_t *ctx) {
 #define EVAL_MAX_DEPTH 256
 
 static double parse_expr(eval_ctx_t *ctx) {
-    if (ctx->has_error) return NAN;
+    if (ctx->has_error)
+        return NAN;
     if (ctx->depth >= EVAL_MAX_DEPTH) {
         set_error(ctx, "expression too deeply nested");
         return NAN;
@@ -536,35 +639,41 @@ void eval_format(eval_ctx_t *ctx, const char *expr, char *out, size_t out_len) {
     }
 
     switch (ctx->base) {
-    case 16:
-        snprintf(out, out_len, "0x%lx", (long)val);
-        break;
-    case 8:
-        snprintf(out, out_len, "0o%lo", (long)val);
-        break;
-    case 2: {
-        long v = (long)val;
-        char bits[65];
-        int i = 0;
-        if (v == 0) { bits[i++] = '0'; }
-        else {
-            unsigned long u = (unsigned long)v;
-            while (u) { bits[i++] = (u & 1) ? '1' : '0'; u >>= 1; }
+        case 16:
+            snprintf(out, out_len, "0x%lx", (long)val);
+            break;
+        case 8:
+            snprintf(out, out_len, "0o%lo", (long)val);
+            break;
+        case 2: {
+            long v = (long)val;
+            char bits[65];
+            int i = 0;
+            if (v == 0) {
+                bits[i++] = '0';
+            } else {
+                unsigned long u = (unsigned long)v;
+                while (u) {
+                    bits[i++] = (u & 1) ? '1' : '0';
+                    u >>= 1;
+                }
+            }
+            bits[i] = '\0';
+            /* Reverse */
+            for (int a = 0, b = i - 1; a < b; a++, b--) {
+                char t = bits[a];
+                bits[a] = bits[b];
+                bits[b] = t;
+            }
+            snprintf(out, out_len, "0b%s", bits);
+            break;
         }
-        bits[i] = '\0';
-        /* Reverse */
-        for (int a = 0, b = i - 1; a < b; a++, b--) {
-            char t = bits[a]; bits[a] = bits[b]; bits[b] = t;
-        }
-        snprintf(out, out_len, "0b%s", bits);
-        break;
-    }
-    default:
-        if (val == (long)val && fabs(val) < 1e15)
-            snprintf(out, out_len, "%ld", (long)val);
-        else
-            snprintf(out, out_len, "%.15g", val);
-        break;
+        default:
+            if (val == (long)val && fabs(val) < 1e15)
+                snprintf(out, out_len, "%ld", (long)val);
+            else
+                snprintf(out, out_len, "%.15g", val);
+            break;
     }
 }
 
@@ -575,20 +684,23 @@ void eval_multi(eval_ctx_t *ctx, const char *exprs, char *out, size_t out_len) {
     size_t pos = 0;
 
     while (token && pos < out_len - 1) {
-        while (*token == ' ') token++;
+        while (*token == ' ')
+            token++;
         char *end = token + strlen(token);
-        while (end > token && end[-1] == ' ') *--end = '\0';
+        while (end > token && end[-1] == ' ')
+            *--end = '\0';
 
         if (*token) {
             char buf[256];
             eval_format(ctx, token, buf, sizeof(buf));
-            int n = snprintf(out + pos, out_len - pos, "%s%s",
-                             pos > 0 ? "\n" : "", buf);
-            if (n > 0) pos += (size_t)n;
+            int n = snprintf(out + pos, out_len - pos, "%s%s", pos > 0 ? "\n" : "", buf);
+            if (n > 0)
+                pos += (size_t)n;
         }
         token = strtok_r(NULL, ";", &save);
     }
-    if (pos == 0 && out_len > 0) out[0] = '\0';
+    if (pos == 0 && out_len > 0)
+        out[0] = '\0';
     free(copy);
 }
 
@@ -598,9 +710,13 @@ void eval_multi(eval_ctx_t *ctx, const char *exprs, char *out, size_t out_len) {
 
 void bigint_from_str(bigint_t *b, const char *s) {
     memset(b, 0, sizeof(*b));
-    if (*s == '-') { b->negative = true; s++; }
+    if (*s == '-') {
+        b->negative = true;
+        s++;
+    }
     int slen = (int)strlen(s);
-    if (slen > BIGINT_MAX_DIGITS) slen = BIGINT_MAX_DIGITS;
+    if (slen > BIGINT_MAX_DIGITS)
+        slen = BIGINT_MAX_DIGITS;
     b->len = slen;
     for (int i = 0; i < slen; i++) {
         b->digits[i] = s[slen - 1 - i] - '0';
@@ -608,9 +724,13 @@ void bigint_from_str(bigint_t *b, const char *s) {
 }
 
 void bigint_to_str(const bigint_t *b, char *s, size_t len) {
-    if (b->len == 0) { snprintf(s, len, "0"); return; }
+    if (b->len == 0) {
+        snprintf(s, len, "0");
+        return;
+    }
     size_t pos = 0;
-    if (b->negative && pos < len - 1) s[pos++] = '-';
+    if (b->negative && pos < len - 1)
+        s[pos++] = '-';
     for (int i = b->len - 1; i >= 0 && pos < len - 1; i--) {
         s[pos++] = '0' + b->digits[i];
     }
@@ -623,8 +743,10 @@ void bigint_add(const bigint_t *a, const bigint_t *b, bigint_t *result) {
     int carry = 0;
     for (int i = 0; (i < maxlen || carry) && result->len < BIGINT_MAX_DIGITS; i++) {
         int sum = carry;
-        if (i < a->len) sum += a->digits[i];
-        if (i < b->len) sum += b->digits[i];
+        if (i < a->len)
+            sum += a->digits[i];
+        if (i < b->len)
+            sum += b->digits[i];
         result->digits[result->len++] = sum % 10;
         carry = sum / 10;
     }
@@ -637,10 +759,12 @@ void bigint_mul(const bigint_t *a, const bigint_t *b, bigint_t *result) {
         int carry = 0;
         for (int j = 0; (j < b->len || carry) && (i + j) < BIGINT_MAX_DIGITS; j++) {
             int prod = result->digits[i + j] + carry;
-            if (j < b->len) prod += a->digits[i] * b->digits[j];
+            if (j < b->len)
+                prod += a->digits[i] * b->digits[j];
             result->digits[i + j] = prod % 10;
             carry = prod / 10;
-            if (i + j + 1 > result->len) result->len = i + j + 1;
+            if (i + j + 1 > result->len)
+                result->len = i + j + 1;
         }
     }
     /* Trim leading zeros */
@@ -673,14 +797,20 @@ void bigint_factorial(int n, bigint_t *result) {
 
 bool bigint_is_prime(const bigint_t *n) {
     /* Simple primality for small numbers */
-    if (n->len > 10) return false; /* Too big for simple test */
+    if (n->len > 10)
+        return false; /* Too big for simple test */
     long val = 0;
-    for (int i = n->len - 1; i >= 0; i--) val = val * 10 + n->digits[i];
-    if (val < 2) return false;
-    if (val < 4) return true;
-    if (val % 2 == 0 || val % 3 == 0) return false;
+    for (int i = n->len - 1; i >= 0; i--)
+        val = val * 10 + n->digits[i];
+    if (val < 2)
+        return false;
+    if (val < 4)
+        return true;
+    if (val % 2 == 0 || val % 3 == 0)
+        return false;
     for (long i = 5; i * i <= val; i += 6) {
-        if (val % i == 0 || val % (i + 2) == 0) return false;
+        if (val % i == 0 || val % (i + 2) == 0)
+            return false;
     }
     return true;
 }

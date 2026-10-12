@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dsco-agent-headless
+  namespace: dsco-agent
+  labels:
+    app.kubernetes.io/name: dsco-agent
+spec:
+  # Required by StatefulSet for per-pod DNS identity, even at replicas: 1 —
+  # not meant to be used for client traffic.
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: dsco-agent
+  ports:
+    - name: bridge
+      port: 8765
+      targetPort: bridge
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dsco-agent
+  namespace: dsco-agent
+  labels:
+    app.kubernetes.io/name: dsco-agent
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: dsco-agent
+  ports:
+    - name: bridge
+      port: 8765
+      targetPort: bridge

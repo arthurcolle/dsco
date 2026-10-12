@@ -1,0 +1,24 @@
+local l = require("lingo")
+local w = l.world()
+w:define("Example", {
+  a=l.stored("integer", 1),
+  b=l.derived("integer", function(self) return self.a+2 end),
+  c=l.derived("integer", function(self) return self.b+4 end),
+})
+local x=w:new("Example", "example")
+local base=x.c
+local hypothetical=w:scenario("outer", function(s)
+  s:override(x, "a", 100); assert(x.c==106)
+  s:override(x, "b", 200); assert(x.c==204)
+  s:override(x, "a", 2); assert(x.c==204)
+  assert(#s:why(x, "b").dependencies==0)
+  local inner=s:scenario("inner", function(inner)
+    inner:override(x, "b", 900)
+    return x.c
+  end)
+  assert(inner==904 and x.c==204)
+  s:restore(x, "b"); assert(x.b==4 and x.c==8)
+  return x.c
+end)
+assert(base==7 and hypothetical==8 and x.c==7)
+return {base=base,hypothetical=hypothetical,after=x.c}

@@ -1,0 +1,37 @@
+# Default-deny-ish posture for a workload that holds real provider API keys:
+# only same-namespace pods may reach the agent's bridge port; outbound is
+# scoped to DNS + HTTPS, which covers every provider/tool API dsco talks to
+# (Anthropic/OpenAI/OpenRouter/Kalshi/Polymarket/search APIs/etc. — all
+# plain HTTPS). Widen the egress rule if a specific toolset needs a
+# non-443 port (e.g. a self-hosted MCP server on a custom port).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: dsco-agent
+  namespace: dsco-agent
+  labels:
+    app.kubernetes.io/name: dsco-agent
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: dsco-agent
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    # A `from` entry with only a podSelector (no namespaceSelector) matches
+    # pods in this policy's own namespace — deliberately not hardcoding a
+    # namespace name here, since overlays/dev renames the namespace and a
+    # literal "dsco-agent" would silently stop matching there.
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8765
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 443

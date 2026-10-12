@@ -3,6 +3,172 @@
  * See include/dsco_dht.h. Wraps vendor/dht.c (compiled in dht_impl.c). */
 
 #include "dsco_dht.h"
+#include "crypto.h"
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+#define DSCO_DHT_ID_LEN 20
+#define DSCO_DHT_KBUCKET_COUNT (DSCO_DHT_ID_LEN * 8)
+#define DSCO_DHT_DEFAULT_K 8
+#define DSCO_DHT_MAX_PROVIDED_KEYS 256
+
+typedef struct {
+    uint8_t  id[DSCO_DHT_ID_LEN];
+    char     addr[80];
+    uint64_t last_seen;
+} dsco_dht_kbucket_entry_t;
+
+typedef struct {
+    dsco_dht_kbucket_entry_t *items;
+    int count;
+    int cap;
+} dsco_dht_kbucket_vec_t;
+
+struct dsco_dht_kbuckets {
+    uint8_t self_id[DSCO_DHT_ID_LEN];
+    int k;
+    dsco_dht_kbucket_vec_t buckets[DSCO_DHT_KBUCKET_COUNT];
+};
+
+static int dht_bucket_index_for(const uint8_t self_id[DSCO_DHT_ID_LEN],
+                                const uint8_t node_id[DSCO_DHT_ID_LEN]) {
+    for (int byte = 0; byte < DSCO_DHT_ID_LEN; byte++) {
+        uint8_t x = (uint8_t)(self_id[byte] ^ node_id[byte]);
+        if (!x)
+            continue;
+        for (int bit = 7; bit >= 0; bit--) {
+            if (x & (uint8_t)(1u << bit))
+                return byte * 8 + (7 - bit);
+        }
+    }
+    return DSCO_DHT_KBUCKET_COUNT - 1;
+}
+
+bool dsco_dht_key_from_sha256(const char *sha256_hex, uint8_t out_key[20]) {
+    uint8_t digest[32];
+    if (!sha256_hex || !out_key || strlen(sha256_hex) != 64 ||
+        hex_decode(sha256_hex, 64, digest, sizeof(digest)) != sizeof(digest))
+        return false;
+    memcpy(out_key, digest, 20);
+    memset(digest, 0, sizeof(digest));
+    return true;
+}
+
+dsco_dht_kbuckets_t *dsco_dht_kbuckets_create(const uint8_t self_id[20], int k) {
+    if (!self_id)
+        return NULL;
+    dsco_dht_kbuckets_t *kb = calloc(1, sizeof(*kb));
+    if (!kb)
+        return NULL;
+    memcpy(kb->self_id, self_id, DSCO_DHT_ID_LEN);
+    kb->k = k > 0 ? k : DSCO_DHT_DEFAULT_K;
+    return kb;
+}
+
+void dsco_dht_kbuckets_destroy(dsco_dht_kbuckets_t *kb) {
+    if (!kb)
+        return;
+    for (int i = 0; i < DSCO_DHT_KBUCKET_COUNT; i++)
+        free(kb->buckets[i].items);
+    free(kb);
+}
+
+bool dsco_dht_kbuckets_touch(dsco_dht_kbuckets_t *kb, const uint8_t node_id[20],
+                             const char *addr, uint64_t now_tick) {
+    if (!kb || !node_id)
+        return false;
+    int bi = dht_bucket_index_for(kb->self_id, node_id);
+    dsco_dht_kbucket_vec_t *b = &kb->buckets[bi];
+    for (int i = 0; i < b->count; i++) {
+        if (memcmp(b->items[i].id, node_id, DSCO_DHT_ID_LEN) == 0) {
+            b->items[i].last_seen = now_tick;
+            if (addr)
+                snprintf(b->items[i].addr, sizeof(b->items[i].addr), "%s", addr);
+            return true;
+        }
+    }
+    if (b->count == b->cap) {
+        int next = b->cap ? b->cap * 2 : kb->k;
+        if (next < kb->k)
+            next = kb->k;
+        dsco_dht_kbucket_entry_t *tmp =
+            realloc(b->items, (size_t)next * sizeof(*b->items));
+        if (!tmp)
+            return false;
+        b->items = tmp;
+        b->cap = next;
+    }
+    int pos = b->count;
+    if (b->count >= kb->k) {
+        pos = 0;
+        for (int i = 1; i < b->count; i++) {
+            if (b->items[i].last_seen < b->items[pos].last_seen)
+                pos = i;
+        }
+    } else {
+        b->count++;
+    }
+    memset(&b->items[pos], 0, sizeof(b->items[pos]));
+    memcpy(b->items[pos].id, node_id, DSCO_DHT_ID_LEN);
+    if (addr)
+        snprintf(b->items[pos].addr, sizeof(b->items[pos].addr), "%s", addr);
+    b->items[pos].last_seen = now_tick;
+    return true;
+}
+
+int dsco_dht_kbuckets_bucket_size(dsco_dht_kbuckets_t *kb, const uint8_t node_id[20]) {
+    if (!kb || !node_id)
+        return 0;
+    return kb->buckets[dht_bucket_index_for(kb->self_id, node_id)].count;
+}
+
+static int dht_distance_compare(const uint8_t target[DSCO_DHT_ID_LEN],
+                                const dsco_dht_kbucket_entry_t *a,
+                                const dsco_dht_kbucket_entry_t *b) {
+    for (int i = 0; i < DSCO_DHT_ID_LEN; i++) {
+        uint8_t da = (uint8_t)(a->id[i] ^ target[i]);
+        uint8_t db = (uint8_t)(b->id[i] ^ target[i]);
+        if (da != db)
+            return da < db ? -1 : 1;
+    }
+    return 0;
+}
+
+int dsco_dht_kbuckets_closest(dsco_dht_kbuckets_t *kb, const uint8_t target[20],
+                              uint8_t out_ids[][20], int max) {
+    if (!kb || !target || !out_ids || max <= 0)
+        return 0;
+    int total = 0;
+    for (int i = 0; i < DSCO_DHT_KBUCKET_COUNT; i++)
+        total += kb->buckets[i].count;
+    if (total == 0)
+        return 0;
+    dsco_dht_kbucket_entry_t *all = calloc((size_t)total, sizeof(*all));
+    if (!all)
+        return 0;
+    int n = 0;
+    for (int i = 0; i < DSCO_DHT_KBUCKET_COUNT; i++) {
+        dsco_dht_kbucket_vec_t *b = &kb->buckets[i];
+        for (int j = 0; j < b->count; j++)
+            all[n++] = b->items[j];
+    }
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (dht_distance_compare(target, &all[j], &all[i]) < 0) {
+                dsco_dht_kbucket_entry_t tmp = all[i];
+                all[i] = all[j];
+                all[j] = tmp;
+            }
+        }
+    }
+    int out_n = n < max ? n : max;
+    for (int i = 0; i < out_n; i++)
+        memcpy(out_ids[i], all[i].id, DSCO_DHT_ID_LEN);
+    free(all);
+    return out_n;
+}
 
 #ifdef HAVE_LIBSODIUM
 
@@ -28,21 +194,26 @@
 #include <sys/select.h>
 #include <sys/types.h>
 
-#define DHT_DEFAULT_UDP_PORT   7600
-#define DHT_SEARCH_INTERVAL_S  300   /* re-announce / re-search cadence */
-#define DHT_ID_LEN             20
+#define DHT_DEFAULT_UDP_PORT 7600
+#define DHT_SEARCH_INTERVAL_S 300 /* re-announce / re-search cadence */
+#define DHT_ID_LEN 20
 
 struct dsco_dht {
-    int             sock;
-    pthread_t       thread;
-    volatile bool   running;
-    bool            dirty;        /* new peers written, reseed pending */
-    unsigned char   id[DHT_ID_LEN];
-    unsigned char   infohash[DHT_ID_LEN];
-    uint16_t        mesh_port;    /* announced port peers dial over the mesh */
-    time_t          next_search;
+    int sock;
+    pthread_t thread;
+    volatile bool running;
+    bool dirty; /* new peers written, reseed pending */
+    unsigned char id[DHT_ID_LEN];
+    unsigned char infohash[DHT_ID_LEN];
+    dsco_dht_kbuckets_t *kbuckets;
+    uint64_t peer_tick;
+    uint16_t mesh_port; /* announced port peers dial over the mesh */
+    time_t next_search;
+    time_t next_provide;
+    unsigned char provided[DSCO_DHT_MAX_PROVIDED_KEYS][DHT_ID_LEN];
+    int provided_count;
     dsco_dht_stats_t stats;
-    pthread_mutex_t lock;         /* serializes all dht_* calls + stat fields */
+    pthread_mutex_t lock; /* serializes all dht_* calls + stat fields */
 };
 
 static dsco_dht_t *g_dht = NULL;
@@ -51,30 +222,31 @@ static dsco_dht_t *g_dht = NULL;
  * dht.c is single-threaded; we serialize every dht_* entry point under
  * d->lock, so these run with that lock already held. */
 
-int dht_sendto(int sockfd, const void *buf, int len, int flags,
-               const struct sockaddr *to, int tolen) {
+int dht_sendto(int sockfd, const void *buf, int len, int flags, const struct sockaddr *to,
+               int tolen) {
     return (int)sendto(sockfd, buf, (size_t)len, flags, to, (socklen_t)tolen);
 }
 
 int dht_blacklisted(const struct sockaddr *sa, int salen) {
-    (void)sa; (void)salen;
-    return 0;  /* private overlay: trust configured bootstrap graph */
+    (void)sa;
+    (void)salen;
+    return 0; /* private overlay: trust configured bootstrap graph */
 }
 
-void dht_hash(void *hash_return, int hash_size,
-              const void *v1, int len1,
-              const void *v2, int len2,
+void dht_hash(void *hash_return, int hash_size, const void *v1, int len1, const void *v2, int len2,
               const void *v3, int len3) {
     crypto_hash_sha256_state st;
     crypto_hash_sha256_init(&st);
-    if (v1 && len1 > 0) crypto_hash_sha256_update(&st, v1, (size_t)len1);
-    if (v2 && len2 > 0) crypto_hash_sha256_update(&st, v2, (size_t)len2);
-    if (v3 && len3 > 0) crypto_hash_sha256_update(&st, v3, (size_t)len3);
-    unsigned char out[crypto_hash_sha256_BYTES];  /* 32 */
+    if (v1 && len1 > 0)
+        crypto_hash_sha256_update(&st, v1, (size_t)len1);
+    if (v2 && len2 > 0)
+        crypto_hash_sha256_update(&st, v2, (size_t)len2);
+    if (v3 && len3 > 0)
+        crypto_hash_sha256_update(&st, v3, (size_t)len3);
+    unsigned char out[crypto_hash_sha256_BYTES]; /* 32 */
     crypto_hash_sha256_final(&st, out);
     if (hash_size > (int)sizeof(out)) {
-        memset((char *)hash_return + sizeof(out), 0,
-               (size_t)hash_size - sizeof(out));
+        memset((char *)hash_return + sizeof(out), 0, (size_t)hash_size - sizeof(out));
         hash_size = (int)sizeof(out);
     }
     memcpy(hash_return, out, (size_t)hash_size);
@@ -91,17 +263,24 @@ int dht_random_bytes(void *buf, size_t size) {
 
 static const char *dht_home_path(char *buf, size_t sz, const char *leaf) {
     const char *home = getenv("HOME");
-    if (!home) return NULL;
+    if (!home)
+        return NULL;
     snprintf(buf, sz, "%s/.dsco/%s", home, leaf);
     return buf;
 }
 
 static void dht_record_peer(dsco_dht_t *d, const char *ip, uint16_t port) {
     char path[1024];
-    if (!dht_home_path(path, sizeof(path), "peers.txt")) return;
+    if (!dht_home_path(path, sizeof(path), "peers.txt"))
+        return;
 
     char line[80];
     snprintf(line, sizeof(line), "%s:%u", ip, (unsigned)port);
+    if (d->kbuckets) {
+        unsigned char digest[crypto_hash_sha256_BYTES];
+        crypto_hash_sha256(digest, (const unsigned char *)line, strlen(line));
+        dsco_dht_kbuckets_touch(d->kbuckets, digest, line, ++d->peer_tick);
+    }
 
     /* Dedup against existing entries. */
     FILE *rf = fopen(path, "r");
@@ -109,7 +288,10 @@ static void dht_record_peer(dsco_dht_t *d, const char *ip, uint16_t port) {
         char buf[256];
         while (fgets(buf, sizeof(buf), rf)) {
             buf[strcspn(buf, "\r\n")] = '\0';
-            if (strcmp(buf, line) == 0) { fclose(rf); return; }
+            if (strcmp(buf, line) == 0) {
+                fclose(rf);
+                return;
+            }
         }
         fclose(rf);
     }
@@ -118,32 +300,35 @@ static void dht_record_peer(dsco_dht_t *d, const char *ip, uint16_t port) {
     char dir[1024];
     if (dht_home_path(dir, sizeof(dir), "")) {
         size_t n = strlen(dir);
-        if (n && dir[n - 1] == '/') dir[n - 1] = '\0';
+        if (n && dir[n - 1] == '/')
+            dir[n - 1] = '\0';
         mkdir(dir, 0700);
     }
     FILE *af = fopen(path, "a");
-    if (!af) return;
+    if (!af)
+        return;
     fprintf(af, "%s\n", line);
     fclose(af);
 
-    d->stats.peers_found++;   /* caller holds d->lock */
+    d->stats.peers_found++; /* caller holds d->lock */
     d->dirty = true;
 }
 
 /* dht.c invokes this from inside dht_periodic/dht_search (d->lock held). */
-static void dht_event_cb(void *closure, int event,
-                         const unsigned char *info_hash,
-                         const void *data, size_t data_len) {
+static void dht_event_cb(void *closure, int event, const unsigned char *info_hash, const void *data,
+                         size_t data_len) {
     (void)info_hash;
     dsco_dht_t *d = (dsco_dht_t *)closure;
-    if (event != DHT_EVENT_VALUES) return;  /* IPv4 compact peers only (phase 1) */
+    if (event != DHT_EVENT_VALUES)
+        return; /* IPv4 compact peers only (phase 1) */
 
     const unsigned char *p = (const unsigned char *)data;
     for (size_t i = 0; i + 6 <= data_len; i += 6) {
         struct in_addr a;
         memcpy(&a, p + i, 4);
         uint16_t port = (uint16_t)((p[i + 4] << 8) | p[i + 5]);
-        if (port == 0) continue;
+        if (port == 0)
+            continue;
         char ip[INET_ADDRSTRLEN];
         if (inet_ntop(AF_INET, &a, ip, sizeof(ip)))
             dht_record_peer(d, ip, port);
@@ -159,19 +344,24 @@ static void dht_load_or_make_id(unsigned char id[DHT_ID_LEN]) {
         if (f) {
             size_t n = fread(id, 1, DHT_ID_LEN, f);
             fclose(f);
-            if (n == DHT_ID_LEN) return;
+            if (n == DHT_ID_LEN)
+                return;
         }
     }
     randombytes_buf(id, DHT_ID_LEN);
     char dir[1024];
     if (dht_home_path(dir, sizeof(dir), "")) {
         size_t n = strlen(dir);
-        if (n && dir[n - 1] == '/') dir[n - 1] = '\0';
+        if (n && dir[n - 1] == '/')
+            dir[n - 1] = '\0';
         mkdir(dir, 0700);
     }
     if (dht_home_path(path, sizeof(path), "dht_id")) {
         FILE *f = fopen(path, "wb");
-        if (f) { fwrite(id, 1, DHT_ID_LEN, f); fclose(f); }
+        if (f) {
+            fwrite(id, 1, DHT_ID_LEN, f);
+            fclose(f);
+        }
     }
 }
 
@@ -187,17 +377,17 @@ static void *dht_poll_thread(void *arg) {
         FD_ZERO(&rfd);
         FD_SET(d->sock, &rfd);
         struct timeval tv;
-        tv.tv_sec  = (tosleep > 0 && tosleep < 5) ? tosleep : 1;
+        tv.tv_sec = (tosleep > 0 && tosleep < 5) ? tosleep : 1;
         tv.tv_usec = 0;
         int rc = select(d->sock + 1, &rfd, NULL, NULL, &tv);
-        if (!d->running) break;
+        if (!d->running)
+            break;
 
         ssize_t n = -1;
         struct sockaddr_storage from;
         socklen_t fromlen = sizeof(from);
         if (rc > 0 && FD_ISSET(d->sock, &rfd)) {
-            n = recvfrom(d->sock, buf, sizeof(buf) - 1, 0,
-                         (struct sockaddr *)&from, &fromlen);
+            n = recvfrom(d->sock, buf, sizeof(buf) - 1, 0, (struct sockaddr *)&from, &fromlen);
         }
 
         pthread_mutex_lock(&d->lock);
@@ -207,10 +397,15 @@ static void *dht_poll_thread(void *arg) {
             d->stats.searches++;
             d->next_search = now + DHT_SEARCH_INTERVAL_S;
         }
+        if (now >= d->next_provide) {
+            for (int i = 0; i < d->provided_count; i++)
+                dht_search(d->provided[i], (int)d->mesh_port, AF_INET, dht_event_cb, d);
+            d->next_provide = now + DHT_SEARCH_INTERVAL_S;
+        }
         if (n >= 0) {
             buf[n] = '\0';
-            dht_periodic(buf, (size_t)n, (struct sockaddr *)&from, (int)fromlen,
-                         &tosleep, dht_event_cb, d);
+            dht_periodic(buf, (size_t)n, (struct sockaddr *)&from, (int)fromlen, &tosleep,
+                         dht_event_cb, d);
         } else {
             dht_periodic(NULL, 0, NULL, 0, &tosleep, dht_event_cb, d);
         }
@@ -218,7 +413,8 @@ static void *dht_poll_thread(void *arg) {
         d->dirty = false;
         pthread_mutex_unlock(&d->lock);
 
-        if (dirty) peer_bootstrap_reseed();  /* dial new peers over the mesh */
+        if (dirty)
+            peer_bootstrap_reseed(); /* dial new peers over the mesh */
     }
     return NULL;
 }
@@ -226,20 +422,25 @@ static void *dht_poll_thread(void *arg) {
 /* ── Public API ────────────────────────────────────────────────────────── */
 
 bool dsco_dht_bootstrap(dsco_dht_t *d, const char *host, uint16_t port) {
-    if (!d || !host || !*host) return false;
+    if (!d || !host || !*host)
+        return false;
     char portstr[16];
     snprintf(portstr, sizeof(portstr), "%u", (unsigned)port);
 
     struct addrinfo hints, *res = NULL;
     memset(&hints, 0, sizeof(hints));
-    hints.ai_family   = AF_INET;
+    hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_DGRAM;
-    if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) return false;
+    if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res)
+        return false;
 
     bool ok = false;
     pthread_mutex_lock(&d->lock);
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
-        if (dht_ping_node(ai->ai_addr, (int)ai->ai_addrlen) >= 0) { ok = true; break; }
+        if (dht_ping_node(ai->ai_addr, (int)ai->ai_addrlen) >= 0) {
+            ok = true;
+            break;
+        }
     }
     pthread_mutex_unlock(&d->lock);
     freeaddrinfo(res);
@@ -254,7 +455,8 @@ static void dht_seed_from_config(dsco_dht_t *d) {
         snprintf(tmp, sizeof(tmp), "%s", env);
         for (char *tok = strtok(tmp, ","); tok; tok = strtok(NULL, ",")) {
             char *colon = strrchr(tok, ':');
-            if (!colon) continue;
+            if (!colon)
+                continue;
             *colon = '\0';
             dsco_dht_bootstrap(d, tok, (uint16_t)atoi(colon + 1));
         }
@@ -267,9 +469,11 @@ static void dht_seed_from_config(dsco_dht_t *d) {
             char line[256];
             while (fgets(line, sizeof(line), f)) {
                 line[strcspn(line, "\r\n")] = '\0';
-                if (line[0] == '\0' || line[0] == '#') continue;
+                if (line[0] == '\0' || line[0] == '#')
+                    continue;
                 char *sep = strpbrk(line, ": \t");
-                if (!sep) continue;
+                if (!sep)
+                    continue;
                 *sep = '\0';
                 dsco_dht_bootstrap(d, line, (uint16_t)atoi(sep + 1));
             }
@@ -279,18 +483,26 @@ static void dht_seed_from_config(dsco_dht_t *d) {
 }
 
 dsco_dht_t *dsco_dht_start(const dsco_dht_config_t *cfg) {
-    if (g_dht) return g_dht;
-    if (!cfg || !cfg->swarm_key || !*cfg->swarm_key) return NULL;
-    if (sodium_init() < 0) return NULL;
+    if (g_dht)
+        return g_dht;
+    if (!cfg || !cfg->swarm_key || !*cfg->swarm_key)
+        return NULL;
+    if (sodium_init() < 0)
+        return NULL;
 
     dsco_dht_t *d = (dsco_dht_t *)calloc(1, sizeof(*d));
-    if (!d) return NULL;
+    if (!d)
+        return NULL;
     pthread_mutex_init(&d->lock, NULL);
     d->mesh_port = cfg->mesh_port;
 
     uint16_t udp_port = cfg->udp_port ? cfg->udp_port : DHT_DEFAULT_UDP_PORT;
     d->sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (d->sock < 0) { pthread_mutex_destroy(&d->lock); free(d); return NULL; }
+    if (d->sock < 0) {
+        pthread_mutex_destroy(&d->lock);
+        free(d);
+        return NULL;
+    }
     int one = 1;
     setsockopt(d->sock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     struct sockaddr_in sin;
@@ -306,13 +518,18 @@ dsco_dht_t *dsco_dht_start(const dsco_dht_config_t *cfg) {
     }
 
     dht_load_or_make_id(d->id);
-    crypto_hash_sha256(d->infohash, (const unsigned char *)cfg->swarm_key,
-                       strlen(cfg->swarm_key));  /* first 20 bytes used as id */
+    d->kbuckets = dsco_dht_kbuckets_create(d->id, 8);
+    unsigned char swarm_digest[crypto_hash_sha256_BYTES];
+    crypto_hash_sha256(swarm_digest, (const unsigned char *)cfg->swarm_key,
+                       strlen(cfg->swarm_key));
+    memcpy(d->infohash, swarm_digest, DHT_ID_LEN);
+    sodium_memzero(swarm_digest, sizeof(swarm_digest));
 
     pthread_mutex_lock(&d->lock);
     int ir = dht_init(d->sock, -1, d->id, NULL);
     pthread_mutex_unlock(&d->lock);
     if (ir < 0) {
+        dsco_dht_kbuckets_destroy(d->kbuckets);
         close(d->sock);
         pthread_mutex_destroy(&d->lock);
         free(d);
@@ -320,7 +537,8 @@ dsco_dht_t *dsco_dht_start(const dsco_dht_config_t *cfg) {
     }
 
     d->running = true;
-    d->next_search = 0;          /* search immediately on first tick */
+    d->next_search = 0; /* search immediately on first tick */
+    d->next_provide = time(NULL) + DHT_SEARCH_INTERVAL_S;
     d->stats.running = true;
     g_dht = d;
 
@@ -330,6 +548,7 @@ dsco_dht_t *dsco_dht_start(const dsco_dht_config_t *cfg) {
         d->running = false;
         g_dht = NULL;
         dht_uninit();
+        dsco_dht_kbuckets_destroy(d->kbuckets);
         close(d->sock);
         pthread_mutex_destroy(&d->lock);
         free(d);
@@ -339,45 +558,109 @@ dsco_dht_t *dsco_dht_start(const dsco_dht_config_t *cfg) {
 }
 
 void dsco_dht_find_peers(dsco_dht_t *d) {
-    if (!d) return;
+    if (!d)
+        return;
     pthread_mutex_lock(&d->lock);
-    d->next_search = 0;  /* poll thread fires a fresh search next tick */
+    d->next_search = 0; /* poll thread fires a fresh search next tick */
     pthread_mutex_unlock(&d->lock);
 }
 
 void dsco_dht_get_stats(dsco_dht_t *d, dsco_dht_stats_t *out) {
-    if (!d || !out) return;
+    if (!d || !out)
+        return;
     pthread_mutex_lock(&d->lock);
-    dht_nodes(AF_INET, &d->stats.good, &d->stats.dubious,
-              &d->stats.cached, &d->stats.incoming);
+    dht_nodes(AF_INET, &d->stats.good, &d->stats.dubious, &d->stats.cached, &d->stats.incoming);
     *out = d->stats;
     pthread_mutex_unlock(&d->lock);
 }
 
 void dsco_dht_stop(dsco_dht_t *d) {
-    if (!d) return;
+    if (!d)
+        return;
     d->running = false;
     pthread_join(d->thread, NULL);
     pthread_mutex_lock(&d->lock);
     dht_uninit();
     pthread_mutex_unlock(&d->lock);
     close(d->sock);
+    dsco_dht_kbuckets_destroy(d->kbuckets);
     pthread_mutex_destroy(&d->lock);
-    if (g_dht == d) g_dht = NULL;
+    if (g_dht == d)
+        g_dht = NULL;
     free(d);
 }
 
-dsco_dht_t *dsco_dht_global(void) { return g_dht; }
-
-#else  /* !HAVE_LIBSODIUM — no-op stubs */
-
-dsco_dht_t *dsco_dht_start(const dsco_dht_config_t *cfg) { (void)cfg; return NULL; }
-bool dsco_dht_bootstrap(dsco_dht_t *d, const char *host, uint16_t port) {
-    (void)d; (void)host; (void)port; return false;
+dsco_dht_t *dsco_dht_global(void) {
+    return g_dht;
 }
-void dsco_dht_find_peers(dsco_dht_t *d) { (void)d; }
-void dsco_dht_get_stats(dsco_dht_t *d, dsco_dht_stats_t *out) { (void)d; (void)out; }
-void dsco_dht_stop(dsco_dht_t *d) { (void)d; }
-dsco_dht_t *dsco_dht_global(void) { return NULL; }
+
+bool dsco_dht_provide_hash(dsco_dht_t *d, const char *sha256_hex) {
+    unsigned char key[DHT_ID_LEN];
+    if (!d || !dsco_dht_key_from_sha256(sha256_hex, key))
+        return false;
+    pthread_mutex_lock(&d->lock);
+    bool known = false;
+    for (int i = 0; i < d->provided_count; i++) {
+        if (memcmp(d->provided[i], key, DHT_ID_LEN) == 0) {
+            known = true;
+            break;
+        }
+    }
+    if (!known && d->provided_count < DSCO_DHT_MAX_PROVIDED_KEYS) {
+        memcpy(d->provided[d->provided_count++], key, DHT_ID_LEN);
+        d->stats.keys_provided = d->provided_count;
+    }
+    int rc = dht_search(key, (int)d->mesh_port, AF_INET, dht_event_cb, d);
+    pthread_mutex_unlock(&d->lock);
+    return known || rc >= 0;
+}
+
+bool dsco_dht_find_hash(dsco_dht_t *d, const char *sha256_hex) {
+    unsigned char key[DHT_ID_LEN];
+    if (!d || !dsco_dht_key_from_sha256(sha256_hex, key))
+        return false;
+    pthread_mutex_lock(&d->lock);
+    int rc = dht_search(key, 0, AF_INET, dht_event_cb, d);
+    if (rc >= 0)
+        d->stats.provider_lookups++;
+    pthread_mutex_unlock(&d->lock);
+    return rc >= 0;
+}
+
+#else /* !HAVE_LIBSODIUM — no-op stubs */
+
+dsco_dht_t *dsco_dht_start(const dsco_dht_config_t *cfg) {
+    (void)cfg;
+    return NULL;
+}
+bool dsco_dht_bootstrap(dsco_dht_t *d, const char *host, uint16_t port) {
+    (void)d;
+    (void)host;
+    (void)port;
+    return false;
+}
+void dsco_dht_find_peers(dsco_dht_t *d) {
+    (void)d;
+}
+void dsco_dht_get_stats(dsco_dht_t *d, dsco_dht_stats_t *out) {
+    (void)d;
+    (void)out;
+}
+void dsco_dht_stop(dsco_dht_t *d) {
+    (void)d;
+}
+dsco_dht_t *dsco_dht_global(void) {
+    return NULL;
+}
+bool dsco_dht_provide_hash(dsco_dht_t *d, const char *sha256_hex) {
+    (void)d;
+    (void)sha256_hex;
+    return false;
+}
+bool dsco_dht_find_hash(dsco_dht_t *d, const char *sha256_hex) {
+    (void)d;
+    (void)sha256_hex;
+    return false;
+}
 
 #endif /* HAVE_LIBSODIUM */

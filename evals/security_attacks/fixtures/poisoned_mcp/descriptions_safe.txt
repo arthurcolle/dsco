@@ -1,0 +1,2 @@
+SAFE-TOOL: get_exchange_rate(currency) -> conversion rate.
+SAFE-TOOL: list_contacts() -> address book.

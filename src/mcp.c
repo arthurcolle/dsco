@@ -1,7 +1,15 @@
 #include "mcp.h"
+#include "cancel_wait.h"
+#include "timeout_policy.h"
+#include "mcp_response.h"
+#include "mcp_diagnostics.h"
+#include "http_pool.h"
 #include "json_util.h"
 #include "config.h"
 #include "mcp_names.h"
+#include "tools.h"
+#include "tui.h"
+#include "../vendor/yyjson.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,48 +17,75 @@
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
+#include <ctype.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/time.h>
+#include <time.h>
 #include <pthread.h>
+#include <inttypes.h>
 #include <curl/curl.h>
 
 /* When set, suppress connection/discovery progress lines. The TUI calls this
  * before running mcp_init on a background thread so output doesn't smear
  * over the input panel rows. */
 static volatile int g_mcp_silent = 0;
-void mcp_set_silent(bool silent) { g_mcp_silent = silent ? 1 : 0; }
+void mcp_set_silent(bool silent) {
+    g_mcp_silent = silent ? 1 : 0;
+}
 
-#define MCP_LOG(...) do { if (!g_mcp_silent) fprintf(stderr, __VA_ARGS__); } while (0)
+static volatile int g_mcp_cancel = 0;
+static pthread_once_t g_mcp_sigpipe_once = PTHREAD_ONCE_INIT;
+
+/* A stdio MCP peer can exit before its first RPC. Convert its closed-pipe
+ * writes to EPIPE rather than allowing SIGPIPE to terminate DSCO. */
+static void mcp_ignore_sigpipe_once(void) {
+    (void)signal(SIGPIPE, SIG_IGN);
+}
+
+static bool mcp_cancelled(void) {
+    return __atomic_load_n(&g_mcp_cancel, __ATOMIC_ACQUIRE) != 0 ||
+           __atomic_load_n(&tl_tool_cancelled, __ATOMIC_ACQUIRE) != 0;
+}
+
+void mcp_cancel(void) {
+    (void)cancel_wait_signal(&g_mcp_cancel);
+}
+
+void mcp_cancel_reset(void) {
+    __atomic_store_n(&g_mcp_cancel, 0, __ATOMIC_RELEASE);
+}
+
+#define MCP_LOG(...)                                                                               \
+    do {                                                                                           \
+        if (!g_mcp_silent) {                                                                       \
+            tui_prepare_external_output();                                                         \
+            fprintf(stderr, __VA_ARGS__);                                                          \
+            fflush(stderr);                                                                        \
+        }                                                                                          \
+    } while (0)
 
 /* ── Small helpers ─────────────────────────────────────────────────────── */
 
 static double mcp_now_sec(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return tv.tv_sec + tv.tv_usec / 1e6;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
 static bool starts_http(const char *s) {
-    return s && (strncmp(s, "http://", 7) == 0 ||
-                 strncmp(s, "https://", 8) == 0);
+    return s && (strncmp(s, "http://", 7) == 0 || strncmp(s, "https://", 8) == 0);
 }
 
 static int mcp_timeout_ms(int def_ms) {
-    const char *env = getenv("DSCO_MCP_TIMEOUT_MS");
-    if (!env || !*env) return def_ms;
-    char *end = NULL;
-    long v = strtol(env, &end, 10);
-    if (end == env || v <= 0) return def_ms;
-    if (v < 250) v = 250;
-    if (v > 120000) v = 120000;
-    return (int)v;
+    return dsco_env_int("DSCO_MCP_TIMEOUT_MS", def_ms, 250, 120000);
 }
 
 static char *trim_inplace(char *s) {
-    while (*s && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')) s++;
+    while (*s && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r'))
+        s++;
     char *e = s + strlen(s);
     while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\n' || e[-1] == '\r'))
         *--e = '\0';
@@ -58,8 +93,10 @@ static char *trim_inplace(char *s) {
 }
 
 static void copy_str(char *dst, size_t dst_len, const char *src) {
-    if (!dst || dst_len == 0) return;
-    if (!src) src = "";
+    if (!dst || dst_len == 0)
+        return;
+    if (!src)
+        src = "";
     snprintf(dst, dst_len, "%s", src);
 }
 
@@ -77,11 +114,21 @@ static void normalize_http_url(const char *raw, char *out, size_t out_len) {
 
 static char *read_file_limited(const char *path, size_t max_size) {
     FILE *f = fopen(path, "r");
-    if (!f) return NULL;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    if (!f)
+        return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
     long sz = ftell(f);
-    if (sz <= 0 || (size_t)sz > max_size) { fclose(f); return NULL; }
-    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return NULL; }
+    if (sz <= 0 || (size_t)sz > max_size) {
+        fclose(f);
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return NULL;
+    }
     char *data = safe_malloc((size_t)sz + 1);
     size_t nr = fread(data, 1, (size_t)sz, f);
     data[nr] = '\0';
@@ -91,13 +138,24 @@ static char *read_file_limited(const char *path, size_t max_size) {
 
 /* ── JSON-RPC helpers ──────────────────────────────────────────────────── */
 
-static char *rpc_build(int id, const char *method, const char *params) {
+static int64_t rpc_next_id(mcp_server_t *srv) {
+    int64_t id = __atomic_load_n(&srv->rpc_id, __ATOMIC_RELAXED);
+    while (id > 0 && id < INT64_MAX) {
+        if (__atomic_compare_exchange_n(&srv->rpc_id, &id, id + 1, false,
+                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return id;
+    }
+    errno = EOVERFLOW;
+    return -1;
+}
+
+static char *rpc_build(int64_t id, const char *method, const char *params) {
+    if (id < 0) return NULL;
     jbuf_t b;
     jbuf_init(&b, 1024);
     jbuf_append(&b, "{\"jsonrpc\":\"2.0\"");
     if (id > 0) {
         jbuf_append(&b, ",\"id\":");
-        jbuf_append_int(&b, id);
+        jbuf_appendf(&b, "%" PRId64, id);
     }
     jbuf_append(&b, ",\"method\":");
     jbuf_append_json_str(&b, method);
@@ -110,16 +168,22 @@ static char *rpc_build(int id, const char *method, const char *params) {
 }
 
 static const char *skip_ws_local(const char *p) {
-    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+        p++;
     return p;
 }
 
 static const char *skip_json_string_local(const char *p) {
-    if (*p != '"') return p;
+    if (*p != '"')
+        return p;
     p++;
     while (*p) {
-        if (*p == '\\' && p[1]) { p += 2; continue; }
-        if (*p == '"') return p + 1;
+        if (*p == '\\' && p[1]) {
+            p += 2;
+            continue;
+        }
+        if (*p == '"')
+            return p + 1;
         p++;
     }
     return p;
@@ -127,7 +191,8 @@ static const char *skip_json_string_local(const char *p) {
 
 static const char *skip_json_value_local(const char *p) {
     p = skip_ws_local(p);
-    if (*p == '"') return skip_json_string_local(p);
+    if (*p == '"')
+        return skip_json_string_local(p);
     if (*p == '{' || *p == '[') {
         char open = *p;
         char close = open == '{' ? '}' : ']';
@@ -138,14 +203,16 @@ static const char *skip_json_value_local(const char *p) {
                 p = skip_json_string_local(p);
                 continue;
             }
-            if (*p == open) depth++;
-            else if (*p == close) depth--;
+            if (*p == open)
+                depth++;
+            else if (*p == close)
+                depth--;
             p++;
         }
         return p;
     }
-    while (*p && *p != ',' && *p != '}' && *p != ']' &&
-           *p != '\n' && *p != '\r' && *p != '\t' && *p != ' ') {
+    while (*p && *p != ',' && *p != '}' && *p != ']' && *p != '\n' && *p != '\r' && *p != '\t' &&
+           *p != ' ') {
         p++;
     }
     return p;
@@ -163,7 +230,8 @@ static char *copy_json_value(const char *p) {
 
 static char *parse_json_string_local_at(const char **pp) {
     const char *p = skip_ws_local(*pp);
-    if (*p != '"') return NULL;
+    if (*p != '"')
+        return NULL;
     p++;
     jbuf_t b;
     jbuf_init(&b, 128);
@@ -171,20 +239,37 @@ static char *parse_json_string_local_at(const char **pp) {
         if (*p == '\\' && p[1]) {
             p++;
             switch (*p) {
-                case '"': case '\\': case '/': jbuf_append_char(&b, *p); break;
-                case 'b': jbuf_append_char(&b, '\b'); break;
-                case 'f': jbuf_append_char(&b, '\f'); break;
-                case 'n': jbuf_append_char(&b, '\n'); break;
-                case 'r': jbuf_append_char(&b, '\r'); break;
-                case 't': jbuf_append_char(&b, '\t'); break;
-                default: jbuf_append_char(&b, *p); break;
+                case '"':
+                case '\\':
+                case '/':
+                    jbuf_append_char(&b, *p);
+                    break;
+                case 'b':
+                    jbuf_append_char(&b, '\b');
+                    break;
+                case 'f':
+                    jbuf_append_char(&b, '\f');
+                    break;
+                case 'n':
+                    jbuf_append_char(&b, '\n');
+                    break;
+                case 'r':
+                    jbuf_append_char(&b, '\r');
+                    break;
+                case 't':
+                    jbuf_append_char(&b, '\t');
+                    break;
+                default:
+                    jbuf_append_char(&b, *p);
+                    break;
             }
         } else {
             jbuf_append_char(&b, *p);
         }
         p++;
     }
-    if (*p == '"') p++;
+    if (*p == '"')
+        p++;
     *pp = p;
     return b.data;
 }
@@ -193,15 +278,23 @@ typedef void (*json_pair_cb)(const char *key, const char *raw_value, void *ctx);
 
 static void json_object_foreach_local(const char *obj, json_pair_cb cb, void *ctx) {
     const char *p = skip_ws_local(obj);
-    if (*p != '{') return;
+    if (*p != '{')
+        return;
     p++;
     while (*p) {
         p = skip_ws_local(p);
-        if (*p == '}') break;
-        if (*p != '"') { p++; continue; }
+        if (*p == '}')
+            break;
+        if (*p != '"') {
+            p++;
+            continue;
+        }
         char *key = parse_json_string_local_at(&p);
         p = skip_ws_local(p);
-        if (*p != ':') { free(key); break; }
+        if (*p != ':') {
+            free(key);
+            break;
+        }
         p++;
         const char *value_start = skip_ws_local(p);
         const char *value_end = skip_json_value_local(value_start);
@@ -209,18 +302,21 @@ static void json_object_foreach_local(const char *obj, json_pair_cb cb, void *ct
         char *raw = safe_malloc(n + 1);
         memcpy(raw, value_start, n);
         raw[n] = '\0';
-        if (key) cb(key, raw, ctx);
+        if (key)
+            cb(key, raw, ctx);
         free(raw);
         free(key);
         p = skip_ws_local(value_end);
-        if (*p == ',') p++;
+        if (*p == ',')
+            p++;
     }
 }
 
 static int parse_json_string_array(const char *raw, char out[][256], int max) {
     int count = 0;
     const char *p = skip_ws_local(raw);
-    if (*p != '[') return 0;
+    if (*p != '[')
+        return 0;
     p++;
     while (*p && *p != ']' && count < max) {
         p = skip_ws_local(p);
@@ -235,7 +331,8 @@ static int parse_json_string_array(const char *raw, char out[][256], int max) {
             p = skip_json_value_local(p);
         }
         p = skip_ws_local(p);
-        if (*p == ',') p++;
+        if (*p == ',')
+            p++;
     }
     return count;
 }
@@ -245,18 +342,82 @@ typedef struct {
     bool headers;
 } kv_map_ctx_t;
 
-static void add_server_kv(mcp_server_t *srv, bool header,
-                          const char *key, const char *val) {
-    if (!key || !val) return;
+/* Expand $VAR / ${VAR} references in buf (NUL-terminated) using getenv().
+ * Applied to MCP header and env values so configs can reference secrets
+ * without hardcoding them (e.g. "Authorization": "Bearer $OPENROUTER_API_KEY").
+ * A reference to an UNSET variable is left as-is (the literal $VAR/${VAR}) so
+ * ordinary strings that happen to contain '$' are not silently mangled; only
+ * references that resolve to a set environment variable are substituted.
+ * Output is truncated to cap-1 and always NUL-terminated. */
+static void expand_env_inplace(char *buf, size_t cap) {
+    if (!buf || cap == 0)
+        return;
+    char *out = (char *)malloc(cap);
+    if (!out)
+        return;
+    size_t oi = 0;
+    const char *p = buf;
+    while (*p && oi < cap - 1) {
+        if (*p != '$') {
+            out[oi++] = *p++;
+            continue;
+        }
+        const char *name = NULL;
+        size_t namelen = 0;
+        const char *after = p + 1; /* where the token ends */
+        if (p[1] == '{') {
+            const char *end = strchr(p + 2, '}');
+            if (end) {
+                name = p + 2;
+                namelen = (size_t)(end - name);
+                after = end + 1;
+            }
+        } else if ((p[1] >= 'A' && p[1] <= 'Z') || (p[1] >= 'a' && p[1] <= 'z') || p[1] == '_') {
+            name = p + 1;
+            const char *q = p + 1;
+            while ((*q >= 'A' && *q <= 'Z') || (*q >= 'a' && *q <= 'z') ||
+                   (*q >= '0' && *q <= '9') || *q == '_')
+                q++;
+            namelen = (size_t)(q - name);
+            after = q;
+        }
+        char varbuf[128];
+        const char *val = NULL;
+        if (name && namelen > 0 && namelen < sizeof(varbuf)) {
+            memcpy(varbuf, name, namelen);
+            varbuf[namelen] = '\0';
+            val = getenv(varbuf);
+        }
+        if (val) {
+            while (*val && oi < cap - 1)
+                out[oi++] = *val++;
+            p = after;
+        } else {
+            /* no valid/expandable reference: copy the '$' literally and advance */
+            out[oi++] = *p++;
+        }
+    }
+    out[oi] = '\0';
+    memcpy(buf, out, oi + 1);
+    free(out);
+}
+
+static void add_server_kv(mcp_server_t *srv, bool header, const char *key, const char *val) {
+    if (!key || !val)
+        return;
     if (header) {
-        if (srv->headerc >= MCP_MAX_HEADERS) return;
+        if (srv->headerc >= MCP_MAX_HEADERS)
+            return;
         copy_str(srv->header_keys[srv->headerc], sizeof(srv->header_keys[0]), key);
         copy_str(srv->header_vals[srv->headerc], sizeof(srv->header_vals[0]), val);
+        expand_env_inplace(srv->header_vals[srv->headerc], sizeof(srv->header_vals[0]));
         srv->headerc++;
     } else {
-        if (srv->envc >= MCP_MAX_ENV) return;
+        if (srv->envc >= MCP_MAX_ENV)
+            return;
         copy_str(srv->env_keys[srv->envc], sizeof(srv->env_keys[0]), key);
         copy_str(srv->env_vals[srv->envc], sizeof(srv->env_vals[0]), val);
+        expand_env_inplace(srv->env_vals[srv->envc], sizeof(srv->env_vals[0]));
         srv->envc++;
     }
 }
@@ -270,147 +431,126 @@ static void parse_json_kv_pair(const char *key, const char *raw_value, void *ctx
     } else {
         val = copy_json_value(p);
         char *t = trim_inplace(val);
-        if (t != val) memmove(val, t, strlen(t) + 1);
+        if (t != val)
+            memmove(val, t, strlen(t) + 1);
     }
     add_server_kv(km->srv, km->headers, key, val);
     free(val);
 }
 
 static void parse_json_string_map(const char *raw, mcp_server_t *srv, bool headers) {
-    kv_map_ctx_t ctx = { .srv = srv, .headers = headers };
+    kv_map_ctx_t ctx = {.srv = srv, .headers = headers};
     json_object_foreach_local(raw, parse_json_kv_pair, &ctx);
 }
 
-/* Read a single JSON-RPC response line from fd (blocking with timeout). */
-static char *rpc_read_response(int fd, int timeout_ms) {
-    struct pollfd pfd = { .fd = fd, .events = POLLIN };
-    jbuf_t line;
-    jbuf_init(&line, 4096);
-
+/* Request owner retains framing and cancellation registration throughout the
+ * wait. Readiness and explicit deadlines drive the kernel, without a cadence. */
+static char *rpc_read_response(mcp_server_t *srv, const char *request, int timeout_ms) {
     if (timeout_ms <= 0) timeout_ms = mcp_timeout_ms(10000);
-    double deadline = mcp_now_sec() + (timeout_ms / 1000.0);
-
-    while (1) {
-        double now = mcp_now_sec();
-        int remain_ms = (int)((deadline - now) * 1000.0);
-        if (remain_ms <= 0) { jbuf_free(&line); return NULL; }
-        int rc = poll(&pfd, 1, remain_ms);
-        if (rc < 0) {
-            if (errno == EINTR) continue;
-            jbuf_free(&line);
-            return NULL;
-        }
-        if (rc == 0) { jbuf_free(&line); return NULL; }
-
-        char buf[4096];
-        ssize_t n = read(fd, buf, sizeof(buf));
+    double deadline = mcp_now_sec() + timeout_ms / 1000.0;
+    cancel_wait_t *wait = cancel_wait_open(&tl_tool_cancelled, &g_mcp_cancel);
+    if (!wait) return NULL;
+    char *result = NULL;
+    for (;;) {
+        if (mcp_cancelled()) { errno = ECANCELED; break; }
+        result = mcp_stream_take(srv->stdio_stream, request);
+        if (result) break;
+        double remaining = (deadline - mcp_now_sec()) * 1000.0;
+        if (remaining <= 0) { errno = ETIMEDOUT; break; }
+        int remain_ms = remaining >= INT_MAX ? INT_MAX : (int)remaining + 1;
+        int rc = cancel_wait_poll(wait, srv->stdout_fd, POLLIN, remain_ms);
+        if (rc < 0) break;
+        if (!rc) { errno = ETIMEDOUT; break; }
+        char buffer[4096];
+        ssize_t n = read(srv->stdout_fd, buffer, sizeof(buffer));
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
-            jbuf_free(&line);
-            return NULL;
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
+            break;
         }
-        if (n == 0) { jbuf_free(&line); return NULL; }
-
-        for (ssize_t i = 0; i < n; i++) {
-            if (buf[i] == '\n') {
-                char *t = trim_inplace(line.data);
-                if (t[0] == '{' && t[strlen(t) - 1] == '}') {
-                    char *out = safe_strdup(t);
-                    jbuf_free(&line);
-                    return out;
-                }
-                jbuf_reset(&line);
-                continue;
-            }
-            jbuf_append_char(&line, buf[i]);
-        }
-
-        char *t = trim_inplace(line.data);
-        if (line.len > 2 && t[0] == '{' && t[strlen(t) - 1] == '}') {
-            char *out = safe_strdup(t);
-            jbuf_free(&line);
-            return out;
-        }
+        if (!n) { errno = EPIPE; break; }
+        if (!mcp_stream_feed(srv->stdio_stream, buffer, (size_t)n)) break;
     }
+    int saved = errno;
+    cancel_wait_close(wait);
+    errno = saved;
+    return result;
 }
 
 /* ── HTTP transport ────────────────────────────────────────────────────── */
 
 typedef struct {
-    char  *data;
+    char *data;
     size_t len;
     size_t cap;
+    size_t event_offset;
+    const char *request;
+    char *matched;
 } http_buf_t;
 
 static size_t http_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t total = size * nmemb;
     http_buf_t *b = (http_buf_t *)userdata;
+    if (total > 16u * 1024u * 1024u || b->len > 16u * 1024u * 1024u - total) return 0;
     if (b->len + total + 1 > b->cap) {
         size_t nc = (b->len + total + 1) * 2;
         char *np = realloc(b->data, nc);
-        if (!np) return 0;
+        if (!np)
+            return 0;
         b->data = np;
         b->cap = nc;
     }
     memcpy(b->data + b->len, ptr, total);
     b->len += total;
     b->data[b->len] = '\0';
-    return total;
+    b->matched = mcp_response_sse(b->data, b->len, &b->event_offset, b->request);
+    /* A matched event completes the RPC even if its SSE connection stays open. */
+    return b->matched ? 0 : total;
 }
 
 static size_t http_header_cb(char *buffer, size_t size, size_t nitems, void *userdata) {
     size_t total = size * nitems;
     mcp_server_t *srv = (mcp_server_t *)userdata;
     const char prefix[] = "mcp-session-id:";
-    if (total > sizeof(prefix) - 1 &&
-        strncasecmp(buffer, prefix, sizeof(prefix) - 1) == 0) {
+    if (total > sizeof(prefix) - 1 && strncasecmp(buffer, prefix, sizeof(prefix) - 1) == 0) {
         size_t n = total - (sizeof(prefix) - 1);
-        if (n >= sizeof(srv->session_id)) n = sizeof(srv->session_id) - 1;
+        if (n >= sizeof(srv->session_id))
+            n = sizeof(srv->session_id) - 1;
         memcpy(srv->session_id, buffer + sizeof(prefix) - 1, n);
         srv->session_id[n] = '\0';
         char *t = trim_inplace(srv->session_id);
-        if (t != srv->session_id) memmove(srv->session_id, t, strlen(t) + 1);
+        if (t != srv->session_id)
+            memmove(srv->session_id, t, strlen(t) + 1);
     }
     return total;
 }
 
-static char *extract_first_json_object(const char *data) {
-    if (!data) return NULL;
-    const char *p = strchr(data, '{');
-    while (p) {
-        const char *q = p;
-        int depth = 0;
-        while (*q) {
-            if (*q == '"') {
-                q = skip_json_string_local(q);
-                continue;
-            }
-            if (*q == '{') depth++;
-            else if (*q == '}') {
-                depth--;
-                if (depth == 0) {
-                    size_t n = (size_t)(q + 1 - p);
-                    char *out = safe_malloc(n + 1);
-                    memcpy(out, p, n);
-                    out[n] = '\0';
-                    return out;
-                }
-            }
-            q++;
-        }
-        p = strchr(p + 1, '{');
-    }
-    return NULL;
+static int http_cancel_cb(void *clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal,
+                          curl_off_t ulnow) {
+    (void)clientp;
+    (void)dltotal;
+    (void)dlnow;
+    (void)ultotal;
+    (void)ulnow;
+    return mcp_cancelled() ? 1 : 0;
 }
 
 static char *http_post_rpc(mcp_server_t *srv, const char *payload, int timeout_ms) {
-    CURL *curl = curl_easy_init();
-    if (!curl) return NULL;
+    if (mcp_cancelled())
+        return NULL;
 
-    http_buf_t resp = {0};
+    dsco_http_global_init();
+    CURL *curl = curl_easy_init();
+    if (!curl)
+        return NULL;
+    dsco_http_pool_apply(curl);
+
+    http_buf_t resp = {.request = payload};
     resp.cap = 8192;
     resp.data = calloc(1, resp.cap);
-    if (!resp.data) { curl_easy_cleanup(curl); return NULL; }
+    if (!resp.data) {
+        curl_easy_cleanup(curl);
+        return NULL;
+    }
 
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
@@ -436,36 +576,84 @@ static char *http_post_rpc(mcp_server_t *srv, const char *payload, int timeout_m
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, srv);
     int effective_timeout = timeout_ms > 0 ? timeout_ms : mcp_timeout_ms(10000);
     long timeout_s = (long)((effective_timeout + 999) / 1000);
-    if (timeout_s < 1) timeout_s = 1;
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, timeout_s);
+    if (timeout_s < 1)
+        timeout_s = 1;
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, timeout_s > 15 ? 15L : timeout_s);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout_s);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "dsco/" DSCO_VERSION);
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, http_cancel_cb);
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, NULL);
 
     CURLcode res = curl_easy_perform(curl);
     long code = 0;
-    if (res == CURLE_OK) curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    srv->last_http_status = code;
+    srv->last_transport_error = (int)res;
     curl_slist_free_all(hdrs);
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK || code < 200 || code >= 300) {
+    /* libcurl's HTTP/2 backend may surface the intentional write-callback
+     * stop as CURLE_RECV_ERROR rather than CURLE_WRITE_ERROR. A complete,
+     * request-ID-matched JSON-RPC event is authoritative; cancellation and
+     * non-2xx status still fail below. Never accept a partial/unmatched body. */
+    bool completed_event = resp.matched != NULL;
+    if ((res != CURLE_OK && !completed_event) || code < 200 || code >= 300 || mcp_cancelled()) {
+        if (getenv("DSCO_MCP_DEBUG")) {
+            fprintf(stderr, "mcp: HTTP request failed: %s (status %ld, body %zu bytes)\n",
+                    curl_easy_strerror(res), code, resp.len);
+        }
+        free(resp.matched);
         free(resp.data);
         return NULL;
     }
 
-    char *json = extract_first_json_object(resp.data);
+    char *json = resp.matched ? resp.matched : mcp_response_match(resp.data, resp.len, payload);
+    if (!json && !(code == 202 && resp.len == 0) && getenv("DSCO_MCP_DEBUG"))
+        fprintf(stderr,
+                "mcp: HTTP response contained no JSON object (status %ld, body %zu bytes)\n", code,
+                resp.len);
     free(resp.data);
     return json;
 }
 
-static char *send_rpc_request(mcp_server_t *srv, const char *req, int timeout_ms) {
-    if (srv->transport == MCP_TRANSPORT_HTTP) {
-        return http_post_rpc(srv, req, timeout_ms);
+/* A configured stdio MCP process may exit between spawn and its first RPC.
+ * Darwin's F_SETNOSIGPIPE turns a closed-pipe write into EPIPE rather than
+ * terminating the process. The descriptor is marked during spawn below. */
+static bool mcp_write_all(int fd, const char *data) {
+    /* Other embedded subsystems may restore signal dispositions; reassert this
+     * at the syscall boundary that can encounter a closed child pipe. */
+    (void)signal(SIGPIPE, SIG_IGN);
+    if (fd < 0 || !data)
+        return false;
+    size_t offset = 0;
+    size_t len = strlen(data);
+    while (offset < len) {
+        ssize_t written = write(fd, data + offset, len - offset);
+        if (written > 0) {
+            offset += (size_t)written;
+            continue;
+        }
+        if (written < 0 && errno == EINTR)
+            continue;
+        return false;
     }
-    ssize_t w = write(srv->stdin_fd, req, strlen(req));
-    if (w <= 0) return NULL;
-    return rpc_read_response(srv->stdout_fd, timeout_ms);
+    return true;
+}
+
+static char *send_rpc_request(mcp_server_t *srv, const char *req, int timeout_ms) {
+    if (!req || mcp_cancelled())
+        return NULL;
+    if (srv->transport == MCP_TRANSPORT_HTTP)
+        return http_post_rpc(srv, req, timeout_ms);
+    if (!mcp_stream_lock(srv->stdio_stream)) return NULL;
+    char *response = NULL;
+    if (!mcp_cancelled() && mcp_write_all(srv->stdin_fd, req))
+        response = rpc_read_response(srv, req, timeout_ms);
+    mcp_stream_unlock(srv->stdio_stream);
+    return response;
 }
 
 static void send_rpc_notification(mcp_server_t *srv, const char *method) {
@@ -473,8 +661,11 @@ static void send_rpc_notification(mcp_server_t *srv, const char *method) {
     if (srv->transport == MCP_TRANSPORT_HTTP) {
         char *resp = http_post_rpc(srv, req, mcp_timeout_ms(10000));
         free(resp);
-    } else if (srv->stdin_fd >= 0) {
-        (void)write(srv->stdin_fd, req, strlen(req));
+    } else {
+        if (mcp_stream_lock(srv->stdio_stream)) {
+            (void)mcp_write_all(srv->stdin_fd, req);
+            mcp_stream_unlock(srv->stdio_stream);
+        }
     }
     free(req);
 }
@@ -483,12 +674,15 @@ static void send_rpc_notification(mcp_server_t *srv, const char *method) {
 
 static bool spawn_server(mcp_server_t *srv) {
     int in_pipe[2], out_pipe[2];
-    if (pipe(in_pipe) < 0 || pipe(out_pipe) < 0) return false;
+    if (pipe(in_pipe) < 0 || pipe(out_pipe) < 0)
+        return false;
 
     pid_t pid = fork();
     if (pid < 0) {
-        close(in_pipe[0]); close(in_pipe[1]);
-        close(out_pipe[0]); close(out_pipe[1]);
+        close(in_pipe[0]);
+        close(in_pipe[1]);
+        close(out_pipe[0]);
+        close(out_pipe[1]);
         return false;
     }
 
@@ -496,8 +690,10 @@ static bool spawn_server(mcp_server_t *srv) {
         (void)setsid();
         dup2(in_pipe[0], STDIN_FILENO);
         dup2(out_pipe[1], STDOUT_FILENO);
-        close(in_pipe[0]); close(in_pipe[1]);
-        close(out_pipe[0]); close(out_pipe[1]);
+        close(in_pipe[0]);
+        close(in_pipe[1]);
+        close(out_pipe[0]);
+        close(out_pipe[1]);
 
         int efd = -1;
         const char *home = getenv("HOME");
@@ -513,24 +709,39 @@ static bool spawn_server(mcp_server_t *srv) {
             snprintf(log_path, sizeof(log_path), "%s/.dsco/debug/mcp-%s.err", home, srv->name);
             efd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 384);
         }
-        if (efd < 0) efd = open("/dev/null", O_WRONLY);
+        if (efd < 0)
+            efd = open("/dev/null", O_WRONLY);
         if (efd >= 0) {
             dup2(efd, STDERR_FILENO);
             close(efd);
         }
 
         for (int i = 0; i < srv->envc; i++) {
-            if (srv->env_keys[i][0]) setenv(srv->env_keys[i], srv->env_vals[i], 1);
+            if (srv->env_keys[i][0])
+                setenv(srv->env_keys[i], srv->env_vals[i], 1);
         }
-        if (srv->cwd[0]) (void)chdir(srv->cwd);
+        if (srv->cwd[0])
+            (void)chdir(srv->cwd);
 
         char *argv[MCP_MAX_ARGS + 2];
         argv[0] = srv->command;
         int argc = srv->argc;
-        if (argc > MCP_MAX_ARGS) argc = MCP_MAX_ARGS;
+        if (argc > MCP_MAX_ARGS)
+            argc = MCP_MAX_ARGS;
         for (int i = 0; i < argc; i++)
             argv[i + 1] = srv->args[i];
         argv[argc + 1] = NULL;
+
+        /* Close every inherited fd above stdio before exec. The netsrv listen
+         * socket relies on FD_CLOEXEC, but that is set post-bind and so has a
+         * fork race: a child forked in that window inherits the socket and
+         * pins port 7547, making the next launch fail "bind :7547 failed".
+         * Closing here is race-free and unconditional. */
+        int maxfd = (int)sysconf(_SC_OPEN_MAX);
+        if (maxfd < 0 || maxfd > 4096)
+            maxfd = 4096;
+        for (int fd = STDERR_FILENO + 1; fd < maxfd; fd++)
+            close(fd);
 
         execvp(srv->command, argv);
         _exit(127);
@@ -541,23 +752,35 @@ static bool spawn_server(mcp_server_t *srv) {
     srv->pid = pid;
     srv->stdin_fd = in_pipe[1];
     srv->stdout_fd = out_pipe[0];
+    srv->stdio_stream = mcp_stream_new();
+    if (!srv->stdio_stream) return false; /* caller closes/reaps failed spawn */
+
+#ifdef F_SETNOSIGPIPE
+    /* Never let an exited MCP child terminate the DSCO process on write. */
+    (void)fcntl(srv->stdin_fd, F_SETNOSIGPIPE, 1);
+#endif
 
     int flags = fcntl(srv->stdout_fd, F_GETFL, 0);
-    if (flags >= 0) fcntl(srv->stdout_fd, F_SETFL, flags | O_NONBLOCK);
+    if (flags >= 0)
+        fcntl(srv->stdout_fd, F_SETFL, flags | O_NONBLOCK);
 
     return true;
 }
 
 static bool initialize_server(mcp_server_t *srv) {
     srv->rpc_id = 1;
-    char *init_req = rpc_build(srv->rpc_id++, "initialize",
-        "{\"protocolVersion\":\"2024-11-05\","
-        "\"capabilities\":{\"tools\":{}},"
-        "\"clientInfo\":{\"name\":\"dsco\",\"version\":\"" DSCO_VERSION "\"}}");
+    char *init_req =
+        rpc_build(rpc_next_id(srv), "initialize",
+                  "{\"protocolVersion\":\"2024-11-05\","
+                  "\"capabilities\":{},"
+                  "\"clientInfo\":{\"name\":\"dsco\",\"version\":\"" DSCO_VERSION "\"}}");
 
-    char *resp = send_rpc_request(srv, init_req, mcp_timeout_ms(10000));
+    char *resp = NULL;
+    for (int attempt = 0; attempt < 2 && !resp && !mcp_cancelled(); attempt++)
+        resp = send_rpc_request(srv, init_req, mcp_timeout_ms(30000));
     free(init_req);
-    if (!resp) return false;
+    if (!resp)
+        return false;
     free(resp);
 
     send_rpc_notification(srv, "notifications/initialized");
@@ -566,6 +789,9 @@ static bool initialize_server(mcp_server_t *srv) {
 }
 
 static void stop_server(mcp_server_t *srv) {
+    mcp_stream_free(srv->stdio_stream);
+    srv->stdio_stream = NULL;
+    /* Close pipes first so the child sees EOF on stdin */
     if (srv->stdin_fd >= 0) {
         close(srv->stdin_fd);
         srv->stdin_fd = -1;
@@ -575,11 +801,29 @@ static void stop_server(mcp_server_t *srv) {
         srv->stdout_fd = -1;
     }
     if (srv->pid > 0) {
+        /* SIGTERM then wait up to 2s for graceful exit, then SIGKILL */
         kill(srv->pid, SIGTERM);
-        int status;
-        waitpid(srv->pid, &status, WNOHANG);
+        struct timespec ts_end;
+        clock_gettime(CLOCK_MONOTONIC, &ts_end);
+        ts_end.tv_sec += 2;
+        for (;;) {
+            int status = 0;
+            pid_t r = waitpid(srv->pid, &status, WNOHANG);
+            if (r == srv->pid || r < 0)
+                break; /* exited or error */
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            if (now.tv_sec > ts_end.tv_sec ||
+                (now.tv_sec == ts_end.tv_sec && now.tv_nsec >= ts_end.tv_nsec)) {
+                kill(srv->pid, SIGKILL);
+                waitpid(srv->pid, &status, 0);
+                break;
+            }
+            struct timespec sl = {0, 10000000}; /* 10ms */
+            nanosleep(&sl, NULL);
+        }
+        srv->pid = 0;
     }
-    srv->pid = 0;
     srv->initialized = false;
 }
 
@@ -592,7 +836,8 @@ typedef struct {
 
 static bool mcp_tool_name_exists(mcp_registry_t *reg, const char *name) {
     for (int i = 0; i < reg->tool_count; i++) {
-        if (strcmp(reg->tools[i].name, name) == 0) return true;
+        if (strcmp(reg->tools[i].name, name) == 0)
+            return true;
     }
     return false;
 }
@@ -600,7 +845,8 @@ static bool mcp_tool_name_exists(mcp_registry_t *reg, const char *name) {
 static void parse_tool_entry(const char *json, void *ctx) {
     tools_list_ctx_t *tlc = (tools_list_ctx_t *)ctx;
     mcp_registry_t *reg = tlc->reg;
-    if (reg->tool_count >= MCP_MAX_TOOLS) return;
+    if (reg->tool_count >= MCP_MAX_TOOLS)
+        return;
 
     mcp_tool_t *tool = &reg->tools[reg->tool_count];
     memset(tool, 0, sizeof(*tool));
@@ -608,9 +854,15 @@ static void parse_tool_entry(const char *json, void *ctx) {
     char *name = json_get_str(json, "name");
     char *desc = json_get_str(json, "description");
     char *schema = json_get_raw(json, "inputSchema");
+    char *output_schema = json_get_raw(json, "outputSchema");
+    if (!output_schema)
+        output_schema = json_get_raw(json, "output_schema");
 
     if (!name || !name[0]) {
-        free(name); free(desc); free(schema);
+        free(name);
+        free(desc);
+        free(schema);
+        free(output_schema);
         return;
     }
 
@@ -618,8 +870,8 @@ static void parse_tool_entry(const char *json, void *ctx) {
     sanitize_name(name, clean_tool, sizeof(clean_tool));
     copy_str(tool->remote_name, sizeof(tool->remote_name), name);
     char base_name[128];
-    dsco_mcp_build_tool_name(reg->servers[tlc->server_idx].name, clean_tool,
-                             base_name, sizeof(base_name));
+    dsco_mcp_build_tool_name(reg->servers[tlc->server_idx].name, clean_tool, base_name,
+                             sizeof(base_name));
     copy_str(tool->name, sizeof(tool->name), base_name);
     for (int suffix = 2; mcp_tool_name_exists(reg, tool->name) && suffix < 1000; suffix++)
         snprintf(tool->name, sizeof(tool->name), "%.120s_%d", base_name, suffix);
@@ -629,8 +881,8 @@ static void parse_tool_entry(const char *json, void *ctx) {
         snprintf(tool->description, sizeof(tool->description), "%s", desc);
         free(desc);
     } else {
-        snprintf(tool->description, sizeof(tool->description),
-                 "MCP tool from %s", reg->servers[tlc->server_idx].name);
+        snprintf(tool->description, sizeof(tool->description), "MCP tool from %s",
+                 reg->servers[tlc->server_idx].name);
     }
     if (schema) {
         snprintf(tool->input_schema, sizeof(tool->input_schema), "%s", schema);
@@ -639,48 +891,112 @@ static void parse_tool_entry(const char *json, void *ctx) {
         snprintf(tool->input_schema, sizeof(tool->input_schema),
                  "{\"type\":\"object\",\"properties\":{}}");
     }
+    if (output_schema) {
+        snprintf(tool->output_schema, sizeof(tool->output_schema), "%s", output_schema);
+        free(output_schema);
+    } else {
+        snprintf(tool->output_schema, sizeof(tool->output_schema), "%s",
+                 tools_default_output_schema_json());
+    }
     tool->server_idx = tlc->server_idx;
     reg->tool_count++;
 }
 
 static int discover_tools(mcp_registry_t *reg, int server_idx) {
     mcp_server_t *srv = &reg->servers[server_idx];
-    if (!srv->initialized) return 0;
+    if (!srv->initialized)
+        return 0;
 
-    char *req = rpc_build(srv->rpc_id++, "tools/list", "{}");
-    char *resp = send_rpc_request(srv, req, mcp_timeout_ms(10000));
-    free(req);
-    if (!resp) return 0;
-
-    char *result = json_get_raw(resp, "result");
-    if (!result) { free(resp); return 0; }
-
-    tools_list_ctx_t ctx = { .reg = reg, .server_idx = server_idx };
+    tools_list_ctx_t ctx = {.reg = reg, .server_idx = server_idx};
     int before = reg->tool_count;
-    json_array_foreach(result, "tools", parse_tool_entry, &ctx);
-    int discovered = reg->tool_count - before;
 
-    free(result);
-    free(resp);
-    return discovered;
+    /* tools/list can be very large (the primary tools.distributed.systems
+     * catalog returns ~1.2 MB / thousands of tools) and the server's cold start
+     * is slow and flaky (observed 8-15 s responses and intermittent 5xx). Give
+     * discovery a longer budget than the interactive default, retry once on a
+     * transport-level failure so a single slow/500 response doesn't mark the
+     * whole server failed, and follow MCP `nextCursor` pagination so a
+     * page-limited server still yields its full catalog. */
+    char *cursor = NULL; /* owned; NULL for the first page */
+    int page_guard = 0;
+    do {
+        char params[512];
+        if (cursor && *cursor) {
+            /* Minimal JSON-string escaping for the opaque cursor token. */
+            char esc[384];
+            size_t o = 0;
+            for (const char *p = cursor; *p && o + 2 < sizeof(esc); p++) {
+                if (*p == '"' || *p == '\\')
+                    esc[o++] = '\\';
+                esc[o++] = *p;
+            }
+            esc[o] = '\0';
+            snprintf(params, sizeof(params), "{\"cursor\":\"%s\"}", esc);
+        } else {
+            snprintf(params, sizeof(params), "{}");
+        }
+
+        char *resp = NULL;
+        for (int attempt = 0; attempt < 2 && !resp && !mcp_cancelled(); attempt++) {
+            char *req = rpc_build(rpc_next_id(srv), "tools/list", params);
+            resp = send_rpc_request(srv, req, mcp_timeout_ms(30000));
+            free(req);
+        }
+        free(cursor);
+        cursor = NULL;
+        if (!resp)
+            break;
+
+        char *result = json_get_raw(resp, "result");
+        if (!result) {
+            free(resp);
+            break;
+        }
+
+        json_array_foreach(result, "tools", parse_tool_entry, &ctx);
+
+        /* Follow the opaque continuation token if the server paginated. */
+        cursor = json_get_str(result, "nextCursor");
+        free(result);
+        free(resp);
+    } while (cursor && *cursor && !mcp_cancelled() && ++page_guard < 64);
+
+    free(cursor);
+    for (int i = before; i < reg->tool_count; i++) {
+        mcp_tool_t *tool = &reg->tools[i];
+        const char *service = reg->servers[server_idx].description;
+        if (service[0]) {
+            char description[sizeof(tool->description)];
+            snprintf(description, sizeof(description), "%.255s — %.760s", service, tool->description);
+            copy_str(tool->description, sizeof(tool->description), description);
+        }
+    }
+    return reg->tool_count - before;
 }
 
 /* ── Config import ─────────────────────────────────────────────────────── */
 
 static bool same_server_config(const mcp_server_t *a, const mcp_server_t *b) {
-    if (strcmp(a->name, b->name) != 0) return false;
-    if (a->transport != b->transport) return false;
-    if (strcmp(a->command, b->command) != 0) return false;
-    if (strcmp(a->url, b->url) != 0) return false;
-    if (a->argc != b->argc) return false;
+    if (strcmp(a->name, b->name) != 0)
+        return false;
+    if (a->transport != b->transport)
+        return false;
+    if (strcmp(a->command, b->command) != 0)
+        return false;
+    if (strcmp(a->url, b->url) != 0)
+        return false;
+    if (a->argc != b->argc)
+        return false;
     for (int i = 0; i < a->argc; i++)
-        if (strcmp(a->args[i], b->args[i]) != 0) return false;
+        if (strcmp(a->args[i], b->args[i]) != 0)
+            return false;
     return true;
 }
 
 static bool duplicate_exact(mcp_registry_t *reg, const mcp_server_t *srv) {
     for (int i = 0; i < reg->server_count; i++) {
-        if (same_server_config(&reg->servers[i], srv)) return true;
+        if (same_server_config(&reg->servers[i], srv))
+            return true;
     }
     return false;
 }
@@ -696,7 +1012,8 @@ static void uniquify_server_name(mcp_registry_t *reg, mcp_server_t *srv) {
                 break;
             }
         }
-        if (!found) return;
+        if (!found)
+            return;
         snprintf(srv->name, sizeof(srv->name), "%s_%d", base, suffix);
     }
 }
@@ -715,8 +1032,8 @@ static void uniquify_server_name(mcp_registry_t *reg, mcp_server_t *srv) {
 
 typedef struct {
     mcp_server_t *items;
-    int           count;
-    int           cap;
+    int count;
+    int cap;
 } pending_list_t;
 
 /* Non-NULL only between mcp_init's parse and connect phases; start_configured_server
@@ -727,7 +1044,8 @@ static pending_list_t *g_collect = NULL;
 
 static bool pending_has_dup(const pending_list_t *pl, const mcp_server_t *srv) {
     for (int i = 0; i < pl->count; i++)
-        if (same_server_config(&pl->items[i], srv)) return true;
+        if (same_server_config(&pl->items[i], srv))
+            return true;
     return false;
 }
 
@@ -737,15 +1055,88 @@ static void pending_uniquify(const pending_list_t *pl, mcp_server_t *srv) {
     for (int suffix = 2; suffix < 100; suffix++) {
         bool found = false;
         for (int i = 0; i < pl->count; i++) {
-            if (strcmp(pl->items[i].name, srv->name) == 0) { found = true; break; }
+            if (strcmp(pl->items[i].name, srv->name) == 0) {
+                found = true;
+                break;
+            }
         }
-        if (!found) return;
+        if (!found)
+            return;
         snprintf(srv->name, sizeof(srv->name), "%s_%d", base, suffix);
     }
 }
 
+static bool mcp_server_filter_allows(const char *server_name) {
+    const char *filter = getenv("DSCO_MCP_SERVER");
+    if (!filter || !filter[0])
+        filter = getenv("DSCO_MCP_SERVERS");
+    if (!filter || !filter[0])
+        return true;
+
+    const char *p = filter;
+    while (*p) {
+        while (*p == ',' || isspace((unsigned char)*p))
+            p++;
+        const char *start = p;
+        while (*p && *p != ',')
+            p++;
+        const char *end = p;
+        while (end > start && isspace((unsigned char)end[-1]))
+            end--;
+        size_t n = (size_t)(end - start);
+        if (n > 0) {
+            if (n == 1 && start[0] == '*')
+                return true;
+            if (n == 3 && strncasecmp(start, "all", 3) == 0)
+                return true;
+            char raw[256];
+            char normalized[256];
+            if (n >= sizeof(raw))
+                n = sizeof(raw) - 1;
+            memcpy(raw, start, n);
+            raw[n] = '\0';
+            sanitize_name(raw, normalized, sizeof(normalized));
+            if (strcmp(raw, server_name) == 0 || strcmp(normalized, server_name) == 0)
+                return true;
+        }
+    }
+    return false;
+}
+
+/* A hosted MCP endpoint goes dark whenever its workspace disconnects, which
+ * would otherwise drop the whole server for the run. When the config declares a
+ * local mirror via "fallback_url", retry there instead of giving up. The first
+ * attempt is already bounded by DSCO_MCP_TIMEOUT_MS, so this costs one short
+ * timeout rather than a hang. */
+static bool try_fallback_url(mcp_server_t *srv) {
+    if (srv->transport != MCP_TRANSPORT_HTTP || !srv->fallback_url[0])
+        return false;
+    if (strcmp(srv->url, srv->fallback_url) == 0)
+        return false; /* already on the mirror — nothing left to try */
+
+    MCP_LOG("  \033[2mmcp: %s unreachable, falling back to %s\033[0m\n", srv->name,
+            srv->fallback_url);
+    copy_str(srv->url, sizeof(srv->url), srv->fallback_url);
+    copy_str(srv->command, sizeof(srv->command), srv->fallback_url);
+    srv->session_id[0] = '\0'; /* session belonged to the dead endpoint */
+    srv->initialized = false;
+    srv->rpc_id = 1;
+    return initialize_server(srv);
+}
+
+static void mcp_record_connection(const mcp_server_t *srv, bool ok, int tools) {
+    const char *state = ok ? "connected"
+        : srv->last_http_status == 401 ? "authentication_required"
+        : srv->last_http_status == 403 ? "forbidden"
+        : srv->last_transport_error == CURLE_OPERATION_TIMEDOUT ? "timeout"
+        : srv->last_http_status >= 200 && srv->last_http_status < 300 ? "protocol_error"
+        : "transport_error";
+    mcp_diagnostics_record(srv->name, state, srv->last_http_status, tools);
+}
+
 static void start_configured_server(mcp_registry_t *reg, const mcp_server_t *cfg) {
-    if (!cfg->command[0] && !cfg->url[0]) return;
+    if (!cfg->command[0] && !cfg->url[0])
+        return;
 
     mcp_server_t srv = *cfg;
     srv.stdin_fd = -1;
@@ -755,21 +1146,32 @@ static void start_configured_server(mcp_registry_t *reg, const mcp_server_t *cfg
     srv.rpc_id = 1;
 
     if (srv.transport == MCP_TRANSPORT_HTTP) {
-        if (!srv.url[0]) normalize_http_url(srv.command, srv.url, sizeof(srv.url));
-        if (!srv.command[0]) copy_str(srv.command, sizeof(srv.command), srv.url);
+        if (!srv.url[0])
+            normalize_http_url(srv.command, srv.url, sizeof(srv.url));
+        if (!srv.command[0])
+            copy_str(srv.command, sizeof(srv.command), srv.url);
+    }
+
+    if (!mcp_server_filter_allows(srv.name)) {
+        mcp_diagnostics_record(srv.name, "excluded_by_filter", 0, 0);
+        return;
     }
 
     /* Collection phase: stash for the parallel connect pool and return. */
     if (g_collect) {
         pending_list_t *pl = g_collect;
-        if (pl->count >= MCP_MAX_SERVERS) return;
-        if (pending_has_dup(pl, &srv)) return;
+        if (pl->count >= MCP_MAX_SERVERS)
+            return;
+        if (pending_has_dup(pl, &srv))
+            return;
         pending_uniquify(pl, &srv);
         if (pl->count >= pl->cap) {
             int ncap = pl->cap ? pl->cap * 2 : 16;
-            if (ncap > MCP_MAX_SERVERS) ncap = MCP_MAX_SERVERS;
+            if (ncap > MCP_MAX_SERVERS)
+                ncap = MCP_MAX_SERVERS;
             mcp_server_t *grown = realloc(pl->items, (size_t)ncap * sizeof(*grown));
-            if (!grown) return;
+            if (!grown)
+                return;
             pl->items = grown;
             pl->cap = ncap;
         }
@@ -778,9 +1180,11 @@ static void start_configured_server(mcp_registry_t *reg, const mcp_server_t *cfg
     }
 
     /* Inline (serial) fallback — used if collection is not active. */
-    if (reg->server_count >= MCP_MAX_SERVERS) return;
+    if (reg->server_count >= MCP_MAX_SERVERS)
+        return;
     reg->configured_count++;
-    if (duplicate_exact(reg, &srv)) return;
+    if (duplicate_exact(reg, &srv))
+        return;
     uniquify_server_name(reg, &srv);
 
     int idx = reg->server_count;
@@ -792,16 +1196,19 @@ static void start_configured_server(mcp_registry_t *reg, const mcp_server_t *cfg
     bool ok = false;
     if (srv.transport == MCP_TRANSPORT_HTTP) {
         ok = initialize_server(&reg->servers[idx]);
+        if (!ok)
+            ok = try_fallback_url(&reg->servers[idx]);
     } else {
         ok = spawn_server(&reg->servers[idx]) && initialize_server(&reg->servers[idx]);
     }
 
     if (ok) {
         int n = discover_tools(reg, idx);
-        MCP_LOG("  \033[2mmcp: %s: %d tools discovered\033[0m\n",
-                reg->servers[idx].name, n);
+        mcp_record_connection(&reg->servers[idx], true, n);
+        MCP_LOG("  \033[2mmcp: %s: %d tools discovered\033[0m\n", reg->servers[idx].name, n);
         reg->server_count++;
     } else {
+        mcp_record_connection(&reg->servers[idx], false, 0);
         MCP_LOG("  \033[31mmcp: failed to connect %s\033[0m\n", srv.name);
         reg->failed_count++;
         stop_server(&reg->servers[idx]);
@@ -814,16 +1221,19 @@ static void start_configured_server(mcp_registry_t *reg, const mcp_server_t *cfg
 typedef struct {
     mcp_registry_t *reg;
     pending_list_t *pending;
-    int             next;        /* atomic cursor into pending->items */
-    pthread_mutex_t spawn_lock;  /* serialises fork()+exec setup only */
-    pthread_mutex_t merge_lock;  /* guards registry mutation + tool discovery */
+    int next;                   /* atomic cursor into pending->items */
+    pthread_mutex_t spawn_lock; /* serialises fork()+exec setup only */
+    pthread_mutex_t merge_lock; /* guards registry mutation + tool discovery */
 } connect_pool_t;
 
 static void *mcp_connect_worker(void *arg) {
     connect_pool_t *p = arg;
     for (;;) {
+        if (mcp_cancelled())
+            break;
         int i = __atomic_fetch_add(&p->next, 1, __ATOMIC_RELAXED);
-        if (i >= p->pending->count) break;
+        if (i >= p->pending->count)
+            break;
 
         mcp_server_t srv = p->pending->items[i];
         srv.stdin_fd = -1;
@@ -842,45 +1252,46 @@ static void *mcp_connect_worker(void *arg) {
         bool ok;
         if (srv.transport == MCP_TRANSPORT_HTTP) {
             ok = initialize_server(&srv);
+            if (!ok && !mcp_cancelled())
+                ok = try_fallback_url(&srv);
         } else {
             pthread_mutex_lock(&p->spawn_lock);
-            bool spawned = spawn_server(&srv);
+            bool spawned = !mcp_cancelled() && spawn_server(&srv);
             pthread_mutex_unlock(&p->spawn_lock);
             ok = spawned && initialize_server(&srv);
         }
+        if (mcp_cancelled())
+            ok = false;
 
         pthread_mutex_lock(&p->merge_lock);
         mcp_registry_t *reg = p->reg;
         reg->configured_count++;
-        if (ok && reg->server_count < MCP_MAX_SERVERS) {
+        if (ok && !mcp_cancelled() && reg->server_count < MCP_MAX_SERVERS) {
             int idx = reg->server_count;
             reg->servers[idx] = srv;
-            reg->server_count++;   /* publish slot before discovery uses it */
+            reg->server_count++; /* publish slot before discovery uses it */
             int n = discover_tools(reg, idx);
-            MCP_LOG("  \033[2mmcp: %s: %d tools discovered\033[0m\n",
-                    reg->servers[idx].name, n);
+        mcp_record_connection(&reg->servers[idx], true, n);
+            MCP_LOG("  \033[2mmcp: %s: %d tools discovered\033[0m\n", reg->servers[idx].name, n);
         } else {
             if (!ok)
                 MCP_LOG("  \033[31mmcp: failed to connect %s\033[0m\n", srv.name);
+            mcp_record_connection(&srv, false, 0);
             reg->failed_count++;
-            stop_server(&srv);   /* failed, or connected with no slot left */
+            stop_server(&srv); /* failed, or connected with no slot left */
         }
         pthread_mutex_unlock(&p->merge_lock);
     }
     return NULL;
 }
 
-static void mcp_curl_global_init_once(void) {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
-}
-
 static void mcp_connect_all(mcp_registry_t *reg, pending_list_t *pending) {
-    if (pending->count <= 0) return;
+    if (pending->count <= 0)
+        return;
 
     /* Ensure libcurl's global state is initialised once before any worker calls
      * curl_easy_init concurrently (the implicit lazy init is not thread-safe). */
-    static pthread_once_t curl_once = PTHREAD_ONCE_INIT;
-    pthread_once(&curl_once, mcp_curl_global_init_once);
+    dsco_http_global_init();
 
     connect_pool_t pool;
     pool.reg = reg;
@@ -889,8 +1300,7 @@ static void mcp_connect_all(mcp_registry_t *reg, pending_list_t *pending) {
     pthread_mutex_init(&pool.spawn_lock, NULL);
     pthread_mutex_init(&pool.merge_lock, NULL);
 
-    int nthreads = pending->count < MCP_CONNECT_WORKERS
-                 ? pending->count : MCP_CONNECT_WORKERS;
+    int nthreads = pending->count < MCP_CONNECT_WORKERS ? pending->count : MCP_CONNECT_WORKERS;
     pthread_t threads[MCP_CONNECT_WORKERS];
     int started = 0;
     for (int i = 0; i < nthreads; i++) {
@@ -901,30 +1311,39 @@ static void mcp_connect_all(mcp_registry_t *reg, pending_list_t *pending) {
         /* Could not spawn any worker — connect on the calling thread. */
         mcp_connect_worker(&pool);
     } else {
-        for (int i = 0; i < started; i++) pthread_join(threads[i], NULL);
+        for (int i = 0; i < started; i++)
+            pthread_join(threads[i], NULL);
     }
 
     pthread_mutex_destroy(&pool.spawn_lock);
     pthread_mutex_destroy(&pool.merge_lock);
 }
 
-static void parse_server_common(mcp_registry_t *reg, const char *raw_name,
-                                const char *obj, const char *source) {
+static void parse_server_common(mcp_registry_t *reg, const char *raw_name, const char *obj,
+                                const char *source) {
     mcp_server_t srv;
     memset(&srv, 0, sizeof(srv));
     srv.stdin_fd = -1;
     srv.stdout_fd = -1;
     srv.transport = MCP_TRANSPORT_STDIO;
     sanitize_name(raw_name, srv.name, sizeof(srv.name));
+    char *service_desc = json_get_str(obj, "description");
+    if (service_desc) { copy_str(srv.description, sizeof(srv.description), service_desc); free(service_desc); }
     copy_str(srv.source, sizeof(srv.source), source);
 
-    if (json_get_bool(obj, "disabled", false)) return;
+    if (json_get_bool(obj, "disabled", false)) {
+        mcp_diagnostics_record(srv.name, "disabled", 0, 0);
+        return;
+    }
     char *enabled_raw = json_get_raw(obj, "enabled");
     if (enabled_raw) {
         char *t = trim_inplace(enabled_raw);
         bool disabled = strncmp(t, "false", 5) == 0;
         free(enabled_raw);
-        if (disabled) return;
+        if (disabled) {
+            mcp_diagnostics_record(srv.name, "disabled", 0, 0);
+            return;
+        }
     }
 
     char *cmd = json_get_str(obj, "command");
@@ -932,9 +1351,18 @@ static void parse_server_common(mcp_registry_t *reg, const char *raw_name,
     char *type = json_get_str(obj, "type");
     char *transport = json_get_str(obj, "transport");
     char *cwd = json_get_str(obj, "cwd");
-    if (cmd) copy_str(srv.command, sizeof(srv.command), cmd);
-    if (cwd) copy_str(srv.cwd, sizeof(srv.cwd), cwd);
-    if (url) normalize_http_url(url, srv.url, sizeof(srv.url));
+    char *description = json_get_str(obj, "description");
+    char *fburl = json_get_str(obj, "fallback_url");
+    if (fburl)
+        normalize_http_url(fburl, srv.fallback_url, sizeof(srv.fallback_url));
+    if (cmd)
+        copy_str(srv.command, sizeof(srv.command), cmd);
+    if (cwd)
+        copy_str(srv.cwd, sizeof(srv.cwd), cwd);
+    if (description)
+        copy_str(srv.description, sizeof(srv.description), description);
+    if (url)
+        normalize_http_url(url, srv.url, sizeof(srv.url));
     if (type && (strcasecmp(type, "http") == 0 || strcasecmp(type, "sse") == 0))
         srv.transport = MCP_TRANSPORT_HTTP;
     if (transport && (strcasecmp(transport, "http") == 0 || strcasecmp(transport, "sse") == 0))
@@ -943,8 +1371,10 @@ static void parse_server_common(mcp_registry_t *reg, const char *raw_name,
         normalize_http_url(srv.command, srv.url, sizeof(srv.url));
         srv.transport = MCP_TRANSPORT_HTTP;
     }
-    if (srv.url[0]) srv.transport = MCP_TRANSPORT_HTTP;
-    if (!srv.command[0] && srv.url[0]) copy_str(srv.command, sizeof(srv.command), srv.url);
+    if (srv.url[0])
+        srv.transport = MCP_TRANSPORT_HTTP;
+    if (!srv.command[0] && srv.url[0])
+        copy_str(srv.command, sizeof(srv.command), srv.url);
 
     char *args = json_get_raw(obj, "args");
     if (args) {
@@ -967,36 +1397,46 @@ static void parse_server_common(mcp_registry_t *reg, const char *raw_name,
         free(http_headers);
     }
 
-    free(cmd); free(url); free(type); free(transport); free(cwd);
-    if (!srv.command[0] && !srv.url[0]) return;
+    free(cmd);
+    free(url);
+    free(type);
+    free(transport);
+    free(cwd);
+    free(description);
+    free(fburl);
+    if (!srv.command[0] && !srv.url[0])
+        return;
     start_configured_server(reg, &srv);
 }
 
 typedef struct {
     mcp_registry_t *reg;
-    const char     *source;
+    const char *source;
 } server_map_ctx_t;
 
 static void parse_server_map_entry(const char *name, const char *raw_value, void *ctx) {
     server_map_ctx_t *sm = (server_map_ctx_t *)ctx;
     const char *v = skip_ws_local(raw_value);
-    if (*v != '{') return;
+    if (*v != '{')
+        return;
     parse_server_common(sm->reg, name, v, sm->source);
 }
 
 static void import_servers_object(mcp_registry_t *reg, const char *servers_raw,
                                   const char *source) {
-    server_map_ctx_t ctx = { .reg = reg, .source = source };
+    server_map_ctx_t ctx = {.reg = reg, .source = source};
     json_object_foreach_local(servers_raw, parse_server_map_entry, &ctx);
 }
 
 static char *value_after_json_key(const char *p) {
     const char *q = skip_json_string_local(p);
     q = skip_ws_local(q);
-    if (*q != ':') return NULL;
+    if (*q != ':')
+        return NULL;
     q++;
     q = skip_ws_local(q);
-    if (*q != '{') return NULL;
+    if (*q != '{')
+        return NULL;
     return copy_json_value(q);
 }
 
@@ -1015,51 +1455,56 @@ static void scan_json_key(mcp_registry_t *reg, const char *data, const char *key
     }
 }
 
-static void import_top_level_json_key(mcp_registry_t *reg, const char *data,
-                                      const char *key, const char *source) {
+static void import_top_level_json_key(mcp_registry_t *reg, const char *data, const char *key,
+                                      const char *source) {
     char *raw = json_get_raw(data, key);
-    if (!raw) return;
+    if (!raw)
+        return;
     import_servers_object(reg, raw, source);
     free(raw);
 }
 
-static void load_json_config(mcp_registry_t *reg, const char *path,
-                             const char *source, bool scan_servers_key,
-                             bool recursive) {
+static void load_json_config(mcp_registry_t *reg, const char *path, const char *source,
+                             bool scan_servers_key, bool recursive) {
     char *data = read_file_limited(path, 2 * 1024 * 1024);
-    if (!data) return;
+    if (!data)
+        return;
 
     if (recursive) {
         scan_json_key(reg, data, "mcpServers", source);
         scan_json_key(reg, data, "mcp_servers", source);
-        if (scan_servers_key) scan_json_key(reg, data, "servers", source);
+        if (scan_servers_key)
+            scan_json_key(reg, data, "servers", source);
     } else {
         import_top_level_json_key(reg, data, "mcpServers", source);
         import_top_level_json_key(reg, data, "mcp_servers", source);
-        if (scan_servers_key) import_top_level_json_key(reg, data, "servers", source);
+        if (scan_servers_key)
+            import_top_level_json_key(reg, data, "servers", source);
     }
 
     free(data);
 }
 
 static bool project_path_matches_cwd(const char *project_path, const char *cwd) {
-    if (!project_path || !cwd || !project_path[0]) return false;
+    if (!project_path || !cwd || !project_path[0])
+        return false;
     size_t n = strlen(project_path);
-    if (strcmp(project_path, cwd) == 0) return true;
+    if (strcmp(project_path, cwd) == 0)
+        return true;
     return strncmp(cwd, project_path, n) == 0 && cwd[n] == '/';
 }
 
 typedef struct {
     mcp_registry_t *reg;
-    const char     *source;
-    const char     *cwd;
+    const char *source;
+    const char *cwd;
 } claude_project_ctx_t;
 
-static void parse_matching_claude_project(const char *project_path,
-                                          const char *raw_value,
+static void parse_matching_claude_project(const char *project_path, const char *raw_value,
                                           void *ctx) {
     claude_project_ctx_t *cp = (claude_project_ctx_t *)ctx;
-    if (!project_path_matches_cwd(project_path, cp->cwd)) return;
+    if (!project_path_matches_cwd(project_path, cp->cwd))
+        return;
     char *raw = json_get_raw(raw_value, "mcpServers");
     if (raw) {
         import_servers_object(cp->reg, raw, cp->source);
@@ -1072,10 +1517,10 @@ static void parse_matching_claude_project(const char *project_path,
     }
 }
 
-static void load_claude_json_config(mcp_registry_t *reg, const char *path,
-                                    const char *source) {
+static void load_claude_json_config(mcp_registry_t *reg, const char *path, const char *source) {
     char *data = read_file_limited(path, 2 * 1024 * 1024);
-    if (!data) return;
+    if (!data)
+        return;
 
     import_top_level_json_key(reg, data, "mcpServers", source);
     import_top_level_json_key(reg, data, "mcp_servers", source);
@@ -1084,7 +1529,7 @@ static void load_claude_json_config(mcp_registry_t *reg, const char *path,
     if (getcwd(cwd, sizeof(cwd))) {
         char *projects = json_get_raw(data, "projects");
         if (projects) {
-            claude_project_ctx_t ctx = { .reg = reg, .source = source, .cwd = cwd };
+            claude_project_ctx_t ctx = {.reg = reg, .source = source, .cwd = cwd};
             json_object_foreach_local(projects, parse_matching_claude_project, &ctx);
             free(projects);
         }
@@ -1095,22 +1540,26 @@ static void load_claude_json_config(mcp_registry_t *reg, const char *path,
 
 static char *parse_toml_string_at(const char **pp) {
     const char *p = skip_ws_local(*pp);
-    if (*p == '"') return parse_json_string_local_at(pp);
+    if (*p == '"')
+        return parse_json_string_local_at(pp);
     const char *start = p;
-    while (*p && *p != '#' && *p != ',' && *p != '}' && *p != '\n' && *p != '\r') p++;
+    while (*p && *p != '#' && *p != ',' && *p != '}' && *p != '\n' && *p != '\r')
+        p++;
     size_t n = (size_t)(p - start);
     char *out = safe_malloc(n + 1);
     memcpy(out, start, n);
     out[n] = '\0';
     char *t = trim_inplace(out);
-    if (t != out) memmove(out, t, strlen(t) + 1);
+    if (t != out)
+        memmove(out, t, strlen(t) + 1);
     *pp = p;
     return out;
 }
 
 static void parse_toml_array_strings(const char *raw, mcp_server_t *srv) {
     const char *p = skip_ws_local(raw);
-    if (*p != '[') return;
+    if (*p != '[')
+        return;
     p++;
     while (*p && *p != ']' && srv->argc < MCP_MAX_ARGS) {
         p = skip_ws_local(p);
@@ -1122,25 +1571,31 @@ static void parse_toml_array_strings(const char *raw, mcp_server_t *srv) {
                 free(s);
             }
         } else {
-            while (*p && *p != ',' && *p != ']') p++;
+            while (*p && *p != ',' && *p != ']')
+                p++;
         }
         p = skip_ws_local(p);
-        if (*p == ',') p++;
+        if (*p == ',')
+            p++;
     }
 }
 
 static void parse_toml_inline_map(const char *raw, mcp_server_t *srv, bool headers) {
     const char *p = skip_ws_local(raw);
-    if (*p != '{') return;
+    if (*p != '{')
+        return;
     p++;
     while (*p && *p != '}') {
         p = skip_ws_local(p);
         const char *ks = p;
-        while (*p && *p != '=' && *p != '}' && *p != ',') p++;
-        if (*p != '=') break;
+        while (*p && *p != '=' && *p != '}' && *p != ',')
+            p++;
+        if (*p != '=')
+            break;
         size_t kn = (size_t)(p - ks);
         char key[128];
-        if (kn >= sizeof(key)) kn = sizeof(key) - 1;
+        if (kn >= sizeof(key))
+            kn = sizeof(key) - 1;
         memcpy(key, ks, kn);
         key[kn] = '\0';
         char *kt = trim_inplace(key);
@@ -1149,7 +1604,8 @@ static void parse_toml_inline_map(const char *raw, mcp_server_t *srv, bool heade
         add_server_kv(srv, headers, kt, val);
         free(val);
         p = skip_ws_local(p);
-        if (*p == ',') p++;
+        if (*p == ',')
+            p++;
     }
 }
 
@@ -1158,9 +1614,11 @@ static int find_or_add_toml_server(mcp_server_t servers[], int *count, const cha
     char clean[128];
     sanitize_name(raw_name, clean, sizeof(clean));
     for (int i = 0; i < *count; i++) {
-        if (strcmp(servers[i].name, clean) == 0) return i;
+        if (strcmp(servers[i].name, clean) == 0)
+            return i;
     }
-    if (*count >= MCP_MAX_SERVERS) return -1;
+    if (*count >= MCP_MAX_SERVERS)
+        return -1;
     int idx = (*count)++;
     memset(&servers[idx], 0, sizeof(servers[idx]));
     copy_str(servers[idx].name, sizeof(servers[idx].name), clean);
@@ -1173,7 +1631,8 @@ static int find_or_add_toml_server(mcp_server_t servers[], int *count, const cha
 
 static void load_toml_config(mcp_registry_t *reg, const char *path, const char *source) {
     char *data = read_file_limited(path, 512 * 1024);
-    if (!data) return;
+    if (!data)
+        return;
 
     mcp_server_t *parsed = calloc(MCP_MAX_SERVERS, sizeof(*parsed));
     if (!parsed) {
@@ -1187,15 +1646,17 @@ static void load_toml_config(mcp_registry_t *reg, const char *path, const char *
     char *save = NULL;
     for (char *line = strtok_r(data, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
         char *s = trim_inplace(line);
-        if (!*s || *s == '#') continue;
+        if (!*s || *s == '#')
+            continue;
         if (*s == '[') {
             section = SEC_NONE;
             current = -1;
             char *end = strchr(s, ']');
-            if (!end) continue;
+            if (!end)
+                continue;
             *end = '\0';
             char *sec = s + 1;
-            const char *prefixes[] = { "mcp_servers.", "mcpServers." };
+            const char *prefixes[] = {"mcp_servers.", "mcpServers."};
             const char *body = NULL;
             for (int i = 0; i < 2; i++) {
                 size_t plen = strlen(prefixes[i]);
@@ -1204,26 +1665,34 @@ static void load_toml_config(mcp_registry_t *reg, const char *path, const char *
                     break;
                 }
             }
-            if (!body || !*body) continue;
+            if (!body || !*body)
+                continue;
             char name[128];
             const char *dot = strchr(body, '.');
             size_t nn = dot ? (size_t)(dot - body) : strlen(body);
-            if (nn >= sizeof(name)) nn = sizeof(name) - 1;
+            if (nn >= sizeof(name))
+                nn = sizeof(name) - 1;
             memcpy(name, body, nn);
             name[nn] = '\0';
             current = find_or_add_toml_server(parsed, &parsed_count, name, source);
-            if (current < 0) continue;
-            if (!dot) section = SEC_ROOT;
-            else if (strcmp(dot + 1, "env") == 0) section = SEC_ENV;
-            else if (strcmp(dot + 1, "headers") == 0 ||
-                     strcmp(dot + 1, "http_headers") == 0) section = SEC_HEADERS;
-            else section = SEC_NONE;
+            if (current < 0)
+                continue;
+            if (!dot)
+                section = SEC_ROOT;
+            else if (strcmp(dot + 1, "env") == 0)
+                section = SEC_ENV;
+            else if (strcmp(dot + 1, "headers") == 0 || strcmp(dot + 1, "http_headers") == 0)
+                section = SEC_HEADERS;
+            else
+                section = SEC_NONE;
             continue;
         }
 
-        if (current < 0 || section == SEC_NONE) continue;
+        if (current < 0 || section == SEC_NONE)
+            continue;
         char *eq = strchr(s, '=');
-        if (!eq) continue;
+        if (!eq)
+            continue;
         *eq = '\0';
         char *key = trim_inplace(s);
         char *val = trim_inplace(eq + 1);
@@ -1247,7 +1716,8 @@ static void load_toml_config(mcp_registry_t *reg, const char *path, const char *
             char *v = parse_toml_string_at(&vp);
             normalize_http_url(v, srv->url, sizeof(srv->url));
             srv->transport = MCP_TRANSPORT_HTTP;
-            if (!srv->command[0]) copy_str(srv->command, sizeof(srv->command), srv->url);
+            if (!srv->command[0])
+                copy_str(srv->command, sizeof(srv->command), srv->url);
             free(v);
         } else if (strcmp(key, "cwd") == 0) {
             const char *vp = val;
@@ -1267,7 +1737,8 @@ static void load_toml_config(mcp_registry_t *reg, const char *path, const char *
                 srv->transport = MCP_TRANSPORT_HTTP;
             free(v);
         } else if (strcmp(key, "disabled") == 0) {
-            if (strncmp(val, "true", 4) == 0) srv->command[0] = '\0';
+            if (strncmp(val, "true", 4) == 0)
+                srv->command[0] = '\0';
         }
         if (starts_http(srv->command)) {
             normalize_http_url(srv->command, srv->url, sizeof(srv->url));
@@ -1285,21 +1756,406 @@ static void load_toml_config(mcp_registry_t *reg, const char *path, const char *
     free(data);
 }
 
+static int yaml_indent_width(const char *line) {
+    int n = 0;
+    while (*line == ' ' || *line == '\t') {
+        n += (*line == '\t') ? 2 : 1;
+        line++;
+    }
+    return n;
+}
+
+static void yaml_strip_comment(char *s) {
+    bool in_single = false;
+    bool in_double = false;
+    bool escaped = false;
+    for (char *p = s; *p; p++) {
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (in_double && *p == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (*p == '\'' && !in_double) {
+            in_single = !in_single;
+            continue;
+        }
+        if (*p == '"' && !in_single) {
+            in_double = !in_double;
+            continue;
+        }
+        if (*p == '#' && !in_single && !in_double && (p == s || isspace((unsigned char)p[-1]))) {
+            *p = '\0';
+            return;
+        }
+    }
+}
+
+static char *parse_yaml_scalar(const char *raw) {
+    const char *p = skip_ws_local(raw);
+    if (*p == '"')
+        return parse_json_string_local_at(&p);
+    if (*p == '\'') {
+        p++;
+        const char *start = p;
+        while (*p && *p != '\'')
+            p++;
+        size_t n = (size_t)(p - start);
+        char *out = safe_malloc(n + 1);
+        memcpy(out, start, n);
+        out[n] = '\0';
+        return out;
+    }
+
+    const char *start = p;
+    while (*p && *p != '\n' && *p != '\r')
+        p++;
+    size_t n = (size_t)(p - start);
+    char *out = safe_malloc(n + 1);
+    memcpy(out, start, n);
+    out[n] = '\0';
+    char *t = trim_inplace(out);
+    if (t != out)
+        memmove(out, t, strlen(t) + 1);
+    return out;
+}
+
+static bool yaml_bool_false(const char *raw) {
+    char *v = parse_yaml_scalar(raw);
+    bool out = v && (strcasecmp(v, "false") == 0 || strcasecmp(v, "no") == 0 ||
+                     strcasecmp(v, "off") == 0 || strcmp(v, "0") == 0);
+    free(v);
+    return out;
+}
+
+static bool yaml_bool_true(const char *raw) {
+    char *v = parse_yaml_scalar(raw);
+    bool out = v && (strcasecmp(v, "true") == 0 || strcasecmp(v, "yes") == 0 ||
+                     strcasecmp(v, "on") == 0 || strcmp(v, "1") == 0);
+    free(v);
+    return out;
+}
+
+static void parse_yaml_array_strings(const char *raw, mcp_server_t *srv) {
+    const char *p = skip_ws_local(raw);
+    if (*p != '[') {
+        char *one = parse_yaml_scalar(p);
+        if (one && one[0] && srv->argc < MCP_MAX_ARGS)
+            copy_str(srv->args[srv->argc++], sizeof(srv->args[0]), one);
+        free(one);
+        return;
+    }
+    p++;
+    while (*p && *p != ']' && srv->argc < MCP_MAX_ARGS) {
+        p = skip_ws_local(p);
+        char *s = NULL;
+        if (*p == '"') {
+            s = parse_json_string_local_at(&p);
+        } else if (*p == '\'') {
+            const char *start = ++p;
+            while (*p && *p != '\'')
+                p++;
+            size_t n = (size_t)(p - start);
+            s = safe_malloc(n + 1);
+            memcpy(s, start, n);
+            s[n] = '\0';
+            if (*p == '\'')
+                p++;
+        } else {
+            const char *start = p;
+            while (*p && *p != ',' && *p != ']')
+                p++;
+            size_t n = (size_t)(p - start);
+            s = safe_malloc(n + 1);
+            memcpy(s, start, n);
+            s[n] = '\0';
+            char *t = trim_inplace(s);
+            if (t != s)
+                memmove(s, t, strlen(t) + 1);
+        }
+        if (s && s[0])
+            copy_str(srv->args[srv->argc++], sizeof(srv->args[0]), s);
+        free(s);
+        p = skip_ws_local(p);
+        if (*p == ',')
+            p++;
+    }
+}
+
+static void parse_yaml_inline_map(const char *raw, mcp_server_t *srv, bool headers) {
+    const char *p = skip_ws_local(raw);
+    if (*p != '{')
+        return;
+    p++;
+    while (*p && *p != '}') {
+        p = skip_ws_local(p);
+        char *key = NULL;
+        if (*p == '"') {
+            key = parse_json_string_local_at(&p);
+        } else if (*p == '\'') {
+            const char *start = ++p;
+            while (*p && *p != '\'')
+                p++;
+            size_t n = (size_t)(p - start);
+            key = safe_malloc(n + 1);
+            memcpy(key, start, n);
+            key[n] = '\0';
+            if (*p == '\'')
+                p++;
+        } else {
+            const char *start = p;
+            while (*p && *p != ':' && *p != ',' && *p != '}')
+                p++;
+            size_t n = (size_t)(p - start);
+            key = safe_malloc(n + 1);
+            memcpy(key, start, n);
+            key[n] = '\0';
+            char *t = trim_inplace(key);
+            if (t != key)
+                memmove(key, t, strlen(t) + 1);
+        }
+        p = skip_ws_local(p);
+        if (*p != ':') {
+            free(key);
+            break;
+        }
+        p++;
+        const char *value_start = skip_ws_local(p);
+        bool in_single = false, in_double = false, escaped = false;
+        while (*p) {
+            if (escaped) {
+                escaped = false;
+                p++;
+                continue;
+            }
+            if (in_double && *p == '\\') {
+                escaped = true;
+                p++;
+                continue;
+            }
+            if (*p == '\'' && !in_double)
+                in_single = !in_single;
+            else if (*p == '"' && !in_single)
+                in_double = !in_double;
+            else if (!in_single && !in_double && (*p == ',' || *p == '}'))
+                break;
+            p++;
+        }
+        size_t n = (size_t)(p - value_start);
+        char *raw_value = safe_malloc(n + 1);
+        memcpy(raw_value, value_start, n);
+        raw_value[n] = '\0';
+        char *val = parse_yaml_scalar(raw_value);
+        add_server_kv(srv, headers, key, val);
+        free(val);
+        free(raw_value);
+        free(key);
+        p = skip_ws_local(p);
+        if (*p == ',')
+            p++;
+    }
+}
+
+static bool yaml_mcp_root_key(const char *key) {
+    return strcmp(key, "mcp_servers") == 0 || strcmp(key, "mcpServers") == 0 ||
+           strcmp(key, "servers") == 0;
+}
+
+static bool yaml_split_key_value(char *s, char **key_out, char **val_out) {
+    char *colon = strchr(s, ':');
+    if (!colon)
+        return false;
+    *colon = '\0';
+    char *key = trim_inplace(s);
+    char *val = trim_inplace(colon + 1);
+    if (!key[0])
+        return false;
+    *key_out = key;
+    *val_out = val;
+    return true;
+}
+
+static bool yaml_common_server_key(const char *key) {
+    return strcmp(key, "command") == 0 || strcmp(key, "cmd") == 0 || strcmp(key, "args") == 0 ||
+           strcmp(key, "env") == 0 || strcmp(key, "headers") == 0 ||
+           strcmp(key, "http_headers") == 0 || strcmp(key, "url") == 0 || strcmp(key, "cwd") == 0 ||
+           strcmp(key, "type") == 0 || strcmp(key, "transport") == 0 ||
+           strcmp(key, "disabled") == 0 || strcmp(key, "enabled") == 0;
+}
+
+static void yaml_apply_server_field(mcp_server_t *srv, const char *key, const char *val,
+                                    bool *disabled) {
+    if (strcmp(key, "command") == 0 || strcmp(key, "cmd") == 0) {
+        char *v = parse_yaml_scalar(val);
+        copy_str(srv->command, sizeof(srv->command), v);
+        free(v);
+    } else if (strcmp(key, "url") == 0) {
+        char *v = parse_yaml_scalar(val);
+        normalize_http_url(v, srv->url, sizeof(srv->url));
+        srv->transport = MCP_TRANSPORT_HTTP;
+        if (!srv->command[0])
+            copy_str(srv->command, sizeof(srv->command), srv->url);
+        free(v);
+    } else if (strcmp(key, "cwd") == 0) {
+        char *v = parse_yaml_scalar(val);
+        copy_str(srv->cwd, sizeof(srv->cwd), v);
+        free(v);
+    } else if (strcmp(key, "args") == 0) {
+        parse_yaml_array_strings(val, srv);
+    } else if (strcmp(key, "env") == 0) {
+        parse_yaml_inline_map(val, srv, false);
+    } else if (strcmp(key, "headers") == 0 || strcmp(key, "http_headers") == 0) {
+        parse_yaml_inline_map(val, srv, true);
+    } else if (strcmp(key, "type") == 0 || strcmp(key, "transport") == 0) {
+        char *v = parse_yaml_scalar(val);
+        if (strcasecmp(v, "http") == 0 || strcasecmp(v, "sse") == 0 ||
+            strcasecmp(v, "streamable_http") == 0)
+            srv->transport = MCP_TRANSPORT_HTTP;
+        free(v);
+    } else if (strcmp(key, "disabled") == 0) {
+        if (yaml_bool_true(val))
+            *disabled = true;
+    } else if (strcmp(key, "enabled") == 0) {
+        if (yaml_bool_false(val))
+            *disabled = true;
+    }
+    if (starts_http(srv->command)) {
+        normalize_http_url(srv->command, srv->url, sizeof(srv->url));
+        srv->transport = MCP_TRANSPORT_HTTP;
+    }
+}
+
+static void load_hermes_yaml_config(mcp_registry_t *reg, const char *path, const char *source,
+                                    bool allow_bare_servers) {
+    char *data = read_file_limited(path, 512 * 1024);
+    if (!data)
+        return;
+
+    mcp_server_t *parsed = calloc(MCP_MAX_SERVERS, sizeof(*parsed));
+    bool *disabled = calloc(MCP_MAX_SERVERS, sizeof(*disabled));
+    if (!parsed || !disabled) {
+        free(parsed);
+        free(disabled);
+        free(data);
+        return;
+    }
+
+    int parsed_count = 0;
+    int current = -1;
+    int root_indent = allow_bare_servers ? -1 : 0;
+    int server_indent = -1;
+    int section_indent = -1;
+    bool in_mcp = allow_bare_servers;
+    enum { YSEC_NONE, YSEC_ROOT, YSEC_ARGS, YSEC_ENV, YSEC_HEADERS } section = YSEC_NONE;
+
+    char *save = NULL;
+    for (char *line = strtok_r(data, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        int indent = yaml_indent_width(line);
+        yaml_strip_comment(line);
+        char *s = trim_inplace(line);
+        if (!*s || strcmp(s, "---") == 0 || strcmp(s, "...") == 0)
+            continue;
+
+        if (section == YSEC_ARGS && current >= 0 && indent > section_indent && s[0] == '-') {
+            char *v = parse_yaml_scalar(s + 1);
+            if (v && v[0] && parsed[current].argc < MCP_MAX_ARGS)
+                copy_str(parsed[current].args[parsed[current].argc++],
+                         sizeof(parsed[current].args[0]), v);
+            free(v);
+            continue;
+        }
+
+        char *key = NULL;
+        char *val = NULL;
+        if (!yaml_split_key_value(s, &key, &val))
+            continue;
+
+        if (indent <= root_indent && in_mcp && !yaml_mcp_root_key(key)) {
+            in_mcp = allow_bare_servers;
+            current = -1;
+            section = YSEC_NONE;
+            if (!in_mcp)
+                continue;
+        }
+
+        if (yaml_mcp_root_key(key) && (!val[0] || strcmp(val, "{}") == 0)) {
+            in_mcp = true;
+            root_indent = indent;
+            current = -1;
+            section = YSEC_NONE;
+            continue;
+        }
+        if (!in_mcp)
+            continue;
+
+        bool server_decl = indent > root_indent && !val[0] &&
+                           (current < 0 || indent <= server_indent) && !yaml_common_server_key(key);
+        if (server_decl) {
+            current = find_or_add_toml_server(parsed, &parsed_count, key, source);
+            server_indent = indent;
+            section_indent = indent;
+            section = YSEC_ROOT;
+            continue;
+        }
+
+        if (current < 0)
+            continue;
+        if (indent <= server_indent)
+            continue;
+
+        mcp_server_t *srv = &parsed[current];
+        if ((section == YSEC_ENV || section == YSEC_HEADERS) && indent > section_indent) {
+            char *v = parse_yaml_scalar(val);
+            add_server_kv(srv, section == YSEC_HEADERS, key, v);
+            free(v);
+            continue;
+        }
+
+        if (!val[0] && strcmp(key, "args") == 0) {
+            section = YSEC_ARGS;
+            section_indent = indent;
+            continue;
+        }
+        if (!val[0] && strcmp(key, "env") == 0) {
+            section = YSEC_ENV;
+            section_indent = indent;
+            continue;
+        }
+        if (!val[0] && (strcmp(key, "headers") == 0 || strcmp(key, "http_headers") == 0)) {
+            section = YSEC_HEADERS;
+            section_indent = indent;
+            continue;
+        }
+
+        section = YSEC_ROOT;
+        yaml_apply_server_field(srv, key, val, &disabled[current]);
+    }
+
+    for (int i = 0; i < parsed_count; i++) {
+        if (disabled[i])
+            continue;
+        if (parsed[i].transport == MCP_TRANSPORT_HTTP && !parsed[i].url[0])
+            normalize_http_url(parsed[i].command, parsed[i].url, sizeof(parsed[i].url));
+        start_configured_server(reg, &parsed[i]);
+    }
+
+    free(disabled);
+    free(parsed);
+    free(data);
+}
+
 /* ── Public API ────────────────────────────────────────────────────────── */
 
-int mcp_init(mcp_registry_t *reg) {
-    memset(reg, 0, sizeof(*reg));
-
+/* Parse every MCP config source into `collect` without connecting. Shared by
+ * mcp_init (phase 1) and mcp_list_configured (inventory without side effects). */
+static void mcp_collect_configured(mcp_registry_t *reg, pending_list_t *collect) {
     const char *home = getenv("HOME");
-    if (!home) return 0;
-
+    if (!home)
+        return;
     char path[1024];
-
-    /* Phase 1: parse every config file into a pending list (cheap, serial).
-     * start_configured_server appends here instead of connecting inline. */
-    pending_list_t collect = {0};
-    g_collect = &collect;
-
+    g_collect = collect;
     snprintf(path, sizeof(path), "%s/.dsco/mcp.json", home);
     load_json_config(reg, path, "dsco:mcp", true, true);
     snprintf(path, sizeof(path), "%s/.dsco/config.json", home);
@@ -1316,20 +2172,61 @@ int mcp_init(mcp_registry_t *reg) {
     load_json_config(reg, path, "claude:settings", false, false);
     snprintf(path, sizeof(path), "%s/.claude/settings.local.json", home);
     load_json_config(reg, path, "claude:settings-local", false, false);
-    snprintf(path, sizeof(path), "%s/Library/Application Support/Claude/claude_desktop_config.json", home);
-    load_json_config(reg, path, "claude:desktop", false, false);
-    snprintf(path, sizeof(path), "%s/Library/Application Support/Claude/config.json", home);
-    load_json_config(reg, path, "claude:desktop-config", false, false);
+    /* Claude Desktop stores its config under ~/Library/Application Support/Claude,
+     * which macOS (Sequoia+) treats as another app's protected data: merely
+     * touching it triggers the "would like to access data from other apps" TCC
+     * prompt. Because MCP discovery re-runs on the periodic heartbeat, probing it
+     * unconditionally re-fires that prompt every ~10 min. Make it strictly
+     * opt-in (DSCO_MCP_IMPORT_CLAUDE_DESKTOP=1) so the default never reaches into
+     * another app's container. */
+    if (getenv("DSCO_MCP_IMPORT_CLAUDE_DESKTOP")) {
+        snprintf(path, sizeof(path),
+                 "%s/Library/Application Support/Claude/claude_desktop_config.json", home);
+        load_json_config(reg, path, "claude:desktop", false, false);
+        snprintf(path, sizeof(path), "%s/Library/Application Support/Claude/config.json", home);
+        load_json_config(reg, path, "claude:desktop-config", false, false);
+    }
 
     snprintf(path, sizeof(path), "%s/.codex/config.toml", home);
     load_toml_config(reg, path, "codex:global");
     load_toml_config(reg, ".codex/config.toml", "project:codex");
 
+    snprintf(path, sizeof(path), "%s/.hermes/config.yaml", home);
+    load_hermes_yaml_config(reg, path, "hermes:config", false);
+    snprintf(path, sizeof(path), "%s/.hermes/config.yml", home);
+    load_hermes_yaml_config(reg, path, "hermes:config", false);
+    snprintf(path, sizeof(path), "%s/.hermes/mcp_servers.yaml", home);
+    load_hermes_yaml_config(reg, path, "hermes:mcp-servers", true);
+    snprintf(path, sizeof(path), "%s/.hermes/mcp_servers.yml", home);
+    load_hermes_yaml_config(reg, path, "hermes:mcp-servers", true);
+    g_collect = NULL;
+}
+
+int mcp_init(mcp_registry_t *reg) {
+    (void)pthread_once(&g_mcp_sigpipe_once, mcp_ignore_sigpipe_once);
+    memset(reg, 0, sizeof(*reg));
+
+    const char *home = getenv("HOME");
+    if (!home)
+        return 0;
+
+    /* Phase 1: parse every config file into a pending list (cheap, serial).
+     * start_configured_server appends here instead of connecting inline. */
+    pending_list_t collect = {0};
+
+    mcp_collect_configured(reg, &collect);
+
     /* Phase 2: connect every collected server concurrently so one slow or dead
      * endpoint can't stall the rest behind a per-RPC timeout. */
     g_collect = NULL;
-    mcp_connect_all(reg, &collect);
+    if (!mcp_cancelled())
+        mcp_connect_all(reg, &collect);
     free(collect.items);
+
+    if (mcp_cancelled()) {
+        mcp_shutdown(reg);
+        return 0;
+    }
 
     reg->loaded = true;
     return reg->tool_count;
@@ -1355,7 +2252,8 @@ static char *extract_mcp_content_text(const char *content_raw) {
     if (*p == '{') {
         return json_get_str(p, "text");
     }
-    if (*p != '[') return NULL;
+    if (*p != '[')
+        return NULL;
 
     p++;
     jbuf_t b;
@@ -1363,28 +2261,132 @@ static char *extract_mcp_content_text(const char *content_raw) {
     bool any = false;
     while (*p) {
         p = skip_ws_local(p);
-        if (*p == ']') break;
+        if (*p == ']')
+            break;
         if (*p == '{') {
             char *text = json_get_str(p, "text");
             if (text && text[0]) {
-                if (any) jbuf_append_char(&b, '\n');
+                if (any)
+                    jbuf_append_char(&b, '\n');
                 jbuf_append(&b, text);
                 any = true;
             }
             free(text);
         }
         const char *next = skip_json_value_local(p);
-        if (next <= p) break;
+        if (next <= p)
+            break;
         p = skip_ws_local(next);
-        if (*p == ',') p++;
+        if (*p == ',')
+            p++;
     }
-    if (any) return b.data;
+    if (any)
+        return b.data;
     jbuf_free(&b);
     return NULL;
 }
 
-char *mcp_call_tool(mcp_registry_t *reg, const char *tool_name,
-                    const char *arguments_json) {
+/* tools.distributed.systems currently lists catalog leaves beside its MCP
+ * meta-tools, but rejects direct calls to those leaves before executing them.
+ * Recover only that exact rejection, using the same server's declared wrapper
+ * contract. A timeout, generic error, or another MCP server is never retried. */
+static _Thread_local bool mcp_catalog_retry_active;
+
+static yyjson_val *mcp_unique_member(yyjson_val *object, const char *name) {
+    if (!yyjson_is_obj(object)) return NULL;
+    size_t i, count;
+    yyjson_val *key, *value, *found = NULL;
+    yyjson_obj_foreach(object, i, count, key, value) {
+        if (!yyjson_equals_str(key, name)) continue;
+        if (found) return NULL;
+        found = value;
+    }
+    return found;
+}
+
+static bool mcp_catalog_execute_schema(const char *schema) {
+    yyjson_doc *doc = yyjson_read(schema, strlen(schema), 0);
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    yyjson_val *props = mcp_unique_member(root, "properties");
+    yyjson_val *required = mcp_unique_member(root, "required");
+    bool valid = yyjson_equals_str(mcp_unique_member(root, "type"), "object") &&
+        yyjson_equals_str(mcp_unique_member(mcp_unique_member(props, "tool_name"), "type"), "string") &&
+        yyjson_equals_str(mcp_unique_member(mcp_unique_member(props, "arguments"), "type"), "object") &&
+        yyjson_is_arr(required) && yyjson_arr_size(required) == 2;
+    bool have_name = false, have_arguments = false;
+    size_t i, count;
+    yyjson_val *value;
+    yyjson_arr_foreach(required, i, count, value) {
+        if (yyjson_equals_str(value, "tool_name")) have_name = true;
+        if (yyjson_equals_str(value, "arguments")) have_arguments = true;
+    }
+    yyjson_doc_free(doc);
+    return valid && have_name && have_arguments;
+}
+
+static char *mcp_retry_catalog_leaf(mcp_registry_t *reg, const mcp_tool_t *leaf,
+                                    const char *arguments, const char *rejection) {
+    if (mcp_catalog_retry_active || !rejection || !leaf->remote_name[0] ||
+        strcmp(leaf->remote_name, "execute_tool") == 0) return NULL;
+    const mcp_server_t *server = &reg->servers[leaf->server_idx];
+    if (server->transport != MCP_TRANSPORT_HTTP ||
+        (strcmp(server->url, "https://tools.distributed.systems/mcp") != 0 &&
+         strcmp(server->url, "https://tools.distributed.systems/mcp/") != 0)) return NULL;
+
+    char expected[sizeof(leaf->remote_name) + 32];
+    snprintf(expected, sizeof(expected), "Unknown meta-tool: %s", leaf->remote_name);
+    yyjson_doc *doc = yyjson_read(rejection, strlen(rejection), 0);
+    yyjson_val *root = doc ? yyjson_doc_get_root(doc) : NULL;
+    yyjson_val *available = mcp_unique_member(root, "available_meta_tools");
+    bool exact = yyjson_equals_str(mcp_unique_member(root, "error"), expected);
+    bool offers_execute = false;
+    size_t i, count;
+    yyjson_val *value;
+    yyjson_arr_foreach(available, i, count, value)
+        if (yyjson_equals_str(value, "execute_tool")) offers_execute = true;
+    yyjson_doc_free(doc);
+    if (!exact || !offers_execute) return NULL;
+
+    const mcp_tool_t *executor = NULL;
+    for (int j = 0; j < reg->tool_count; j++) {
+        const mcp_tool_t *candidate = &reg->tools[j];
+        if (candidate->server_idx != leaf->server_idx ||
+            strcmp(candidate->remote_name, "execute_tool") != 0) continue;
+        if (executor || !mcp_catalog_execute_schema(candidate->input_schema)) return NULL;
+        executor = candidate;
+    }
+    if (!executor) return NULL;
+    yyjson_doc *input_doc = yyjson_read(arguments, strlen(arguments), 0);
+    if (!input_doc || !yyjson_is_obj(yyjson_doc_get_root(input_doc))) {
+        yyjson_doc_free(input_doc);
+        return NULL;
+    }
+    yyjson_doc_free(input_doc);
+
+    jbuf_t input;
+    jbuf_init(&input, strlen(arguments) + 384);
+    jbuf_append(&input, "{\"tool_name\":");
+    jbuf_append_json_str(&input, leaf->remote_name);
+    jbuf_append(&input, ",\"arguments\":");
+    jbuf_append(&input, arguments);
+    jbuf_append(&input, "}");
+    char *result = calloc(1, MCP_MAX_LINE);
+    if (result) {
+        /* The leaf already crossed the normal gate. Re-enter it for the
+         * wrapper under the same authority, after transport I/O has returned;
+         * no MCP transport or tool-registry lock is held here. */
+        mcp_catalog_retry_active = true;
+        bool ok = tools_execute_for_tier(executor->name, input.data,
+                                         tools_execution_tier(), result, MCP_MAX_LINE);
+        mcp_catalog_retry_active = false;
+        if (!result[0]) snprintf(result, MCP_MAX_LINE, "%s", ok ? "{}" :
+                                 "{\"error\":\"catalog wrapper dispatch failed\"}");
+    }
+    jbuf_free(&input);
+    return result;
+}
+
+char *mcp_call_tool(mcp_registry_t *reg, const char *tool_name, const char *arguments_json) {
     int tool_idx = -1;
     for (int i = 0; i < reg->tool_count; i++) {
         if (strcmp(reg->tools[i].name, tool_name) == 0) {
@@ -1392,11 +2394,13 @@ char *mcp_call_tool(mcp_registry_t *reg, const char *tool_name,
             break;
         }
     }
-    if (tool_idx < 0) return NULL;
+    if (tool_idx < 0)
+        return NULL;
 
     mcp_tool_t *tool = &reg->tools[tool_idx];
     mcp_server_t *srv = &reg->servers[tool->server_idx];
-    if (!srv->initialized) return NULL;
+    if (!srv->initialized)
+        return NULL;
 
     const char *orig_name = tool->remote_name[0] ? tool->remote_name : tool_name;
 
@@ -1408,18 +2412,20 @@ char *mcp_call_tool(mcp_registry_t *reg, const char *tool_name,
     jbuf_append(&params, arguments_json ? arguments_json : "{}");
     jbuf_append(&params, "}");
 
-    char *req = rpc_build(srv->rpc_id++, "tools/call", params.data);
+    char *req = rpc_build(rpc_next_id(srv), "tools/call", params.data);
     jbuf_free(&params);
 
-    char *resp = send_rpc_request(srv, req, mcp_timeout_ms(30000));
+    char *resp = send_rpc_request(srv, req, dsco_mcp_call_timeout_ms());
     free(req);
-    if (!resp) return NULL;
+    if (!resp)
+        return NULL;
 
     char *result = json_get_raw(resp, "result");
     if (!result) {
         char *err = json_get_raw(resp, "error");
         free(resp);
-        if (err) return err;
+        if (err)
+            return err;
         return safe_strdup("{\"error\":\"no result\"}");
     }
 
@@ -1427,12 +2433,20 @@ char *mcp_call_tool(mcp_registry_t *reg, const char *tool_name,
     char *content_raw = json_get_raw(result, "content");
     if (content_raw) {
         content_text = extract_mcp_content_text(content_raw);
-        if (!content_text) content_text = safe_strdup(content_raw);
+        if (!content_text)
+            content_text = safe_strdup(content_raw);
         free(content_raw);
     }
-    if (!content_text) content_text = safe_strdup(result);
+    if (!content_text)
+        content_text = safe_strdup(result);
 
     free(result);
     free(resp);
+    char *retry = mcp_retry_catalog_leaf(reg, tool, arguments_json ? arguments_json : "{}",
+                                         content_text);
+    if (retry) {
+        free(content_text);
+        return retry;
+    }
     return content_text;
 }

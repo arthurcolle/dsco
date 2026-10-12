@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Self-Improvement Loop System
@@ -49,6 +50,7 @@
 typedef struct {
     char    name[SI_MAX_TOOL_NAME];
     int     calls;
+    int     consolidated_calls;
     int     successes;
     int     failures;
     double  total_latency_ms;
@@ -73,6 +75,8 @@ typedef enum {
     SI_PATTERN_HIGH_COST_TURN,        /* turn cost > $0.50 */
     SI_PATTERN_CONTEXT_PRESSURE,      /* context usage > 80% */
     SI_PATTERN_BUDGET_APPROACHING,   /* approaching cost budget */
+    SI_PATTERN_CACHE_LEVERAGED,       /* high cache-read reuse */
+    SI_PATTERN_OUTPUT_HEAVY_TURN,     /* output-heavy synthesis/reduction */
     SI_PATTERN_SUCCESSFUL_STRATEGY,   /* strategy that worked well */
 } si_pattern_type_t;
 
@@ -82,6 +86,7 @@ typedef struct {
     char               tool_name[SI_MAX_TOOL_NAME];
     double             severity;       /* 0.0-1.0 */
     int                occurrences;    /* how many times seen */
+    int                learned_occurrences;
     double             first_seen;     /* timestamp */
     double             last_seen;
 } si_pattern_t;
@@ -148,6 +153,10 @@ typedef struct {
     int                total_failures;
     int                total_retries;
     int                total_redundant_calls;
+    long long          total_input_tokens;
+    long long          total_output_tokens;
+    long long          total_cache_read_tokens;
+    long long          total_cache_write_tokens;
 
     /* Patterns & suggestions */
     si_pattern_t       patterns[SI_MAX_PATTERNS];
@@ -157,6 +166,12 @@ typedef struct {
 
     /* Adaptive strategy */
     si_strategy_weights_t weights;
+    /* A consolidation consumes one observed revision once. Recursive calls
+     * cannot manufacture additional evidence or strengthen the same prior. */
+    uint64_t           evidence_revision;
+    uint64_t           consolidated_revision;
+    uint64_t           consolidation_count;
+    double             consolidated_total_cost;
 
     /* Cross-session learnings */
     int                sessions_seen;
@@ -188,6 +203,18 @@ void self_improve_record_turn(self_improve_t *si,
                               int output_tokens,
                               int context_usage_pct,
                               double budget_used_pct);
+
+/* LOOP 1 (micro): Record turn-level metrics including provider cache usage.
+ * Prefer this from the agent loop when cache read/write counters are known. */
+void self_improve_record_turn_usage(self_improve_t *si,
+                                    int turn_number,
+                                    double turn_cost,
+                                    int input_tokens,
+                                    int output_tokens,
+                                    int cache_read_tokens,
+                                    int cache_write_tokens,
+                                    int context_usage_pct,
+                                    double budget_used_pct);
 
 /* LOOP 2 (meso): Consolidate patterns and generate suggestions.
  * Called every SI_CONSOLIDATION_INTERVAL turns or at session end.
@@ -235,9 +262,13 @@ void self_improve_turn_reset(self_improve_t *si);
 /* ── Tool implementations (for tools.c registration) ──────────────────── */
 
 /* Tool: self_improve — Run the self-improvement loop and return suggestions.
- * Input: { "action": "summary"|"consolidate"|"acknowledge"|"history",
- *           "suggestion_id": N (for acknowledge) }
- * Output: JSON with suggestions, patterns, and strategy weights. */
+ * Input: { "action": "summary"|"consolidate"|"acknowledge"|"history"|"save"|
+ *                    "progress"|"curriculum"|"skill"|"promotion_gate",
+ *           "suggestion_id": N (for acknowledge),
+ *           "skill_id": "SP07" (for skill),
+ *           ...promotion metrics for promotion_gate }
+ * Output: summary text or JSON with suggestions, patterns, strategy weights,
+ *         RSI curriculum, and promotion gate decisions. */
 bool tool_self_improve(const char *input_json, char *result, size_t result_len);
 
 /* Tool: self_assess — Quick self-evaluation of current session performance.
@@ -255,6 +286,10 @@ extern self_improve_t g_self_improve;
 #define SI_RECORD_TURN(n, cost, in_tok, out_tok, ctx_pct, budget_pct) \
     self_improve_record_turn(&g_self_improve, (n), (cost), (in_tok), \
                              (out_tok), (ctx_pct), (budget_pct))
+
+#define SI_RECORD_TURN_USAGE(n, cost, in_tok, out_tok, cr_tok, cw_tok, ctx_pct, budget_pct) \
+    self_improve_record_turn_usage(&g_self_improve, (n), (cost), (in_tok), (out_tok),       \
+                                   (cr_tok), (cw_tok), (ctx_pct), (budget_pct))
 
 #define SI_CONSOLIDATE() \
     self_improve_consolidate(&g_self_improve)

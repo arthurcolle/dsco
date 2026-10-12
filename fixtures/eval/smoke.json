@@ -1,0 +1,7 @@
+{
+  "name": "smoke",
+  "tasks": [
+    {"id": "suite-file-exists", "kind": "file_exists", "path": "fixtures/eval/smoke.json"},
+    {"id": "missing-file", "kind": "file_exists", "path": "fixtures/eval/does-not-exist.txt"}
+  ]
+}

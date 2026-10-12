@@ -1,0 +1,195 @@
+{
+  "schema": "dsco.harness_matrix.v1",
+  "name": "native-subscription-smoke",
+  "defaults": {
+    "timeout_seconds": 300,
+    "grader_timeout_seconds": 30,
+    "max_input_tokens": 32768,
+    "max_output_tokens": 4096,
+    "max_turns": 12,
+    "max_cost_usd": 0.25,
+    "max_output_bytes": 8388608
+  },
+  "fleet_mesh": {
+    "python": "../../fleet-mesh/.venv/bin/python3",
+    "harness": "../../fleet-mesh/fleet_harness.py",
+    "targets": [
+      "node-a",
+      "matrix",
+      "node-b",
+      "node-c",
+      "mothership-2",
+      "hel-11",
+      "fsn-12",
+      "ash-13",
+      "nur-14"
+    ],
+    "transport": "auto",
+    "timeout_seconds": 20,
+    "min_ready_nodes": 8
+  },
+  "adapters": [
+    {
+      "id": "dsco-gpt6-sol-xhigh",
+      "kind": "dsco_native",
+      "binary": "../dsco",
+      "provider": "openai-codex",
+      "model": "gpt-6-sol",
+      "effort": "xhigh",
+      "inherit_env": [
+        "CODEX_HOME",
+        "DSCO_ENV_FILE"
+      ]
+    },
+    {
+      "id": "codex-gpt6-sol-xhigh",
+      "kind": "argv",
+      "binary": "codex",
+      "argv": [
+        "exec",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "--ignore-user-config",
+        "--json",
+        "--sandbox",
+        "workspace-write",
+        "--approve-for-me",
+        "--cd",
+        "{workspace}",
+        "--model",
+        "gpt-6-sol",
+        "-c",
+        "model_reasoning_effort=\"xhigh\"",
+        "-"
+      ],
+      "prompt_transport": "stdin",
+      "enabled": false
+    },
+    {
+      "id": "claude-opus-5-5-xhigh",
+      "kind": "argv",
+      "binary": "claude",
+      "argv": [
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--no-session-persistence",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "{\"mcpServers\":{}}",
+        "--permission-mode",
+        "auto",
+        "--permission-prompts",
+        "none",
+        "--effort",
+        "xhigh",
+        "--model",
+        "claude-opus-5-5",
+        "--max-budget-usd",
+        "{max_cost_usd}"
+      ],
+      "prompt_transport": "stdin",
+      "enabled": false
+    },
+    {
+      "id": "omp-gpt6-sol-xhigh",
+      "kind": "argv",
+      "binary": "omp",
+      "argv": [
+        "-p",
+        "--cwd",
+        "{workspace}",
+        "--model",
+        "gpt-6-sol",
+        "--thinking",
+        "xhigh",
+        "--mode",
+        "json",
+        "--no-session",
+        "--auto-approve",
+        "--max-time",
+        "{timeout_seconds}",
+        "{prompt}"
+      ],
+      "enabled": false
+    },
+    {
+      "id": "opencode-configured-xhigh",
+      "kind": "argv",
+      "binary": "opencode",
+      "argv": [
+        "run",
+        "--dir",
+        "{workspace}",
+        "--format",
+        "json",
+        "--pure",
+        "--variant",
+        "xhigh",
+        "{prompt}"
+      ],
+      "enabled": false
+    },
+    {
+      "id": "hermes-configured",
+      "kind": "argv",
+      "binary": "hermes",
+      "argv": [
+        "chat",
+        "--query",
+        "{prompt}"
+      ],
+      "enabled": false
+    },
+    {
+      "id": "qwen-code-configured",
+      "kind": "argv",
+      "binary": "qwen",
+      "argv": [
+        "--prompt",
+        "{prompt}",
+        "--output-format",
+        "stream-json",
+        "--include-partial-messages"
+      ],
+      "enabled": false
+    },
+    {
+      "id": "mini-swe-agent-configured",
+      "kind": "argv",
+      "binary": "mini",
+      "argv": [
+        "--task",
+        "{prompt}",
+        "--yolo"
+      ],
+      "enabled": false
+    }
+  ],
+  "tasks": [
+    {
+      "id": "write-fizzbuzz",
+      "fixture": "fixtures/harness_matrix_smoke",
+      "prompt": "Implement fizzbuzz.py in the current directory. It must print the integers 1 through 30, replacing multiples of 3 with Fizz, multiples of 5 with Buzz, and multiples of both with FizzBuzz. Use only the Python standard library. Run it before finishing.",
+      "graders": [
+        {
+          "id": "implementation-exists",
+          "type": "file_exists",
+          "path": "fizzbuzz.py",
+          "expected": true
+        },
+        {
+          "id": "behavior",
+          "type": "command",
+          "argv": [
+            "python3",
+            "grade.py"
+          ],
+          "expected_exit_code": 0,
+          "timeout_seconds": 10
+        }
+      ]
+    }
+  ]
+}

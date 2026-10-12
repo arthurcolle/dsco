@@ -1,65 +1,74 @@
-#include "event_loop.h"
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <errno.h>
-
-#ifdef __APPLE__
-#include <sys/event.h>
+#include <limits.h>
+#include <fcntl.h>
 #include <unistd.h>
+
+#if !defined(EV_FORCE_POLL) && defined(__APPLE__)
+#include <sys/event.h>
+enum { EV_KQUEUE_ERROR = EV_ERROR };
+#undef EV_ERROR /* Keep the public ev_mask_t value, not kqueue's flag. */
 #define EV_USE_KQUEUE 1
+#elif !defined(EV_FORCE_POLL) && defined(__linux__)
+#include <sys/epoll.h>
+#define EV_USE_EPOLL 1
 #else
 #include <poll.h>
-#define EV_USE_KQUEUE 0
 #endif
+#include "event_loop.h"
+#include "event_wakeup.h"
 
 /* ── Constants ─────────────────────────────────────────────────────── */
 
-#define EV_MAX_FDS     256
-#define EV_MAX_TIMERS   64
+#define EV_MAX_FDS 256
+#define EV_MAX_TIMERS 64
 #define EV_MAX_DEFERRED 128
 
 /* ── Internal types ────────────────────────────────────────────────── */
 
 typedef struct {
-    int       fd;
+    int fd;
     ev_mask_t mask;
-    ev_fd_cb  cb;
-    void     *ctx;
-    bool      active;
+    ev_fd_cb cb;
+    void *ctx;
+    bool active;
+    uintptr_t token;
 } ev_fd_watcher_t;
 
 typedef struct {
-    int          id;
-    uint64_t     deadline_ms;
-    int          interval_ms;  /* 0 = one-shot */
-    ev_timer_cb  cb;
-    void        *ctx;
-    bool         active;
+    int id;
+    uint64_t deadline_ms;
+    int interval_ms; /* 0 = one-shot */
+    ev_timer_cb cb;
+    void *ctx;
+    bool active;
 } ev_timer_t;
 
 typedef struct {
     ev_defer_cb cb;
-    void       *ctx;
+    void *ctx;
 } ev_deferred_t;
 
 struct ev_loop {
-#if EV_USE_KQUEUE
-    int              kq;
+#if EV_USE_KQUEUE || EV_USE_EPOLL
+    int backend_fd;
 #endif
-    ev_fd_watcher_t  fds[EV_MAX_FDS];
-    int              fd_count;
+    ev_wakeup_t wake;
+    ev_fd_watcher_t fds[EV_MAX_FDS];
+    uintptr_t next_token;
 
-    ev_timer_t       timers[EV_MAX_TIMERS];
-    int              timer_next_id;
+    ev_timer_t timers[EV_MAX_TIMERS];
+    uint64_t timer_next_id;
 
-    ev_deferred_t    deferred[EV_MAX_DEFERRED];
-    int              defer_head;
-    int              defer_tail;
-    int              defer_count;
+    ev_deferred_t deferred[EV_MAX_DEFERRED];
+    int defer_head;
+    int defer_tail;
+    int defer_count;
 
-    volatile int     stop_flag;
-    ev_stats_t       stats;
+    int stop_flag;
+    ev_stats_t stats;
 };
 
 /* ── Monotonic clock ───────────────────────────────────────────────── */
@@ -74,13 +83,44 @@ static uint64_t now_ms(void) {
 
 ev_loop_t *ev_loop_new(void) {
     ev_loop_t *loop = calloc(1, sizeof(ev_loop_t));
-    if (!loop) return NULL;
+    if (!loop)
+        return NULL;
 
 #if EV_USE_KQUEUE
-    loop->kq = kqueue();
-    if (loop->kq < 0) {
+    loop->backend_fd = kqueue();
+#elif EV_USE_EPOLL
+    loop->backend_fd = epoll_create1(EPOLL_CLOEXEC);
+#endif
+#if EV_USE_KQUEUE || EV_USE_EPOLL
+    if (loop->backend_fd < 0) {
+        int saved_errno = errno;
         free(loop);
+        errno = saved_errno;
         return NULL;
+    }
+    if (fcntl(loop->backend_fd, F_SETFD, FD_CLOEXEC) < 0) {
+        int saved = errno; close(loop->backend_fd); free(loop); errno = saved;
+        return NULL;
+    }
+#endif
+    if (ev_wakeup_init(&loop->wake,
+#if EV_USE_KQUEUE || EV_USE_EPOLL
+                       loop->backend_fd
+#else
+                       -1
+#endif
+                       ) < 0) {
+        int saved = errno;
+#if EV_USE_KQUEUE || EV_USE_EPOLL
+        close(loop->backend_fd);
+#endif
+        free(loop); errno = saved; return NULL;
+    }
+#if EV_USE_EPOLL
+    struct epoll_event wake_event = {.events = EPOLLIN}; /* token zero reserved */
+    if (epoll_ctl(loop->backend_fd, EPOLL_CTL_ADD, loop->wake.read_fd, &wake_event) < 0) {
+        int saved = errno; ev_wakeup_close(&loop->wake);
+        close(loop->backend_fd); free(loop); errno = saved; return NULL;
     }
 #endif
 
@@ -91,94 +131,148 @@ ev_loop_t *ev_loop_new(void) {
 }
 
 void ev_loop_free(ev_loop_t *loop) {
-    if (!loop) return;
-#if EV_USE_KQUEUE
-    close(loop->kq);
+    if (!loop)
+        return;
+    ev_wakeup_close(&loop->wake);
+#if EV_USE_KQUEUE || EV_USE_EPOLL
+    close(loop->backend_fd);
 #endif
     free(loop);
 }
 
 /* ── FD watching ───────────────────────────────────────────────────── */
 
-int ev_watch_fd(ev_loop_t *loop, int fd, ev_mask_t mask, ev_fd_cb cb, void *ctx) {
-    if (!loop || fd < 0) return -1;
-
-    /* Check if already watched — update in place */
-    for (int i = 0; i < loop->fd_count; i++) {
-        if (loop->fds[i].fd == fd && loop->fds[i].active) {
-            loop->fds[i].mask = mask;
-            loop->fds[i].cb   = cb;
-            loop->fds[i].ctx  = ctx;
 #if EV_USE_KQUEUE
-            struct kevent kev[2];
-            int n = 0;
-            if (mask & EV_READ)
-                EV_SET(&kev[n++], fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, NULL);
-            if (mask & EV_WRITE)
-                EV_SET(&kev[n++], fd, EVFILT_WRITE, EV_ADD | EV_ENABLE, 0, 0, NULL);
-            if (n > 0) kevent(loop->kq, kev, n, NULL, 0, NULL);
-#endif
-            return 0;
+/* Each change is synchronous: registration failures must reach the caller. */
+static int kqueue_mask(ev_loop_t *loop, int fd, ev_mask_t mask,
+                       ev_mask_t previous, uintptr_t token) {
+    const int filters[] = { EVFILT_READ, EVFILT_WRITE };
+    const ev_mask_t bits[] = { EV_READ, EV_WRITE };
+    for (int i = 0; i < 2; i++) {
+        if (!((mask | previous) & bits[i]))
+            continue;
+        struct kevent change;
+        int flags = (mask & bits[i]) ? EV_ADD | EV_ENABLE : EV_DELETE;
+        EV_SET(&change, fd, filters[i], flags, 0, 0, (void *)token);
+        if (kevent(loop->backend_fd, &change, 1, NULL, 0, NULL) < 0) {
+            if (!(mask & bits[i]) && (errno == ENOENT || errno == EBADF))
+                continue; /* Closing a watched descriptor removes its filters. */
+            return -1;
         }
     }
-
-    if (loop->fd_count >= EV_MAX_FDS) return -1;
-
-    int idx = loop->fd_count++;
-    loop->fds[idx].fd     = fd;
-    loop->fds[idx].mask   = mask;
-    loop->fds[idx].cb     = cb;
-    loop->fds[idx].ctx    = ctx;
-    loop->fds[idx].active = true;
-    loop->stats.active_fds++;
-
-#if EV_USE_KQUEUE
-    struct kevent kev[2];
-    int n = 0;
-    if (mask & EV_READ)
-        EV_SET(&kev[n++], fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, NULL);
-    if (mask & EV_WRITE)
-        EV_SET(&kev[n++], fd, EVFILT_WRITE, EV_ADD | EV_ENABLE, 0, 0, NULL);
-    if (n > 0) kevent(loop->kq, kev, n, NULL, 0, NULL);
+    return 0;
+}
 #endif
 
+int ev_watch_fd(ev_loop_t *loop, int fd, ev_mask_t mask, ev_fd_cb cb, void *ctx) {
+    if (!loop || !cb || !(mask & (EV_READ | EV_WRITE)) ||
+        (mask & ~(EV_READ | EV_WRITE | EV_ERROR))) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (fd < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    if (fcntl(fd, F_GETFD) < 0)
+        return -1;
+
+    int idx = -1;
+    for (int i = 0; i < EV_MAX_FDS; i++) {
+        if (loop->fds[i].active && loop->fds[i].fd == fd) {
+            idx = i;
+            break;
+        }
+        if (!loop->fds[i].active && idx < 0)
+            idx = i;
+    }
+    if (idx < 0) {
+        errno = ENOSPC;
+        return -1;
+    }
+    if (loop->next_token == UINTPTR_MAX) {
+        errno = EOVERFLOW; /* Never recycle a generation token. */
+        return -1;
+    }
+    uintptr_t token = ++loop->next_token;
+    ev_fd_watcher_t *w = &loop->fds[idx];
+#if EV_USE_KQUEUE
+    ev_mask_t old_mask = w->active ? w->mask : 0;
+    if (kqueue_mask(loop, fd, mask, old_mask, token) < 0) {
+        int saved_errno = errno;
+        /* Undo partially applied changes, preserving the previous registration. */
+        if (kqueue_mask(loop, fd, old_mask, mask | old_mask, w->token) < 0) {
+            (void)kqueue_mask(loop, fd, 0, mask | old_mask, 0);
+            if (w->active) {
+                w->active = false;
+                loop->stats.active_fds--;
+            }
+        }
+        errno = saved_errno;
+        return -1;
+    }
+#elif EV_USE_EPOLL
+    struct epoll_event event = {0};
+    if (mask & EV_READ) event.events |= EPOLLIN;
+    if (mask & EV_WRITE) event.events |= EPOLLOUT;
+    event.events |= EPOLLRDHUP;
+    event.data.u64 = token;
+    int op = w->active ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
+    if (epoll_ctl(loop->backend_fd, op, fd, &event) < 0)
+        return -1;
+#endif
+    if (!w->active)
+        loop->stats.active_fds++;
+    *w = (ev_fd_watcher_t){ .fd = fd, .mask = mask, .cb = cb, .ctx = ctx,
+                            .active = true, .token = token };
     return 0;
 }
 
 int ev_unwatch_fd(ev_loop_t *loop, int fd) {
-    if (!loop) return -1;
-    for (int i = 0; i < loop->fd_count; i++) {
-        if (loop->fds[i].fd == fd && loop->fds[i].active) {
-#if EV_USE_KQUEUE
-            struct kevent kev[2];
-            int n = 0;
-            if (loop->fds[i].mask & EV_READ)
-                EV_SET(&kev[n++], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
-            if (loop->fds[i].mask & EV_WRITE)
-                EV_SET(&kev[n++], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
-            if (n > 0) kevent(loop->kq, kev, n, NULL, 0, NULL);
-#endif
-            loop->fds[i].active = false;
-            loop->stats.active_fds--;
-            return 0;
-        }
+    if (!loop) {
+        errno = EINVAL;
+        return -1;
     }
+    for (int i = 0; i < EV_MAX_FDS; i++) {
+        ev_fd_watcher_t *w = &loop->fds[i];
+        if (!w->active || w->fd != fd)
+            continue;
+        int result = 0;
+#if EV_USE_KQUEUE
+        result = kqueue_mask(loop, fd, 0, w->mask, 0);
+#elif EV_USE_EPOLL
+        result = epoll_ctl(loop->backend_fd, EPOLL_CTL_DEL, fd, NULL);
+        if (result < 0 && (errno == ENOENT || errno == EBADF))
+            result = 0;
+#endif
+        /* Invalidate even on deletion failure: queued events cannot call back. */
+        w->active = false;
+        loop->stats.active_fds--;
+        return result;
+    }
+    errno = ENOENT;
     return -1;
 }
 
 /* ── Timers ────────────────────────────────────────────────────────── */
 
-static int alloc_timer(ev_loop_t *loop, int ms, int interval,
-                       ev_timer_cb cb, void *ctx) {
-    if (!loop) return -1;
+static int alloc_timer(ev_loop_t *loop, int ms, int interval, ev_timer_cb cb, void *ctx) {
+    if (!loop || !cb || ms < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (loop->timer_next_id > INT_MAX) {
+        errno = EOVERFLOW;
+        return -1;
+    }
     for (int i = 0; i < EV_MAX_TIMERS; i++) {
         if (!loop->timers[i].active) {
-            loop->timers[i].id          = loop->timer_next_id++;
+            loop->timers[i].id = (int)loop->timer_next_id++;
             loop->timers[i].deadline_ms = now_ms() + (uint64_t)ms;
             loop->timers[i].interval_ms = interval;
-            loop->timers[i].cb          = cb;
-            loop->timers[i].ctx         = ctx;
-            loop->timers[i].active      = true;
+            loop->timers[i].cb = cb;
+            loop->timers[i].ctx = ctx;
+            loop->timers[i].active = true;
             loop->stats.active_timers++;
             return loop->timers[i].id;
         }
@@ -191,11 +285,16 @@ int ev_timer_once(ev_loop_t *loop, int ms, ev_timer_cb cb, void *ctx) {
 }
 
 int ev_timer_repeat(ev_loop_t *loop, int interval_ms, ev_timer_cb cb, void *ctx) {
+    if (interval_ms <= 0) {
+        errno = EINVAL;
+        return -1;
+    }
     return alloc_timer(loop, interval_ms, interval_ms, cb, ctx);
 }
 
 void ev_timer_cancel(ev_loop_t *loop, int timer_id) {
-    if (!loop) return;
+    if (!loop)
+        return;
     for (int i = 0; i < EV_MAX_TIMERS; i++) {
         if (loop->timers[i].active && loop->timers[i].id == timer_id) {
             loop->timers[i].active = false;
@@ -208,9 +307,10 @@ void ev_timer_cancel(ev_loop_t *loop, int timer_id) {
 /* ── Deferred ──────────────────────────────────────────────────────── */
 
 int ev_defer(ev_loop_t *loop, ev_defer_cb cb, void *ctx) {
-    if (!loop || loop->defer_count >= EV_MAX_DEFERRED) return -1;
+    if (!loop || loop->defer_count >= EV_MAX_DEFERRED)
+        return -1;
     int idx = loop->defer_tail;
-    loop->deferred[idx].cb  = cb;
+    loop->deferred[idx].cb = cb;
     loop->deferred[idx].ctx = ctx;
     loop->defer_tail = (loop->defer_tail + 1) % EV_MAX_DEFERRED;
     loop->defer_count++;
@@ -218,7 +318,8 @@ int ev_defer(ev_loop_t *loop, ev_defer_cb cb, void *ctx) {
 }
 
 static void run_deferred(ev_loop_t *loop) {
-    while (loop->defer_count > 0) {
+    int count = loop->defer_count; /* Re-enqueued work waits for the next phase. */
+    while (count-- > 0) {
         ev_deferred_t d = loop->deferred[loop->defer_head];
         loop->defer_head = (loop->defer_head + 1) % EV_MAX_DEFERRED;
         loop->defer_count--;
@@ -233,19 +334,26 @@ static void run_deferred(ev_loop_t *loop) {
 
 static void fire_timers(ev_loop_t *loop) {
     uint64_t t = now_ms();
+    int due[EV_MAX_TIMERS];
     for (int i = 0; i < EV_MAX_TIMERS; i++) {
         ev_timer_t *tm = &loop->timers[i];
-        if (!tm->active) continue;
-        if (t >= tm->deadline_ms) {
-            tm->cb(tm->id, tm->ctx);
-            loop->stats.timer_fires++;
-            if (tm->interval_ms > 0) {
-                tm->deadline_ms = t + (uint64_t)tm->interval_ms;
-            } else {
-                tm->active = false;
-                loop->stats.active_timers--;
-            }
+        due[i] = tm->active && t >= tm->deadline_ms ? tm->id : -1;
+    }
+    for (int i = 0; i < EV_MAX_TIMERS; i++) {
+        ev_timer_t *tm = &loop->timers[i];
+        if (due[i] < 0 || !tm->active || tm->id != due[i])
+            continue;
+        ev_timer_cb cb = tm->cb;
+        void *ctx = tm->ctx;
+        /* Commit before calling user code; never overwrite callback mutations. */
+        if (tm->interval_ms > 0) {
+            tm->deadline_ms = t + (uint64_t)tm->interval_ms;
+        } else {
+            tm->active = false;
+            loop->stats.active_timers--;
         }
+        loop->stats.timer_fires++;
+        cb(due[i], ctx);
     }
 }
 
@@ -255,110 +363,154 @@ static int next_timer_ms(ev_loop_t *loop, int max_ms) {
     uint64_t t = now_ms();
     int min = max_ms;
     for (int i = 0; i < EV_MAX_TIMERS; i++) {
-        if (!loop->timers[i].active) continue;
+        if (!loop->timers[i].active)
+            continue;
         int64_t diff = (int64_t)loop->timers[i].deadline_ms - (int64_t)t;
-        int d = diff <= 0 ? 0 : (int)diff;
-        if (d < min) min = d;
+        int d = diff <= 0 ? 0 : diff > INT_MAX ? INT_MAX : (int)diff;
+        if (min < 0 || d < min)
+            min = d;
     }
     return min;
 }
 
 /* ── Poll ──────────────────────────────────────────────────────────── */
 
+static int dispatch_fd(ev_loop_t *loop, uintptr_t token, ev_mask_t fired) {
+    for (int i = 0; i < EV_MAX_FDS; i++) {
+        ev_fd_watcher_t *w = &loop->fds[i];
+        if (!w->active || w->token != token)
+            continue;
+        fired &= w->mask | EV_ERROR;
+        if (!fired)
+            return 0;
+        w->cb(w->fd, fired, w->ctx);
+        loop->stats.fd_events++;
+        return 1;
+    }
+    return 0; /* Removed/replaced after this batch was collected. */
+}
+
 int ev_loop_poll(ev_loop_t *loop, int timeout_ms) {
-    if (!loop) return -1;
+    if (!loop) {
+        errno = EINVAL;
+        return -1;
+    }
 
-    /* Run deferred callbacks first */
+    bool had_deferred = loop->defer_count > 0;
     run_deferred(loop);
-
-    /* Compute effective timeout from timers */
     int wait_ms = timeout_ms;
-    if (wait_ms < 0) wait_ms = 60000; /* cap infinite at 60s */
     wait_ms = next_timer_ms(loop, wait_ms);
-
+    if (had_deferred || loop->defer_count || loop->stop_flag)
+        wait_ms = 0;
     int events_fired = 0;
+    int ret;
 
 #if EV_USE_KQUEUE
     struct kevent events[64];
-    struct timespec ts;
-    ts.tv_sec  = wait_ms / 1000;
-    ts.tv_nsec = (wait_ms % 1000) * 1000000L;
-
-    int nev = kevent(loop->kq, NULL, 0, events, 64, &ts);
-    loop->stats.polls++;
-
-    for (int i = 0; i < nev; i++) {
-        int fd = (int)events[i].ident;
-        /* Find the watcher */
-        for (int j = 0; j < loop->fd_count; j++) {
-            if (loop->fds[j].fd == fd && loop->fds[j].active) {
-                ev_mask_t fired = 0;
-                if (events[i].filter == EVFILT_READ)  fired |= EV_READ;
-                if (events[i].filter == EVFILT_WRITE) fired |= EV_WRITE;
-                if (events[i].flags & EV_ERROR)       fired |= EV_ERROR;
-                loop->fds[j].cb(fd, fired, loop->fds[j].ctx);
-                loop->stats.fd_events++;
-                events_fired++;
-                break;
-            }
+    struct timespec ts = {0, 0};
+    if (wait_ms >= 0) {
+        ts.tv_sec = wait_ms / 1000; ts.tv_nsec = (wait_ms % 1000) * 1000000L;
+    }
+    ret = kevent(loop->backend_fd, NULL, 0, events, 64, wait_ms < 0 ? NULL : &ts);
+    for (int i = 0; i < ret; i++) {
+        if (events[i].filter == EVFILT_USER) {
+            loop->stats.wake_events++;
+            continue;
         }
+        ev_mask_t fired = 0;
+        if (events[i].filter == EVFILT_READ) fired |= EV_READ;
+        if (events[i].filter == EVFILT_WRITE) fired |= EV_WRITE;
+        if (events[i].flags & (EV_KQUEUE_ERROR | EV_EOF)) fired |= EV_ERROR;
+        events_fired += dispatch_fd(loop, (uintptr_t)events[i].udata, fired);
+    }
+#elif EV_USE_EPOLL
+    struct epoll_event events[64];
+    ret = epoll_wait(loop->backend_fd, events, 64, wait_ms);
+    for (int i = 0; i < ret; i++) {
+        if (events[i].data.u64 == 0) {
+            ev_wakeup_drain(&loop->wake); loop->stats.wake_events++;
+            continue;
+        }
+        ev_mask_t fired = 0;
+        if (events[i].events & EPOLLIN) fired |= EV_READ;
+        if (events[i].events & EPOLLOUT) fired |= EV_WRITE;
+        if (events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) fired |= EV_ERROR;
+        events_fired += dispatch_fd(loop, (uintptr_t)events[i].data.u64, fired);
     }
 #else
-    /* poll() fallback */
-    struct pollfd pfds[EV_MAX_FDS];
-    int pfd_count = 0;
-    int pfd_map[EV_MAX_FDS]; /* maps pfd index -> fds index */
-
-    for (int i = 0; i < loop->fd_count; i++) {
-        if (!loop->fds[i].active) continue;
-        pfds[pfd_count].fd = loop->fds[i].fd;
-        pfds[pfd_count].events = 0;
-        if (loop->fds[i].mask & EV_READ)  pfds[pfd_count].events |= POLLIN;
-        if (loop->fds[i].mask & EV_WRITE) pfds[pfd_count].events |= POLLOUT;
-        pfds[pfd_count].revents = 0;
-        pfd_map[pfd_count] = i;
-        pfd_count++;
+    struct pollfd pfds[EV_MAX_FDS + 1];
+    uintptr_t tokens[EV_MAX_FDS];
+    int count = 0;
+    for (int i = 0; i < EV_MAX_FDS; i++) {
+        ev_fd_watcher_t *w = &loop->fds[i];
+        if (!w->active)
+            continue;
+        pfds[count] = (struct pollfd){ .fd = w->fd };
+        if (w->mask & EV_READ) pfds[count].events |= POLLIN;
+        if (w->mask & EV_WRITE) pfds[count].events |= POLLOUT;
+#ifdef POLLRDHUP
+        pfds[count].events |= POLLRDHUP;
+#endif
+        tokens[count++] = w->token;
     }
-
-    int ret = poll(pfds, (unsigned int)pfd_count, wait_ms);
-    loop->stats.polls++;
-
+    pfds[count] = (struct pollfd){ .fd = loop->wake.read_fd, .events = POLLIN };
+    ret = poll(pfds, (nfds_t)count + 1, wait_ms);
     if (ret > 0) {
-        for (int i = 0; i < pfd_count; i++) {
-            if (pfds[i].revents == 0) continue;
-            int idx = pfd_map[i];
+        if (pfds[count].revents) {
+            ev_wakeup_drain(&loop->wake); loop->stats.wake_events++;
+        }
+        for (int i = 0; i < count; i++) {
             ev_mask_t fired = 0;
-            if (pfds[i].revents & POLLIN)   fired |= EV_READ;
-            if (pfds[i].revents & POLLOUT)  fired |= EV_WRITE;
+            if (pfds[i].revents & POLLIN) fired |= EV_READ;
+            if (pfds[i].revents & POLLOUT) fired |= EV_WRITE;
             if (pfds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) fired |= EV_ERROR;
-            loop->fds[idx].cb(loop->fds[idx].fd, fired, loop->fds[idx].ctx);
-            loop->stats.fd_events++;
-            events_fired++;
+#ifdef POLLRDHUP
+            if (pfds[i].revents & POLLRDHUP) fired |= EV_ERROR;
+#endif
+            if (fired)
+                events_fired += dispatch_fd(loop, tokens[i], fired);
         }
     }
 #endif
-
-    /* Fire expired timers */
+    loop->stats.polls++;
+    if (ret < 0 && errno != EINTR)
+        return -1;
     fire_timers(loop);
-
-    /* Run any deferred callbacks scheduled during this iteration */
     run_deferred(loop);
-
     return events_fired;
+}
+
+const char *ev_loop_backend(const ev_loop_t *loop) {
+    if (!loop) return NULL;
+#if EV_USE_KQUEUE
+    return "kqueue";
+#elif EV_USE_EPOLL
+    return "epoll";
+#else
+    return "poll";
+#endif
+}
+
+int ev_loop_wake(ev_loop_t *loop) {
+    if (!loop) { errno = EINVAL; return -1; }
+    return ev_wakeup_signal(&loop->wake);
 }
 
 /* ── Run / Stop ────────────────────────────────────────────────────── */
 
 void ev_loop_run(ev_loop_t *loop) {
-    if (!loop) return;
+    if (!loop)
+        return;
     loop->stop_flag = 0;
     while (!loop->stop_flag) {
-        ev_loop_poll(loop, -1);
+        if (ev_loop_poll(loop, -1) < 0)
+            break;
     }
 }
 
 void ev_loop_stop(ev_loop_t *loop) {
-    if (loop) loop->stop_flag = 1;
+    if (loop)
+        loop->stop_flag = 1;
 }
 
 /* ── Stats ─────────────────────────────────────────────────────────── */

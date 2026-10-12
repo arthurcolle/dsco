@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dsco-agent-config
+  namespace: dsco-agent
+  labels:
+    app.kubernetes.io/name: dsco-agent
+data:
+  # See docker/entrypoint.sh for what each mode runs.
+  DSCO_MODE: "mcp"
+  DSCO_TOOLSETS: ""
+  DSCO_TIER: "agent"
+  # Must match statefulset.yaml's containerPort/servicePort — a Pod spec's
+  # containerPort has to be a literal number, so this can't be templated from
+  # here; it's duplicated by contract, not by accident.
+  DSCO_BIND_PORT: "8765"
+  DSCO_TIMELINE_PORT: "8421"

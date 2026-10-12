@@ -9,36 +9,96 @@
  * for the Chat Completions API format.
  */
 
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+/* mkstemps() is a BSD extension; macOS's libc gates it behind
+ * _DARWIN_C_SOURCE, which the project's _POSIX_C_SOURCE build flag
+ * otherwise suppresses. _GNU_SOURCE (set elsewhere in the build) already
+ * covers this on glibc. */
+#define _DARWIN_C_SOURCE
+#endif
+
+#include "swarm_progress.h"
 #include "provider.h"
+#include "provider_transport.h"
+#include "provider_responses.h"
+#include "event_stream.h"
+#include "provider_events.h"
+#include "workspace.h"
+#include "abliteration.h"
+#include "http_pool.h"
 #include "config.h"
 #include "crypto.h"
 #include "tools.h"
+#include "tool_grounding.h"
 #include "sealed_store.h"
 #include "provider_profiles.h"
+#include "openai_oauth.h"
+#include "kimi_oauth.h"
+#include "codex_cache.h"
+#include "dcr.h"
+#include "env_config.h"
+#include "subscription_gate.h"
+#include "goal.h"
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <errno.h>
+#include <limits.h>
+#include <math.h>
+#include <poll.h>
+#include <signal.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <pwd.h>
 #include <unistd.h>
+#include <time.h>
 #include <curl/curl.h>
 
 #ifdef HAVE_LIBSODIUM
-#  include <sodium.h>
+#include <sodium.h>
 #endif
 
+void llm_debug_save_request(const char *request_json, int http_status);
+
 /* Forward declarations */
-static char *openai_build_request(provider_t *p, conversation_t *conv,
-                                   session_state_t *session, int max_tokens,
-                                   const char *credential);
+static char *openai_build_request(provider_t *p, conversation_t *conv, session_state_t *session,
+                                  int max_tokens, const char *credential);
 static struct curl_slist *openai_build_headers(provider_t *p, const char *api_key);
-static char *xai_build_request(provider_t *p, conversation_t *conv,
-                                session_state_t *session, int max_tokens,
-                                const char *credential);
+static char *xai_build_request(provider_t *p, conversation_t *conv, session_state_t *session,
+                               int max_tokens, const char *credential);
+static bool provider_is_sakana(const provider_t *p);
+static size_t oai_reasoning_detail_span(const char *detail);
+static stream_result_t chatgpt_native_stream_once(
+    provider_t *p, const char *api_key, const char *request_json, stream_text_cb text_cb,
+    stream_tool_start_cb tool_cb, stream_tool_arg_delta_cb tool_delta_cb,
+    stream_thinking_cb thinking_cb, void *cb_ctx);
+
+static void provider_format_goal_prompt(char *out, size_t out_len, const session_state_t *session) {
+    if (!out || out_len == 0)
+        return;
+    out[0] = '\0';
+    if (!session || !session->goal_objective[0] || session->goal_status != DSCO_GOAL_ACTIVE)
+        return;
+    /* All native provider paths receive the same leased-task contract.  A
+     * duplicate legacy prompt here used to tell OpenAI-compatible models that
+     * self_exit completed a goal, bypassing the controller's evidence gate. */
+    goal_make_runtime_context(session, out, out_len);
+}
+
+static void provider_append_goal_prompt(jbuf_t *b, const session_state_t *session) {
+    if (!b)
+        return;
+    char goal_prompt[GOAL_PROMPT_SIZE];
+    provider_format_goal_prompt(goal_prompt, sizeof(goal_prompt), session);
+    if (!goal_prompt[0])
+        return;
+    jbuf_append(b, "\n\n");
+    jbuf_append(b, goal_prompt);
+}
 
 static char *unsupported_build_request(provider_t *p, conversation_t *conv,
                                        session_state_t *session, int max_tokens,
@@ -67,14 +127,14 @@ static struct curl_slist *unsupported_build_headers(provider_t *p, const char *a
 }
 
 static stream_result_t unsupported_stream(provider_t *p, const char *api_key,
-                                          const char *request_json,
-                                          stream_text_cb text_cb,
+                                          const char *request_json, stream_text_cb text_cb,
                                           stream_tool_start_cb tool_cb,
-                                          stream_thinking_cb thinking_cb,
-                                          void *cb_ctx) {
+                                          stream_tool_arg_delta_cb tool_delta_cb,
+                                          stream_thinking_cb thinking_cb, void *cb_ctx) {
     (void)api_key;
     (void)request_json;
     (void)tool_cb;
+    (void)tool_delta_cb;
     (void)thinking_cb;
     stream_result_t result = {0};
     result.ok = false;
@@ -89,55 +149,178 @@ static stream_result_t unsupported_stream(provider_t *p, const char *api_key,
     const char *mode = p && p->data ? (const char *)p->data : "unknown";
     char msg[512];
     snprintf(msg, sizeof(msg),
-             "Provider '%s' is known, but DSCO has no '%s' transport adapter yet.",
-             name, mode);
+             "Provider '%s' is known, but DSCO has no '%s' transport adapter yet.", name, mode);
     result.parsed.blocks[0].text = safe_strdup(msg);
-    if (text_cb) text_cb(msg, cb_ctx);
+    if (text_cb)
+        text_cb(msg, cb_ctx);
     return result;
 }
 
 /* ── Anthropic Provider ────────────────────────────────────────────────── */
 
-static char *anthropic_build_request(provider_t *p, conversation_t *conv,
-                                      session_state_t *session, int max_tokens,
-                                      const char *credential) {
+static char *anthropic_build_request(provider_t *p, conversation_t *conv, session_state_t *session,
+                                     int max_tokens, const char *credential) {
     (void)p;
     return llm_build_request_ex_for_credential(conv, session, max_tokens, credential);
 }
 
 static struct curl_slist *anthropic_build_headers(provider_t *p, const char *api_key) {
     (void)p;
-    struct curl_slist *hdrs = NULL;
-    hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
-    hdrs = curl_slist_append(hdrs, "Accept: text/event-stream");
-    char auth[512];
-    if (llm_anthropic_uses_claude_code_auth(api_key))
-        snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key);
-    else
-        snprintf(auth, sizeof(auth), "x-api-key: %s", api_key);
-    hdrs = curl_slist_append(hdrs, auth);
-    char ver[128];
-    snprintf(ver, sizeof(ver), "anthropic-version: %s", ANTHROPIC_VERSION);
-    hdrs = curl_slist_append(hdrs, ver);
-    char beta[256];
-    if (llm_anthropic_uses_claude_code_auth(api_key))
-        snprintf(beta, sizeof(beta), "anthropic-beta: oauth-2025-04-20,%s",
-                 ANTHROPIC_BETAS);
-    else
-        snprintf(beta, sizeof(beta), "anthropic-beta: %s", ANTHROPIC_BETAS);
-    hdrs = curl_slist_append(hdrs, beta);
-    hdrs = curl_slist_append(hdrs, "Expect:");
-    return hdrs;
+    return llm_build_anthropic_headers(api_key, NULL);
 }
 
 static stream_result_t anthropic_stream(provider_t *p, const char *api_key,
-                                          const char *request_json,
-                                          stream_text_cb text_cb,
-                                          stream_tool_start_cb tool_cb,
-                                          stream_thinking_cb thinking_cb,
-                                          void *cb_ctx) {
+                                        const char *request_json, stream_text_cb text_cb,
+                                        stream_tool_start_cb tool_cb,
+                                        stream_tool_arg_delta_cb tool_delta_cb,
+                                        stream_thinking_cb thinking_cb, void *cb_ctx) {
+    return llm_stream_reuse_url(p ? p->transport_curl : NULL, p ? p->api_url : NULL,
+                                api_key, request_json, text_cb, tool_cb,
+                                tool_delta_cb, thinking_cb, cb_ctx);
+}
+
+static bool provider_remove_json_member(char *json, const char *key) {
+    if (!json || !key)
+        return false;
+    char needle[128];
+    snprintf(needle, sizeof(needle), "\"%s\":", key);
+    char *member = strstr(json, needle);
+    if (!member)
+        return false;
+    char *start = member;
+    if (start > json && start[-1] == ',')
+        start--;
+    else {
+        char *after = member + strlen(needle);
+        (void)after;
+    }
+    const char *value = member + strlen(needle);
+    while (*value && isspace((unsigned char)*value))
+        value++;
+    size_t span = 0;
+    if (*value == '{' || *value == '[') {
+        span = oai_reasoning_detail_span(value);
+    } else if (*value == '"') {
+        bool escaped = false;
+        for (size_t i = 1; value[i]; i++) {
+            if (escaped)
+                escaped = false;
+            else if (value[i] == '\\')
+                escaped = true;
+            else if (value[i] == '"') {
+                span = i + 1;
+                break;
+            }
+        }
+    } else {
+        const char *end = value;
+        while (*end && *end != ',' && *end != '}')
+            end++;
+        span = (size_t)(end - value);
+    }
+    if (span == 0)
+        return false;
+    char *end = (char *)value + span;
+    if (start == member && *end == ',')
+        end++;
+    memmove(start, end, strlen(end) + 1);
+    return true;
+}
+
+static char *abliteration_anthropic_build_request(provider_t *p, conversation_t *conv,
+                                                   session_state_t *session, int max_tokens,
+                                                   const char *credential) {
     (void)p;
-    return llm_stream(api_key, request_json, text_cb, tool_cb, thinking_cb, cb_ctx);
+    jbuf_t tool_override;
+    jbuf_init(&tool_override, 512);
+    if (session && session->web_search) {
+        /* This provider accepts only server search in this lane. Construct
+         * its final inventory before the generic builder grounds the prompt. */
+        jbuf_append(&tool_override, ",\"tools\":[{\"type\":\"web_search_2025_03_05\","
+                                   "\"name\":\"web_search\",\"max_uses\":5");
+        const char *allowed = getenv("DSCO_ABLITERATION_WEB_ALLOWED_DOMAINS");
+        const char *blocked = getenv("DSCO_ABLITERATION_WEB_BLOCKED_DOMAINS");
+        if (allowed && allowed[0]) {
+            jbuf_append(&tool_override, ",\"allowed_domains\":");
+            jbuf_append(&tool_override, allowed);
+        }
+        if (blocked && blocked[0]) {
+            jbuf_append(&tool_override, ",\"blocked_domains\":");
+            jbuf_append(&tool_override, blocked);
+        }
+        jbuf_append(&tool_override, "}]");
+    }
+    char *request = llm_build_request_ex_with_tools(
+        conv, session, max_tokens, credential, tool_override.len ? tool_override.data : NULL);
+    jbuf_free(&tool_override);
+    if (!request)
+        return NULL;
+    /* The generic Anthropic builder only emits effort for registry models that
+     * advertise thinking. Abliteration models do; preserve literal max rather
+     * than applying Anthropic's max->xhigh compatibility rewrite. */
+    if (session && session->effort[0]) {
+        char *existing = strstr(request, "\"output_config\":{\"effort\":\"xhigh\"}");
+        if (existing && strcmp(session->effort, "max") == 0) {
+            char *value = strstr(existing, "\"xhigh\"");
+            if (value) {
+                memcpy(value, "\"max\"", 5);
+                memmove(value + 5, value + 7, strlen(value + 7) + 1);
+            }
+        } else if (!strstr(request, "\"output_config\"")) {
+            size_t len = strlen(request);
+            if (len > 0 && request[len - 1] == '}') {
+                request[len - 1] = '\0';
+                jbuf_t b;
+                jbuf_init(&b, len + 128);
+                jbuf_append(&b, request);
+                jbuf_append(&b, ",\"output_config\":{\"effort\":");
+                jbuf_append_json_str(&b, session->effort);
+                jbuf_append(&b, "}}");
+                free(request);
+                request = b.data;
+            }
+        }
+    }
+    /* Abliteration's Anthropic schema is strict and does not accept Anthropic
+     * cache_control markers; caching is server-owned/automatic. */
+    const char *cache_marker = "\"cache_control\":{\"type\":\"ephemeral\"}";
+    char *marker = NULL;
+    while ((marker = strstr(request, cache_marker)) != NULL) {
+        char *start = marker;
+        if (start > request && start[-1] == ',')
+            start--;
+        char *end = marker + strlen(cache_marker);
+        if (start == marker && *end == ',')
+            end++;
+        memmove(start, end, strlen(end) + 1);
+    }
+    if (session && session->web_search) {
+        /* Preserve this lane's existing default automatic server-tool choice. */
+        provider_remove_json_member(request, "tool_choice");
+    }
+    return request;
+}
+
+static struct curl_slist *abliteration_anthropic_build_headers(provider_t *p,
+                                                               const char *api_key) {
+    (void)p;
+    struct curl_slist *headers = NULL;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, "Accept: text/event-stream");
+    char auth[9216];
+    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key ? api_key : "");
+    headers = curl_slist_append(headers, auth);
+    headers = curl_slist_append(headers, "anthropic-version: 2023-06-01");
+    return abliteration_append_policy_headers(headers);
+}
+
+static stream_result_t abliteration_anthropic_stream(
+    provider_t *p, const char *api_key, const char *request_json, stream_text_cb text_cb,
+    stream_tool_start_cb tool_cb, stream_tool_arg_delta_cb tool_delta_cb,
+    stream_thinking_cb thinking_cb, void *cb_ctx) {
+    return llm_stream_reuse_url(p ? p->transport_curl : NULL, p ? p->api_url : NULL,
+                                api_key, request_json, text_cb, tool_cb, tool_delta_cb,
+                                thinking_cb, cb_ctx);
 }
 
 /* ── OpenRouter Provider ────────────────────────────────────────────────── */
@@ -145,12 +328,14 @@ static stream_result_t anthropic_stream(provider_t *p, const char *api_key,
 static struct curl_slist *openrouter_build_headers(provider_t *p, const char *api_key) {
     struct curl_slist *hdrs = openai_build_headers(p, api_key);
     const char *referer = getenv("DSCO_OR_REFERER");
-    if (!referer) referer = "https://github.com/dsco-cli";
+    if (!referer)
+        referer = "https://openrouter.ai/apps/url/https%3A%2F%2Fgithub.com%2Farthurcolle%2Fdsco";
     char hdr[512];
     snprintf(hdr, sizeof(hdr), "HTTP-Referer: %s", referer);
     hdrs = curl_slist_append(hdrs, hdr);
     const char *title = getenv("DSCO_OR_TITLE");
-    if (!title) title = "dsco";
+    if (!title)
+        title = "dsco";
     snprintf(hdr, sizeof(hdr), "X-Title: %s", title);
     hdrs = curl_slist_append(hdrs, hdr);
     return hdrs;
@@ -163,18 +348,23 @@ static void or_append_csv_array(jbuf_t *b, const char *csv) {
     bool first = true;
     while (*cur) {
         const char *end = strchr(cur, ',');
-        if (!end) end = cur + strlen(cur);
+        if (!end)
+            end = cur + strlen(cur);
         size_t n = (size_t)(end - cur);
         char name[128];
-        if (n >= sizeof(name)) n = sizeof(name) - 1;
+        if (n >= sizeof(name))
+            n = sizeof(name) - 1;
         memcpy(name, cur, n);
         name[n] = '\0';
         char *s = name;
-        while (*s == ' ') s++;
+        while (*s == ' ')
+            s++;
         char *e2 = s + strlen(s) - 1;
-        while (e2 > s && *e2 == ' ') *e2-- = '\0';
+        while (e2 > s && *e2 == ' ')
+            *e2-- = '\0';
         if (s[0]) {
-            if (!first) jbuf_append(b, ",");
+            if (!first)
+                jbuf_append(b, ",");
             jbuf_append_json_str(b, s);
             first = false;
         }
@@ -188,9 +378,27 @@ static bool or_env_bool(const char *val) {
 }
 
 static bool provider_env_truthy(const char *val) {
-    return val && (val[0] == '1' || strcasecmp(val, "true") == 0 ||
-                   strcasecmp(val, "yes") == 0);
+    return val && (val[0] == '1' || strcasecmp(val, "true") == 0 || strcasecmp(val, "yes") == 0);
 }
+
+static bool provider_env_falsey(const char *val) {
+    return val && (val[0] == '0' || strcasecmp(val, "false") == 0 ||
+                   strcasecmp(val, "no") == 0 || strcasecmp(val, "off") == 0);
+}
+
+static bool provider_env_matches(const char *val, const char *a, const char *b) {
+    return val && ((a && strcasecmp(val, a) == 0) || (b && strcasecmp(val, b) == 0));
+}
+
+static _Thread_local long s_provider_subscription_queue_ms;
+
+long provider_last_subscription_queue_ms(void) {
+    return s_provider_subscription_queue_ms;
+}
+
+static const char *provider_sakana_subscription_key(void);
+static const char *provider_sakana_payg_key(void);
+static const char *provider_getenv_nonempty(const char *name);
 
 static double provider_now_sec(void) {
     struct timeval tv;
@@ -198,41 +406,130 @@ static double provider_now_sec(void) {
     return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
 }
 
+static bool provider_stream_terminal_abort(CURLcode res, bool stream_done) {
+    return stream_done && (res == CURLE_WRITE_ERROR || res == CURLE_ABORTED_BY_CALLBACK ||
+                           res == CURLE_RECV_ERROR || res == CURLE_HTTP2 ||
+                           res == CURLE_HTTP2_STREAM || res == CURLE_PARTIAL_FILE);
+}
+
+/* ChatGPT subscription requests are serialized by subscription_gate, so HTTP/2
+ * multiplexing cannot improve throughput here. HTTP/1.1 avoids nghttp2 stream
+ * teardown failures observed after long function-call argument streams. Keep
+ * an opt-in H2 mode for transport diagnosis and an auto mode for experiments. */
+static long chatgpt_http_version(void) {
+    const char *value = getenv("DSCO_CHATGPT_HTTP_VERSION");
+    if (value && (provider_env_matches(value, "2", "h2") ||
+                  strcasecmp(value, "http/2") == 0))
+        return CURL_HTTP_VERSION_2TLS;
+    if (value && provider_env_matches(value, "auto", "negotiate"))
+        return CURL_HTTP_VERSION_NONE;
+    return CURL_HTTP_VERSION_1_1;
+}
+
+#ifdef DSCO_INTERNAL_TESTS
+long provider_test_chatgpt_http_version(void) {
+    return chatgpt_http_version();
+}
+#endif
+
+/* Shared with agent/main cancellation. Progress callbacks also run while a
+ * server is quiet, so cancellation need not wait for another SSE chunk or
+ * the provider's (potentially minutes-long) idle timeout. */
+extern volatile int g_interrupted;
+
+static int provider_stream_progress_cb(void *ctx, curl_off_t dltotal, curl_off_t dlnow,
+                                       curl_off_t ultotal, curl_off_t ulnow) {
+    (void)swarm_progress_tick();
+    (void)ctx;
+    (void)dltotal;
+    (void)dlnow;
+    (void)ultotal;
+    (void)ulnow;
+    return g_interrupted ? 1 : 0;
+}
+
+static void provider_stream_enable_interrupt(CURL *curl) {
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, provider_stream_progress_cb);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+}
+
 bool provider_debug_auth_enabled(void) {
     return provider_env_truthy(getenv("DSCO_DEBUG_AUTH"));
 }
 
 const char *provider_auth_mode(const char *provider_name, const char *resolved_key) {
-    if (!resolved_key || !resolved_key[0]) return "missing";
-    if (provider_name && strcmp(provider_name, "anthropic") == 0) {
-        return llm_anthropic_uses_claude_code_auth(resolved_key)
-            ? "claude-code-oauth"
-            : "anthropic-api-key";
+    if (!resolved_key || !resolved_key[0])
+        return "missing";
+    const char *canonical = provider_name ? provider_profile_canonical_name(provider_name) : NULL;
+    if (canonical && strcmp(canonical, "anthropic") == 0) {
+        return llm_anthropic_uses_claude_code_auth(resolved_key) ? "claude-code-oauth"
+                                                                 : "anthropic-api-key";
     }
-    if (provider_name && strcmp(provider_name, "openrouter") == 0)
+    if (canonical && strcmp(canonical, "openrouter") == 0)
         return "openrouter-api-key";
-    if (provider_name && strcmp(provider_name, "openai") == 0)
+    if (canonical && strcmp(canonical, "abliteration-ai") == 0)
+        return "abliteration-api-key";
+    if (canonical && strcmp(canonical, "dsco-router") == 0)
+        return "dsco-router-api-key";
+    if (canonical && strcmp(canonical, "openai") == 0)
         return "openai-api-key";
+    if (canonical && strcmp(canonical, "openai-codex") == 0)
+        return "chatgpt-subscription";
+    if (canonical && strcmp(canonical, "kimi-code") == 0)
+        return "kimi-code-subscription";
+    if (canonical && strcmp(canonical, "sakana") == 0) {
+        const char *payg = provider_sakana_payg_key();
+        if (resolved_key && payg && strcmp(resolved_key, payg) == 0)
+            return "sakana-payg-api-key";
+        const char *sub = provider_sakana_subscription_key();
+        if (resolved_key && sub && strcmp(resolved_key, sub) == 0)
+            return "sakana-subscription-api-key";
+        return provider_sakana_current_key_is_subscription() ? "sakana-subscription-api-key"
+                                                            : "sakana-payg-api-key";
+    }
+    if (canonical && strcmp(canonical, "zai") == 0)
+        return "zai-coding-plan-api-key";
+    if (canonical && strcmp(canonical, "alibaba-coding-plan") == 0)
+        return "alibaba-coding-plan-api-key";
+    if (canonical && strcmp(canonical, "qwen-oauth") == 0)
+        return "qwen-subscription-oauth";
+    if (canonical && strcmp(canonical, "stepfun") == 0)
+        return "stepfun-coding-plan-api-key";
     return "api-key";
+}
+
+bool provider_usage_is_included(const char *provider_name, const char *resolved_key) {
+    const char *mode = provider_auth_mode(provider_name, resolved_key);
+    return strcmp(mode, "chatgpt-subscription") == 0 ||
+           strcmp(mode, "claude-code-oauth") == 0 ||
+           strcmp(mode, "kimi-code-subscription") == 0 ||
+           strcmp(mode, "sakana-subscription-api-key") == 0 ||
+           strcmp(mode, "zai-coding-plan-api-key") == 0 ||
+           strcmp(mode, "alibaba-coding-plan-api-key") == 0 ||
+           strcmp(mode, "qwen-subscription-oauth") == 0 ||
+           strcmp(mode, "stepfun-coding-plan-api-key") == 0;
 }
 
 void provider_debug_log_request(const char *provider_name, const char *model,
                                 const char *resolved_key) {
-    if (!provider_debug_auth_enabled()) return;
+    if (!provider_debug_auth_enabled())
+        return;
     fprintf(stderr, "  [auth] provider=%s model=%s auth=%s\n",
             provider_name && provider_name[0] ? provider_name : "(none)",
-            model && model[0] ? model : "(none)",
-            provider_auth_mode(provider_name, resolved_key));
+            model && model[0] ? model : "(none)", provider_auth_mode(provider_name, resolved_key));
 }
 
 static void provider_expand_path(char *out, size_t out_len, const char *path) {
-    if (!out || out_len == 0) return;
+    if (!out || out_len == 0)
+        return;
     out[0] = '\0';
-    if (!path || !path[0]) return;
+    if (!path || !path[0])
+        return;
 
     if (path[0] == '~' && path[1] == '/') {
         const char *home = getenv("HOME");
-        if (!home || !home[0]) return;
+        if (!home || !home[0])
+            return;
         snprintf(out, out_len, "%s/%s", home, path + 2);
         return;
     }
@@ -241,9 +538,11 @@ static void provider_expand_path(char *out, size_t out_len, const char *path) {
 }
 
 static char *provider_read_text_file(const char *path) {
-    if (!path || !path[0]) return NULL;
+    if (!path || !path[0])
+        return NULL;
     FILE *fp = fopen(path, "rb");
-    if (!fp) return NULL;
+    if (!fp)
+        return NULL;
     if (fseek(fp, 0, SEEK_END) != 0) {
         fclose(fp);
         return NULL;
@@ -262,6 +561,16 @@ static char *provider_read_text_file(const char *path) {
     return data;
 }
 
+/* Subscription inference stays inside DSCO. Credential discovery may read an
+ * existing login cache, but never selects or launches an external harness. */
+static bool provider_chatgpt_subscription_ready(void) {
+    return openai_oauth_available();
+}
+
+static const char *provider_codex_subscription_credential(void) {
+    return openai_oauth_access_token(true);
+}
+
 static void provider_build_claude_code_service_name(char *out, size_t out_len) {
     const char *override = getenv("DSCO_CLAUDE_CODE_KEYCHAIN_SERVICE");
     if (override && override[0]) {
@@ -272,12 +581,10 @@ static void provider_build_claude_code_service_name(char *out, size_t out_len) {
     const char *oauth_suffix = "";
     if (getenv("CLAUDE_CODE_CUSTOM_OAUTH_URL")) {
         oauth_suffix = "-custom-oauth";
-    } else if (getenv("USER_TYPE") &&
-               strcmp(getenv("USER_TYPE"), "ant") == 0 &&
+    } else if (getenv("USER_TYPE") && strcmp(getenv("USER_TYPE"), "ant") == 0 &&
                provider_env_truthy(getenv("USE_LOCAL_OAUTH"))) {
         oauth_suffix = "-local-oauth";
-    } else if (getenv("USER_TYPE") &&
-               strcmp(getenv("USER_TYPE"), "ant") == 0 &&
+    } else if (getenv("USER_TYPE") && strcmp(getenv("USER_TYPE"), "ant") == 0 &&
                provider_env_truthy(getenv("USE_STAGING_OAUTH"))) {
         oauth_suffix = "-staging-oauth";
     }
@@ -293,14 +600,19 @@ static void provider_build_claude_code_service_name(char *out, size_t out_len) {
     snprintf(out, out_len, "Claude Code%s-credentials%s", oauth_suffix, dir_suffix);
 }
 
-#define CLAUDE_CODE_OAUTH_TOKEN_URL        "https://platform.claude.com/v1/oauth/token"
-#define CLAUDE_CODE_OAUTH_CLIENT_ID        "REDACTED_OAUTH_CLIENT"
-#define CLAUDE_CODE_OAUTH_SCOPES           "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+#ifdef DSCO_USE_OBF_SECRETS
+#define CLAUDE_CODE_OAUTH_CLIENT_ID dsco_secret("CLAUDE_CODE_OAUTH_CLIENT_ID")
+#else
+#define CLAUDE_CODE_OAUTH_CLIENT_ID "REDACTED_OAUTH_CLIENT"
+#endif
+#define CLAUDE_CODE_OAUTH_SCOPES                                                                   \
+    "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 #define CLAUDE_CODE_OAUTH_EXPIRY_BUFFER_MS (5LL * 60LL * 1000LL)
 
 typedef enum {
     CLAUDE_CODE_OAUTH_SOURCE_MISSING = 0,
     CLAUDE_CODE_OAUTH_SOURCE_ENV,
+    CLAUDE_CODE_OAUTH_SOURCE_DSCO_CACHE,
     CLAUDE_CODE_OAUTH_SOURCE_KEYCHAIN,
     CLAUDE_CODE_OAUTH_SOURCE_FILE,
 } claude_code_oauth_source_t;
@@ -322,19 +634,29 @@ static void provider_claude_code_oauth_bundle_init(claude_code_oauth_bundle_t *b
 }
 
 static void provider_claude_code_oauth_bundle_free(claude_code_oauth_bundle_t *bundle) {
-    if (!bundle) return;
+    if (!bundle)
+        return;
     free(bundle->storage_json);
     free(bundle->oauth_json);
     bundle->storage_json = NULL;
     bundle->oauth_json = NULL;
 }
 
+static bool provider_extract_claude_code_oauth_bundle(
+    const char *json, claude_code_oauth_bundle_t *bundle);
+
 static const char *provider_claude_code_oauth_source_name(claude_code_oauth_source_t source) {
     switch (source) {
-        case CLAUDE_CODE_OAUTH_SOURCE_ENV: return "env";
-        case CLAUDE_CODE_OAUTH_SOURCE_KEYCHAIN: return "macos-keychain";
-        case CLAUDE_CODE_OAUTH_SOURCE_FILE: return "credentials-file";
-        default: return "missing";
+        case CLAUDE_CODE_OAUTH_SOURCE_ENV:
+            return "env";
+        case CLAUDE_CODE_OAUTH_SOURCE_DSCO_CACHE:
+            return "dsco-cache";
+        case CLAUDE_CODE_OAUTH_SOURCE_KEYCHAIN:
+            return "macos-keychain";
+        case CLAUDE_CODE_OAUTH_SOURCE_FILE:
+            return "credentials-file";
+        default:
+            return "missing";
     }
 }
 
@@ -345,12 +667,14 @@ static long long provider_now_ms(void) {
 }
 
 static bool provider_claude_code_oauth_expired(long long expires_at_ms) {
-    if (expires_at_ms <= 0) return false;
+    if (expires_at_ms <= 0)
+        return false;
     return provider_now_ms() + CLAUDE_CODE_OAUTH_EXPIRY_BUFFER_MS >= expires_at_ms;
 }
 
 static void provider_get_username(char *out, size_t out_len) {
-    if (!out || out_len == 0) return;
+    if (!out || out_len == 0)
+        return;
     out[0] = '\0';
 
     const char *user = getenv("USER");
@@ -368,6 +692,87 @@ static void provider_get_username(char *out, size_t out_len) {
     snprintf(out, out_len, "claude-code-user");
 }
 
+const char *provider_claude_code_session_id(void) {
+    static char session_id[37];
+    const char *override = getenv("DSCO_CLAUDE_SESSION_ID");
+    if (override && override[0])
+        return override;
+    if (!session_id[0])
+        uuid_v4(session_id);
+    return session_id;
+}
+
+const char *provider_claude_code_metadata_user_id(void) {
+    static char metadata[1024];
+    char *root = NULL;
+    char *oauth_account = NULL;
+    char *device_id = NULL;
+    char *account_uuid = NULL;
+
+    const char *device_override = getenv("DSCO_CLAUDE_DEVICE_ID");
+    const char *account_override = getenv("DSCO_CLAUDE_ACCOUNT_UUID");
+
+    if ((!device_override || !device_override[0]) ||
+        (!account_override || !account_override[0])) {
+        char path[1024];
+        provider_expand_path(path, sizeof(path), "~/.claude.json");
+        root = provider_read_text_file(path);
+        if (root) {
+            if (!device_override || !device_override[0]) {
+                device_id = json_get_str(root, "userID");
+                if (!device_id || !device_id[0]) {
+                    free(device_id);
+                    device_id = json_get_str(root, "machineID");
+                }
+                if ((!device_id || !device_id[0])) {
+                    free(device_id);
+                    device_id = json_get_str(root, "anonymousId");
+                }
+            }
+            if (!account_override || !account_override[0]) {
+                oauth_account = json_get_raw(root, "oauthAccount");
+                if (oauth_account)
+                    account_uuid = json_get_str(oauth_account, "accountUuid");
+                if (!account_uuid || !account_uuid[0]) {
+                    free(account_uuid);
+                    account_uuid = json_get_str(root, "accountUuid");
+                }
+            }
+        }
+    }
+
+    const char *device = device_override && device_override[0] ? device_override : device_id;
+    const char *account = account_override && account_override[0] ? account_override : account_uuid;
+    if (!device || !device[0] || !account || !account[0]) {
+        free(account_uuid);
+        free(device_id);
+        free(oauth_account);
+        free(root);
+        metadata[0] = '\0';
+        return NULL;
+    }
+
+    const char *session = provider_claude_code_session_id();
+
+    jbuf_t identity;
+    jbuf_init(&identity, 256);
+    jbuf_append(&identity, "{\"device_id\":");
+    jbuf_append_json_str(&identity, device);
+    jbuf_append(&identity, ",\"account_uuid\":");
+    jbuf_append_json_str(&identity, account);
+    jbuf_append(&identity, ",\"session_id\":");
+    jbuf_append_json_str(&identity, session);
+    jbuf_append_char(&identity, '}');
+    snprintf(metadata, sizeof(metadata), "%s", identity.data ? identity.data : "");
+    jbuf_free(&identity);
+
+    free(account_uuid);
+    free(device_id);
+    free(oauth_account);
+    free(root);
+    return metadata[0] ? metadata : NULL;
+}
+
 static void provider_build_claude_code_credentials_path(char *out, size_t out_len) {
     const char *override_path = getenv("DSCO_CLAUDE_CODE_CREDENTIALS_FILE");
     if (override_path && override_path[0]) {
@@ -382,6 +787,64 @@ static void provider_build_claude_code_credentials_path(char *out, size_t out_le
     }
 
     provider_expand_path(out, out_len, "~/.claude/.credentials.json");
+}
+
+static void provider_build_claude_code_dsco_cache_path(char *out, size_t out_len) {
+    const char *override = getenv("DSCO_CLAUDE_CODE_OAUTH_CACHE");
+    if (override && override[0]) {
+        provider_expand_path(out, out_len, override);
+        return;
+    }
+    const char *home = getenv("HOME");
+    if (!home || !home[0])
+        home = "/tmp";
+    snprintf(out, out_len, "%s/.dsco/claude-oauth.json", home);
+}
+
+static bool provider_write_claude_code_dsco_cache(const char *json) {
+    if (!json || !json[0])
+        return false;
+    char path[1024];
+    provider_build_claude_code_dsco_cache_path(path, sizeof(path));
+    char dir[1024];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (slash) {
+        *slash = '\0';
+        (void)mkdir(dir, 0700);
+    }
+    char tmp_path[1100];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.XXXXXX", path);
+    int fd = mkstemp(tmp_path);
+    if (fd < 0)
+        return false;
+    (void)fchmod(fd, 0600);
+    size_t len = strlen(json);
+    bool ok = write(fd, json, len) == (ssize_t)len;
+    if (ok)
+        ok = fsync(fd) == 0;
+    close(fd);
+    if (!ok || rename(tmp_path, path) != 0) {
+        unlink(tmp_path);
+        return false;
+    }
+    return true;
+}
+
+static bool provider_load_claude_code_bundle_from_dsco_cache(
+    claude_code_oauth_bundle_t *bundle) {
+    char path[1024];
+    provider_build_claude_code_dsco_cache_path(path, sizeof(path));
+    char *json = provider_read_text_file(path);
+    if (!json)
+        return false;
+    bool ok = provider_extract_claude_code_oauth_bundle(json, bundle);
+    free(json);
+    if (!ok)
+        return false;
+    bundle->source = CLAUDE_CODE_OAUTH_SOURCE_DSCO_CACHE;
+    snprintf(bundle->credentials_path, sizeof(bundle->credentials_path), "%s", path);
+    return true;
 }
 
 /* ── dsco-owned encrypted cache for the Claude Code OAuth bundle ───────────
@@ -407,28 +870,34 @@ static void provider_build_dsco_cc_cache_path(char *out, size_t out_len) {
         return;
     }
     const char *home = getenv("HOME");
-    if (!home || !home[0]) home = "/tmp";
+    if (!home || !home[0])
+        home = "/tmp";
     snprintf(out, out_len, "%s/.dsco/cc-oauth.bin", home);
 }
 
 static bool provider_save_claude_code_bundle_local_cache(const char *storage_json) {
 #ifdef HAVE_LIBSODIUM
-    if (!storage_json || !storage_json[0]) return false;
-    if (provider_env_truthy(getenv("DSCO_DISABLE_CLAUDE_CODE_LOCAL_CACHE"))) return false;
+    if (!storage_json || !storage_json[0])
+        return false;
+    if (provider_env_truthy(getenv("DSCO_DISABLE_CLAUDE_CODE_LOCAL_CACHE")))
+        return false;
 
     uint8_t key[32];
-    if (!sealed_store_master_key_copy(key)) return false;
+    if (!sealed_store_master_key_copy(key))
+        return false;
 
     size_t json_len = strlen(storage_json);
     size_t cipher_len = crypto_secretbox_MACBYTES + json_len;
     uint8_t *cipher = malloc(cipher_len);
-    if (!cipher) { sodium_memzero(key, sizeof(key)); return false; }
+    if (!cipher) {
+        sodium_memzero(key, sizeof(key));
+        return false;
+    }
 
     uint8_t nonce[crypto_secretbox_NONCEBYTES];
     randombytes_buf(nonce, sizeof(nonce));
 
-    if (crypto_secretbox_easy(cipher, (const uint8_t *)storage_json, json_len,
-                              nonce, key) != 0) {
+    if (crypto_secretbox_easy(cipher, (const uint8_t *)storage_json, json_len, nonce, key) != 0) {
         sodium_memzero(key, sizeof(key));
         free(cipher);
         return false;
@@ -449,12 +918,16 @@ static bool provider_save_claude_code_bundle_local_cache(const char *storage_jso
     char tmp_path[1100];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.XXXXXX", path);
     int fd = mkstemp(tmp_path);
-    if (fd < 0) { free(cipher); return false; }
+    if (fd < 0) {
+        free(cipher);
+        return false;
+    }
     (void)fchmod(fd, 0600);
 
-    bool ok = (write(fd, DSCO_CC_CACHE_MAGIC, DSCO_CC_CACHE_MAGIC_LEN) == DSCO_CC_CACHE_MAGIC_LEN) &&
-              (write(fd, nonce, sizeof(nonce)) == (ssize_t)sizeof(nonce)) &&
-              (write(fd, cipher, cipher_len) == (ssize_t)cipher_len);
+    bool ok =
+        (write(fd, DSCO_CC_CACHE_MAGIC, DSCO_CC_CACHE_MAGIC_LEN) == DSCO_CC_CACHE_MAGIC_LEN) &&
+        (write(fd, nonce, sizeof(nonce)) == (ssize_t)sizeof(nonce)) &&
+        (write(fd, cipher, cipher_len) == (ssize_t)cipher_len);
     close(fd);
     free(cipher);
 
@@ -471,20 +944,24 @@ static bool provider_save_claude_code_bundle_local_cache(const char *storage_jso
 
 static char *provider_load_claude_code_bundle_local_cache(void) {
 #ifdef HAVE_LIBSODIUM
-    if (provider_env_truthy(getenv("DSCO_DISABLE_CLAUDE_CODE_LOCAL_CACHE"))) return NULL;
+    if (provider_env_truthy(getenv("DSCO_DISABLE_CLAUDE_CODE_LOCAL_CACHE")))
+        return NULL;
 
     char path[1024];
     provider_build_dsco_cc_cache_path(path, sizeof(path));
 
     FILE *fp = fopen(path, "rb");
-    if (!fp) return NULL;
+    if (!fp)
+        return NULL;
 
-    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return NULL; }
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return NULL;
+    }
     long size = ftell(fp);
     rewind(fp);
 
-    long min_size = (long)DSCO_CC_CACHE_MAGIC_LEN +
-                    (long)crypto_secretbox_NONCEBYTES +
+    long min_size = (long)DSCO_CC_CACHE_MAGIC_LEN + (long)crypto_secretbox_NONCEBYTES +
                     (long)crypto_secretbox_MACBYTES;
     if (size <= min_size || size > (long)(1024 * 1024)) {
         fclose(fp);
@@ -502,7 +979,10 @@ static char *provider_load_claude_code_bundle_local_cache(void) {
 
     size_t cipher_len = (size_t)size - sizeof(magic) - sizeof(nonce);
     uint8_t *cipher = malloc(cipher_len);
-    if (!cipher) { fclose(fp); return NULL; }
+    if (!cipher) {
+        fclose(fp);
+        return NULL;
+    }
     if (fread(cipher, 1, cipher_len, fp) != cipher_len) {
         free(cipher);
         fclose(fp);
@@ -524,8 +1004,7 @@ static char *provider_load_claude_code_bundle_local_cache(void) {
         return NULL;
     }
 
-    int rc = crypto_secretbox_open_easy((uint8_t *)plain, cipher, cipher_len,
-                                        nonce, key);
+    int rc = crypto_secretbox_open_easy((uint8_t *)plain, cipher, cipher_len, nonce, key);
     sodium_memzero(key, sizeof(key));
     free(cipher);
 
@@ -553,25 +1032,73 @@ static char *provider_shell_quote(const char *s) {
     jbuf_append_char(&b, '\'');
     if (s) {
         for (const char *p = s; *p; p++) {
-            if (*p == '\'') jbuf_append(&b, "'\"'\"'");
-            else jbuf_append_char(&b, *p);
+            if (*p == '\'')
+                jbuf_append(&b, "'\"'\"'");
+            else
+                jbuf_append_char(&b, *p);
         }
     }
     jbuf_append_char(&b, '\'');
     return b.data;
 }
 
+/* Claude Code 2.x stores the macOS keychain credential as a *hex-encoded* JSON
+ * string (the stored password bytes are the ASCII hex of the JSON, e.g.
+ * "7b22636c6175646541694f61757468..." == {"claudeAiOauth"...). Older versions
+ * stored raw JSON. Detect a pure-hex even-length buffer that begins with "7b22"
+ * ('{"') and decode it back to JSON so the parser below works for both layouts. */
+static char *provider_maybe_hex_decode_oauth_json(const char *s) {
+    if (!s)
+        return NULL;
+    size_t len = strlen(s);
+    /* trim trailing whitespace/newline that `security -w` may append */
+    while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r' || s[len - 1] == ' ' ||
+                       s[len - 1] == '\t'))
+        len--;
+    if (len < 8 || (len % 2) != 0)
+        return NULL;
+    /* Require a JSON-object hex prefix: '{' '"' == 7b 22 (case-insensitive). */
+    if (!((s[0] == '7' && s[1] == 'b') && (s[2] == '2' && s[3] == '2')))
+        return NULL;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
+            return NULL;
+    }
+    char *out = safe_malloc(len / 2 + 1);
+    if (!out)
+        return NULL;
+    for (size_t i = 0; i < len; i += 2) {
+        int hi = s[i], lo = s[i + 1];
+        hi = (hi <= '9') ? hi - '0' : (hi | 0x20) - 'a' + 10;
+        lo = (lo <= '9') ? lo - '0' : (lo | 0x20) - 'a' + 10;
+        out[i / 2] = (char)((hi << 4) | lo);
+    }
+    out[len / 2] = '\0';
+    return out;
+}
+
 static bool provider_extract_claude_code_oauth_bundle(const char *json,
                                                       claude_code_oauth_bundle_t *bundle) {
-    if (!json || !bundle) return false;
+    if (!json || !bundle)
+        return false;
+
+    /* Transparently handle hex-encoded keychain payloads (Claude Code 2.x). */
+    char *hex_decoded = provider_maybe_hex_decode_oauth_json(json);
+    if (hex_decoded)
+        json = hex_decoded;
 
     char *oauth = json_get_raw(json, "claudeAiOauth");
-    if (!oauth) return false;
+    if (!oauth) {
+        free(hex_decoded);
+        return false;
+    }
 
     char *access = json_get_str(oauth, "accessToken");
     if (!access || !access[0]) {
         free(access);
         free(oauth);
+        free(hex_decoded);
         return false;
     }
 
@@ -588,23 +1115,33 @@ static bool provider_extract_claude_code_oauth_bundle(const char *json,
     free(access);
     free(refresh);
     free(expires_raw);
+    free(hex_decoded);
     return true;
 }
 
 static bool provider_command_read_all(const char *cmd, char *out, size_t out_len) {
-    if (!cmd || !out || out_len == 0) return false;
+    if (!cmd || !out || out_len == 0)
+        return false;
     out[0] = '\0';
 
     FILE *fp = popen(cmd, "r");
-    if (!fp) return false;
+    if (!fp)
+        return false;
     size_t got = fread(out, 1, out_len - 1, fp);
     out[got] = '\0';
     int rc = pclose(fp);
     return rc == 0 && got > 0;
 }
 
-static bool provider_load_claude_code_bundle_from_keychain(claude_code_oauth_bundle_t *bundle) {
+static bool provider_load_claude_code_bundle_from_keychain(claude_code_oauth_bundle_t *bundle,
+                                                           bool allow_prompt) {
 #ifdef __APPLE__
+    if (!allow_prompt && (provider_env_truthy(getenv("DSCO_SECURE_STORE_NO_PROMPT")) ||
+        provider_env_truthy(getenv("DSCO_CREDENTIAL_DISCOVERY_NO_PROMPT")) ||
+        (!provider_env_truthy(getenv("DSCO_SECURE_STORE_AUTH_UI")) &&
+         !isatty(STDIN_FILENO) && !isatty(STDERR_FILENO)))) {
+        return false;
+    }
     char service[128];
     char account[128];
     provider_build_claude_code_service_name(service, sizeof(service));
@@ -617,8 +1154,7 @@ static bool provider_load_claude_code_bundle_from_keychain(claude_code_oauth_bun
 
     if (q_service && q_account) {
         char cmd[512];
-        snprintf(cmd, sizeof(cmd),
-                 "security find-generic-password -a %s -s %s -w 2>/dev/null",
+        snprintf(cmd, sizeof(cmd), "security find-generic-password -a %s -s %s -w 2>/dev/null",
                  q_account, q_service);
         if (provider_command_read_all(cmd, json, sizeof(json)) &&
             provider_extract_claude_code_oauth_bundle(json, bundle)) {
@@ -631,8 +1167,8 @@ static bool provider_load_claude_code_bundle_from_keychain(claude_code_oauth_bun
 
     if (!ok && q_service) {
         char cmd[384];
-        snprintf(cmd, sizeof(cmd),
-                 "security find-generic-password -s %s -w 2>/dev/null", q_service);
+        snprintf(cmd, sizeof(cmd), "security find-generic-password -s %s -w 2>/dev/null",
+                 q_service);
         if (provider_command_read_all(cmd, json, sizeof(json)) &&
             provider_extract_claude_code_oauth_bundle(json, bundle)) {
             bundle->source = CLAUDE_CODE_OAUTH_SOURCE_KEYCHAIN;
@@ -656,11 +1192,13 @@ static bool provider_load_claude_code_bundle_from_file(claude_code_oauth_bundle_
     provider_build_claude_code_credentials_path(creds_path, sizeof(creds_path));
 
     char *json = provider_read_text_file(creds_path);
-    if (!json) return false;
+    if (!json)
+        return false;
 
     bool ok = provider_extract_claude_code_oauth_bundle(json, bundle);
     free(json);
-    if (!ok) return false;
+    if (!ok)
+        return false;
 
     bundle->source = CLAUDE_CODE_OAUTH_SOURCE_FILE;
     snprintf(bundle->credentials_path, sizeof(bundle->credentials_path), "%s", creds_path);
@@ -687,6 +1225,9 @@ static bool provider_load_claude_code_oauth_bundle(claude_code_oauth_bundle_t *b
     if (provider_env_truthy(getenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY")))
         return false;
 
+    if (provider_load_claude_code_bundle_from_dsco_cache(bundle))
+        return true;
+
     /* Try dsco-owned local cache first — avoids prompting for the Claude Code
      * keychain entry on every run. Cache is invalidated when expired so
      * Claude Code's keychain remains the authority for refreshes. */
@@ -701,8 +1242,7 @@ static bool provider_load_claude_code_oauth_bundle(claude_code_oauth_bundle_t *b
                 bundle->source = CLAUDE_CODE_OAUTH_SOURCE_KEYCHAIN;
                 provider_build_claude_code_service_name(bundle->keychain_service,
                                                         sizeof(bundle->keychain_service));
-                provider_get_username(bundle->keychain_account,
-                                      sizeof(bundle->keychain_account));
+                provider_get_username(bundle->keychain_account, sizeof(bundle->keychain_account));
                 free(cached_json);
                 return true;
             }
@@ -714,14 +1254,18 @@ static bool provider_load_claude_code_oauth_bundle(claude_code_oauth_bundle_t *b
         }
     }
 
-    if (provider_load_claude_code_bundle_from_keychain(bundle)) {
-        if (bundle->storage_json)
+    if (provider_load_claude_code_bundle_from_keychain(bundle, false)) {
+        if (bundle->storage_json) {
+            (void)provider_write_claude_code_dsco_cache(bundle->storage_json);
             (void)provider_save_claude_code_bundle_local_cache(bundle->storage_json);
+        }
         return true;
     }
     if (provider_load_claude_code_bundle_from_file(bundle)) {
-        if (bundle->storage_json)
+        if (bundle->storage_json) {
+            (void)provider_write_claude_code_dsco_cache(bundle->storage_json);
             (void)provider_save_claude_code_bundle_local_cache(bundle->storage_json);
+        }
         return true;
     }
     provider_claude_code_oauth_bundle_free(bundle);
@@ -738,17 +1282,12 @@ static size_t provider_http_write_cb(char *ptr, size_t size, size_t nmemb, void 
 static char *provider_default_scope_json_array(void) {
     jbuf_t b;
     jbuf_init(&b, 256);
-    const char *scopes[] = {
-        "user:profile",
-        "user:inference",
-        "user:sessions:claude_code",
-        "user:mcp_servers",
-        "user:file_upload",
-        NULL
-    };
+    const char *scopes[] = {"user:profile",     "user:inference",   "user:sessions:claude_code",
+                            "user:mcp_servers", "user:file_upload", NULL};
     jbuf_append_char(&b, '[');
     for (int i = 0; scopes[i]; i++) {
-        if (i) jbuf_append_char(&b, ',');
+        if (i)
+            jbuf_append_char(&b, ',');
         jbuf_append_json_str(&b, scopes[i]);
     }
     jbuf_append_char(&b, ']');
@@ -785,14 +1324,19 @@ static char *provider_build_refreshed_oauth_json(const claude_code_oauth_bundle_
         const char *cur = scope_string;
         bool first = true;
         while (*cur) {
-            while (*cur == ' ') cur++;
-            if (!*cur) break;
+            while (*cur == ' ')
+                cur++;
+            if (!*cur)
+                break;
             const char *end = strchr(cur, ' ');
-            if (!end) end = cur + strlen(cur);
-            if (!first) jbuf_append_char(&out, ',');
+            if (!end)
+                end = cur + strlen(cur);
+            if (!first)
+                jbuf_append_char(&out, ',');
             char scope[128];
             size_t n = (size_t)(end - cur);
-            if (n >= sizeof(scope)) n = sizeof(scope) - 1;
+            if (n >= sizeof(scope))
+                n = sizeof(scope) - 1;
             memcpy(scope, cur, n);
             scope[n] = '\0';
             jbuf_append_json_str(&out, scope);
@@ -827,21 +1371,27 @@ static char *provider_build_refreshed_oauth_json(const claude_code_oauth_bundle_
     return out.data;
 }
 
-static bool provider_find_json_value_span(const char *json, const char *key,
-                                          const char **out_start, const char **out_end) {
-    if (!json || !key || !out_start || !out_end) return false;
+static bool provider_find_json_value_span(const char *json, const char *key, const char **out_start,
+                                          const char **out_end) {
+    if (!json || !key || !out_start || !out_end)
+        return false;
 
     char needle[128];
     snprintf(needle, sizeof(needle), "\"%s\"", key);
     const char *p = strstr(json, needle);
-    if (!p) return false;
+    if (!p)
+        return false;
 
     p += strlen(needle);
-    while (*p && isspace((unsigned char)*p)) p++;
-    if (*p != ':') return false;
+    while (*p && isspace((unsigned char)*p))
+        p++;
+    if (*p != ':')
+        return false;
     p++;
-    while (*p && isspace((unsigned char)*p)) p++;
-    if (*p != '{') return false;
+    while (*p && isspace((unsigned char)*p))
+        p++;
+    if (*p != '{')
+        return false;
 
     const char *start = p;
     int depth = 0;
@@ -850,16 +1400,20 @@ static bool provider_find_json_value_span(const char *json, const char *key,
     for (; *p; p++) {
         char ch = *p;
         if (in_string) {
-            if (escaped) escaped = false;
-            else if (ch == '\\') escaped = true;
-            else if (ch == '"') in_string = false;
+            if (escaped)
+                escaped = false;
+            else if (ch == '\\')
+                escaped = true;
+            else if (ch == '"')
+                in_string = false;
             continue;
         }
         if (ch == '"') {
             in_string = true;
             continue;
         }
-        if (ch == '{') depth++;
+        if (ch == '{')
+            depth++;
         else if (ch == '}') {
             depth--;
             if (depth == 0) {
@@ -875,9 +1429,9 @@ static bool provider_find_json_value_span(const char *json, const char *key,
 
 static char *provider_replace_claude_code_oauth_json(const claude_code_oauth_bundle_t *bundle,
                                                      const char *new_oauth_json) {
-    if (!new_oauth_json) return NULL;
-    if (!bundle->storage_json || !bundle->storage_json[0] ||
-        !strchr(bundle->storage_json, '{')) {
+    if (!new_oauth_json)
+        return NULL;
+    if (!bundle->storage_json || !bundle->storage_json[0] || !strchr(bundle->storage_json, '{')) {
         jbuf_t out;
         jbuf_init(&out, 256);
         jbuf_append(&out, "{\"claudeAiOauth\":");
@@ -888,14 +1442,15 @@ static char *provider_replace_claude_code_oauth_json(const claude_code_oauth_bun
 
     const char *value_start = NULL;
     const char *value_end = NULL;
-    if (!provider_find_json_value_span(bundle->storage_json, "claudeAiOauth",
-                                       &value_start, &value_end)) {
+    if (!provider_find_json_value_span(bundle->storage_json, "claudeAiOauth", &value_start,
+                                       &value_end)) {
         jbuf_t out;
         jbuf_init(&out, strlen(bundle->storage_json) + strlen(new_oauth_json) + 32);
         size_t len = strlen(bundle->storage_json);
         if (len > 0 && bundle->storage_json[len - 1] == '}') {
             jbuf_append_len(&out, bundle->storage_json, len - 1);
-            if (len > 2) jbuf_append_char(&out, ',');
+            if (len > 2)
+                jbuf_append_char(&out, ',');
             jbuf_append_json_str(&out, "claudeAiOauth");
             jbuf_append_char(&out, ':');
             jbuf_append(&out, new_oauth_json);
@@ -908,17 +1463,21 @@ static char *provider_replace_claude_code_oauth_json(const claude_code_oauth_bun
 
     size_t prefix_len = (size_t)(value_start - bundle->storage_json);
     size_t suffix_len = strlen(value_end);
-    char *out = safe_malloc(prefix_len + strlen(new_oauth_json) + suffix_len + 1);
+    size_t new_json_len = strlen(new_oauth_json);
+    size_t out_sz = prefix_len + new_json_len + suffix_len + 1;
+    char *out = safe_malloc(out_sz);
     memcpy(out, bundle->storage_json, prefix_len);
-    strcpy(out + prefix_len, new_oauth_json);
-    strcpy(out + prefix_len + strlen(new_oauth_json), value_end);
+    snprintf(out + prefix_len, out_sz - prefix_len, "%s", new_oauth_json);
+    snprintf(out + prefix_len + new_json_len, out_sz - prefix_len - new_json_len, "%s", value_end);
     return out;
 }
 
 static bool provider_write_claude_code_bundle_file(const char *path, const char *json) {
-    if (!path || !path[0] || !json) return false;
+    if (!path || !path[0] || !json)
+        return false;
     FILE *fp = fopen(path, "wb");
-    if (!fp) return false;
+    if (!fp)
+        return false;
     size_t len = strlen(json);
     bool ok = fwrite(json, 1, len, fp) == len;
     fclose(fp);
@@ -928,11 +1487,11 @@ static bool provider_write_claude_code_bundle_file(const char *path, const char 
 static bool provider_write_claude_code_bundle_keychain(const claude_code_oauth_bundle_t *bundle,
                                                        const char *json) {
 #ifdef __APPLE__
-    if (!bundle || !json || !bundle->keychain_service[0]) return false;
+    if (!bundle || !json || !bundle->keychain_service[0])
+        return false;
     char *q_service = provider_shell_quote(bundle->keychain_service);
-    char *q_account = provider_shell_quote(bundle->keychain_account[0]
-                                           ? bundle->keychain_account
-                                           : "claude-code-user");
+    char *q_account = provider_shell_quote(bundle->keychain_account[0] ? bundle->keychain_account
+                                                                       : "claude-code-user");
     char *q_json = provider_shell_quote(json);
     bool ok = false;
     if (q_service && q_account && q_json) {
@@ -961,16 +1520,20 @@ static bool provider_write_claude_code_bundle_keychain(const claude_code_oauth_b
 
 static bool provider_persist_claude_code_bundle(const claude_code_oauth_bundle_t *bundle,
                                                 const char *scope_string) {
-    if (!bundle || bundle->source == CLAUDE_CODE_OAUTH_SOURCE_ENV) return true;
+    if (!bundle || bundle->source == CLAUDE_CODE_OAUTH_SOURCE_ENV)
+        return true;
 
     char *oauth_json = provider_build_refreshed_oauth_json(bundle, scope_string);
     char *storage_json = provider_replace_claude_code_oauth_json(bundle, oauth_json);
     free(oauth_json);
-    if (!storage_json) return false;
+    if (!storage_json)
+        return false;
 
     bool ok = false;
     if (bundle->source == CLAUDE_CODE_OAUTH_SOURCE_KEYCHAIN) {
         ok = provider_write_claude_code_bundle_keychain(bundle, storage_json);
+    } else if (bundle->source == CLAUDE_CODE_OAUTH_SOURCE_DSCO_CACHE) {
+        ok = provider_write_claude_code_dsco_cache(storage_json);
     } else if (bundle->source == CLAUDE_CODE_OAUTH_SOURCE_FILE) {
         ok = provider_write_claude_code_bundle_file(bundle->credentials_path, storage_json);
     }
@@ -978,6 +1541,7 @@ static bool provider_persist_claude_code_bundle(const claude_code_oauth_bundle_t
     /* Always refresh the local cache with the new bundle so subsequent dsco
      * invocations pick up the refreshed access_token without touching the
      * authoritative store again. */
+    (void)provider_write_claude_code_dsco_cache(storage_json);
     (void)provider_save_claude_code_bundle_local_cache(storage_json);
 
     free(storage_json);
@@ -985,18 +1549,22 @@ static bool provider_persist_claude_code_bundle(const claude_code_oauth_bundle_t
 }
 
 static bool provider_refresh_claude_code_oauth_bundle(claude_code_oauth_bundle_t *bundle) {
-    if (!bundle || !bundle->refresh_token[0]) return false;
+    if (!bundle || !bundle->refresh_token[0])
+        return false;
 
     const char *token_url = getenv("DSCO_CLAUDE_CODE_OAUTH_TOKEN_URL");
-    if (!token_url || !token_url[0]) token_url = CLAUDE_CODE_OAUTH_TOKEN_URL;
+    if (!token_url || !token_url[0])
+        token_url = CLAUDE_CODE_OAUTH_TOKEN_URL;
     const char *client_id = getenv("DSCO_CLAUDE_CODE_OAUTH_CLIENT_ID");
-    if (!client_id || !client_id[0]) client_id = CLAUDE_CODE_OAUTH_CLIENT_ID;
+    if (!client_id || !client_id[0])
+        client_id = CLAUDE_CODE_OAUTH_CLIENT_ID;
     const char *scopes = getenv("DSCO_CLAUDE_CODE_OAUTH_SCOPES");
-    if (!scopes || !scopes[0]) scopes = CLAUDE_CODE_OAUTH_SCOPES;
 
-    curl_global_init(CURL_GLOBAL_DEFAULT);
+    dsco_http_global_init();
     CURL *curl = curl_easy_init();
-    if (!curl) return false;
+    dsco_http_pool_apply(curl);
+    if (!curl)
+        return false;
 
     jbuf_t req;
     jbuf_init(&req, 512);
@@ -1004,14 +1572,21 @@ static bool provider_refresh_claude_code_oauth_bundle(claude_code_oauth_bundle_t
     jbuf_append_json_str(&req, bundle->refresh_token);
     jbuf_append(&req, ",\"client_id\":");
     jbuf_append_json_str(&req, client_id);
-    jbuf_append(&req, ",\"scope\":");
-    jbuf_append_json_str(&req, scopes);
+    /* Current Claude Code omits scope on refresh. Preserve the existing env
+     * override only for custom OAuth deployments that explicitly require it. */
+    if (scopes && scopes[0]) {
+        jbuf_append(&req, ",\"scope\":");
+        jbuf_append_json_str(&req, scopes);
+    }
     jbuf_append_char(&req, '}');
 
     jbuf_t resp;
     jbuf_init(&resp, 1024);
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+    hdrs = curl_slist_append(hdrs, "anthropic-beta: oauth-2025-04-20");
+    hdrs = curl_slist_append(hdrs,
+                             "User-Agent: " CLAUDE_CODE_OAUTH_REFRESH_USER_AGENT);
     curl_easy_setopt(curl, CURLOPT_URL, token_url);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req.data);
@@ -1060,13 +1635,25 @@ static const char *provider_resolve_claude_code_oauth_token(bool allow_refresh) 
     token[0] = '\0';
 
     claude_code_oauth_bundle_t bundle;
-    if (!provider_load_claude_code_oauth_bundle(&bundle)) return NULL;
+    if (!provider_load_claude_code_oauth_bundle(&bundle))
+        return NULL;
 
-    if (allow_refresh &&
-        bundle.source != CLAUDE_CODE_OAUTH_SOURCE_ENV &&
-        bundle.refresh_token[0] &&
+    if (allow_refresh && bundle.source != CLAUDE_CODE_OAUTH_SOURCE_ENV && bundle.refresh_token[0] &&
         provider_claude_code_oauth_expired(bundle.expires_at_ms)) {
-        (void)provider_refresh_claude_code_oauth_bundle(&bundle);
+        if (!provider_refresh_claude_code_oauth_bundle(&bundle)) {
+            provider_claude_code_oauth_bundle_free(&bundle);
+            /* Claude Code rotates refresh tokens. A long-lived DSCO cache can
+             * therefore be stale even while the official client is logged in.
+             * Re-import the authoritative bundle once instead of replaying a
+             * revoked cached access token forever. */
+            if (!provider_claude_code_import_credentials() ||
+                !provider_load_claude_code_oauth_bundle(&bundle))
+                return NULL;
+            if (provider_claude_code_oauth_expired(bundle.expires_at_ms)) {
+                provider_claude_code_oauth_bundle_free(&bundle);
+                return NULL;
+            }
+        }
     }
 
     if (!bundle.access_token[0]) {
@@ -1077,6 +1664,39 @@ static const char *provider_resolve_claude_code_oauth_token(bool allow_refresh) 
     snprintf(token, sizeof(token), "%s", bundle.access_token);
     provider_claude_code_oauth_bundle_free(&bundle);
     return token;
+}
+
+bool provider_claude_code_import_credentials(void) {
+    claude_code_oauth_bundle_t bundle;
+    provider_claude_code_oauth_bundle_init(&bundle);
+    bool loaded = provider_load_claude_code_bundle_from_keychain(&bundle, true);
+    if (!loaded)
+        loaded = provider_load_claude_code_bundle_from_file(&bundle);
+    if (!loaded) {
+        provider_claude_code_oauth_bundle_free(&bundle);
+        return false;
+    }
+    bool ok = bundle.storage_json && provider_write_claude_code_dsco_cache(bundle.storage_json);
+    if (ok && bundle.refresh_token[0] && provider_claude_code_oauth_expired(bundle.expires_at_ms))
+        ok = provider_refresh_claude_code_oauth_bundle(&bundle);
+    provider_claude_code_oauth_bundle_free(&bundle);
+    return ok;
+}
+
+bool provider_claude_code_refresh_credentials(void) {
+    claude_code_oauth_bundle_t bundle;
+    if (!provider_load_claude_code_oauth_bundle(&bundle))
+        return provider_claude_code_import_credentials();
+
+    bool ok = bundle.source != CLAUDE_CODE_OAUTH_SOURCE_ENV && bundle.refresh_token[0] &&
+              provider_refresh_claude_code_oauth_bundle(&bundle);
+    provider_claude_code_oauth_bundle_free(&bundle);
+    if (ok)
+        return true;
+
+    /* A 401 often means Claude Code already rotated the cached refresh token
+     * or the user completed a newer login. Recover from its local store. */
+    return provider_claude_code_import_credentials();
 }
 
 /* Builds an OpenAI-compat request then injects OpenRouter-specific fields.
@@ -1099,43 +1719,44 @@ static const char *provider_resolve_claude_code_oauth_token(bool allow_refresh) 
  *   DSCO_OR_REASONING_EFFORT  — "low", "medium", "high" for reasoning models
  *   DSCO_OR_DEBUG              — "1"/"true" to echo upstream request body
  */
-static char *openrouter_build_request(provider_t *p, conversation_t *conv,
-                                       session_state_t *session, int max_tokens,
-                                       const char *credential) {
+static char *openrouter_build_request(provider_t *p, conversation_t *conv, session_state_t *session,
+                                      int max_tokens, const char *credential) {
     char *base = openai_build_request(p, conv, session, max_tokens, credential);
-    if (!base) return NULL;
+    if (!base)
+        return NULL;
 
     /* Gather all env config */
-    const char *transforms      = getenv("DSCO_OR_TRANSFORMS");
-    const char *route           = getenv("DSCO_OR_ROUTE");
-    const char *prov_order      = getenv("DSCO_OR_PROVIDER_ORDER");
-    const char *prov_only       = getenv("DSCO_OR_PROVIDER_ONLY");
-    const char *prov_ignore     = getenv("DSCO_OR_PROVIDER_IGNORE");
-    const char *req_params      = getenv("DSCO_OR_REQUIRE_PARAMS");
-    const char *allow_fb        = getenv("DSCO_OR_ALLOW_FALLBACKS");
-    const char *data_collect    = getenv("DSCO_OR_DATA_COLLECTION");
-    const char *zdr             = getenv("DSCO_OR_ZDR");
-    const char *quantizations   = getenv("DSCO_OR_QUANTIZATIONS");
-    const char *sort_by         = getenv("DSCO_OR_SORT");
-    const char *max_price_in    = getenv("DSCO_OR_MAX_PRICE_INPUT");
-    const char *max_price_out   = getenv("DSCO_OR_MAX_PRICE_OUTPUT");
+    const char *transforms = getenv("DSCO_OR_TRANSFORMS");
+    const char *route = getenv("DSCO_OR_ROUTE");
+    const char *prov_order = getenv("DSCO_OR_PROVIDER_ORDER");
+    const char *prov_only = getenv("DSCO_OR_PROVIDER_ONLY");
+    const char *prov_ignore = getenv("DSCO_OR_PROVIDER_IGNORE");
+    const char *req_params = getenv("DSCO_OR_REQUIRE_PARAMS");
+    const char *allow_fb = getenv("DSCO_OR_ALLOW_FALLBACKS");
+    const char *data_collect = getenv("DSCO_OR_DATA_COLLECTION");
+    const char *zdr = getenv("DSCO_OR_ZDR");
+    const char *quantizations = getenv("DSCO_OR_QUANTIZATIONS");
+    const char *sort_by = getenv("DSCO_OR_SORT");
+    const char *max_price_in = getenv("DSCO_OR_MAX_PRICE_INPUT");
+    const char *max_price_out = getenv("DSCO_OR_MAX_PRICE_OUTPUT");
     const char *fallback_models = getenv("DSCO_OR_FALLBACK_MODELS");
-    const char *reasoning       = getenv("DSCO_OR_REASONING_EFFORT");
-    const char *debug_mode      = getenv("DSCO_OR_DEBUG");
+    const char *reasoning = getenv("DSCO_OR_REASONING_EFFORT");
+    const char *debug_mode = getenv("DSCO_OR_DEBUG");
     /* thinking disabled by omission; explicit type=disabled rejected by some models */
 
     bool has_provider = prov_order || prov_only || prov_ignore || req_params ||
-                        (allow_fb && !or_env_bool(allow_fb)) ||
-                        data_collect || zdr || quantizations || sort_by ||
-                        max_price_in || max_price_out;
-    bool has_extras = transforms || route || has_provider || fallback_models ||
-                      reasoning || debug_mode;
+                        (allow_fb && !or_env_bool(allow_fb)) || data_collect || zdr ||
+                        quantizations || sort_by || max_price_in || max_price_out;
+    bool has_extras =
+        transforms || route || has_provider || fallback_models || reasoning || debug_mode;
 
-    if (!has_extras) return base;
+    if (!has_extras)
+        return base;
 
     /* Strip trailing '}' to append fields */
     size_t len = strlen(base);
-    if (len == 0 || base[len - 1] != '}') return base;
+    if (len == 0 || base[len - 1] != '}')
+        return base;
     base[len - 1] = '\0';
 
     jbuf_t b;
@@ -1188,52 +1809,61 @@ static char *openrouter_build_request(provider_t *p, conversation_t *conv,
             wrote = true;
         }
         if (prov_only) {
-            if (wrote) jbuf_append(&b, ",");
+            if (wrote)
+                jbuf_append(&b, ",");
             jbuf_append(&b, "\"only\":");
             or_append_csv_array(&b, prov_only);
             wrote = true;
         }
         if (prov_ignore) {
-            if (wrote) jbuf_append(&b, ",");
+            if (wrote)
+                jbuf_append(&b, ",");
             jbuf_append(&b, "\"ignore\":");
             or_append_csv_array(&b, prov_ignore);
             wrote = true;
         }
         if (req_params && or_env_bool(req_params)) {
-            if (wrote) jbuf_append(&b, ",");
+            if (wrote)
+                jbuf_append(&b, ",");
             jbuf_append(&b, "\"require_parameters\":true");
             wrote = true;
         }
         if (allow_fb && !or_env_bool(allow_fb)) {
-            if (wrote) jbuf_append(&b, ",");
+            if (wrote)
+                jbuf_append(&b, ",");
             jbuf_append(&b, "\"allow_fallbacks\":false");
             wrote = true;
         }
         if (data_collect) {
-            if (wrote) jbuf_append(&b, ",");
+            if (wrote)
+                jbuf_append(&b, ",");
             jbuf_append(&b, "\"data_collection\":");
             jbuf_append_json_str(&b, data_collect);
             wrote = true;
         }
         if (zdr && or_env_bool(zdr)) {
-            if (wrote) jbuf_append(&b, ",");
+            if (wrote)
+                jbuf_append(&b, ",");
             jbuf_append(&b, "\"zdr\":true");
             wrote = true;
         }
         if (quantizations) {
-            if (wrote) jbuf_append(&b, ",");
+            if (wrote)
+                jbuf_append(&b, ",");
             jbuf_append(&b, "\"quantizations\":");
             or_append_csv_array(&b, quantizations);
             wrote = true;
         }
         if (sort_by) {
-            if (wrote) jbuf_append(&b, ",");
+            if (wrote)
+                jbuf_append(&b, ",");
             jbuf_append(&b, "\"sort\":");
             jbuf_append_json_str(&b, sort_by);
             wrote = true;
         }
         if (max_price_in || max_price_out) {
-            if (wrote) jbuf_append(&b, ",");
+            if (wrote)
+                jbuf_append(&b, ",");
             jbuf_append(&b, "\"max_price\":{");
             bool mp_wrote = false;
             if (max_price_in) {
@@ -1241,7 +1871,8 @@ static char *openrouter_build_request(provider_t *p, conversation_t *conv,
                 mp_wrote = true;
             }
             if (max_price_out) {
-                if (mp_wrote) jbuf_append(&b, ",");
+                if (mp_wrote)
+                    jbuf_append(&b, ",");
                 jbuf_appendf(&b, "\"output\":%s", max_price_out);
             }
             jbuf_append(&b, "}");
@@ -1259,27 +1890,54 @@ static char *openrouter_build_request(provider_t *p, conversation_t *conv,
 
 /* Native Moonshot routing. Speaks the OpenAI Chat Completions dialect, but
  * adds Anthropic-style {"thinking": {"type": "enabled"|"disabled"}} so we
- * can toggle Kimi K2.5 reasoning. Per the Kimi K2.5 docs, when thinking is
- * enabled, several sampling knobs (temperature/top_p/n/penalties) must be
- * left at their server-side defaults — we never send those today, so we're
- * already compliant. */
-static char *moonshot_build_request(provider_t *p, conversation_t *conv,
-                                     session_state_t *session, int max_tokens,
-                                     const char *credential) {
+ * can toggle Kimi K2.5 reasoning. Per the Kimi K2.7 Code docs, thinking must
+ * always be enabled (the model throws an error if disabled), and sampling
+ * parameters are fixed: temperature=1.0, top_p=0.95, n=1, penalties=0.0.
+ * These are now injected in openai_build_request for all moonshot-compatible
+ * models, so moonshot_build_request just needs to strip the type=disabled
+ * thinking field that openai_build_request might emit. */
+static char *moonshot_build_request(provider_t *p, conversation_t *conv, session_state_t *session,
+                                    int max_tokens, const char *credential) {
     char *base = openai_build_request(p, conv, session, max_tokens, credential);
-    if (!base) return NULL;
+    if (!base)
+        return NULL;
 
+    /* openai_build_request() already emits Moonshot-safe payloads: Kimi-compatible
+     * models get thinking enabled plus the fixed sampling parameters required by
+     * K2.7 Code. Do not mutate the JSON here. A previous version chopped the
+     * final closing brace while trying to strip a disabled-thinking field, which
+     * made Moonshot return HTTP 400 "unexpected EOF" for every native Kimi call. */
+    return base;
+}
 
-    size_t len = strlen(base);
-    if (len == 0 || base[len - 1] != '}') return base;
-    base[len - 1] = '\0';
+/* Kimi K3 family: bare "k3", the long-context "k3[1m]", "kimi-k3", or a
+ * namespaced form like "kimi-code/k3". K3 is the only Kimi model with no
+ * `thinking` request field (reasoning is always on, tuned via
+ * reasoning_effort) and the only one accepting tool_choice "required". */
+static bool model_is_kimi_k3(const char *model) {
+    if (!model || !model[0])
+        return false;
+    const char *bare = strrchr(model, '/');
+    bare = bare ? bare + 1 : model;
+    if (bare[0] == 'k' && bare[1] == '3' && (bare[2] == '\0' || bare[2] == '['))
+        return true;
+    return strstr(model, "kimi-k3") != NULL;
+}
 
-    jbuf_t b;
-    jbuf_init(&b, len + 64);
-    jbuf_append(&b, base);
-    free(base);
-    jbuf_append(&b, ",\"thinking\":{\"type\":\"disabled\"}}");
-    return b.data;
+/* kimi-k2.7-code family (also sold as "kimi-for-coding" on the Kimi Code
+ * endpoint): thinking is mandatory and only {"type":"enabled","keep":"all"}
+ * is accepted per the K2.7 Code quickstart. */
+static bool model_is_kimi_k27_code(const char *model) {
+    if (!model || !model[0])
+        return false;
+    return strstr(model, "k2.7-code") != NULL || strstr(model, "kimi-for-coding") != NULL;
+}
+
+static bool model_is_moonshot_compatible(const char *model) {
+    if (!model || !model[0])
+        return false;
+    return strstr(model, "kimi") != NULL || strstr(model, "moonshot") != NULL ||
+           model_is_kimi_k3(model);
 }
 
 /* ── xAI (native api.x.ai) ─────────────────────────────────────────────
@@ -1299,35 +1957,39 @@ static char *moonshot_build_request(provider_t *p, conversation_t *conv,
  *   DSCO_XAI_RETURN_CITATIONS  — "1"/"true" to request citations array
  */
 static bool xai_supports_reasoning(const char *model) {
-    if (!model || !model[0]) return false;
-    if (strstr(model, "grok-3-mini")) return true;
-    if (strstr(model, "grok-4")) return true;
+    if (!model || !model[0])
+        return false;
+    if (strstr(model, "grok-3-mini"))
+        return true;
+    if (strstr(model, "grok-4"))
+        return true;
     return false;
 }
 
-static char *xai_build_request(provider_t *p, conversation_t *conv,
-                                session_state_t *session, int max_tokens,
-                                const char *credential) {
+static char *xai_build_request(provider_t *p, conversation_t *conv, session_state_t *session,
+                               int max_tokens, const char *credential) {
     char *base = openai_build_request(p, conv, session, max_tokens, credential);
-    if (!base) return NULL;
+    if (!base)
+        return NULL;
 
-    const char *reasoning   = getenv("DSCO_XAI_REASONING_EFFORT");
+    const char *reasoning = getenv("DSCO_XAI_REASONING_EFFORT");
     const char *search_mode = getenv("DSCO_XAI_SEARCH_MODE");
-    const char *src         = getenv("DSCO_XAI_SEARCH_SOURCES");
-    const char *from_date   = getenv("DSCO_XAI_SEARCH_FROM_DATE");
-    const char *to_date     = getenv("DSCO_XAI_SEARCH_TO_DATE");
+    const char *src = getenv("DSCO_XAI_SEARCH_SOURCES");
+    const char *from_date = getenv("DSCO_XAI_SEARCH_FROM_DATE");
+    const char *to_date = getenv("DSCO_XAI_SEARCH_TO_DATE");
     const char *max_results = getenv("DSCO_XAI_SEARCH_MAX_RESULTS");
     const char *return_cite = getenv("DSCO_XAI_RETURN_CITATIONS");
 
-    bool want_reasoning = reasoning && reasoning[0] &&
-        xai_supports_reasoning(session ? session->model : NULL);
-    bool want_search = search_mode && search_mode[0] &&
-                       strcasecmp(search_mode, "off") != 0;
+    bool want_reasoning =
+        reasoning && reasoning[0] && xai_supports_reasoning(session ? session->model : NULL);
+    bool want_search = search_mode && search_mode[0] && strcasecmp(search_mode, "off") != 0;
 
-    if (!want_reasoning && !want_search) return base;
+    if (!want_reasoning && !want_search)
+        return base;
 
     size_t len = strlen(base);
-    if (len == 0 || base[len - 1] != '}') return base;
+    if (len == 0 || base[len - 1] != '}')
+        return base;
     base[len - 1] = '\0';
 
     jbuf_t b;
@@ -1349,18 +2011,23 @@ static char *xai_build_request(provider_t *p, conversation_t *conv,
             bool first = true;
             while (*cur) {
                 const char *end = strchr(cur, ',');
-                if (!end) end = cur + strlen(cur);
+                if (!end)
+                    end = cur + strlen(cur);
                 size_t n = (size_t)(end - cur);
                 char name[64];
-                if (n >= sizeof(name)) n = sizeof(name) - 1;
+                if (n >= sizeof(name))
+                    n = sizeof(name) - 1;
                 memcpy(name, cur, n);
                 name[n] = '\0';
                 char *s = name;
-                while (*s == ' ') s++;
+                while (*s == ' ')
+                    s++;
                 char *e2 = s + strlen(s) - 1;
-                while (e2 > s && *e2 == ' ') *e2-- = '\0';
+                while (e2 > s && *e2 == ' ')
+                    *e2-- = '\0';
                 if (s[0]) {
-                    if (!first) jbuf_append(&b, ",");
+                    if (!first)
+                        jbuf_append(&b, ",");
                     jbuf_append(&b, "{\"type\":");
                     jbuf_append_json_str(&b, s);
                     jbuf_append(&b, "}");
@@ -1418,9 +2085,11 @@ static bool msg_has_tool_result(message_t *m) {
 }
 
 static const char *openai_last_user_context(conversation_t *conv) {
-    if (!conv) return NULL;
+    if (!conv)
+        return NULL;
     for (int i = conv->count - 1; i >= 0; i--) {
-        if (conv->msgs[i].role != ROLE_USER) continue;
+        if (conv->msgs[i].role != ROLE_USER)
+            continue;
         for (int j = 0; j < conv->msgs[i].content_count; j++) {
             if (conv->msgs[i].content[j].text) {
                 return conv->msgs[i].content[j].text;
@@ -1430,12 +2099,24 @@ static const char *openai_last_user_context(conversation_t *conv) {
     return NULL;
 }
 
-static void openai_append_function_tool(jbuf_t *b, const char *name,
-                                        const char *description,
-                                        const char *schema_json,
-                                        bool cache_mark) {
+/* Several OpenAI-family models (o-series and gpt-5.6-*) reserve the bare
+ * function name "python" for a built-in code interpreter and return HTTP 400
+ * for any user tool that uses it (fabric RSI sweep 2026-07-13; openai-codex
+ * gpt-5.6-sol regression 2026-07-23). The canonical tool is now registered as
+ * "dsco-python-3x", which every provider accepts, so no rename is normally
+ * needed. This remains as a defensive backstop: if any legacy caller still
+ * emits "python"/"python_exec" on the wire, map it to the canonical namespaced
+ * name (tool dispatch resolves all three back to the same tool). */
+static const char *openai_wire_safe_tool_name(const char *name) {
+    if (name && (strcmp(name, "python") == 0 || strcmp(name, "python_exec") == 0))
+        return "dsco-python-3x";
+    return name;
+}
+
+static void openai_append_function_tool(jbuf_t *b, const char *name, const char *description,
+                                        const char *schema_json, bool cache_mark) {
     jbuf_append(b, "{\"type\":\"function\",\"function\":{\"name\":");
-    jbuf_append_json_str(b, name ? name : "");
+    jbuf_append_json_str(b, openai_wire_safe_tool_name(name ? name : ""));
     jbuf_append(b, ",\"description\":");
     jbuf_append_json_str(b, description ? description : "");
     jbuf_append(b, ",\"parameters\":");
@@ -1447,104 +2128,300 @@ static void openai_append_function_tool(jbuf_t *b, const char *name,
         jbuf_append(b, "}}");
 }
 
-static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv,
-                                     session_state_t *session) {
+static bool openai_tools_disabled(void) {
     const char *disable_tools = getenv("DSCO_OR_DISABLE_TOOLS");
-    if (disable_tools && disable_tools[0] &&
-        strcmp(disable_tools, "0") != 0 &&
+    if (disable_tools && disable_tools[0] && strcmp(disable_tools, "0") != 0 &&
         strcasecmp(disable_tools, "false") != 0) {
-        return false;
+        return true;
     }
+    return false;
+}
 
+static bool provider_wire_allows_openai_cache_params(const char *provider_name);
+
+/* Same bounded execution/discovery register as the native Responses adapter.
+ * The catalog remains callable through discover_tools + invoke_tool; paging
+ * must not turn an internal retry prompt into dozens of unrelated schemas. */
+static const char *const openai_proxy_tool_names[] = {
+    "bash", "dsco-python-3x", "discover_tools", "load_tools", "invoke_tool", "evict_tools",
+    /* Context recovery must remain callable before another discovery turn. */
+    "context_status", "context_compact", "context_evict", "context_recall",
+    "agent", "swarm",
+    "read_file", "weather", "write_file", "edit_file", "list_directory", "find_files", "grep_files",
+};
+enum { OPENAI_PROXY_TOOL_LIMIT = sizeof(openai_proxy_tool_names) /
+                                 sizeof(openai_proxy_tool_names[0]) };
+
+/* Orchestrator meta-tools are registered as external tools after the builtin
+ * proxy list is constructed. Keep the complete routing surface together when
+ * orchestrator mode is active; a three-tool external cap can otherwise hide
+ * dispatch_agent and leave Luna unable to start its Astra worker. */
+static const char *const openai_orchestrator_tool_names[] = {
+    "dispatch_agent", "dispatch_topology", "dispatch_tools", "list_domains", NULL};
+
+static bool openai_is_orchestrator_tool(const char *name) {
+    if (!name || !name[0])
+        return false;
+    for (int i = 0; openai_orchestrator_tool_names[i]; i++)
+        if (strcmp(name, openai_orchestrator_tool_names[i]) == 0)
+            return true;
+    return false;
+}
+
+static bool openai_tool_proxy_enabled(void) {
+    const char *v = getenv("DSCO_TOOL_PROXY");
+    return !(v && v[0] && (!strcmp(v, "0") || !strcasecmp(v, "false") ||
+                           !strcasecmp(v, "no") || !strcasecmp(v, "off")));
+}
+
+static const tool_def_t **openai_proxy_tools(session_state_t *session, int limit, int *out_count) {
+    enum { proxy_count = sizeof(openai_proxy_tool_names) / sizeof(openai_proxy_tool_names[0]) };
+    const char *allow = getenv("DSCO_TOOL_ALLOWLIST");
+    const tool_def_t **selected = safe_malloc((size_t)(limit > 0 ? limit : 1) * sizeof(*selected));
+    int total = 0, count = 0;
+    const tool_def_t *all = tools_get_all(&total);
+    /* A forced named tool is an explicit operator/model contract. Include its
+     * exact schema, subject to the same profile/allowlist filter, within cap. */
+    const char *forced = session && !strncmp(session->tool_choice, "tool:", 5)
+        ? session->tool_choice + 5 : NULL;
+    bool active_goal = goal_is_active(session);
+    /* The active controller explicitly calls these tools, including its
+     * terminal verification step. Keep that prompt/schema contract executable. */
+    const char *pins[] = {forced, active_goal ? "goal_queue" : NULL,
+                         active_goal ? "get_goal" : NULL, active_goal ? "update_goal" : NULL};
+    for (int p = 0; p < 4 && count < limit; p++) {
+        for (int i = 0; pins[p] && i < total; i++) {
+            if (strcmp(all[i].name, pins[p]) || !tools_profile_allows_index(i)) continue;
+            bool duplicate = false;
+            for (int j = 0; j < count; j++) duplicate |= selected[j] == &all[i];
+            if (!duplicate) selected[count++] = &all[i];
+            break;
+        }
+    }
+    for (int n = 0; allow && allow[0] && n < total && count < limit; n++) {
+        bool duplicate = false;
+        for (int j = 0; j < count; j++) duplicate |= selected[j] == &all[n];
+        if (!duplicate && tools_profile_allows_index(n))
+            selected[count++] = &all[n];
+    }
+    for (int n = 0; (!allow || !allow[0]) && n < proxy_count && count < limit; n++) {
+        for (int i = 0; i < total; i++) {
+            if (strcmp(all[i].name, openai_proxy_tool_names[n]) ||
+                (forced && !strcmp(all[i].name, forced)) || !tools_profile_allows_index(i))
+                continue;
+            selected[count++] = &all[i];
+            break;
+        }
+    }
+    *out_count = count;
+    return selected;
+}
+
+static bool openai_append_tools_json(jbuf_t *b, conversation_t *conv, session_state_t *session,
+                                     const char *provider_name) {
+    if (openai_tools_disabled() || (session && session->direct_answer_mode))
+        return false;
+    const char *family = provider_model_family(session ? session->model : NULL);
+    bool modal_endpoint = family && strcmp(family, "modal") == 0;
+
+    const int provider_tool_limit = 128;
     int max_tools_send = 128;
     const char *mt_env = getenv("DSCO_OR_MAX_TOOLS");
+    if (!mt_env || !mt_env[0]) mt_env = getenv("DSCO_MAX_TOOLS");
+    /* An explicit schema-count override opts into ranked selection. The input
+     * admission cap still applies to the resulting complete request. */
+    bool stable_proxy = openai_tool_proxy_enabled() && !(mt_env && mt_env[0]);
     if (mt_env && mt_env[0]) {
         max_tools_send = atoi(mt_env);
-        if (max_tools_send < 0) max_tools_send = 0;
+        if (max_tools_send < 0)
+            max_tools_send = 0;
+    } else if (modal_endpoint) {
+        /* Modal Auto Endpoints optimize the inference engine, not dsco's prompt
+         * payload. Keep the initial schema small to minimize TTFT/prefill while
+         * preserving agentic tool use; discover/load can expand on demand. */
+        max_tools_send = g_cheap_mode ? TOOL_REG_ALWAYS : 24;
+    } else if (g_cheap_mode) {
+        max_tools_send = TOOL_REG_ALWAYS;
     } else {
         const char *model = session ? session->model : "";
-        if (model && strstr(model, "/")) max_tools_send = 48; /* OpenRouter: tighter cap */
+        if (model && strstr(model, "/"))
+            max_tools_send = 48; /* OpenRouter: tighter cap */
     }
+    if (max_tools_send > provider_tool_limit)
+        max_tools_send = provider_tool_limit;
 
     int filtered_count = 0;
     const tool_def_t **filtered = NULL;
-    if (max_tools_send > 0) {
-        filtered = tools_get_filtered(openai_last_user_context(conv),
-                                      max_tools_send, &filtered_count);
+    const char *tool_ctx = openai_last_user_context(conv);
+    bool allowlist_active = getenv("DSCO_TOOL_ALLOWLIST") && getenv("DSCO_TOOL_ALLOWLIST")[0];
+    external_tool_snapshot_t ext = tools_external_snapshot();
+    int proxy_ext_budget = !allowlist_active ? (ext.count < 3 ? ext.count : 3) : 0;
+    int orchestrator_ext_count = 0;
+    if (!allowlist_active) {
+        for (int i = 0; i < ext.count; i++)
+            if (openai_is_orchestrator_tool(ext.items[i].name))
+                orchestrator_ext_count++;
+        if (orchestrator_ext_count > proxy_ext_budget)
+            proxy_ext_budget = orchestrator_ext_count;
+    }
+    if (goal_is_active(session) && proxy_ext_budget > 1) proxy_ext_budget = 1;
+    if (stable_proxy) {
+        filtered = openai_proxy_tools(session, OPENAI_PROXY_TOOL_LIMIT - proxy_ext_budget,
+                                       &filtered_count);
+    } else if (max_tools_send > 0) {
+        filtered = tools_get_filtered(tool_ctx, max_tools_send, &filtered_count);
+    }
+    int *ext_order = ext.count > 0 ? safe_malloc((size_t)ext.count * sizeof(*ext_order)) : NULL;
+    int ext_order_count =
+        ext_order ? tools_rank_external_snapshot(&ext, tool_ctx, ext_order, ext.count) : 0;
+    if (!allowlist_active && orchestrator_ext_count > 0) {
+        /* Preserve the ordinary relevance ordering after the complete
+         * orchestrator surface. This is a capability requirement, not a
+         * prompt-ranking preference. */
+        int promoted = 0;
+        for (int ni = 0; openai_orchestrator_tool_names[ni]; ni++) {
+            for (int oi = promoted; oi < ext_order_count; oi++) {
+                int idx = ext_order[oi];
+                if (idx < 0 || idx >= ext.count ||
+                    strcmp(ext.items[idx].name, openai_orchestrator_tool_names[ni]) != 0)
+                    continue;
+                int saved = ext_order[promoted];
+                ext_order[promoted] = idx;
+                ext_order[oi] = saved;
+                promoted++;
+                break;
+            }
+        }
+    }
+    int forced_external = -1;
+    if (session && !strncmp(session->tool_choice, "tool:", 5)) {
+        const char *forced = session->tool_choice + 5;
+        bool found = false;
+        for (int i = 0; i < filtered_count; i++)
+            if (!strcmp(filtered[i]->name, forced)) found = true;
+        for (int oi = 0; !allowlist_active && oi < ext_order_count; oi++) {
+            int i = ext_order[oi];
+            if (i >= 0 && i < ext.count && !strcmp(ext.items[i].name, forced)) {
+                forced_external = i; found = true;
+                int first = ext_order[0]; ext_order[0] = i; ext_order[oi] = first;
+                break;
+            }
+        }
+        if (stable_proxy && !found) {
+            free((void *)filtered); free(ext_order); tools_external_snapshot_free(&ext);
+            /* The builder distinguishes this from a normal empty inventory. */
+            return false;
+        }
     }
 
-    if (filtered_count <= 0 && g_external_tool_count <= 0) {
+    if (filtered_count <= 0 && ext.count <= 0) {
         free((void *)filtered);
+        free(ext_order);
+        tools_external_snapshot_free(&ext);
         return false;
     }
 
     /* Gate cache markers: only Anthropic claude-* models via OpenRouter
      * understand cache_control in the OpenAI wire format. */
-    bool want_cache = provider_model_supports_cache_control(
-        session ? session->model : NULL);
+    bool want_cache = provider_wire_allows_openai_cache_params(provider_name) &&
+                      provider_model_supports_cache_control(session ? session->model : NULL);
+
+    /* Kimi-bound schemas need explicit property types (see
+     * json_schema_ensure_property_types). */
+    const char *tools_canonical =
+        provider_name && provider_name[0] ? provider_profile_canonical_name(provider_name) : NULL;
+    bool kimi_schema_patch =
+        (tools_canonical && (strcmp(tools_canonical, "moonshot") == 0 ||
+                             strcmp(tools_canonical, "kimi-code") == 0)) ||
+        model_is_moonshot_compatible(session ? session->model : NULL);
 
     /* Pre-count total tools to identify the last one for cache marking. */
     int loaded_ext_pre = 0;
-    for (int i = 0; i < g_external_tool_count; i++)
-        if (g_external_tools[i].loaded) loaded_ext_pre++;
-    int ext_budget_pre = loaded_ext_pre > 0 ? loaded_ext_pre : 16;
-    if (ext_budget_pre > 32) ext_budget_pre = 32;
-    int ext_total_pre = ext_budget_pre < g_external_tool_count
-                        ? ext_budget_pre : g_external_tool_count;
+    for (int i = 0; !allowlist_active && i < ext.count; i++)
+        if (ext.items[i].loaded)
+            loaded_ext_pre++;
+    int remaining_pre = provider_tool_limit - filtered_count;
+    int ext_budget_pre = remaining_pre > 0 ? (loaded_ext_pre > 0 ? loaded_ext_pre : 16) : 0;
+    if (ext_budget_pre > 32)
+        ext_budget_pre = 32;
+    if (ext_budget_pre > remaining_pre)
+        ext_budget_pre = remaining_pre;
+    if (stable_proxy) ext_budget_pre = proxy_ext_budget;
+    int ext_total_pre =
+        allowlist_active ? 0 : (ext_budget_pre < ext.count ? ext_budget_pre : ext.count);
     int total_tools = filtered_count + ext_total_pre;
 
     jbuf_append(b, ",\"tools\":[");
     bool wrote_any = false;
     int emitted = 0;
     for (int i = 0; i < filtered_count; i++) {
-        if (wrote_any) jbuf_append(b, ",");
+        if (wrote_any)
+            jbuf_append(b, ",");
         bool is_last = want_cache && (emitted == total_tools - 1);
-        openai_append_function_tool(b, filtered[i]->name,
-                                    filtered[i]->description,
-                                    filtered[i]->input_schema_json,
-                                    is_last);
+        char *patched = kimi_schema_patch
+                            ? json_schema_ensure_property_types(filtered[i]->input_schema_json)
+                            : NULL;
+        openai_append_function_tool(b, filtered[i]->name, filtered[i]->description,
+                                    patched ? patched : filtered[i]->input_schema_json, is_last);
+        free(patched);
         wrote_any = true;
         emitted++;
     }
     free((void *)filtered);
 
     int loaded_ext_count = 0;
-    for (int i = 0; i < g_external_tool_count; i++)
-        if (g_external_tools[i].loaded) loaded_ext_count++;
-    int ext_budget = loaded_ext_count > 0 ? loaded_ext_count : 16;
-    if (ext_budget > 32) ext_budget = 32;
+    for (int i = 0; !allowlist_active && i < ext.count; i++)
+        if (ext.items[i].loaded)
+            loaded_ext_count++;
+    int remaining = provider_tool_limit - emitted;
+    int ext_budget = remaining > 0 ? (loaded_ext_count > 0 ? loaded_ext_count : 16) : 0;
+    if (ext_budget > 32)
+        ext_budget = 32;
+    if (ext_budget > remaining)
+        ext_budget = remaining;
+    if (stable_proxy) ext_budget = proxy_ext_budget;
     int ext_written = 0;
-    for (int pass = 0; pass < 2 && ext_written < ext_budget; pass++) {
+    for (int pass = 0; !allowlist_active && pass < 2 && ext_written < ext_budget; pass++) {
         bool want_loaded = (pass == 0);
-        for (int i = 0; i < g_external_tool_count && ext_written < ext_budget; i++) {
-            if ((bool)g_external_tools[i].loaded != want_loaded) continue;
-            if (wrote_any) jbuf_append(b, ",");
+        for (int oi = 0; oi < ext_order_count && ext_written < ext_budget; oi++) {
+            int i = ext_order[oi];
+            if (i < 0 || i >= ext.count)
+                continue;
+            if ((bool)(ext.items[i].loaded || i == forced_external) != want_loaded)
+                continue;
+            if (wrote_any)
+                jbuf_append(b, ",");
             bool is_last = want_cache && (emitted == total_tools - 1);
-            openai_append_function_tool(b, g_external_tools[i].name,
-                                        g_external_tools[i].description,
-                                        g_external_tools[i].input_schema_json,
+            char *patched = kimi_schema_patch
+                                ? json_schema_ensure_property_types(ext.items[i].input_schema_json)
+                                : NULL;
+            openai_append_function_tool(b, ext.items[i].name, ext.items[i].description,
+                                        patched ? patched : ext.items[i].input_schema_json,
                                         is_last);
+            free(patched);
             wrote_any = true;
             ext_written++;
             emitted++;
         }
     }
     jbuf_append(b, "]");
+    free(ext_order);
+    tools_external_snapshot_free(&ext);
     return wrote_any;
 }
 
-static void openai_append_tool_choice_json(jbuf_t *b, session_state_t *session,
-                                           bool has_tools) {
-    if (!has_tools) return;
+static void openai_append_tool_choice_json(jbuf_t *b, session_state_t *session, bool has_tools,
+                                           bool required_choice_supported) {
+    if (!has_tools)
+        return;
 
-    const char *choice = (session && session->tool_choice[0])
-        ? session->tool_choice
-        : "auto";
-
+    const char *choice = (session && session->tool_choice[0]) ? session->tool_choice : "auto";
     if (strcmp(choice, "auto") == 0) {
         jbuf_append(b, ",\"tool_choice\":\"auto\"");
     } else if (strcmp(choice, "any") == 0) {
-        jbuf_append(b, ",\"tool_choice\":\"required\"");
+        /* Kimi thinking models other than K3 reject tool_choice "required". */
+        jbuf_append(b, required_choice_supported ? ",\"tool_choice\":\"required\""
+                                                 : ",\"tool_choice\":\"auto\"");
     } else if (strcmp(choice, "none") == 0) {
         jbuf_append(b, ",\"tool_choice\":\"none\"");
     } else if (strncmp(choice, "tool:", 5) == 0) {
@@ -1562,8 +2439,23 @@ static void openai_append_tool_choice_json(jbuf_t *b, session_state_t *session,
  * a *-thinking model. */
 /* moonshot_should_disable_thinking excised */
 
-
 /* Emit text+image content array (skipping tool_use and tool_result blocks) */
+static bool openai_msg_has_text_content(message_t *m) {
+    if (!m)
+        return false;
+    for (int j = 0; j < m->content_count; j++) {
+        msg_content_t *mc = &m->content[j];
+        if (mc->type && strcmp(mc->type, "text") == 0 && mc->text && mc->text[0])
+            return true;
+    }
+    return false;
+}
+
+static bool openai_msg_cacheable_history_tail(message_t *m) {
+    return m && m->role == ROLE_USER &&
+           (openai_msg_has_text_content(m) || msg_has_tool_result(m));
+}
+
 static void openai_append_text_content(jbuf_t *b, message_t *m) {
     jbuf_t text;
     jbuf_init(&text, 1024);
@@ -1571,7 +2463,8 @@ static void openai_append_text_content(jbuf_t *b, message_t *m) {
     for (int j = 0; j < m->content_count; j++) {
         msg_content_t *mc = &m->content[j];
         if (mc->type && strcmp(mc->type, "text") == 0 && mc->text) {
-            if (text.len > 0) jbuf_append(&text, "\n");
+            if (text.len > 0)
+                jbuf_append(&text, "\n");
             jbuf_append(&text, mc->text);
         }
     }
@@ -1585,40 +2478,79 @@ static void openai_append_text_content(jbuf_t *b, message_t *m) {
 }
 
 /* Emit an assistant message with tool_calls in OpenAI format */
-static void openai_append_assistant_msg(jbuf_t *b, message_t *m) {
+static void openai_append_assistant_msg(jbuf_t *b, message_t *m,
+                                        bool preserve_reasoning_details,
+                                        const char *request_model) {
+    static const char detail_type[] = "openrouter_reasoning_details";
     jbuf_append(b, ",{\"role\":\"assistant\"");
 
-    /* Collect text content */
     jbuf_t text;
+    jbuf_t reasoning;
     jbuf_init(&text, 1024);
+    jbuf_init(&reasoning, 1024);
+    const char *reasoning_details = NULL;
     for (int j = 0; j < m->content_count; j++) {
         msg_content_t *mc = &m->content[j];
         if (mc->type && strcmp(mc->type, "text") == 0 && mc->text) {
-            if (text.len > 0) jbuf_append(&text, "\n");
+            if (text.len > 0)
+                jbuf_append(&text, "\n");
             jbuf_append(&text, mc->text);
+        } else if (mc->type && strcmp(mc->type, "thinking") == 0 && mc->text) {
+            if (reasoning.len > 0)
+                jbuf_append(&reasoning, "\n");
+            jbuf_append(&reasoning, mc->text);
+        } else if (preserve_reasoning_details && mc->type && mc->text &&
+                   strncmp(mc->type, detail_type, sizeof(detail_type) - 1) == 0) {
+            const char *issuer = mc->type + sizeof(detail_type) - 1;
+            if ((!issuer[0] || (issuer[0] == ':' && request_model &&
+                                strcmp(issuer + 1, request_model) == 0)) &&
+                !reasoning_details) {
+                reasoning_details = mc->text;
+            }
         }
     }
+
     if (text.len > 0) {
         jbuf_append(b, ",\"content\":");
         jbuf_append_json_str(b, text.data);
+    } else {
+        jbuf_append(b, ",\"content\":null");
+    }
+    const char *details = reasoning_details;
+    while (details && *details && isspace((unsigned char)*details))
+        details++;
+    if (details && *details == '[' && json_is_valid_container(details)) {
+        jbuf_append(b, ",\"reasoning_details\":");
+        jbuf_append(b, details);
+    } else if (reasoning.len > 0) {
+        jbuf_append(b, ",\"reasoning_content\":");
+        jbuf_append_json_str(b, reasoning.data);
+    } else if (msg_has_tool_use(m) && model_is_moonshot_compatible(request_model)) {
+        /* Kimi preserved-thinking replay wants reasoning_content on every
+         * assistant tool-call turn; a turn that reasoned to empty (or whose
+         * reasoning was folded into text) must still round-trip the field or
+         * the API 400s with "thinking is enabled but reasoning_content is
+         * missing". Empty string is the official client's round-trip form. */
+        jbuf_append(b, ",\"reasoning_content\":\"\"");
     }
     jbuf_free(&text);
+    jbuf_free(&reasoning);
 
-    /* Emit tool_calls array for tool_use blocks */
     if (msg_has_tool_use(m)) {
         jbuf_append(b, ",\"tool_calls\":[");
         bool first_tool = true;
         for (int j = 0; j < m->content_count; j++) {
             msg_content_t *mc = &m->content[j];
-            if (!mc->type || strcmp(mc->type, "tool_use") != 0) continue;
-            if (!first_tool) jbuf_append(b, ",");
+            if (!mc->type || strcmp(mc->type, "tool_use") != 0)
+                continue;
+            if (!first_tool)
+                jbuf_append(b, ",");
             first_tool = false;
             jbuf_append(b, "{\"id\":");
             jbuf_append_json_str(b, mc->tool_id ? mc->tool_id : "call_0");
             jbuf_append(b, ",\"type\":\"function\",\"function\":{\"name\":");
             jbuf_append_json_str(b, mc->tool_name ? mc->tool_name : "unknown");
             jbuf_append(b, ",\"arguments\":");
-            /* OpenAI/OpenRouter require arguments as a JSON *string*, not object */
             jbuf_append_json_str(b, mc->tool_input ? mc->tool_input : "{}");
             jbuf_append(b, "}}");
         }
@@ -1629,34 +2561,70 @@ static void openai_append_assistant_msg(jbuf_t *b, message_t *m) {
 }
 
 /* Emit tool_result blocks as separate {"role":"tool"} messages (OpenAI format) */
-static void openai_append_tool_results(jbuf_t *b, message_t *m) {
+static void openai_append_tool_results(jbuf_t *b, message_t *m, bool cache_mark_last) {
+    int remaining_results = 0;
+    if (cache_mark_last) {
+        for (int j = 0; j < m->content_count; j++) {
+            msg_content_t *mc = &m->content[j];
+            if (mc->type && strcmp(mc->type, "tool_result") == 0)
+                remaining_results++;
+        }
+    }
     for (int j = 0; j < m->content_count; j++) {
         msg_content_t *mc = &m->content[j];
-        if (!mc->type || strcmp(mc->type, "tool_result") != 0) continue;
+        if (!mc->type || strcmp(mc->type, "tool_result") != 0)
+            continue;
         jbuf_append(b, ",{\"role\":\"tool\",\"tool_call_id\":");
         jbuf_append_json_str(b, mc->tool_id ? mc->tool_id : "call_0");
         jbuf_append(b, ",\"content\":");
         jbuf_append_json_str(b, mc->text ? mc->text : "");
+        remaining_results--;
+        if (cache_mark_last && remaining_results == 0)
+            jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
         jbuf_append(b, "}");
     }
 }
 
 /* Emit a regular user message (text + images, no tool_results) */
-static void openai_append_user_msg(jbuf_t *b, message_t *m) {
+static void openai_append_user_msg(jbuf_t *b, message_t *m, bool cache_mark) {
     jbuf_append(b, ",{\"role\":\"user\",\"content\":");
 
-    /* Check if we have images */
-    bool has_images = false;
+    /* Check if we have multimodal input. */
+    bool has_media = false;
     for (int j = 0; j < m->content_count; j++) {
-        if (m->content[j].type && strcmp(m->content[j].type, "image") == 0) {
-            has_images = true;
+        if (m->content[j].type &&
+            (strcmp(m->content[j].type, "image") == 0 ||
+             strcmp(m->content[j].type, "video") == 0)) {
+            has_media = true;
             break;
         }
     }
 
-    if (!has_images) {
-        /* Simple string content */
-        openai_append_text_content(b, m);
+    if (!has_media) {
+        /* Claude-compatible OpenRouter routes honor Anthropic-style
+         * cache_control on content blocks.  Use an explicit block for the
+         * moving history breakpoint instead of relying only on OR's top-level
+         * automatic cache hint; this is the R4 fix for tool-continuation
+         * rereads. */
+        if (cache_mark) {
+            jbuf_t text;
+            jbuf_init(&text, 1024);
+            for (int j = 0; j < m->content_count; j++) {
+                msg_content_t *mc = &m->content[j];
+                if (mc->type && strcmp(mc->type, "text") == 0 && mc->text) {
+                    if (text.len > 0)
+                        jbuf_append(&text, "\n");
+                    jbuf_append(&text, mc->text);
+                }
+            }
+            jbuf_append(b, "[{\"type\":\"text\",\"text\":");
+            jbuf_append_json_str(b, text.len > 0 ? text.data : "");
+            jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}}]");
+            jbuf_free(&text);
+        } else {
+            /* Simple string content */
+            openai_append_text_content(b, m);
+        }
     } else {
         /* Array content with text + images */
         jbuf_append(b, "[");
@@ -1668,40 +2636,51 @@ static void openai_append_user_msg(jbuf_t *b, message_t *m) {
         for (int j = 0; j < m->content_count; j++) {
             msg_content_t *mc = &m->content[j];
             if (mc->type && strcmp(mc->type, "text") == 0 && mc->text) {
-                if (text.len > 0) jbuf_append(&text, "\n");
+                if (text.len > 0)
+                    jbuf_append(&text, "\n");
                 jbuf_append(&text, mc->text);
             }
         }
         if (text.len > 0) {
             jbuf_append(b, "{\"type\":\"text\",\"text\":");
             jbuf_append_json_str(b, text.data);
+            if (cache_mark)
+                jbuf_append(b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
             jbuf_append(b, "}");
             wrote_any = true;
         }
         jbuf_free(&text);
 
-        /* Image blocks — skip any image with neither URL nor real base64.
-         * Emitting an empty data-url breaks every provider downstream and
-         * kills the fallback chain (grok-4-fast, gemini, gpt-5.4 all reject
-         * "data:image/png;base64,"). Silently drop; the text block above
-         * already carries the user's prose and any other image blocks in
-         * this same turn will still serialize. */
+        /* Image/video blocks — skip media with neither URL nor real base64.
+         * Video is a Chat Completions extension implemented by Abliteration.ai;
+         * other providers can reject it and will then use the normal fallback. */
         for (int j = 0; j < m->content_count; j++) {
             msg_content_t *mc = &m->content[j];
-            if (!mc->type || strcmp(mc->type, "image") != 0) continue;
-            bool has_url  = (mc->image_url && mc->image_url[0]);
-            bool has_data = (mc->image_data && mc->image_data[0]);
-            if (!has_url && !has_data) continue;
-            if (wrote_any) jbuf_append(b, ",");
-            jbuf_append(b, "{\"type\":\"image_url\",\"image_url\":{\"url\":");
+            if (!mc->type || (strcmp(mc->type, "image") != 0 &&
+                              strcmp(mc->type, "video") != 0))
+                continue;
+            bool video = strcmp(mc->type, "video") == 0;
+            const char *url = video ? mc->video_url : mc->image_url;
+            const char *data = video ? mc->video_data : mc->image_data;
+            const char *media_type = video
+                                         ? (mc->video_media_type ? mc->video_media_type : "video/mp4")
+                                         : (mc->image_media_type ? mc->image_media_type : "image/png");
+            bool has_url = url && url[0];
+            bool has_data = data && data[0];
+            if (!has_url && !has_data)
+                continue;
+            if (wrote_any)
+                jbuf_append(b, ",");
+            jbuf_append(b, video
+                               ? "{\"type\":\"video_url\",\"video_url\":{\"url\":"
+                               : "{\"type\":\"image_url\",\"image_url\":{\"url\":");
             if (has_url) {
-                jbuf_append_json_str(b, mc->image_url);
+                jbuf_append_json_str(b, url);
             } else {
-                const char *media_type = mc->image_media_type ? mc->image_media_type : "image/png";
                 jbuf_append(b, "\"data:");
                 jbuf_append(b, media_type);
                 jbuf_append(b, ";base64,");
-                jbuf_append(b, mc->image_data);
+                jbuf_append(b, data);
                 jbuf_append(b, "\"");
             }
             jbuf_append(b, "}}");
@@ -1725,58 +2704,693 @@ static void openai_append_user_msg(jbuf_t *b, message_t *m) {
  * this same OpenAI-compat path (xAI, DeepSeek, Mistral, Moonshot, Gemini) would
  * ignore or reject it, so gate strictly on the model id. Override with
  * DSCO_OR_CACHE=0 to disable, or =1 to force on for any model. */
-bool provider_model_supports_cache_control(const char *model) {
-    const char *force = getenv("DSCO_OR_CACHE");
-    if (force && force[0] == '0') return false;
-    if (force && force[0] == '1') return true;
-    if (!model) return false;
-    /* Anthropic claude-* (direct or namespaced via OpenRouter) */
-    if (strstr(model, "claude") || strstr(model, "anthropic/")) return true;
-    /* Alibaba Qwen via OpenRouter — uses identical cache_control:{type:ephemeral}
-     * syntax. Supported: qwen3-max, qwen-plus, qwen3-coder-plus/flash, etc.
-     * Snapshot endpoints (qwen3.5-plus-02-15 etc) do NOT support it, but OR
-     * silently ignores cache_control on unsupported models so it's safe to send. */
-    if (strstr(model, "qwen/") || strstr(model, "qwen3") || strstr(model, "qwen-")) return true;
+static const char *provider_model_strip_explicit_openrouter_prefix(const char *model);
+
+static bool provider_model_has_any_prefix(const char *m, const char *const *prefixes) {
+    if (!m || !prefixes)
+        return false;
+    for (int i = 0; prefixes[i]; i++)
+        if (strncmp(m, prefixes[i], strlen(prefixes[i])) == 0)
+            return true;
     return false;
 }
 
-static char *openai_build_request(provider_t *p, conversation_t *conv,
-                                    session_state_t *session, int max_tokens,
-                                    const char *credential) {
+static bool provider_model_contains_any(const char *m, const char *const *needles) {
+    if (!m || !needles)
+        return false;
+    for (int i = 0; needles[i]; i++)
+        if (strstr(m, needles[i]))
+            return true;
+    return false;
+}
+
+bool provider_model_supports_cache_control(const char *model) {
+    const char *force = getenv("DSCO_OR_CACHE");
+    if (force && force[0] == '0')
+        return false;
+    if (force && force[0] == '1')
+        return true;
+    if (!model)
+        return false;
+    /* Explicit cache breakpoints: Anthropic/Claude and Qwen-compatible routes. */
+    if (strstr(model, "claude") || strstr(model, "anthropic/"))
+        return true;
+    if (strstr(model, "qwen/") || strstr(model, "qwen3") || strstr(model, "qwen-"))
+        return true;
+    return false;
+}
+
+static bool provider_model_is_gpt56(const char *model) {
+    const char *m = provider_model_strip_explicit_openrouter_prefix(model);
+    if (m && strncmp(m, "openai/", 7) == 0)
+        m += 7;
+    return m && strncmp(m, "gpt-5.6", 7) == 0;
+}
+
+bool provider_model_supports_prompt_cache_retention(const char *model) {
+    if (!model)
+        return false;
+    if (abliteration_is_model(model))
+        return true;
+    const char *m = provider_model_strip_explicit_openrouter_prefix(model);
+    static const char *const openai_prefixes[] = {
+        "gpt-", "o1", "o3", "o4", "chatgpt-", "openai/gpt-", "openai/o", NULL
+    };
+    static const char *const azure_prefixes[] = {"azure/", "azure-foundry/", "microsoft/", NULL};
+    return !provider_model_is_gpt56(m) &&
+           (provider_model_has_any_prefix(m, openai_prefixes) ||
+            provider_model_has_any_prefix(m, azure_prefixes));
+}
+
+bool provider_model_supports_prompt_cache_key(const char *model) {
+    if (!model)
+        return false;
+    if (abliteration_is_model(model))
+        return true;
+    const char *m = provider_model_strip_explicit_openrouter_prefix(model);
+    static const char *const key_prefixes[] = {
+        "gpt-", "o1", "o3", "o4", "chatgpt-", "openai/gpt-", "openai/o",
+        "azure/", "azure-foundry/", "microsoft/",
+        "mistral", "mistralai/", "codestral", "ministral",
+        "grok", "xai/", "x-ai/",
+        "cerebras/", NULL
+    };
+    return provider_model_has_any_prefix(m, key_prefixes);
+}
+
+int provider_count_tokens(const char *provider_name, const char *api_key,
+                          const char *request_json) {
+    if (abliteration_is_provider(provider_name))
+        return abliteration_count_tokens(api_key, request_json);
+    return -1;
+}
+
+bool provider_model_supports_automatic_prompt_cache(const char *model) {
+    if (!model)
+        return false;
+    if (abliteration_is_model(model))
+        return true;
+    const char *m = provider_model_strip_explicit_openrouter_prefix(model);
+    static const char *const prefixes[] = {
+        "gpt-4o", "gpt-4.1", "gpt-5", "o1", "o3", "o4", "chatgpt-",
+        "openai/gpt-4o", "openai/gpt-4.1", "openai/gpt-5", "openai/o",
+        "azure/", "azure-foundry/", "microsoft/",
+        "mistral", "mistralai/", "codestral", "ministral",
+        "deepseek", "deepseek/",
+        "grok", "xai/", "x-ai/",
+        "openai/gpt-oss-", "gpt-oss-",
+        "cerebras/", "llama-", NULL
+    };
+    static const char *const contains[] = {"gpt-oss", NULL};
+    return provider_model_has_any_prefix(m, prefixes) || provider_model_contains_any(m, contains);
+}
+
+
+static const char *openai_extra_params_json_for_provider(const char *provider_name) {
+    const char *raw = abliteration_is_provider(provider_name) ? abliteration_params_json() : NULL;
+    if (raw)
+        return raw;
+    raw = getenv("DSCO_OPENAI_PARAMS");
+    if (!raw || !raw[0])
+        raw = getenv("OPENAI_PARAMS");
+    if (!raw || !raw[0])
+        return NULL;
+    while (*raw && isspace((unsigned char)*raw))
+        raw++;
+    return *raw == '{' ? raw : NULL;
+}
+
+static bool openai_extra_has_param(const char *extra, const char *key) {
+    if (!extra || !key)
+        return false;
+    char *raw = json_get_raw(extra, key);
+    if (!raw)
+        return false;
+    free(raw);
+    return true;
+}
+
+static bool openai_parallel_tool_calls_enabled_for_provider(const char *provider_name) {
+    const char *env = getenv("DSCO_PARALLEL_TOOL_CALLS");
+    if (env && env[0])
+        return !provider_env_falsey(env);
+
+    const char *canonical =
+        provider_name && provider_name[0] ? provider_profile_canonical_name(provider_name) : NULL;
+    if (canonical && provider_is_local_endpoint(canonical))
+        return false;
+    return true;
+}
+
+/* Fabric sweep 2026-07-12: o-series reasoning models (o1/o3/o4, incl -mini/
+ * -pro) reject `parallel_tool_calls` with HTTP 400. Gate by model too. */
+static bool openai_model_rejects_parallel_tool_calls(const char *model) {
+    if (!model)
+        return false;
+    const char *m = provider_model_strip_explicit_openrouter_prefix(model);
+    if (m && strncmp(m, "openai/", 7) == 0)
+        m += 7;
+    static const char *const o_series[] = {"o1", "o3", "o4", NULL};
+    return provider_model_has_any_prefix(m, o_series);
+}
+
+static bool openai_should_append_parallel_tool_calls(const char *provider_name,
+                                                     const char *extra) {
+    if (extra && openai_extra_has_param(extra, "parallel_tool_calls"))
+        return false;
+    return openai_parallel_tool_calls_enabled_for_provider(provider_name);
+}
+
+/* Providers whose OpenAI-compatible endpoints reject OpenAI prompt-cache
+ * params outright (observed via fabric sweeps 2026-07-12: groq 400s on
+ * prompt_cache_key/cache_control; cerebras 400s on prompt_cache_retention).
+ * Model-prefix gates are insufficient because the same model id (e.g.
+ * openai/gpt-oss-120b) is served by multiple providers with different wire
+ * dialects — the provider is the source of truth for the wire, not the model. */
+static bool provider_wire_allows_openai_cache_params(const char *provider_name) {
+    if (!provider_name || !provider_name[0])
+        return true;
+    const char *canonical = provider_profile_canonical_name(provider_name);
+    static const char *const deny[] = {"groq", "cerebras", "together", NULL};
+    for (int i = 0; deny[i]; i++)
+        if (strcmp(canonical, deny[i]) == 0)
+            return false;
+    return true;
+}
+
+static void openai_append_raw_param(jbuf_t *b, const char *key, const char *raw) {
+    if (!b || !key || !raw)
+        return;
+    const char *v = raw;
+    while (*v && isspace((unsigned char)*v))
+        v++;
+    if (!*v)
+        return;
+    jbuf_append(b, ",\"");
+    jbuf_append(b, key);
+    jbuf_append(b, "\":");
+    jbuf_append(b, v);
+}
+
+static void openai_append_extra_param_if_present(jbuf_t *b, const char *extra, const char *key) {
+    char *raw = json_get_raw(extra, key);
+    if (!raw)
+        return;
+    openai_append_raw_param(b, key, raw);
+    free(raw);
+}
+
+static const char *openai_family_request_model(const char *provider_name,
+                                               const char *request_model) {
+    const char *canonical =
+        provider_name && provider_name[0] ? provider_profile_canonical_name(provider_name) : NULL;
+    const char *m = request_model ? request_model : "";
+    if (!canonical)
+        return NULL;
+
+    if (strcmp(canonical, "openai") == 0) {
+        return strncmp(m, "openai/", 7) == 0 ? m + 7 : m;
+    }
+    if (strcmp(canonical, "openrouter") == 0 && strncmp(m, "openai/", 7) == 0) {
+        return m + 7;
+    }
+    return NULL;
+}
+
+static bool openai_model_uses_max_completion_tokens(const char *provider_name,
+                                                    const char *request_model) {
+    const char *m = openai_family_request_model(provider_name, request_model);
+    if (!m)
+        return false;
+    return strncmp(m, "gpt-5", 5) == 0 || strncmp(m, "o1", 2) == 0 ||
+           strncmp(m, "o3", 2) == 0 || strncmp(m, "o4", 2) == 0;
+}
+
+static bool openai_model_is_gpt56(const char *provider_name, const char *request_model) {
+    const char *m = openai_family_request_model(provider_name, request_model);
+    return m && strncmp(m, "gpt-5.6", 7) == 0;
+}
+
+
+static void provider_append_structured_output_prompt(jbuf_t *sys, session_state_t *session) {
+    if (!sys || !session || !session->structured_output)
+        return;
+    jbuf_append(sys, "\n\n[Structured Output Contract]\n");
+    jbuf_append(sys, "For the final assistant answer, emit exactly one valid JSON object and no markdown, prose, code fences, comments, or trailing text. Preserve numeric/boolean/null types exactly. ");
+    if (session->structured_output_schema[0]) {
+        jbuf_append(sys, "The JSON must conform to this schema: ");
+        jbuf_append(sys, session->structured_output_schema);
+    } else {
+        jbuf_append(sys, "Use a stable object shape with explicit keys appropriate to the task.");
+    }
+}
+
+static void openai_append_structured_output_param(jbuf_t *b, session_state_t *session,
+                                                  const char *extra) {
+    if (!b || !session || !session->structured_output)
+        return;
+    if (extra && openai_extra_has_param(extra, "response_format"))
+        return;
+
+    jbuf_append(b, ",\"response_format\":");
+    if (session->structured_output_schema[0] &&
+        json_is_valid_container(session->structured_output_schema)) {
+        const char *name = session->structured_output_name[0]
+                               ? session->structured_output_name
+                               : "dsco_structured_output";
+        jbuf_append(b, "{\"type\":\"json_schema\",\"json_schema\":{");
+        jbuf_append(b, "\"name\":");
+        jbuf_append_json_str(b, name);
+        jbuf_append(b, ",\"strict\":");
+        jbuf_append(b, session->structured_output_strict ? "true" : "false");
+        jbuf_append(b, ",\"schema\":");
+        jbuf_append(b, session->structured_output_schema);
+        jbuf_append(b, "}}");
+    } else {
+        jbuf_append(b, "{\"type\":\"json_object\"}");
+    }
+}
+
+static void openai_append_extra_request_params(jbuf_t *b, const char *extra,
+                                               bool suppress_reasoning_params,
+                                               const char *provider_name) {
+    if (!extra)
+        return;
+    /* Chat Completions request-policy and output-shaping fields. Core transport
+     * fields (model/messages/stream/tools/tool_choice/token limit) remain owned
+     * by dsco; explicitly supplied cache/safety fields are forwarded verbatim. */
+    static const char *const keys[] = {
+        "audio",
+        "frequency_penalty",
+        "flagged_categories",
+        "function_call",
+        "functions",
+        "logit_bias",
+        "logprobs",
+        "metadata",
+        "modalities",
+        "moderation",
+        "n",
+        "parallel_tool_calls",
+        "prediction",
+        "presence_penalty",
+        "prompt_cache_key",
+        "prompt_cache_options",
+        "prompt_cache_retention",
+        "cache_salt",
+        "include_reasoning",
+        "policy",
+        "policy_id",
+        "policy_project_id",
+        "policy_target",
+        "policy_user",
+        "policy_user_id",
+        "reasoning",
+        "reasoning_effort",
+        "response_format",
+        "safety_identifier",
+        "seed",
+        "skip_special_tokens",
+        "service_tier",
+        "stop",
+        "store",
+        "stream_options",
+        "temperature",
+        "top_logprobs",
+        "top_p",
+        "user",
+        "verbosity",
+        "web_search_options",
+        NULL,
+    };
+    for (int i = 0; keys[i]; i++) {
+        if (abliteration_is_provider(provider_name) &&
+            !abliteration_chat_param_supported(keys[i]))
+            continue;
+        if (suppress_reasoning_params &&
+            (strcmp(keys[i], "reasoning") == 0 || strcmp(keys[i], "reasoning_effort") == 0)) {
+            continue;
+        }
+        openai_append_extra_param_if_present(b, extra, keys[i]);
+    }
+}
+
+static bool provider_strip_slash_namespace(const char *model, const char *ns,
+                                           const char **stripped) {
+    if (!model || !ns || !ns[0])
+        return false;
+    size_t n = strlen(ns);
+    if (strncmp(model, ns, n) == 0 && model[n] == '/' && model[n + 1] != '\0') {
+        if (stripped)
+            *stripped = model + n + 1;
+        return true;
+    }
+    return false;
+}
+
+static const char *provider_strip_profile_namespace(const char *provider_name,
+                                                    const char *model) {
+    const char *canonical =
+        provider_name && provider_name[0] ? provider_profile_canonical_name(provider_name) : NULL;
+    if (!canonical || !canonical[0])
+        return model;
+
+    const char *stripped = NULL;
+    if (provider_strip_slash_namespace(model, canonical, &stripped))
+        return stripped;
+
+    const provider_profile_t *profile = provider_profile_find(canonical);
+    if (!profile)
+        return model;
+    for (int i = 0; i < PROVIDER_PROFILE_MAX_ALIASES && profile->aliases[i]; i++) {
+        if (provider_strip_slash_namespace(model, profile->aliases[i], &stripped))
+            return stripped;
+    }
+    return model;
+}
+
+static bool openai_conversation_has_media(const conversation_t *conv) {
+    if (!conv)
+        return false;
+    for (int i = 0; i < conv->count; i++) {
+        for (int j = 0; j < conv->msgs[i].content_count; j++) {
+            const char *type = conv->msgs[i].content[j].type;
+            if (type && (strcmp(type, "image") == 0 || strcmp(type, "video") == 0))
+                return true;
+        }
+    }
+    return false;
+}
+
+static const char *provider_request_model_id(const char *provider_name, const char *model) {
+    if (!model || !model[0] || strcmp(model, "\"\"") == 0 || strcmp(model, "''") == 0)
+        return DEFAULT_MODEL;
+    const char *canonical =
+        provider_name && provider_name[0] ? provider_profile_canonical_name(provider_name) : NULL;
+    if (canonical && strcmp(canonical, "openrouter") == 0)
+        return provider_model_strip_explicit_openrouter_prefix(model);
+    if (canonical && strcmp(canonical, "dsco-router") == 0) {
+        /* dsco-router/... is a real Router catalog namespace (notably
+         * dsco-router/chimera:latest), so preserve it on the wire. The short
+         * router/... and colon forms are client-side routing selectors. */
+        if (strncmp(model, "router/", 7) == 0 || strncmp(model, "router:", 7) == 0)
+            return model + 7;
+        if (strncmp(model, "dsco-router:", 12) == 0)
+            return model + 12;
+        return model;
+    }
+    if (canonical &&
+        (strcmp(canonical, "openai") == 0 || strcmp(canonical, "openai-codex") == 0) &&
+        strncmp(model, "openai/", 7) == 0) {
+        return model + 7;
+    }
+    if (canonical && canonical[0]) {
+        if (strcmp(canonical, "anthropic") == 0 && strncmp(model, "anthropic/", 10) == 0)
+            return model + 10;
+        if (strcmp(canonical, "xai") == 0 && strncmp(model, "x-ai/", 5) == 0)
+            return model + 5;
+        if (strcmp(canonical, "google") == 0 && strncmp(model, "google/", 7) == 0)
+            return model + 7;
+        if (strcmp(canonical, "deepseek") == 0 && strncmp(model, "deepseek/", 9) == 0)
+            return model + 9;
+        if (strcmp(canonical, "qwen-oauth") == 0 && strncmp(model, "qwen/", 5) == 0)
+            return model + 5;
+        if (strcmp(canonical, "mistral") == 0 && strncmp(model, "mistralai/", 10) == 0)
+            return model + 10;
+        /* session_state_init resolves the public kimi-k3 alias to Kimi Code.
+         * An explicitly selected Moonshot endpoint requires its native ID. */
+        if (strcmp(canonical, "moonshot") == 0 && strcmp(model, KIMI_CODE_DEFAULT_MODEL) == 0)
+            return "kimi-k3";
+        if (strcmp(canonical, "moonshot") == 0 && strncmp(model, "moonshotai/", 11) == 0)
+            return model + 11;
+        if (strcmp(canonical, "kimi-code") == 0 && strncmp(model, "kimi-code/", 10) == 0)
+            return model + 10;
+        if (strcmp(canonical, "sakana") == 0 && strncmp(model, "sakana/", 7) == 0)
+            return model + 7;
+        if (strcmp(canonical, "cohere") == 0 && strncmp(model, "cohere/", 7) == 0)
+            return model + 7;
+        if (strcmp(canonical, "perplexity") == 0 && strncmp(model, "perplexity/", 11) == 0)
+            return model + 11;
+        if (strcmp(canonical, "zai") == 0 && strncmp(model, "z-ai/", 5) == 0)
+            return model + 5;
+        if (strcmp(canonical, "modal") == 0 && strncmp(model, "modal/", 6) == 0)
+            return model + 6;
+        if (strcmp(canonical, "minimax") == 0 && strncmp(model, "minimax/", 8) == 0)
+            return model + 8;
+        if (strcmp(canonical, "bedrock") == 0 && strncmp(model, "amazon/", 7) == 0)
+            return model + 7;
+        if (strcmp(canonical, "azure-foundry") == 0) {
+            const char *stripped = NULL;
+            if (provider_strip_slash_namespace(model, "microsoft", &stripped))
+                return stripped;
+        }
+        const char *profile_model = provider_strip_profile_namespace(canonical, model);
+        if (profile_model != model)
+            return profile_model;
+    }
+    /* Strip a leading "<provider>:" prefix (e.g. "vllm:Qwen2.5" -> "Qwen2.5",
+     * "ollama:llama3.3:latest" -> "llama3.3:latest") so self-hosted backends
+     * receive the bare served model name. Only the provider's own prefix is
+     * stripped; colons inside the model id are preserved. */
+    if (canonical && canonical[0]) {
+        size_t pn = strlen(canonical);
+        if (strncmp(model, canonical, pn) == 0 && model[pn] == ':')
+            return model + pn + 1;
+        const provider_profile_t *profile = provider_profile_find(canonical);
+        if (profile) {
+            for (int i = 0; i < PROVIDER_PROFILE_MAX_ALIASES && profile->aliases[i]; i++) {
+                size_t an = strlen(profile->aliases[i]);
+                if (strncmp(model, profile->aliases[i], an) == 0 && model[an] == ':')
+                    return model + an + 1;
+            }
+        }
+    }
+    return model;
+}
+
+static char *openai_build_request(provider_t *p, conversation_t *conv, session_state_t *session,
+                                  int max_tokens, const char *credential) {
     openai_data_t *od = (openai_data_t *)p->data;
     (void)od;
     (void)credential;
 
     jbuf_t b;
     jbuf_init(&b, 8192);
+    const char *provider_name = p && p->name ? provider_profile_canonical_name(p->name) : NULL;
+    const char *extra_params = openai_extra_params_json_for_provider(provider_name);
+    bool modal_endpoint = provider_name && strcmp(provider_name, "modal") == 0;
+    bool sakana_endpoint = provider_is_sakana(p);
 
     jbuf_append(&b, "{\"model\":");
-    jbuf_append_json_str(&b, session ? session->model : DEFAULT_MODEL);
-    jbuf_append(&b, ",\"max_tokens\":");
-    jbuf_append_int(&b, max_tokens);
+    const char *request_model =
+        provider_request_model_id(p ? p->name : NULL, session ? session->model : DEFAULT_MODEL);
+    if (abliteration_is_provider(provider_name) && openai_conversation_has_media(conv) &&
+        !abliteration_model_supports_vision(request_model)) {
+        /* Large V1/V2 are text-only. Route multimodal turns to the provider's
+         * base model instead of paying for a guaranteed HTTP 400. */
+        request_model = "abliterated-model";
+    }
+    jbuf_append_json_str(&b, request_model);
+    bool direct_openai = provider_name && strcmp(provider_name, "openai") == 0;
+    bool abliteration_endpoint = abliteration_is_provider(provider_name);
+    bool direct_openai_gpt56 = direct_openai && openai_model_is_gpt56(provider_name, request_model);
+    bool openrouter_gpt56 = provider_name && strcmp(provider_name, "openrouter") == 0 &&
+                            openai_model_is_gpt56(provider_name, request_model);
+    /* Select once: the prompt describes the same wire inventory we send. */
+    jbuf_t tool_payload;
+    jbuf_init(&tool_payload, 4096);
+    bool has_tools = (abliteration_endpoint && session && session->web_search)
+                         ? false
+                         : openai_append_tools_json(&tool_payload, conv, session, provider_name);
+    if (!has_tools && session && !strncmp(session->tool_choice, "tool:", 5)) {
+        fprintf(stderr, "error: forced tool is unavailable under the active tool profile/allowlist\n");
+        jbuf_free(&tool_payload); jbuf_free(&b);
+        return NULL;
+    }
+    /* Kimi wire dialect. Gate by endpoint as well as model substring so the
+     * kimi-code provider's bare "k3" default model is shaped correctly. */
+    const char *shaping_model = session && session->model[0] ? session->model : request_model;
+    bool kimi_endpoint = provider_name && (strcmp(provider_name, "moonshot") == 0 ||
+                                           strcmp(provider_name, "kimi-code") == 0);
+    bool moonshot_fixed_sampling = kimi_endpoint || model_is_moonshot_compatible(shaping_model);
+    /* Moonshot's current param is max_completion_tokens (max_tokens is a
+     * deprecated alias). */
+    bool max_completion_tokens =
+        sakana_endpoint || kimi_endpoint ||
+        openai_model_uses_max_completion_tokens(provider_name, request_model);
+    if (extra_params && openai_extra_has_param(extra_params, "max_completion_tokens")) {
+        openai_append_extra_param_if_present(&b, extra_params, "max_completion_tokens");
+    } else if (extra_params && openai_extra_has_param(extra_params, "max_tokens")) {
+        if (max_completion_tokens) {
+            char *raw = json_get_raw(extra_params, "max_tokens");
+            if (raw) {
+                openai_append_raw_param(&b, "max_completion_tokens", raw);
+                free(raw);
+            }
+        } else {
+            openai_append_extra_param_if_present(&b, extra_params, "max_tokens");
+        }
+    } else {
+        if (max_completion_tokens)
+            jbuf_append(&b, ",\"max_completion_tokens\":");
+        else
+            jbuf_append(&b, ",\"max_tokens\":");
+        jbuf_append_int(&b, max_tokens);
+    }
     jbuf_append(&b, ",\"stream\":true");
+    /* The official Kimi CLI tucks usage into choices[0].usage. Abliteration
+     * reports automatic prompt-cache hits in final usage details, so request
+     * the final usage frame there too. */
+    if ((kimi_endpoint || abliteration_endpoint) &&
+        !(extra_params && openai_extra_has_param(extra_params, "stream_options")))
+        jbuf_append(&b, ",\"stream_options\":{\"include_usage\":true}");
+    if (direct_openai && !(extra_params && openai_extra_has_param(extra_params, "store")))
+        jbuf_append(&b, ",\"store\":false");
+
+    /* Kimi's prefix cache accepts a routing hint too; the official CLI sends
+     * the session id. Reuse dsco's session cache key. */
+    if (((!openrouter_gpt56 && provider_wire_allows_openai_cache_params(provider_name) &&
+          provider_model_supports_prompt_cache_key(session ? session->model : request_model)) ||
+         kimi_endpoint) &&
+        !(extra_params && openai_extra_has_param(extra_params, "prompt_cache_key"))) {
+        const char *cache_key = (session && session->prompt_cache_key[0]) ? session->prompt_cache_key
+                              : getenv("DSCO_PROMPT_CACHE_KEY");
+        if (!cache_key || !cache_key[0])
+            cache_key = "dsco-default";
+        jbuf_append(&b, ",\"prompt_cache_key\":");
+        jbuf_append_json_str(&b, cache_key);
+    }
+    if (provider_wire_allows_openai_cache_params(provider_name) &&
+        !(extra_params &&
+          (openai_extra_has_param(extra_params, "prompt_cache_options") ||
+           openai_extra_has_param(extra_params, "prompt_cache_retention")))) {
+        const char *retention = NULL;
+        if (abliteration_endpoint)
+            retention = getenv("DSCO_ABLITERATION_CACHE_RETENTION");
+        if (!retention || !retention[0])
+            retention = (session && session->prompt_cache_retention[0])
+                            ? session->prompt_cache_retention
+                            : getenv("DSCO_PROMPT_CACHE_RETENTION");
+        if (!retention || !retention[0])
+            retention = "24h";
+        if (abliteration_endpoint && strcmp(retention, "in_memory") != 0 &&
+            strcmp(retention, "24h") != 0)
+            retention = "24h";
+        if (direct_openai_gpt56) {
+            /* GPT-5.6 accepts only a 30-minute minimum TTL.  Older DSCO
+             * defaults used 24h, which the API rejects and therefore silently
+             * prevented request delivery/caching for this family. */
+            if (strcmp(retention, "30m") != 0)
+                retention = "30m";
+            jbuf_append(&b, ",\"prompt_cache_options\":{\"mode\":\"explicit\",\"ttl\":");
+            jbuf_append_json_str(&b, retention);
+            jbuf_append(&b, "}");
+        } else if (provider_model_supports_prompt_cache_retention(
+                       session ? session->model : request_model)) {
+            jbuf_append(&b, ",\"prompt_cache_retention\":");
+            jbuf_append_json_str(&b, retention);
+        }
+    }
+
+    /* Kimi/Moonshot request shaping, per the official model parameter
+     * reference (platform.kimi.ai/docs/api/models-overview) and the K2.7
+     * Code / K3 quickstarts:
+     *   - Sampling on Kimi thinking models is fixed server-side
+     *     (temperature=1.0, top_p=0.95, n=1, penalties=0.0); the docs direct
+     *     clients to omit the fields entirely — any non-fixed value is a 400.
+     *   - kimi-k2.7-code requires thinking and accepts only
+     *     {"type":"enabled","keep":"all"}.
+     *   - K3 has no thinking field at all; reasoning is always on and tuned
+     *     via top-level reasoning_effort: low, high, or max. Keep it
+     *     constant per session so prefix-cache hits are not invalidated. */
+    if (moonshot_fixed_sampling) {
+        if (model_is_kimi_k3(shaping_model)) {
+            const char *effort = session ? session->effort : NULL;
+            if (!effort || (strcmp(effort, "low") != 0 &&
+                            strcmp(effort, "high") != 0 && strcmp(effort, "max") != 0))
+                effort = "max";
+            jbuf_append(&b, ",\"reasoning_effort\":");
+            jbuf_append_json_str(&b, effort);
+        } else if (model_is_kimi_k27_code(shaping_model)) {
+            jbuf_append(&b, ",\"thinking\":{\"type\":\"enabled\",\"keep\":\"all\"}");
+        } else {
+            jbuf_append(&b, ",\"thinking\":{\"type\":\"enabled\"}");
+        }
+    } else {
+        if (session && session->temperature >= 0 &&
+            !(extra_params && openai_extra_has_param(extra_params, "temperature"))) {
+            jbuf_appendf(&b, ",\"temperature\":%.6g", session->temperature);
+        }
+        if (session && session->top_p >= 0 &&
+            !(extra_params && openai_extra_has_param(extra_params, "top_p"))) {
+            jbuf_appendf(&b, ",\"top_p\":%.6g", session->top_p);
+        }
+    }
+    if (abliteration_endpoint && session && session->web_search &&
+        !(extra_params && openai_extra_has_param(extra_params, "web_search_options"))) {
+        const char *size = getenv("DSCO_ABLITERATION_WEB_SEARCH_CONTEXT");
+        if (!size || (strcmp(size, "low") != 0 && strcmp(size, "medium") != 0 &&
+                      strcmp(size, "high") != 0))
+            size = "medium";
+        jbuf_append(&b, ",\"web_search_options\":{\"search_context_size\":");
+        jbuf_append_json_str(&b, size);
+        const char *location = getenv("DSCO_ABLITERATION_WEB_SEARCH_LOCATION");
+        if (location && location[0]) {
+            jbuf_append(&b, ",\"user_location\":");
+            jbuf_append_json_str(&b, location);
+        }
+        jbuf_append(&b, "}");
+    }
+    openai_append_structured_output_param(&b, session, extra_params);
 
     /* System message. Build the text once, then emit either as a plain string
      * (default) or as a single-block array carrying a cache_control breakpoint
      * (Claude via OpenRouter) so the static tools+system prefix gets cached. */
-    bool cache_ctrl = provider_model_supports_cache_control(session ? session->model
-                                                                    : NULL);
-    const char *custom = llm_get_custom_system_prompt();
+    bool cache_ctrl = provider_wire_allows_openai_cache_params(provider_name) &&
+                      provider_model_supports_cache_control(session ? session->model : NULL);
+    /* GPT-5.6 requires an explicit content-block breakpoint when the request
+     * uses explicit cache mode.  Keep this separate from Anthropic's
+     * cache_control shape: the two APIs use different marker names. */
+    bool openai_gpt56_cache = direct_openai_gpt56;
+    const char *custom = llm_get_custom_system_prompt_for_session(session);
     jbuf_t sys;
     jbuf_init(&sys, 4096);
     if (custom) {
         jbuf_append(&sys, custom);
         jbuf_append(&sys, "\n\n");
     }
-    jbuf_append(&sys, SYSTEM_PROMPT);
+    const char *base_system = openai_tools_disabled()
+        ? "You are dsco, a concise local CLI assistant. Answer the user's request directly. "
+          "Do not mention tools unless the user asks about them."
+        : ((g_cheap_mode || (session && session->direct_answer_mode))
+               ? SYSTEM_PROMPT_CHEAP
+               : SYSTEM_PROMPT);
+    jbuf_append(&sys, base_system);
+    if (session && session->direct_answer_mode)
+        jbuf_append(&sys, "\n\n[Direct Answer Mode] Answer now without tools, context gathering, "
+                          "loops, or self-exit; then stop.");
+    provider_append_goal_prompt(&sys, session);
+    if (session && session->runtime_directives[0]) {
+        jbuf_append(&sys,
+                    "\n\n[Session Runtime Directives — lower priority than platform, developer, "
+                    "and workspace instructions]\n");
+        jbuf_append(&sys, session->runtime_directives);
+    }
+    provider_append_structured_output_prompt(&sys, session);
+    if (has_tools && (!session || strcmp(session->tool_choice, "none") != 0))
+        tool_grounding_append(&sys, tool_payload.data);
 
     jbuf_append(&b, ",\"messages\":[{\"role\":\"system\",\"content\":");
-    if (cache_ctrl) {
+    if (cache_ctrl || openai_gpt56_cache) {
         jbuf_append(&b, "[{\"type\":\"text\",\"text\":");
-        jbuf_append_json_str(&b, sys.data ? sys.data : SYSTEM_PROMPT);
-        jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}}]");
+        jbuf_append_json_str(&b, sys.data ? sys.data : base_system);
+        if (openai_gpt56_cache)
+            jbuf_append(&b, ",\"prompt_cache_breakpoint\":{\"mode\":\"explicit\"}");
+        else
+            jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
+        jbuf_append(&b, "}]");
     } else {
-        jbuf_append_json_str(&b, sys.data ? sys.data : SYSTEM_PROMPT);
+        jbuf_append_json_str(&b, sys.data ? sys.data : base_system);
     }
     jbuf_free(&sys);
     jbuf_append(&b, "}");
@@ -1787,15 +3401,27 @@ static char *openai_build_request(provider_t *p, conversation_t *conv,
      *                             followed by any remaining user text as {"role":"user",...}
      *   - plain user/assistant  → {"role":"user/assistant","content":"..."}
      */
+    int last_cache_history_index = -1;
+    if (cache_ctrl) {
+        for (int i = 0; i < conv->count; i++) {
+            if (openai_msg_cacheable_history_tail(&conv->msgs[i]))
+                last_cache_history_index = i;
+        }
+    }
+
     for (int i = 0; i < conv->count; i++) {
         message_t *m = &conv->msgs[i];
 
         if (m->role == ROLE_ASSISTANT) {
-            openai_append_assistant_msg(&b, m);
+            openai_append_assistant_msg(&b, m,
+                                        provider_name && strcmp(provider_name, "openrouter") == 0,
+                                        request_model);
         } else {
             /* User message: emit tool_results first, then remaining user content */
             if (msg_has_tool_result(m)) {
-                openai_append_tool_results(&b, m);
+                bool mark_tool_tail = cache_ctrl && i == last_cache_history_index &&
+                                      !openai_msg_has_text_content(m);
+                openai_append_tool_results(&b, m, mark_tool_tail);
                 /* If there's also text content beyond tool results, emit a user msg */
                 bool has_text = false;
                 for (int j = 0; j < m->content_count; j++) {
@@ -1806,24 +3432,77 @@ static char *openai_build_request(provider_t *p, conversation_t *conv,
                     }
                 }
                 if (has_text) {
-                    openai_append_user_msg(&b, m);
+                    openai_append_user_msg(&b, m,
+                                           cache_ctrl && i == last_cache_history_index);
                 }
             } else {
-                openai_append_user_msg(&b, m);
+                openai_append_user_msg(&b, m, cache_ctrl && i == last_cache_history_index);
             }
         }
     }
     jbuf_append(&b, "]");
 
-    bool has_tools = openai_append_tools_json(&b, conv, session);
-    openai_append_tool_choice_json(&b, session, has_tools);
+    /* Abliteration Chat Completions documents web_search_options and function
+     * tools as mutually exclusive. Prefer the explicitly enabled server-side
+     * search lane for this request rather than sending an invalid combination. */
+    jbuf_append(&b, tool_payload.data);
+    jbuf_free(&tool_payload);
+    openai_append_tool_choice_json(&b, session, has_tools,
+                                   !moonshot_fixed_sampling || model_is_kimi_k3(shaping_model));
+    /* parallel_tool_calls is not a documented Kimi parameter; parallel calls
+     * arrive as multiple tool_calls entries regardless. Omit it there. */
+    if (has_tools && !kimi_endpoint &&
+        openai_should_append_parallel_tool_calls(provider_name, extra_params) &&
+        !openai_model_rejects_parallel_tool_calls(session ? session->model : request_model))
+        jbuf_append(&b, ",\"parallel_tool_calls\":true");
+    if (!moonshot_fixed_sampling) {
+        /* GPT-5.6 rejects function tools plus active reasoning on Chat Completions.
+         * Force the only compatible value, including when an explicit extra param
+         * or an empty session effort would otherwise bypass normalization. */
+        bool gpt56_tools_chat = direct_openai_gpt56 && has_tools;
+        bool suppress_reasoning_params = sakana_endpoint || gpt56_tools_chat;
+        if (gpt56_tools_chat) {
+            jbuf_append(&b, ",\"reasoning_effort\":\"none\"");
+        } else if (!modal_endpoint && !sakana_endpoint && session && session->effort[0] &&
+                   !(extra_params && (openai_extra_has_param(extra_params, "reasoning_effort") ||
+                                      openai_extra_has_param(extra_params, "reasoning")))) {
+            char effort_buf[32];
+            const char *effort = dcr_reasoning_effort_normalize(
+                p ? p->name : NULL, session->model, session->effort, effort_buf,
+                sizeof(effort_buf));
+            if (effort && effort[0]) {
+                if (direct_openai_gpt56) {
+                    if (strcmp(effort, "minimal") == 0)
+                        effort = "low";
+                    else if (strcmp(effort, "xhigh") == 0 || strcmp(effort, "max") == 0)
+                        effort = "high";
+                }
+                if (abliteration_endpoint) {
+                    effort = abliteration_normalize_chat_effort(
+                        request_model, session->effort, effort_buf, sizeof(effort_buf));
+                }
+                if (effort && effort[0]) {
+                    if (provider_name && strcmp(provider_name, "openrouter") == 0) {
+                        jbuf_append(&b, ",\"reasoning\":{\"effort\":");
+                        jbuf_append_json_str(&b, effort);
+                        jbuf_append(&b, "}");
+                    } else {
+                        jbuf_append(&b, ",\"reasoning_effort\":");
+                        jbuf_append_json_str(&b, effort);
+                    }
+                }
+            }
+        }
+        openai_append_extra_request_params(&b, extra_params, suppress_reasoning_params,
+                                           provider_name);
+    }
 
     /* Top-level automatic cache_control for Anthropic/Qwen via OpenRouter.
      * In "automatic" mode OR/Anthropic caches everything up to the last
      * cacheable block, advancing the breakpoint each turn — covers growing
      * conversation history without per-block markers. OR routes only to
      * Anthropic direct when this field is present (Bedrock/Vertex excluded). */
-    if (provider_model_supports_cache_control(session ? session->model : NULL))
+    if (cache_ctrl)
         jbuf_append(&b, ",\"cache_control\":{\"type\":\"ephemeral\"}");
 
     jbuf_append(&b, "}");
@@ -1831,56 +3510,123 @@ static char *openai_build_request(provider_t *p, conversation_t *conv,
 }
 
 static struct curl_slist *openai_build_headers(provider_t *p, const char *api_key) {
-    (void)p;
     struct curl_slist *hdrs = NULL;
     hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
-    char auth[512];
-    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key);
-    hdrs = curl_slist_append(hdrs, auth);
+    const char *canonical = p && p->name ? provider_profile_canonical_name(p->name) : NULL;
+    /* Local OpenAI-compatible servers (Ollama, LM Studio, MLX, vLLM, etc.)
+     * are keyless by default.  Avoid sending DSCO's synthetic "local" token:
+     * some local gateways tolerate it, but Ollama's OpenAI shim does not need
+     * auth and custom proxies may reject unexpected Authorization headers. */
+    if (canonical && strcmp(canonical, "modal") == 0) {
+        const char *modal_key = api_key;
+        if (!modal_key || !modal_key[0] || strcmp(modal_key, "local") == 0)
+            modal_key = provider_getenv_nonempty("MODAL_PROXY_TOKEN_ID");
+        if (!modal_key || !modal_key[0])
+            modal_key = provider_getenv_nonempty("MODAL_KEY");
+        const char *modal_secret = provider_getenv_nonempty("MODAL_PROXY_TOKEN_SECRET");
+        if (!modal_secret || !modal_secret[0])
+            modal_secret = provider_getenv_nonempty("MODAL_SECRET");
+        if (modal_key && modal_key[0]) {
+            char hdr[512];
+            snprintf(hdr, sizeof(hdr), "Modal-Key: %s", modal_key);
+            hdrs = curl_slist_append(hdrs, hdr);
+        }
+        if (modal_secret && modal_secret[0]) {
+            char hdr[512];
+            snprintf(hdr, sizeof(hdr), "Modal-Secret: %s", modal_secret);
+            hdrs = curl_slist_append(hdrs, hdr);
+        }
+    } else if (!provider_is_local_endpoint(canonical) ||
+               (api_key && api_key[0] && strcmp(api_key, "local") != 0)) {
+        /* OAuth access tokens (notably Kimi Code) can exceed 512 bytes. */
+        char auth[9216];
+        snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key ? api_key : "");
+        hdrs = curl_slist_append(hdrs, auth);
+    }
+    if (abliteration_is_provider(canonical))
+        hdrs = abliteration_append_policy_headers(hdrs);
+    if (canonical && strcmp(canonical, "xai") == 0) {
+        const char *cache_key = getenv("DSCO_PROMPT_CACHE_KEY");
+        if (!cache_key || !cache_key[0])
+            cache_key = "dsco-default";
+        char hdr[256];
+        snprintf(hdr, sizeof(hdr), "x-grok-conv-id: %s", cache_key);
+        hdrs = curl_slist_append(hdrs, hdr);
+    }
+    if (canonical && strcmp(canonical, "kimi-code") == 0) {
+        /* Identify the real embedding binary while supplying Kimi's stable
+         * coding-host/device contract. No Kimi executable participates. */
+        hdrs = kimi_oauth_append_identity_headers(hdrs, "dsco", DSCO_VERSION);
+    } else if (canonical && strcmp(canonical, "moonshot") == 0) {
+        hdrs = curl_slist_append(hdrs, "User-Agent: dsco/" DSCO_VERSION);
+    }
     return hdrs;
 }
 
 /* ── OpenAI SSE streaming state ─────────────────────────────────────── */
 
 typedef struct {
-    bool   used;
-    bool   announced;
-    int    index;
-    char  *tool_name;
-    char  *tool_id;
+    bool used;
+    bool announced;
+    int index;
+    char *tool_name;
+    char *tool_id;
     jbuf_t tool_args;
     /* How much of tool_args has been streamed to the user (for live arg rendering) */
     size_t streamed_prefix;
 } oai_tool_call_state_t;
 
 typedef struct {
-    jbuf_t          line_buf;
-    jbuf_t          text_accum;
-    jbuf_t          reasoning_accum;
-    stream_text_cb  text_cb;
+    uint64_t hash;
+    size_t offset;
+    size_t len;
+} oai_reasoning_detail_seen_t;
+
+typedef struct {
+    jbuf_t line_buf;
+    jbuf_t raw_body; /* non-SSE content (HTTP error bodies) for diagnostics */
+    jbuf_t text_accum;
+    jbuf_t reasoning_accum;
+    jbuf_t reasoning_details_accum;
+    oai_reasoning_detail_seen_t *reasoning_details_seen;
+    size_t reasoning_details_seen_count;
+    size_t reasoning_details_seen_cap;
+    bool preserve_reasoning_details;
+    provider_event_attempt_t *event_attempt;
+    stream_text_cb text_cb;
     stream_tool_start_cb tool_cb;
+    stream_tool_arg_delta_cb tool_delta_cb;
     stream_thinking_cb thinking_cb;
-    void           *cb_ctx;
-    usage_t         usage;
-    char           *stop_reason;
-    bool            got_error;
-    bool            credit_too_low;    /* 402 / "credit balance too low" / insufficient funds */
-    char           *error_msg;
+    void *cb_ctx;
+    usage_t usage;
+    char *stop_reason;
+    bool got_error;
+    bool credit_too_low; /* 402 / "credit balance too low" / insufficient funds */
+    bool stream_done;
+    char *error_msg;
+    time_t credit_reset_at;
     /* OpenRouter-specific */
-    char           *generation_id; /* x-generation-id from response */
-    char           *actual_model;  /* model actually used (may differ from requested) */
-    double          cost_usd;      /* total cost from usage.cost */
-    int             cached_tokens; /* input_tokens_details.cached_tokens */
-    int             reasoning_tokens; /* output_tokens_details.reasoning_tokens */
+    char *generation_id;  /* x-generation-id from response */
+    char *actual_model;   /* model actually used (may differ from requested) */
+    char *request_model;  /* issuer for opaque reasoning replay */
+    double cost_usd;      /* total cost from usage.cost */
+    bool cost_reported;
+    int base_input_tokens;
+    int base_output_tokens;
+    int orchestration_input_tokens;
+    int orchestration_output_tokens;
+    int orchestration_cached_tokens;
+    int cached_tokens;    /* input_tokens_details.cached_tokens */
+    int reasoning_tokens; /* output_tokens_details.reasoning_tokens */
     oai_tool_call_state_t tool_calls[MAX_CONTENT_BLOCKS];
-    int             tool_slots_used;
+    int tool_slots_used;
     /* Result building */
     content_block_t blocks[MAX_CONTENT_BLOCKS];
-    int             block_count;
-    double          telemetry_start;
-    double          telemetry_first_delta;
-    double          telemetry_first_tool;
-    bool            telemetry_got_first;
+    int block_count;
+    double telemetry_start;
+    double telemetry_first_delta;
+    double telemetry_first_tool;
+    bool telemetry_got_first;
 } oai_sse_state_t;
 
 /* Classify an error body/message as a credit/billing failure so the caller
@@ -1888,34 +3634,303 @@ typedef struct {
  * Exported via provider.h so both the OpenAI-compat and Anthropic streaming
  * paths can share the same detection. */
 bool provider_msg_is_credit_too_low(const char *msg) {
-    if (!msg || !msg[0]) return false;
+    if (!msg || !msg[0])
+        return false;
     /* case-insensitive substring match against known phrases */
     static const char *needles[] = {
-        "credit balance is too low",
-        "credit balance too low",
-        "insufficient_quota",
-        "insufficient funds",
-        "insufficient credit",
-        "billing_hard_limit_reached",
-        "exceeded your current quota",
-        "payment required",
-        "quota_exceeded",
-        "billing not active",
-        "requires a paid plan",
+        "credit_too_low",             /* internal sentinel propagated as stop_reason */
+        "credit balance is too low",   "credit balance too low", "insufficient_quota",
+        "insufficient funds",          "insufficient credit",    "billing_hard_limit_reached",
+        "exceeded your current quota", "payment required",       "quota_exceeded",
+        "billing not active",          "requires a paid plan",   "subscription window is exhausted",
+        "window is exhausted",         "rate_limit_exceeded",    "rate limit exceeded",
+        "too many requests",           "temporarily rate limited", "usage limit",
         NULL,
     };
     for (int i = 0; needles[i]; i++) {
         const char *n = needles[i];
         size_t nlen = strlen(n);
         for (const char *p = msg; *p; p++) {
-            if (strncasecmp(p, n, nlen) == 0) return true;
+            if (strncasecmp(p, n, nlen) == 0)
+                return true;
         }
     }
     return false;
 }
 
+bool provider_stream_result_is_credit_exhausted(const char *provider_name,
+                                                const stream_result_t *result) {
+    if (!result || result->ok)
+        return false;
+    if (result->http_status == 402)
+        return true;
+    if (result->parsed.stop_reason &&
+        strcmp(result->parsed.stop_reason, "credit_too_low") == 0)
+        return true;
+    /* The native ChatGPT stream classifies quota 429s explicitly. Any other
+     * 429 on this lane is a transient throttle, even after retries run out. */
+    if (provider_name && strcmp(provider_name, "openai-codex") == 0)
+        return false;
+    if (result->http_status == 429)
+        return true;
+    return provider_msg_is_credit_too_low(result->parsed.stop_reason);
+}
+
+/* Classify an error body/message as a policy/gating rejection: the model or
+ * provider is administratively unavailable to this principal (regulatory
+ * gating, region/allowlist restriction, model retired, access not granted).
+ * Distinct from credit_too_low (billing) — gating is not fixed by paying, so
+ * the right response is to route to a different model entirely. HTTP 403 and
+ * "model not available" style errors map here. */
+bool provider_msg_is_gated(const char *msg) {
+    if (!msg || !msg[0])
+        return false;
+    static const char *needles[] = {
+        "access denied",                "not authorized",          "unauthorized",
+        "permission denied",            "forbidden",               "not available in your",
+        "not available to your",        "model not found",         "model_not_found",
+        "no access to model",           "access to this model",    "not allowed to access",
+        "requires approval",            "approved access",         "gated",
+        "restricted to",                "region is not supported", "country is not supported",
+        "policy restriction",           "model is retired",        "model has been deprecated",
+        "no endpoints found",           "data policy",             "requires moderation",
+        NULL,
+    };
+    for (int i = 0; needles[i]; i++) {
+        const char *n = needles[i];
+        size_t nlen = strlen(n);
+        for (const char *p = msg; *p; p++) {
+            if (strncasecmp(p, n, nlen) == 0)
+                return true;
+        }
+    }
+    return false;
+}
+
+static time_t provider_reset_max(time_t a, time_t b) {
+    if (b <= 0)
+        return a;
+    if (a <= 0)
+        return b;
+    return b > a ? b : a;
+}
+
+static void provider_reset_value_copy(const char *value, char *out, size_t out_len) {
+    if (!out || out_len == 0)
+        return;
+    out[0] = '\0';
+    if (!value)
+        return;
+    while (*value && isspace((unsigned char)*value))
+        value++;
+    size_t n = strlen(value);
+    while (n > 0 && isspace((unsigned char)value[n - 1]))
+        n--;
+    if (n >= 2 && value[0] == '"' && value[n - 1] == '"') {
+        value++;
+        n -= 2;
+    }
+    if (n >= out_len)
+        n = out_len - 1;
+    memcpy(out, value, n);
+    out[n] = '\0';
+}
+
+static long long provider_days_from_civil(int y, unsigned m, unsigned d) {
+    y -= m <= 2;
+    const int era = (y >= 0 ? y : y - 399) / 400;
+    const unsigned yoe = (unsigned)(y - era * 400);
+    const unsigned doy = (153 * (m + (m > 2 ? (unsigned)-3 : 9)) + 2) / 5 + d - 1;
+    const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return (long long)era * 146097LL + (long long)doe - 719468LL;
+}
+
+static time_t provider_parse_iso_reset_at(const char *value) {
+    int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, pos = 0;
+    if (sscanf(value, "%4d-%2d-%2dT%2d:%2d:%2d%n", &y, &mo, &d, &h, &mi, &s, &pos) != 6 &&
+        sscanf(value, "%4d-%2d-%2d %2d:%2d:%2d%n", &y, &mo, &d, &h, &mi, &s, &pos) != 6)
+        return 0;
+    if (y < 1970 || mo < 1 || mo > 12 || d < 1 || d > 31 || h < 0 || h > 23 ||
+        mi < 0 || mi > 59 || s < 0 || s > 60)
+        return 0;
+
+    long long epoch = provider_days_from_civil(y, (unsigned)mo, (unsigned)d) * 86400LL +
+                      h * 3600LL + mi * 60LL + s;
+    if (value[pos] == 'Z' || value[pos] == '\0')
+        return (time_t)epoch;
+    if (value[pos] == '+' || value[pos] == '-') {
+        int sign = value[pos] == '+' ? 1 : -1;
+        int tzh = 0, tzm = 0;
+        if (sscanf(value + pos + 1, "%2d:%2d", &tzh, &tzm) >= 1) {
+            long long offset = (long long)tzh * 3600LL + (long long)tzm * 60LL;
+            epoch -= sign * offset;
+            return (time_t)epoch;
+        }
+    }
+    return 0;
+}
+
+time_t provider_credit_reset_at_from_value(const char *value, time_t now) {
+    char buf[256];
+    provider_reset_value_copy(value, buf, sizeof(buf));
+    if (!buf[0])
+        return 0;
+
+    char *end = NULL;
+    double num = strtod(buf, &end);
+    if (end && end > buf) {
+        while (*end && isspace((unsigned char)*end))
+            end++;
+        if (strncasecmp(end, "ms", 2) == 0) {
+            long long sec = (long long)((num + 999.0) / 1000.0);
+            return now + (time_t)(sec > 0 ? sec : 1);
+        }
+        if (*end == 's' || strncasecmp(end, "sec", 3) == 0) {
+            long long sec = (long long)num;
+            if ((double)sec < num)
+                sec++;
+            return now + (time_t)(sec > 0 ? sec : 1);
+        }
+        if (*end == 'm' || strncasecmp(end, "min", 3) == 0)
+            return now + (time_t)(num * 60.0);
+        if (*end == 'h')
+            return now + (time_t)(num * 3600.0);
+        if (*end == 'd')
+            return now + (time_t)(num * 86400.0);
+        if (*end == '\0') {
+            if (num > 100000000000.0)
+                return (time_t)(num / 1000.0); /* epoch milliseconds */
+            if (num > 1000000000.0)
+                return (time_t)num; /* epoch seconds */
+            long long sec = (long long)num;
+            if ((double)sec < num)
+                sec++;
+            return now + (time_t)(sec > 0 ? sec : 1);
+        }
+    }
+
+    time_t iso = provider_parse_iso_reset_at(buf);
+    if (iso > 0)
+        return iso;
+
+    time_t parsed = curl_getdate(buf, &now);
+    if (parsed != (time_t)-1)
+        return parsed;
+
+    return 0;
+}
+
+static time_t provider_credit_reset_at_from_json_fields(const char *json, time_t now) {
+    if (!json || !json[0])
+        return 0;
+    static const char *fields[] = {
+        "resetsAt", "resets_at", "resetAt", "reset_at", "reset_time", "resetTime",
+        "retryAfter", "retry_after", "retry_after_seconds", "retryAfterSeconds",
+        "availableAt", "available_at", "reopensAt", "reopens_at", "opensAt", "opens_at",
+        "until", "window_reset_at", "windowResetAt", NULL,
+    };
+    time_t best = 0;
+    for (int i = 0; fields[i]; i++) {
+        char *raw = json_get_raw(json, fields[i]);
+        if (!raw)
+            continue;
+        best = provider_reset_max(best, provider_credit_reset_at_from_value(raw, now));
+        free(raw);
+    }
+    return best;
+}
+
+static time_t provider_credit_reset_at_from_embedded_date(const char *text, time_t now) {
+    if (!text)
+        return 0;
+    for (const char *p = text; *p; p++) {
+        if (!isdigit((unsigned char)p[0]) || !isdigit((unsigned char)p[1]) ||
+            !isdigit((unsigned char)p[2]) || !isdigit((unsigned char)p[3]) ||
+            p[4] != '-' || !isdigit((unsigned char)p[5]) || !isdigit((unsigned char)p[6]) ||
+            p[7] != '-' || !isdigit((unsigned char)p[8]) || !isdigit((unsigned char)p[9]))
+            continue;
+        char candidate[80];
+        size_t n = 0;
+        while (p[n] && n < sizeof(candidate) - 1 && !isspace((unsigned char)p[n]) &&
+               p[n] != '"' && p[n] != '\'' && p[n] != ',' && p[n] != ')' && p[n] != ']')
+            n++;
+        memcpy(candidate, p, n);
+        candidate[n] = '\0';
+        time_t parsed = provider_credit_reset_at_from_value(candidate, now);
+        if (parsed > 0)
+            return parsed;
+    }
+    return 0;
+}
+
+time_t provider_credit_reset_at_from_text(const char *text, time_t now) {
+    if (!text || !text[0])
+        return 0;
+
+    time_t best = provider_credit_reset_at_from_json_fields(text, now);
+    static const char *objects[] = {
+        "error", "rate_limit", "rateLimit", "limits", "details", "metadata", NULL,
+    };
+    for (int i = 0; objects[i]; i++) {
+        char *raw = json_get_raw(text, objects[i]);
+        if (!raw)
+            continue;
+        best = provider_reset_max(best, provider_credit_reset_at_from_json_fields(raw, now));
+        best = provider_reset_max(best, provider_credit_reset_at_from_embedded_date(raw, now));
+        free(raw);
+    }
+    best = provider_reset_max(best, provider_credit_reset_at_from_embedded_date(text, now));
+    return best;
+}
+
+bool provider_credit_reset_at_from_header_line(const char *line, time_t now,
+                                               time_t *reset_at) {
+    if (!line || !reset_at)
+        return false;
+    const char *colon = strchr(line, ':');
+    if (!colon)
+        return false;
+
+    char key[160];
+    size_t kn = (size_t)(colon - line);
+    while (kn > 0 && isspace((unsigned char)line[kn - 1]))
+        kn--;
+    if (kn >= sizeof(key))
+        kn = sizeof(key) - 1;
+    for (size_t i = 0; i < kn; i++)
+        key[i] = (char)tolower((unsigned char)line[i]);
+    key[kn] = '\0';
+
+    bool relevant = strcmp(key, "retry-after") == 0 ||
+                    ((strstr(key, "ratelimit") || strstr(key, "rate-limit")) &&
+                     (strstr(key, "reset") || strstr(key, "retry") || strstr(key, "until")));
+    if (!relevant)
+        return false;
+
+    time_t parsed = provider_credit_reset_at_from_value(colon + 1, now);
+    if (parsed <= 0)
+        return false;
+    *reset_at = provider_reset_max(*reset_at, parsed);
+    return true;
+}
+
+static size_t provider_credit_header_cb(char *buffer, size_t size, size_t nitems,
+                                        void *userdata) {
+    size_t total = size * nitems;
+    time_t *reset_at = (time_t *)userdata;
+    if (!buffer || !reset_at || total == 0)
+        return total;
+    char line[512];
+    size_t n = total < sizeof(line) - 1 ? total : sizeof(line) - 1;
+    memcpy(line, buffer, n);
+    line[n] = '\0';
+    provider_credit_reset_at_from_header_line(line, time(NULL), reset_at);
+    return total;
+}
+
 bool provider_msg_is_context_overflow(const char *msg) {
-    if (!msg || !msg[0]) return false;
+    if (!msg || !msg[0])
+        return false;
     /* case-insensitive substring match against cross-provider phrases for a
      * prompt/context-length rejection. Kept specific to avoid false positives
      * on unrelated "too long" errors (e.g. path length). */
@@ -1938,14 +3953,16 @@ bool provider_msg_is_context_overflow(const char *msg) {
         const char *n = needles[i];
         size_t nlen = strlen(n);
         for (const char *p = msg; *p; p++) {
-            if (strncasecmp(p, n, nlen) == 0) return true;
+            if (strncasecmp(p, n, nlen) == 0)
+                return true;
         }
     }
     return false;
 }
 
 static oai_tool_call_state_t *oai_tool_state_find_by_id(oai_sse_state_t *s, const char *tool_id) {
-    if (!tool_id || !tool_id[0]) return NULL;
+    if (!tool_id || !tool_id[0])
+        return NULL;
     for (int i = 0; i < s->tool_slots_used; i++) {
         oai_tool_call_state_t *slot = &s->tool_calls[i];
         if (slot->used && slot->tool_id && strcmp(slot->tool_id, tool_id) == 0) {
@@ -1966,15 +3983,18 @@ static oai_tool_call_state_t *oai_tool_state_for(oai_sse_state_t *s, int index,
             slot->used = true;
             slot->index = index;
             jbuf_init(&slot->tool_args, 256);
-            if (index + 1 > s->tool_slots_used) s->tool_slots_used = index + 1;
+            if (index + 1 > s->tool_slots_used)
+                s->tool_slots_used = index + 1;
         }
         return slot;
     }
 
     slot = oai_tool_state_find_by_id(s, tool_id);
-    if (slot) return slot;
+    if (slot)
+        return slot;
 
-    if (s->tool_slots_used >= MAX_CONTENT_BLOCKS) return NULL;
+    if (s->tool_slots_used >= MAX_CONTENT_BLOCKS)
+        return NULL;
     slot = &s->tool_calls[s->tool_slots_used];
     memset(slot, 0, sizeof(*slot));
     slot->used = true;
@@ -1986,9 +4006,58 @@ static oai_tool_call_state_t *oai_tool_state_for(oai_sse_state_t *s, int index,
 
 static const char *oai_tool_state_id(oai_tool_call_state_t *slot) {
     static char fallback[32];
-    if (slot && slot->tool_id && slot->tool_id[0]) return slot->tool_id;
+    if (slot && slot->tool_id && slot->tool_id[0])
+        return slot->tool_id;
     snprintf(fallback, sizeof(fallback), "call_%d", slot ? slot->index : 0);
     return fallback;
+}
+
+static void oai_emit_tool_progress(oai_sse_state_t *s, oai_tool_call_state_t *slot,
+                                   const char *arg_delta) {
+    if (!s || !slot)
+        return;
+
+    if (slot->tool_name && !slot->announced) {
+        slot->announced = true;
+        if (s->telemetry_first_tool <= 0.0)
+            s->telemetry_first_tool = provider_now_sec();
+        if (!s->telemetry_got_first) {
+            s->telemetry_got_first = true;
+            s->telemetry_first_delta = s->telemetry_first_tool;
+        }
+        if (s->tool_cb)
+            s->tool_cb(slot->tool_name, oai_tool_state_id(slot), s->cb_ctx);
+    }
+
+    /* Emit native tool-argument deltas. Older callers without this callback
+     * keep the historical TTY-only preview fallback via text_cb. */
+    if (s->tool_delta_cb && arg_delta && arg_delta[0]) {
+        s->tool_delta_cb(slot->tool_name, oai_tool_state_id(slot), arg_delta, s->cb_ctx);
+    } else if (s->text_cb && isatty(STDOUT_FILENO) &&
+               slot->tool_args.data && slot->tool_args.len > slot->streamed_prefix) {
+        size_t start = slot->streamed_prefix;
+        size_t avail = slot->tool_args.len - start;
+        /* Cap single-delta size so a giant argument string does not starve
+         * the heartbeat and so we don't flood the terminal on one packet. */
+        if (avail > 256)
+            avail = 256;
+        char chunk[320];
+        size_t pos = 0;
+        if (start == 0) {
+            const char *prefix = "\033[2m ⋯ \033[0m";
+            size_t plen = strlen(prefix);
+            if (plen < sizeof(chunk)) {
+                memcpy(chunk, prefix, plen);
+                pos = plen;
+            }
+        }
+        if (pos + avail >= sizeof(chunk))
+            avail = sizeof(chunk) - pos - 1;
+        memcpy(chunk + pos, slot->tool_args.data + start, avail);
+        chunk[pos + avail] = '\0';
+        s->text_cb(chunk, s->cb_ctx);
+        slot->streamed_prefix = start + avail;
+    }
 }
 
 typedef struct {
@@ -2016,7 +4085,8 @@ static void oai_handle_tool_call_delta(const char *tc_elem, void *ctx) {
     free(tid);
 
     char *fn_raw = json_get_raw(tc_elem, "function");
-    if (!fn_raw) return;
+    if (!fn_raw)
+        return;
 
     char *fname = json_get_str(fn_raw, "name");
     if (fname && (!slot->tool_name || !slot->tool_name[0])) {
@@ -2029,68 +4099,366 @@ static void oai_handle_tool_call_delta(const char *tc_elem, void *ctx) {
     if (fargs && fargs[0]) {
         jbuf_append(&slot->tool_args, fargs);
     }
-    free(fargs);
     free(fn_raw);
 
-    if (slot->tool_name && !slot->announced) {
-        slot->announced = true;
-        if (s->telemetry_first_tool <= 0.0)
-            s->telemetry_first_tool = provider_now_sec();
-        if (!s->telemetry_got_first) {
-            s->telemetry_got_first = true;
-            s->telemetry_first_delta = s->telemetry_first_tool;
-        }
-        if (s->tool_cb) {
-            s->tool_cb(slot->tool_name, oai_tool_state_id(slot), s->cb_ctx);
-        }
+    oai_emit_tool_progress(s, slot, fargs);
+    free(fargs);
+}
+
+static void oai_handle_legacy_function_call_delta(oai_sse_state_t *s, const char *fn_raw) {
+    if (!s || !fn_raw)
+        return;
+
+    oai_tool_call_state_t *slot = oai_tool_state_for(s, 0, "call_0");
+    if (!slot)
+        return;
+    if (!slot->tool_id || !slot->tool_id[0]) {
+        free(slot->tool_id);
+        slot->tool_id = safe_strdup("call_0");
     }
 
-    /* Stream newly-arrived argument bytes as dim text so the user sees
-     * tool inputs populate in real time instead of appearing all at once
-     * at the end of the turn. We route through text_cb because that is
-     * the only always-wired sink on the OpenAI-compat path. The bytes
-     * are visually distinguished with a leading "  ⋯ " marker on the
-     * first chunk; subsequent chunks just append. */
-    if (s->text_cb && slot->tool_args.data &&
-        slot->tool_args.len > slot->streamed_prefix) {
-        size_t start = slot->streamed_prefix;
-        size_t avail = slot->tool_args.len - start;
-        /* Cap single-delta size so a giant argument string does not starve
-         * the heartbeat and so we don't flood the terminal on one packet. */
-        if (avail > 256) avail = 256;
-        char chunk[320];
-        size_t pos = 0;
-        if (start == 0) {
-            const char *prefix = "\033[2m ⋯ \033[0m";
-            size_t plen = strlen(prefix);
-            if (plen < sizeof(chunk)) {
-                memcpy(chunk, prefix, plen);
-                pos = plen;
-            }
-        }
-        if (pos + avail >= sizeof(chunk)) avail = sizeof(chunk) - pos - 1;
-        memcpy(chunk + pos, slot->tool_args.data + start, avail);
-        chunk[pos + avail] = '\0';
-        s->text_cb(chunk, s->cb_ctx);
-        slot->streamed_prefix = start + avail;
+    char *fname = json_get_str(fn_raw, "name");
+    if (fname && (!slot->tool_name || !slot->tool_name[0])) {
+        slot->tool_name = fname;
+        fname = NULL;
+    }
+    free(fname);
+
+    char *fargs = json_get_str(fn_raw, "arguments");
+    if (fargs && fargs[0])
+        jbuf_append(&slot->tool_args, fargs);
+
+    oai_emit_tool_progress(s, slot, fargs);
+    free(fargs);
+}
+
+static void oai_emit_reasoning_delta(oai_sse_state_t *s, const char *reasoning) {
+    if (!s || !reasoning || !reasoning[0])
+        return;
+    jbuf_append(&s->reasoning_accum, reasoning);
+    if (s->thinking_cb) {
+        s->thinking_cb(reasoning, s->cb_ctx);
+    } else if (s->text_cb) {
+        /* Fallback visualization: wrap in dim ANSI so markdown does not
+         * try to format reasoning and it stays distinct from final text. */
+        char wrapped[1024];
+        int n = snprintf(wrapped, sizeof(wrapped), "\033[2m%.960s\033[0m", reasoning);
+        if (n > 0)
+            s->text_cb(wrapped, s->cb_ctx);
     }
 }
 
+static void oai_emit_text_delta(oai_sse_state_t *s, const char *text) {
+    if (!s || !text || !text[0])
+        return;
+    if (!s->telemetry_got_first) {
+        s->telemetry_got_first = true;
+        s->telemetry_first_delta = provider_now_sec();
+    }
+    jbuf_append(&s->text_accum, text);
+    if (s->text_cb)
+        s->text_cb(text, s->cb_ctx);
+}
+
+typedef struct {
+    oai_sse_state_t *state;
+    bool emit_text;
+} oai_reasoning_detail_ctx_t;
+
+static size_t oai_reasoning_detail_span(const char *detail) {
+    if (!detail || (*detail != '{' && *detail != '['))
+        return 0;
+    int depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (size_t i = 0; detail[i]; i++) {
+        char c = detail[i];
+        if (in_string) {
+            if (escaped)
+                escaped = false;
+            else if (c == '\\')
+                escaped = true;
+            else if (c == '"')
+                in_string = false;
+            continue;
+        }
+        if (c == '"')
+            in_string = true;
+        else if (c == '{' || c == '[')
+            depth++;
+        else if (c == '}' || c == ']') {
+            depth--;
+            if (depth == 0)
+                return i + 1;
+            if (depth < 0)
+                return 0;
+        }
+    }
+    return 0;
+}
+
+static bool oai_record_reasoning_detail(oai_sse_state_t *s, const char *detail) {
+    if (!s || !detail)
+        return false;
+    size_t len = oai_reasoning_detail_span(detail);
+    if (len == 0)
+        return false;
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (size_t i = 0; i < len; i++)
+        hash = (hash ^ (unsigned char)detail[i]) * UINT64_C(1099511628211);
+    for (size_t i = 0; i < s->reasoning_details_seen_count; i++) {
+        oai_reasoning_detail_seen_t *seen = &s->reasoning_details_seen[i];
+        if (seen->hash == hash && seen->len == len && s->reasoning_details_accum.data &&
+            memcmp(s->reasoning_details_accum.data + seen->offset, detail, len) == 0)
+            return false;
+    }
+    if (s->reasoning_details_seen_count == s->reasoning_details_seen_cap) {
+        size_t next_cap = s->reasoning_details_seen_cap ? s->reasoning_details_seen_cap * 2 : 16;
+        s->reasoning_details_seen = safe_realloc(
+            s->reasoning_details_seen, next_cap * sizeof(*s->reasoning_details_seen));
+        s->reasoning_details_seen_cap = next_cap;
+    }
+    if (s->reasoning_details_accum.len > 0)
+        jbuf_append(&s->reasoning_details_accum, ",");
+    oai_reasoning_detail_seen_t *seen =
+        &s->reasoning_details_seen[s->reasoning_details_seen_count++];
+    seen->hash = hash;
+    seen->offset = s->reasoning_details_accum.len;
+    seen->len = len;
+    jbuf_append_len(&s->reasoning_details_accum, detail, len);
+    return true;
+}
+
+static void oai_handle_reasoning_detail(const char *detail, void *ctx) {
+    oai_reasoning_detail_ctx_t *detail_ctx = (oai_reasoning_detail_ctx_t *)ctx;
+    bool new_detail = oai_record_reasoning_detail(detail_ctx->state, detail);
+
+    if (!new_detail || !detail_ctx->emit_text)
+        return;
+    char *type = json_get_str(detail, "type");
+    char *text = NULL;
+    if (type && strcmp(type, "reasoning.summary") == 0)
+        text = json_get_str(detail, "summary");
+    else if (type && strcmp(type, "reasoning.text") == 0)
+        text = json_get_str(detail, "text");
+    if (text && text[0])
+        oai_emit_reasoning_delta(detail_ctx->state, text);
+    free(text);
+    free(type);
+}
+
+static void oai_append_reasoning_details_block(oai_sse_state_t *s) {
+    if (!s || !s->preserve_reasoning_details || s->reasoning_details_accum.len == 0 ||
+        s->block_count >= MAX_CONTENT_BLOCKS)
+        return;
+    content_block_t *block = &s->blocks[s->block_count++];
+    jbuf_t type;
+    jbuf_t details;
+    jbuf_init(&type, 96);
+    jbuf_init(&details, s->reasoning_details_accum.len + 3);
+    jbuf_append(&type, "openrouter_reasoning_details");
+    if (s->request_model && s->request_model[0]) {
+        jbuf_append(&type, ":");
+        jbuf_append(&type, s->request_model);
+    }
+    jbuf_append(&details, "[");
+    jbuf_append(&details, s->reasoning_details_accum.data);
+    jbuf_append(&details, "]");
+    block->type = type.data;
+    block->text = details.data;
+}
+
+/* Parse one OpenAI-compatible usage object into stream state. Called for the
+ * top-level chunk `usage` and for `choices[0].usage` — Moonshot/Kimi (incl.
+ * the kimi-code coding endpoint) report usage only inside the choice, which
+ * previously metered every Kimi turn as zero tokens. */
+static void oai_parse_usage_obj(oai_sse_state_t *s, const char *usage_raw) {
+    if (!s || !usage_raw)
+        return;
+    /* OpenAI-compatible usage aliases:
+     *   - OpenAI Chat Completions: prompt_tokens / completion_tokens
+     *   - Responses-style providers (Sakana Fugu): input_tokens / output_tokens
+     */
+    {
+        int prompt_tok = json_get_int(usage_raw, "prompt_tokens", -1);
+        int input_tok = json_get_int(usage_raw, "input_tokens", -1);
+        int completion_tok = json_get_int(usage_raw, "completion_tokens", -1);
+        int output_tok = json_get_int(usage_raw, "output_tokens", -1);
+        if (prompt_tok >= 0)
+            s->base_input_tokens = prompt_tok;
+        else if (input_tok >= 0)
+            s->base_input_tokens = input_tok;
+        if (completion_tok >= 0)
+            s->base_output_tokens = completion_tok;
+        else if (output_tok >= 0)
+            s->base_output_tokens = output_tok;
+    }
+
+    /* Cost tracking (OpenRouter includes cost in usage) */
+    char *cost_raw = json_get_raw(usage_raw, "cost");
+    char *cost_str = json_get_str(usage_raw, "cost");
+    const char *number = cost_str ? cost_str : cost_raw;
+    if (number) {
+        char *end = NULL;
+        errno = 0;
+        double value = strtod(number, &end);
+        while (end && isspace((unsigned char)*end)) end++;
+        if (end != number && end && !*end && errno != ERANGE &&
+            isfinite(value) && value >= 0) {
+            s->cost_usd = value;
+            s->cost_reported = true;
+        }
+    }
+    free(cost_str);
+    free(cost_raw);
+
+    /* Token detail breakdowns — locations vary by provider:
+     *
+     *  1. input_tokens_details.cached_tokens
+     *     → OpenAI, xAI/Grok, Groq, Gemini via google endpoint, OpenRouter OR-normalised
+     *  2. prompt_tokens_details.cached_tokens
+     *     → Some OpenRouter backends normalise here instead of input_tokens_details
+     *  3. prompt_cache_hit_tokens  (top-level in usage{})
+     *     → DeepSeek direct, Alibaba/DashScope direct
+     *  4. cached_tokens  (top-level in usage{})
+     *     → Moonshot/Kimi direct and kimi-code
+     *
+     * We read all of them and take the first non-zero value so no provider is missed.
+     * Already-set values from earlier chunks are preserved (take max). */
+    char *in_detail = json_get_raw(usage_raw, "input_tokens_details");
+    if (in_detail) {
+        int v = json_get_int(in_detail, "cached_tokens", 0);
+        if (v <= 0)
+            v = json_get_int(in_detail, "cache_read_tokens", 0);
+        if (v <= 0)
+            v = json_get_int(in_detail, "cache_read_input_tokens", 0);
+        if (v > s->cached_tokens)
+            s->cached_tokens = v;
+        /* GPT-5.6 Responses-compatible usage may place explicit cache
+         * writes here. Preserve the largest final/chunk value just as we
+         * do for Anthropic cache_creation_input_tokens. */
+        int w = json_get_int(in_detail, "cache_write_tokens", 0);
+        if (w > s->usage.cache_creation_input_tokens)
+            s->usage.cache_creation_input_tokens = w;
+    }
+    /* OpenAI Chat Completions and OpenRouter normalisation alias. */
+    char *pt_detail = json_get_raw(usage_raw, "prompt_tokens_details");
+    if (pt_detail) {
+        int v = json_get_int(pt_detail, "cached_tokens", 0);
+        if (v <= 0)
+            v = json_get_int(pt_detail, "cache_read_tokens", 0);
+        if (v <= 0)
+            v = json_get_int(pt_detail, "cache_read_input_tokens", 0);
+        if (v > s->cached_tokens)
+            s->cached_tokens = v;
+        int w = json_get_int(pt_detail, "cache_write_tokens", 0);
+        if (w > s->usage.cache_creation_input_tokens)
+            s->usage.cache_creation_input_tokens = w;
+        free(pt_detail);
+    }
+    /* DeepSeek / Alibaba top-level cache hit field */
+    {
+        int v = json_get_int(usage_raw, "prompt_cache_hit_tokens", 0);
+        if (v > s->cached_tokens)
+            s->cached_tokens = v;
+    }
+    /* Moonshot/Kimi and Anthropic-compatible top-level cache fields. */
+    {
+        int v = json_get_int(usage_raw, "cached_tokens", 0);
+        if (v <= 0)
+            v = json_get_int(usage_raw, "cache_read_input_tokens", 0);
+        if (v > s->cached_tokens)
+            s->cached_tokens = v;
+        int w = json_get_int(usage_raw, "cache_creation_input_tokens", 0);
+        if (w > s->usage.cache_creation_input_tokens)
+            s->usage.cache_creation_input_tokens = w;
+    }
+    char *out_detail = json_get_raw(usage_raw, "output_tokens_details");
+    if (out_detail) {
+        int r = json_get_int(out_detail, "reasoning_tokens", 0);
+        if (r > s->reasoning_tokens)
+            s->reasoning_tokens = r;
+    }
+    /* Chat Completions alias used by OpenAI and Moonshot/Kimi. */
+    char *ct_detail = json_get_raw(usage_raw, "completion_tokens_details");
+    if (ct_detail) {
+        int r = json_get_int(ct_detail, "reasoning_tokens", 0);
+        if (r > s->reasoning_tokens)
+            s->reasoning_tokens = r;
+        free(ct_detail);
+    }
+    /* These are cumulative request counters, not per-chunk deltas. Keep
+     * orchestration separate from base usage so repeated or partial usage
+     * objects (including both top-level and choice-level copies) count once. */
+    if (in_detail) {
+        int orch_in = json_get_int(in_detail, "orchestration_input_tokens", -1);
+        int orch_in_cached = json_get_int(in_detail, "orchestration_input_cached_tokens", -1);
+        if (orch_in >= 0) s->orchestration_input_tokens = orch_in;
+        if (orch_in_cached >= 0) s->orchestration_cached_tokens = orch_in_cached;
+        free(in_detail);
+    }
+    if (out_detail) {
+        int orch_out = json_get_int(out_detail, "orchestration_output_tokens", -1);
+        if (orch_out >= 0) s->orchestration_output_tokens = orch_out;
+        free(out_detail);
+    }
+    s->usage.input_tokens = s->base_input_tokens > INT_MAX - s->orchestration_input_tokens
+        ? INT_MAX : s->base_input_tokens + s->orchestration_input_tokens;
+    s->usage.output_tokens = s->base_output_tokens > INT_MAX - s->orchestration_output_tokens
+        ? INT_MAX : s->base_output_tokens + s->orchestration_output_tokens;
+    s->usage.cache_read_input_tokens = s->orchestration_cached_tokens;
+}
+
+/* OpenAI input counts include cached tokens; canonical usage_t keeps input
+ * and cache reads disjoint. Base and orchestration cache hits both contribute.
+ * Share this boundary with parser tests so they exercise real billing units. */
+static usage_t oai_canonical_usage(const oai_sse_state_t *s) {
+    usage_t usage = s->usage;
+    usage.cache_read_input_tokens = s->cached_tokens > INT_MAX - s->orchestration_cached_tokens
+        ? INT_MAX : s->cached_tokens + s->orchestration_cached_tokens;
+    if (usage.cache_read_input_tokens > 0 &&
+        usage.input_tokens >= usage.cache_read_input_tokens)
+        usage.input_tokens -= usage.cache_read_input_tokens;
+    return usage;
+}
+
 static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
-    if (strncmp(line, "data: ", 6) != 0) return;
-    const char *data = line + 6;
-    if (strcmp(data, "[DONE]") == 0) return;
+    if (event_stream_active() &&
+        !event_stream_emit("provider", "provider.chat_completions.sse_line", line)) {
+        g_interrupted = 1;
+        s->got_error = true;
+        s->stream_done = true;
+        return;
+    }
+    if (strncmp(line, "data:", 5) != 0) {
+        if (line[0] && line[0] != ':') {
+            if (s->raw_body.len > 0)
+                jbuf_append(&s->raw_body, "\n");
+            jbuf_append(&s->raw_body, line);
+        }
+        return;
+    }
+    const char *data = line + 5;
+    while (*data == ' ' || *data == '\t')
+        data++;
+    if (strcmp(data, "[DONE]") == 0) {
+        s->stream_done = true;
+        return;
+    }
 
     /* Check for top-level error object (OpenRouter sends errors mid-stream) */
     char *err_raw = json_get_raw(data, "error");
     if (err_raw) {
+        s->credit_reset_at = provider_reset_max(
+            s->credit_reset_at, provider_credit_reset_at_from_text(err_raw, time(NULL)));
         char *err_msg = json_get_str(err_raw, "message");
         int err_code = json_get_int(err_raw, "code", 0);
         if (err_msg) {
             s->got_error = true;
+            s->stream_done = true;
             free(s->error_msg);
             s->error_msg = err_msg;
-            if (err_code == 402 || provider_msg_is_credit_too_low(err_msg))
+            if (err_code == 402 || err_code == 429 || provider_msg_is_credit_too_low(err_msg))
                 s->credit_too_low = true;
             fprintf(stderr, "  \033[31mAPI error %d: %s\033[0m\n", err_code, err_msg);
         }
@@ -2101,73 +4469,44 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
     /* Extract model actually used (first chunk usually has it) */
     if (!s->actual_model) {
         char *model = json_get_str(data, "model");
-        if (model) s->actual_model = model;
+        if (model)
+            s->actual_model = model;
     }
 
     /* Extract generation ID */
     if (!s->generation_id) {
         char *gid = json_get_str(data, "id");
-        if (gid) s->generation_id = gid;
+        if (gid)
+            s->generation_id = gid;
     }
 
     /* Parse usage (may appear in any chunk, usually the last) */
     char *usage_raw = json_get_raw(data, "usage");
     if (usage_raw) {
-        s->usage.input_tokens = json_get_int(usage_raw, "prompt_tokens", s->usage.input_tokens);
-        s->usage.output_tokens = json_get_int(usage_raw, "completion_tokens", s->usage.output_tokens);
-
-        /* Cost tracking (OpenRouter includes cost in usage) */
-        char *cost_str = json_get_str(usage_raw, "cost");
-        if (cost_str) {
-            s->cost_usd = atof(cost_str);
-            free(cost_str);
-        }
-
-        /* Token detail breakdowns — three possible locations depending on provider:
-         *
-         *  1. input_tokens_details.cached_tokens
-         *     → OpenAI, xAI/Grok, Groq, Gemini via google endpoint, OpenRouter OR-normalised
-         *  2. prompt_tokens_details.cached_tokens
-         *     → Some OpenRouter backends normalise here instead of input_tokens_details
-         *  3. prompt_cache_hit_tokens  (top-level in usage{})
-         *     → DeepSeek direct, Moonshot/Kimi direct, Alibaba/DashScope direct
-         *
-         * We read all three and take the first non-zero value so no provider is missed.
-         * Already-set values from earlier chunks are preserved (take max). */
-        char *in_detail = json_get_raw(usage_raw, "input_tokens_details");
-        if (in_detail) {
-            int v = json_get_int(in_detail, "cached_tokens", 0);
-            if (v > s->cached_tokens) s->cached_tokens = v;
-            free(in_detail);
-        }
-        /* OpenRouter normalisation alias */
-        char *pt_detail = json_get_raw(usage_raw, "prompt_tokens_details");
-        if (pt_detail) {
-            int v = json_get_int(pt_detail, "cached_tokens", 0);
-            if (v > s->cached_tokens) s->cached_tokens = v;
-            free(pt_detail);
-        }
-        /* DeepSeek / Moonshot / Alibaba top-level cache hit field */
-        {
-            int v = json_get_int(usage_raw, "prompt_cache_hit_tokens", 0);
-            if (v > s->cached_tokens) s->cached_tokens = v;
-        }
-        char *out_detail = json_get_raw(usage_raw, "output_tokens_details");
-        if (out_detail) {
-            s->reasoning_tokens = json_get_int(out_detail, "reasoning_tokens", 0);
-            free(out_detail);
-        }
+        oai_parse_usage_obj(s, usage_raw);
         free(usage_raw);
     }
 
     /* Parse choices array — extract the first element (an object) */
     char *choices_raw = json_get_raw(data, "choices");
-    if (!choices_raw) return;
+    if (!choices_raw)
+        return;
     /* choices_raw is "[{...}]" — skip into the first element object */
     const char *first_choice = choices_raw;
-    while (*first_choice && (*first_choice == '[' || *first_choice == ' ' ||
-           *first_choice == '\n' || *first_choice == '\r' || *first_choice == '\t'))
+    while (*first_choice &&
+           (*first_choice == '[' || *first_choice == ' ' || *first_choice == '\n' ||
+            *first_choice == '\r' || *first_choice == '\t'))
         first_choice++;
+
+    /* Moonshot/Kimi (incl. kimi-code) attach usage to the finish choice
+     * instead of the top-level chunk. */
+    {
+        char *choice_usage = json_get_raw(first_choice, "usage");
+        if (choice_usage) {
+            oai_parse_usage_obj(s, choice_usage);
+            free(choice_usage);
+        }
+    }
 
     /* Check finish_reason (including mid-stream errors and content filters) */
     char *fr = json_get_str(first_choice, "finish_reason");
@@ -2176,6 +4515,8 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
         if (strcmp(fr, "stop") == 0)
             s->stop_reason = safe_strdup("end_turn");
         else if (strcmp(fr, "tool_calls") == 0)
+            s->stop_reason = safe_strdup("tool_use");
+        else if (strcmp(fr, "function_call") == 0)
             s->stop_reason = safe_strdup("tool_use");
         else if (strcmp(fr, "length") == 0)
             s->stop_reason = safe_strdup("max_tokens");
@@ -2201,32 +4542,17 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
 
     /* Content delta — streaming text */
     char *content = json_get_str(delta_raw, "content");
-    if (content && content[0]) {
-        if (!s->telemetry_got_first) {
-            s->telemetry_got_first = true;
-            s->telemetry_first_delta = provider_now_sec();
-        }
-        jbuf_append(&s->text_accum, content);
-        if (s->text_cb) s->text_cb(content, s->cb_ctx);
-    }
+    oai_emit_text_delta(s, content);
     free(content);
 
-    /* Reasoning delta — streaming "thinking"/chain-of-thought output.
-     *
-     * Different providers emit this under different keys:
-     *   - xAI (grok-3-mini, grok-4):       delta.reasoning_content
-     *   - OpenRouter reasoning models:     delta.reasoning    (string)
-     *                                  or  delta.reasoning    (object with .content)
-     *   - Deepseek reasoner:               delta.reasoning_content
-     *   - Moonshot thinking:               delta.reasoning_content
-     *
-     * We parse both, accumulate them into reasoning_accum, and route them
-     * through thinking_cb when the caller supplied one. If no thinking_cb
-     * is wired, we surface the reasoning as dim text via text_cb so the
-     * user still sees *something* during the pre-output thinking phase,
-     * instead of a long silent pause. This is intentional "show the
-     * thinking even if we throw most of it away" behavior.
-     */
+    /* Refusal deltas are text-bearing output too. Without this, providers can
+     * stream a completed refusal and DSCO treats it as an empty response. */
+    char *refusal = json_get_str(delta_raw, "refusal");
+    oai_emit_text_delta(s, refusal);
+    free(refusal);
+
+    /* Keep structured reasoning opaque for replay while using the scalar form
+     * for display when both representations are present. */
     {
         char *reasoning = json_get_str(delta_raw, "reasoning_content");
         if (!reasoning || !reasoning[0]) {
@@ -2234,8 +4560,10 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
             reasoning = json_get_str(delta_raw, "reasoning");
         }
         if (!reasoning || !reasoning[0]) {
-            /* OpenRouter sometimes sends delta.reasoning as an object:
-             * {"reasoning":{"content":"..."}}. Handle that shape too. */
+            free(reasoning);
+            reasoning = json_get_str(delta_raw, "reasoning_text");
+        }
+        if (!reasoning || !reasoning[0]) {
             free(reasoning);
             reasoning = NULL;
             char *rraw = json_get_raw(delta_raw, "reasoning");
@@ -2244,36 +4572,39 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
                 free(rraw);
             }
         }
-        if (reasoning && reasoning[0]) {
-            jbuf_append(&s->reasoning_accum, reasoning);
-            if (s->thinking_cb) {
-                s->thinking_cb(reasoning, s->cb_ctx);
-            } else if (s->text_cb) {
-                /* Fallback visualization: wrap in dim ANSI so markdown
-                 * doesn't try to format it and it visually separates from
-                 * final text. */
-                char wrapped[1024];
-                int n = snprintf(wrapped, sizeof(wrapped),
-                                 "\033[2m%.960s\033[0m", reasoning);
-                if (n > 0) s->text_cb(wrapped, s->cb_ctx);
-            }
-        }
+        bool have_scalar_reasoning = reasoning && reasoning[0];
+        if (have_scalar_reasoning)
+            oai_emit_reasoning_delta(s, reasoning);
+        oai_reasoning_detail_ctx_t detail_ctx = {
+            .state = s,
+            .emit_text = !have_scalar_reasoning,
+        };
+        json_array_foreach(delta_raw, "reasoning_details", oai_handle_reasoning_detail,
+                           &detail_ctx);
         free(reasoning);
     }
 
     /* Tool calls delta — accumulate every streamed call by index/id. */
     char *tool_calls_raw = json_get_raw(delta_raw, "tool_calls");
     if (tool_calls_raw) {
-        oai_tool_delta_ctx_t tool_ctx = { .state = s };
+        oai_tool_delta_ctx_t tool_ctx = {.state = s};
         jbuf_t wrapped;
         jbuf_init(&wrapped, strlen(tool_calls_raw) + 32);
         jbuf_append(&wrapped, "{\"tool_calls\":");
         jbuf_append(&wrapped, tool_calls_raw);
         jbuf_append(&wrapped, "}");
-        json_array_foreach(wrapped.data, "tool_calls",
-                           oai_handle_tool_call_delta, &tool_ctx);
+        json_array_foreach(wrapped.data, "tool_calls", oai_handle_tool_call_delta, &tool_ctx);
         jbuf_free(&wrapped);
         free(tool_calls_raw);
+    }
+
+    /* Legacy OpenAI-compatible streams may still emit a single
+     * delta.function_call object instead of delta.tool_calls[]. Keep this path
+     * separate so modern tool_calls without provider ids remain invalid. */
+    char *legacy_fn_raw = json_get_raw(delta_raw, "function_call");
+    if (legacy_fn_raw) {
+        oai_handle_legacy_function_call_delta(s, legacy_fn_raw);
+        free(legacy_fn_raw);
     }
 
     free(delta_raw);
@@ -2283,46 +4614,284 @@ static void oai_handle_sse_line(oai_sse_state_t *s, const char *line) {
 static size_t oai_sse_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t total = size * nmemb;
     oai_sse_state_t *s = (oai_sse_state_t *)userdata;
+    if (!provider_event_body(s->event_attempt, ptr, total)) return 0;
 
     const char *p = (const char *)ptr;
-    for (size_t i = 0; i < total; i++) {
-        if (p[i] == '\n') {
-            if (s->line_buf.len > 0) {
-                oai_handle_sse_line(s, s->line_buf.data);
-                jbuf_reset(&s->line_buf);
-            }
-        } else if (p[i] != '\r') {
-            jbuf_append_char(&s->line_buf, p[i]);
+    size_t start = 0;
+    while (start < total) {
+        /* Scan only the current curl chunk, bounding CR searches by the next
+         * LF so many short events do not rescan the remaining chunk. */
+        const char *newline = memchr(p + start, '\n', total - start);
+        size_t end = newline ? (size_t)(newline - p) : total;
+        while (start < end) {
+            const char *cr = memchr(p + start, '\r', end - start);
+            size_t stop = cr ? (size_t)(cr - p) : end;
+            if (stop > start)
+                jbuf_append_len(&s->line_buf, p + start, stop - start);
+            start = cr ? stop + 1 : end;
+        }
+        if (!newline)
+            break;
+        start = end + 1;
+        if (s->line_buf.len > 0) {
+            oai_handle_sse_line(s, s->line_buf.data);
+            jbuf_reset(&s->line_buf);
+            if (s->stream_done)
+                return 0;
         }
     }
     return total;
 }
 
-static stream_result_t openai_stream(provider_t *p, const char *api_key,
-                                       const char *request_json,
-                                       stream_text_cb text_cb,
-                                       stream_tool_start_cb tool_cb,
-                                       stream_thinking_cb thinking_cb,
-                                       void *cb_ctx) {
+static bool oai_stream_terminal_success(const oai_sse_state_t *state) {
+    return state && state->stop_reason && !state->got_error;
+}
+
+static bool oai_validate_completed_turn(oai_sse_state_t *s);
+
+#ifdef DSCO_INTERNAL_TESTS
+typedef struct {
+    jbuf_t reasoning;
+    jbuf_t tool_args;
+} provider_test_stream_capture_t;
+
+static void provider_test_capture_openai_reasoning(const char *delta, void *ctx) {
+    provider_test_stream_capture_t *capture = (provider_test_stream_capture_t *)ctx;
+    if (capture)
+        jbuf_append(&capture->reasoning, delta);
+}
+
+static void provider_test_capture_openai_tool_arg_delta(const char *name, const char *id,
+                                                        const char *delta, void *ctx) {
+    (void)name; (void)id;
+    provider_test_stream_capture_t *capture = (provider_test_stream_capture_t *)ctx;
+    if (capture)
+        jbuf_append(&capture->tool_args, delta);
+}
+
+bool provider_test_parse_openai_sse_for_model(const char *bytes, size_t len,
+                                              const char *source_provider,
+                                              const char *request_model,
+                                              provider_test_openai_sse_result_t *out) {
+    if (!bytes || !out)
+        return false;
+
+    memset(out, 0, sizeof(*out));
+    oai_sse_state_t state = {0};
+    provider_test_stream_capture_t capture;
+    jbuf_init(&state.line_buf, 256);
+    jbuf_init(&state.raw_body, 1024);
+    jbuf_init(&state.text_accum, 256);
+    jbuf_init(&state.reasoning_accum, 256);
+    jbuf_init(&state.reasoning_details_accum, 256);
+    jbuf_init(&capture.reasoning, 256);
+    jbuf_init(&capture.tool_args, 256);
+    state.request_model = request_model ? safe_strdup(request_model) : NULL;
+    const char *canonical_source =
+        source_provider ? provider_profile_canonical_name(source_provider) : NULL;
+    state.preserve_reasoning_details =
+        canonical_source && strcmp(canonical_source, "openrouter") == 0;
+    state.thinking_cb = provider_test_capture_openai_reasoning;
+    state.tool_delta_cb = provider_test_capture_openai_tool_arg_delta;
+    state.cb_ctx = &capture;
+
+    (void)oai_sse_write_cb((void *)bytes, 1, len, &state);
+
+    oai_append_reasoning_details_block(&state);
+    for (int i = 0; i < state.tool_slots_used; i++) {
+        oai_tool_call_state_t *slot = &state.tool_calls[i];
+        if (!slot->used || !slot->tool_name || state.block_count >= MAX_CONTENT_BLOCKS)
+            continue;
+        content_block_t *block = &state.blocks[state.block_count++];
+        block->type = safe_strdup("tool_use");
+        block->tool_name = safe_strdup(slot->tool_name);
+        block->tool_id = safe_strdup(oai_tool_state_id(slot));
+        block->tool_input = safe_strdup(
+            (slot->tool_args.data && slot->tool_args.data[0]) ? slot->tool_args.data : "{}");
+    }
+    if (state.text_accum.len > 0 && state.block_count < MAX_CONTENT_BLOCKS) {
+        content_block_t *block = &state.blocks[state.block_count++];
+        block->type = safe_strdup("text");
+        block->text = safe_strdup(state.text_accum.data);
+    }
+    if (state.reasoning_accum.len > 0 && state.block_count < MAX_CONTENT_BLOCKS) {
+        content_block_t *block = &state.blocks[state.block_count++];
+        block->type = safe_strdup(state.block_count == 1 ? "text" : "thinking");
+        block->text = safe_strdup(state.reasoning_accum.data);
+    }
+
+    out->parsed.count = state.block_count;
+    out->parsed.blocks =
+        safe_malloc((state.block_count > 0 ? state.block_count : 1) * sizeof(content_block_t));
+    memcpy(out->parsed.blocks, state.blocks, state.block_count * sizeof(content_block_t));
+    out->terminal_success =
+        oai_validate_completed_turn(&state) && oai_stream_terminal_success(&state);
+    out->parsed.stop_reason = state.stop_reason;
+    state.stop_reason = NULL;
+    out->reasoning_stream = safe_strdup(capture.reasoning.data ? capture.reasoning.data : "");
+    out->tool_arg_delta_stream = safe_strdup(capture.tool_args.data ? capture.tool_args.data : "");
+    out->done = state.stream_done;
+    out->usage = oai_canonical_usage(&state);
+    out->cost_usd = state.cost_usd;
+    out->cost_reported = state.cost_reported;
+    out->reasoning_tokens = state.reasoning_tokens;
+    out->cached_tokens = state.cached_tokens;
+
+    free(state.stop_reason);
+    free(state.error_msg);
+    free(state.actual_model);
+    free(state.generation_id);
+    free(state.request_model);
+    free(state.reasoning_details_seen);
+    for (int i = 0; i < state.tool_slots_used; i++) {
+        free(state.tool_calls[i].tool_name);
+        free(state.tool_calls[i].tool_id);
+        jbuf_free(&state.tool_calls[i].tool_args);
+    }
+    jbuf_free(&state.raw_body);
+    jbuf_free(&state.line_buf);
+    jbuf_free(&state.text_accum);
+    jbuf_free(&state.reasoning_accum);
+    jbuf_free(&state.reasoning_details_accum);
+    jbuf_free(&capture.reasoning);
+    jbuf_free(&capture.tool_args);
+    return true;
+}
+
+bool provider_test_parse_openai_sse(const char *bytes, size_t len,
+                                    provider_test_openai_sse_result_t *out) {
+    return provider_test_parse_openai_sse_for_model(bytes, len, NULL, NULL, out);
+}
+
+void provider_test_free_openai_sse_result(provider_test_openai_sse_result_t *result) {
+    if (!result)
+        return;
+    json_free_response(&result->parsed);
+    free(result->reasoning_stream);
+    free(result->tool_arg_delta_stream);
+    memset(result, 0, sizeof(*result));
+}
+#endif
+
+static void oai_protocol_error(oai_sse_state_t *s, const char *reason, const char *message) {
+    if (!s || s->got_error)
+        return;
+    s->got_error = true;
+    free(s->stop_reason);
+    s->stop_reason = safe_strdup(reason);
+    free(s->error_msg);
+    s->error_msg = safe_strdup(message);
+}
+
+static bool oai_validate_completed_turn(oai_sse_state_t *s) {
+    if (!s)
+        return false;
+    if (!s->stop_reason)
+        oai_protocol_error(s, "incomplete_stream", "stream ended without finish_reason");
+
+    bool has_tool = false;
+    int tool_count = 0;
+    for (int i = 0; i < s->tool_slots_used && !s->got_error; i++) {
+        oai_tool_call_state_t *slot = &s->tool_calls[i];
+        if (!slot->used)
+            continue;
+        if (!slot->tool_name || !slot->tool_name[0]) {
+            oai_protocol_error(s, "invalid_tool_call", "tool call ended without a function name");
+            break;
+        }
+        if (!slot->tool_id || !slot->tool_id[0]) {
+            oai_protocol_error(s, "invalid_tool_call", "tool call ended without a provider call ID");
+            break;
+        }
+        const char *args = (slot->tool_args.data && slot->tool_args.data[0])
+                               ? slot->tool_args.data
+                               : "{}";
+        while (*args && isspace((unsigned char)*args))
+            args++;
+        if (*args != '{' || !json_is_valid_container(args)) {
+            oai_protocol_error(s, "invalid_tool_arguments",
+                               "tool call ended with malformed JSON arguments");
+            break;
+        }
+        for (int j = 0; j < i; j++) {
+            oai_tool_call_state_t *prior = &s->tool_calls[j];
+            if (prior->used && prior->tool_id && strcmp(prior->tool_id, slot->tool_id) == 0) {
+                oai_protocol_error(s, "duplicate_tool_call_id",
+                                   "stream returned duplicate tool call IDs");
+                break;
+            }
+        }
+        has_tool = true;
+        tool_count++;
+    }
+    if (!s->got_error && s->stop_reason && strcmp(s->stop_reason, "tool_use") == 0 && !has_tool)
+        oai_protocol_error(s, "invalid_tool_call", "tool_calls finish had no complete tool call");
+    if (!s->got_error && !has_tool && s->text_accum.len == 0 && s->reasoning_accum.len == 0)
+        oai_protocol_error(s, "empty_response", "model stream completed without output");
+    if (!s->got_error) {
+        int required_blocks = tool_count;
+        required_blocks += s->text_accum.len > 0 ? 1 : 0;
+        required_blocks += s->reasoning_accum.len > 0 ? 1 : 0;
+        required_blocks +=
+            s->preserve_reasoning_details && s->reasoning_details_accum.len > 0 ? 1 : 0;
+        if (required_blocks > MAX_CONTENT_BLOCKS)
+            oai_protocol_error(s, "response_too_large",
+                               "stream response exceeded the content block limit");
+    }
+    return !s->got_error;
+}
+
+static stream_result_t openai_stream(provider_t *p, const char *api_key, const char *request_json,
+                                     stream_text_cb text_cb, stream_tool_start_cb tool_cb,
+                                     stream_tool_arg_delta_cb tool_delta_cb,
+                                     stream_thinking_cb thinking_cb, void *cb_ctx) {
     openai_data_t *od = (openai_data_t *)p->data;
     stream_result_t result = {0};
 
+    if (!od || !od->api_url[0]) {
+        result.ok = false;
+        result.http_status = 0;
+        result.parsed.stop_reason = safe_strdup("missing_api_base");
+        result.parsed.blocks = safe_malloc(sizeof(content_block_t));
+        memset(result.parsed.blocks, 0, sizeof(content_block_t));
+        result.parsed.count = 1;
+        result.parsed.blocks[0].type = safe_strdup("text");
+        char msg[512];
+        snprintf(msg, sizeof(msg),
+                 "Provider '%s' needs a custom API base URL before DSCO can call it.",
+                 p && p->name ? p->name : "unknown");
+        result.parsed.blocks[0].text = safe_strdup(msg);
+        if (text_cb)
+            text_cb(msg, cb_ctx);
+        return result;
+    }
+
     CURL *curl = od && od->curl ? od->curl : curl_easy_init();
-    if (!curl) { result.ok = false; return result; }
+    if (!curl) {
+        result.ok = false;
+        return result;
+    }
     bool owned_curl = !(od && od->curl);
     curl_easy_reset(curl);
+    provider_stream_enable_interrupt(curl);
 
-    struct curl_slist *hdrs = p->build_headers
-        ? p->build_headers(p, api_key)
-        : openai_build_headers(p, api_key);
+    struct curl_slist *hdrs =
+        p->build_headers ? p->build_headers(p, api_key) : openai_build_headers(p, api_key);
     hdrs = curl_slist_append(hdrs, "Accept: text/event-stream");
 
     oai_sse_state_t state = {0};
     jbuf_init(&state.line_buf, 4096);
     jbuf_init(&state.text_accum, 4096);
+    jbuf_init(&state.raw_body, 1024);
     jbuf_init(&state.reasoning_accum, 1024);
+    jbuf_init(&state.reasoning_details_accum, 1024);
+    state.request_model = json_get_str(request_json, "model");
+    const char *source_provider = p && p->name ? provider_profile_canonical_name(p->name) : NULL;
+    state.preserve_reasoning_details =
+        source_provider && strcmp(source_provider, "openrouter") == 0;
     state.text_cb = text_cb;
     state.tool_cb = tool_cb;
+    state.tool_delta_cb = tool_delta_cb;
     state.thinking_cb = thinking_cb;
     state.cb_ctx = cb_ctx;
     state.telemetry_start = provider_now_sec();
@@ -2332,59 +4901,113 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request_json);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, oai_sse_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, provider_credit_header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &state.credit_reset_at);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 100L);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 120L);
+    curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 4096L);
+    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+    if (provider_is_sakana(p) || dcr_provider_find(p ? p->name : NULL)) {
+        /* Slow multi-agent / imported providers can legitimately stay quiet
+         * during reasoning. DCR can carry provider-specific idle policy learned
+         * from Codex/provider docs; Sakana defaults to 2h. */
+        long idle_ms = dcr_provider_stream_idle_timeout_ms(p ? p->name : NULL,
+                                                           provider_is_sakana(p) ? 7200000L : 120000L);
+        long idle_s = idle_ms > 0 ? (idle_ms + 999L) / 1000L : 120L;
+        const char *idle_env = getenv("DSCO_FUGU_STREAM_IDLE_TIMEOUT_S");
+        if (provider_is_sakana(p) && idle_env && idle_env[0]) {
+            long v = atol(idle_env);
+            if (v > 0)
+                idle_s = v;
+        }
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, idle_s);
+    } else if (provider_is_local_endpoint(source_provider)) {
+        /* Local Metal backends may spend several minutes ingesting DSCO's
+         * tool-rich system prompt before producing the first SSE byte,
+         * especially when multiple slots prefill concurrently.  The generic
+         * 100 B/s for 120 s policy turns healthy prefills into false failures
+         * and may trigger an expensive continuity fallback. */
+        long idle_s = dsco_env_long("DSCO_LOCAL_STREAM_IDLE_TIMEOUT_S",
+                                    600L, 30L, 7200L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, idle_s);
+    } else {
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 100L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 120L);
+    }
 
-    CURLcode res = curl_easy_perform(curl);
+    if (provider_env_truthy(getenv("DSCO_DEBUG_REQUEST")))
+        llm_debug_save_request(request_json, 0);
+
+    provider_event_attempt_t event_attempt = {0};
+    state.event_attempt = &event_attempt;
+    bool audit_started = provider_event_start(&event_attempt, p->name, request_json, od->api_url);
+    CURLcode res = audit_started ? curl_easy_perform(curl) : CURLE_ABORTED_BY_CALLBACK;
+    CURLcode raw_res = res;
+    bool terminal_aborted = provider_stream_terminal_abort(res, state.stream_done);
+    if (terminal_aborted)
+        res = CURLE_OK;
+    /* Flush remaining partial line so the full error body reaches raw_body. */
+    if (state.line_buf.len > 0) {
+        oai_handle_sse_line(&state, state.line_buf.data);
+        jbuf_reset(&state.line_buf);
+    }
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
     {
         double dns = 0.0, conn = 0.0, tls = 0.0, ttfb = 0.0, total = 0.0;
+        long new_connections = 0;
         curl_easy_getinfo(curl, CURLINFO_NAMELOOKUP_TIME, &dns);
         curl_easy_getinfo(curl, CURLINFO_CONNECT_TIME, &conn);
         curl_easy_getinfo(curl, CURLINFO_APPCONNECT_TIME, &tls);
         curl_easy_getinfo(curl, CURLINFO_STARTTRANSFER_TIME, &ttfb);
         curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME, &total);
+        curl_easy_getinfo(curl, CURLINFO_NUM_CONNECTS, &new_connections);
         result.telemetry.latency.dns_ms = dns * 1000.0;
         result.telemetry.latency.connect_ms = conn * 1000.0;
         result.telemetry.latency.tls_ms = tls * 1000.0;
         result.telemetry.latency.ttfb_ms = ttfb * 1000.0;
         result.telemetry.latency.total_ms = total * 1000.0;
+        result.telemetry.latency.new_connections = new_connections;
     }
 
     curl_slist_free_all(hdrs);
-    if (owned_curl)
+    /* An aborted HTTP/2 transfer can leave its cached connection unusable
+     * for the next upload, even after a valid SSE terminal event. Preserve
+     * the completed result and retire only that transport, as on Codex. */
+    if (owned_curl || terminal_aborted) {
+        if (od && od->curl == curl)
+            od->curl = NULL;
         curl_easy_cleanup(curl);
+    }
 
     result.http_status = (int)http_code;
 
     if (res == CURLE_OK && http_code == 200) {
-        result.ok = true;
+        result.ok = oai_validate_completed_turn(&state) &&
+                    oai_stream_terminal_success(&state);
 
+        oai_append_reasoning_details_block(&state);
         /* Finalize every accumulated tool call in index order. */
         for (int i = 0; i < state.tool_slots_used; i++) {
             oai_tool_call_state_t *slot = &state.tool_calls[i];
-            if (!slot->used || !slot->tool_name) continue;
-            int bi = state.block_count++;
-            if (bi < MAX_CONTENT_BLOCKS) {
-                state.blocks[bi].type = safe_strdup("tool_use");
-                state.blocks[bi].tool_name = safe_strdup(slot->tool_name);
-                state.blocks[bi].tool_id = safe_strdup(oai_tool_state_id(slot));
-                state.blocks[bi].tool_input = safe_strdup(
-                    (slot->tool_args.data && slot->tool_args.data[0])
-                        ? slot->tool_args.data
-                        : "{}");
-            }
+            if (!slot->used || !slot->tool_name || state.block_count >= MAX_CONTENT_BLOCKS)
+                continue;
+            content_block_t *block = &state.blocks[state.block_count++];
+            block->type = safe_strdup("tool_use");
+            block->tool_name = safe_strdup(slot->tool_name);
+            block->tool_id = safe_strdup(oai_tool_state_id(slot));
+            block->tool_input = safe_strdup(
+                (slot->tool_args.data && slot->tool_args.data[0]) ? slot->tool_args.data : "{}");
         }
 
         /* Add text block if we accumulated text */
-        if (state.text_accum.len > 0) {
-            int bi = state.block_count++;
-            if (bi < MAX_CONTENT_BLOCKS) {
-                state.blocks[bi].type = safe_strdup("text");
-                state.blocks[bi].text = safe_strdup(state.text_accum.data);
-            }
+        if (state.text_accum.len > 0 && state.block_count < MAX_CONTENT_BLOCKS) {
+            content_block_t *block = &state.blocks[state.block_count++];
+            block->type = safe_strdup("text");
+            block->text = safe_strdup(state.text_accum.data);
         }
 
         /* Reasoning-only turn fallback. Some upstreams (notably OpenRouter
@@ -2395,42 +5018,30 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
          * appended to the conversation (which can later 400 on resend).
          * Promote the accumulated reasoning to a text block so the answer is
          * preserved in conv and can be surfaced to the user. */
-        if (state.block_count == 0 && state.reasoning_accum.len > 0) {
-            int bi = state.block_count++;
-            state.blocks[bi].type = safe_strdup("text");
-            state.blocks[bi].text = safe_strdup(state.reasoning_accum.data);
+        /* Preserve reasoning_content across turns for providers (notably
+         * Moonshot/Kimi) that require replaying prior reasoning during
+         * multi-step tool calling. Keep it as an internal 'thinking' block;
+         * request builders may serialize it provider-specifically. */
+        if (state.reasoning_accum.len > 0 && state.block_count < MAX_CONTENT_BLOCKS) {
+            content_block_t *block = &state.blocks[state.block_count++];
+            block->type = safe_strdup(state.block_count == 1 ? "text" : "thinking");
+            block->text = safe_strdup(state.reasoning_accum.data);
         }
 
         /* Build result */
         result.parsed.count = state.block_count;
-        result.parsed.blocks = safe_malloc(
-            (state.block_count > 0 ? state.block_count : 1) * sizeof(content_block_t));
-        memcpy(result.parsed.blocks, state.blocks,
-               state.block_count * sizeof(content_block_t));
+        result.parsed.blocks =
+            safe_malloc((state.block_count > 0 ? state.block_count : 1) * sizeof(content_block_t));
+        memcpy(result.parsed.blocks, state.blocks, state.block_count * sizeof(content_block_t));
         result.parsed.stop_reason = state.stop_reason;
-        result.usage = state.usage;
-        /* BUG2 fix: OpenAI/xAI/DeepSeek/Gemini report cached tokens in
-         * state.cached_tokens (input_tokens_details.cached_tokens), not in
-         * cache_read_input_tokens. Merge into the canonical field so session
-         * cost accounting, turn budget, and UI stats all see the savings. */
-        if (state.cached_tokens > 0 && result.usage.cache_read_input_tokens == 0)
-            result.usage.cache_read_input_tokens = state.cached_tokens;
-
-        /* Log model/cost info when available (OpenRouter provides these) */
-        if (state.actual_model || state.cost_usd > 0) {
-            fprintf(stderr, "  \033[2m");
-            if (state.actual_model)
-                fprintf(stderr, "model=%s ", state.actual_model);
-            if (state.cost_usd > 0)
-                fprintf(stderr, "$%.6f ", state.cost_usd);
-            if (state.cached_tokens > 0)
-                fprintf(stderr, "cached=%d ", state.cached_tokens);
-            if (state.reasoning_tokens > 0)
-                fprintf(stderr, "reasoning=%d ", state.reasoning_tokens);
-            if (state.generation_id)
-                fprintf(stderr, "gen=%s", state.generation_id);
-            fprintf(stderr, "\033[0m\n");
-        }
+        result.usage = oai_canonical_usage(&state);
+        result.cost_usd = state.cost_usd;
+        result.cost_reported = state.cost_reported;
+        /* Surface provider metadata to caller so it can be printed
+         * AFTER md_flush completes (avoids partial-echo duplication). */
+        result.actual_model     = state.actual_model;   state.actual_model = NULL;
+        result.generation_id    = state.generation_id;  state.generation_id = NULL;
+        result.reasoning_tokens = state.reasoning_tokens;
 
         /* Handle mid-stream errors that arrived on HTTP 200 */
         if (state.got_error) {
@@ -2440,45 +5051,81 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
         }
     } else {
         result.ok = false;
-        /* Extract a parseable error body from the last partial line (HTTP
-         * errors arrive as a JSON blob, not as SSE). This lets us surface
-         * a structured, actionable message to the agent layer — critical
-         * for the credit-too-low fallback path. */
-        if (state.line_buf.len > 0 && !state.error_msg) {
-            char *err_obj = json_get_raw(state.line_buf.data, "error");
+        /* Extract error from the full raw_body, not just the last partial line. */
+        if (state.raw_body.len > 0 && !state.error_msg) {
+            state.credit_reset_at = provider_reset_max(
+                state.credit_reset_at,
+                provider_credit_reset_at_from_text(state.raw_body.data, time(NULL)));
+            char *err_obj = json_get_raw(state.raw_body.data, "error");
             if (err_obj) {
+                state.credit_reset_at = provider_reset_max(
+                    state.credit_reset_at,
+                    provider_credit_reset_at_from_text(err_obj, time(NULL)));
                 char *msg = json_get_str(err_obj, "message");
                 if (msg) {
                     state.got_error = true;
                     state.error_msg = msg;
-                    if (provider_msg_is_credit_too_low(msg) || http_code == 402)
+                    if (provider_msg_is_credit_too_low(msg) || http_code == 402 ||
+                        http_code == 429)
                         state.credit_too_low = true;
                 }
                 free(err_obj);
             }
         }
-        if (http_code == 402) state.credit_too_low = true;
+        if (http_code == 402 || http_code == 429)
+            state.credit_too_low = true;
 
         if (res != CURLE_OK) {
-            fprintf(stderr, "dsco: curl error: %s (HTTP %d, url: %s)\n",
-                    curl_easy_strerror(res), (int)http_code, od->api_url);
+            fprintf(stderr, "dsco: curl error: %s (HTTP %d, url: %s)\n", curl_easy_strerror(res),
+                    (int)http_code, od->api_url);
         } else if (state.credit_too_low) {
-            fprintf(stderr,
-                "  \033[31m✗ %s credit/billing error (HTTP %d):\033[0m %s\n"
-                "  \033[2mhint: switch provider with /model, e.g.\033[0m "
-                "\033[36m/model x-ai/grok-4.20-beta\033[0m \033[2m(needs OPENROUTER_API_KEY)\033[0m\n",
-                p->name ? p->name : "provider",
-                (int)http_code,
-                state.error_msg ? state.error_msg : "(no message)");
+            fprintf(stderr, "  \033[31m✗ %s credit/rate-limit error (HTTP %d):\033[0m %s\n",
+                    p->name ? p->name : "provider", (int)http_code,
+                    state.error_msg ? state.error_msg : "(no message)");
+            if (provider_is_sakana(p)) {
+                const char *payg = provider_sakana_payg_key();
+                const char *sub = provider_sakana_subscription_key();
+                bool using_payg = payg && api_key && strcmp(api_key, payg) == 0;
+                if (using_payg && sub && sub[0]) {
+                    fprintf(stderr,
+                            "  \033[2mhint: Sakana subscription key is configured; retrying "
+                            "that path before cross-provider fallback.\033[0m\n");
+                } else if (!using_payg && payg && payg[0]) {
+                    fprintf(stderr,
+                            "  \033[2mhint: Fugu PAYG key is configured; retrying metered "
+                            "Sakana before cross-provider fallback.\033[0m\n");
+                } else {
+                    fprintf(stderr,
+                            "  \033[2mhint: set FUGU_PAYG_API_KEY for metered Fugu fallback, "
+                            "or switch provider with /model.\033[0m\n");
+                }
+            } else {
+                fprintf(stderr,
+                        "  \033[2mhint: switch provider with /model, e.g.\033[0m "
+                        "\033[36m/model x-ai/grok-4.6\033[0m \033[2m(needs "
+                        "OPENROUTER_API_KEY)\033[0m\n");
+            }
         } else if (state.got_error && state.error_msg) {
             fprintf(stderr, "dsco: HTTP %d: %s\n", (int)http_code, state.error_msg);
-        } else if (state.line_buf.len > 0) {
-            fprintf(stderr, "dsco: HTTP %d: %.*s\n",
-                    (int)http_code, (int)(state.line_buf.len < 500 ? state.line_buf.len : 500),
-                    state.line_buf.data);
+        } else if (state.raw_body.len > 0) {
+            fprintf(stderr, "dsco: HTTP %d: %.*s\n", (int)http_code,
+                    (int)(state.raw_body.len < 500 ? state.raw_body.len : 500),
+                    state.raw_body.data);
         } else {
-            fprintf(stderr, "dsco: request failed HTTP %d (url: %s)\n",
-                    (int)http_code, od->api_url);
+            fprintf(stderr, "dsco: request failed HTTP %d (url: %s)\n", (int)http_code,
+                    od->api_url);
+        }
+        /* Store error in result.parsed so the caller survives fallback destruction. */
+        const char *err_text = state.text_accum.len ? state.text_accum.data : state.error_msg ? state.error_msg :
+            state.raw_body.len > 0 ? state.raw_body.data : NULL;
+        result.parsed.stop_reason = safe_strdup(state.credit_too_low ? "credit_too_low" :
+            g_interrupted ? "interrupted" : res != CURLE_OK ? "incomplete_stream" : "error");
+        if (err_text) {
+            result.parsed.blocks = safe_malloc(sizeof(content_block_t));
+            memset(&result.parsed.blocks[0], 0, sizeof(content_block_t));
+            result.parsed.count = 1;
+            result.parsed.blocks[0].type = safe_strdup("text");
+            result.parsed.blocks[0].text = safe_strdup(err_text);
         }
         free(state.stop_reason);
     }
@@ -2489,37 +5136,1841 @@ static stream_result_t openai_stream(provider_t *p, const char *api_key,
     if (state.credit_too_low) {
         free(result.parsed.stop_reason);
         result.parsed.stop_reason = safe_strdup("credit_too_low");
+        result.credit_reset_at = state.credit_reset_at;
+    }
+
+    /* Usage normally arrives in the final SSE chunk. A stream that dies or is
+     * aborted mid-turn was still generated (and billed / counted against
+     * subscription quota) server-side, yet would meter as zero here — the
+     * session shows in:0 out:0 and budget/quota accounting goes blind.
+     * Estimate from what actually arrived so partial turns stay visible. */
+    if (result.usage.input_tokens == 0 && result.usage.output_tokens == 0) {
+        size_t out_chars = state.text_accum.len + state.reasoning_accum.len;
+        for (int i = 0; i < state.tool_slots_used; i++)
+            if (state.tool_calls[i].used)
+                out_chars += state.tool_calls[i].tool_args.len;
+        if (out_chars > 0) {
+            result.usage.output_tokens = (int)((out_chars + 3) / 4);
+            result.usage.input_tokens = (int)((strlen(request_json) + 3) / 4);
+        }
     }
 
     double telemetry_end = provider_now_sec();
     result.telemetry.total_ms = (telemetry_end - state.telemetry_start) * 1000.0;
     if (state.telemetry_got_first)
-        result.telemetry.ttft_ms =
-            (state.telemetry_first_delta - state.telemetry_start) * 1000.0;
+        result.telemetry.ttft_ms = (state.telemetry_first_delta - state.telemetry_start) * 1000.0;
     if (state.telemetry_first_tool > 0.0)
         result.telemetry.ttft_tool_ms =
             (state.telemetry_first_tool - state.telemetry_start) * 1000.0;
-    if (result.telemetry.total_ms > 0.0 && result.usage.output_tokens > 0)
+    double decode_ms = result.telemetry.total_ms - result.telemetry.ttft_ms;
+    if (decode_ms > 0.0 && result.usage.output_tokens > 0)
         result.telemetry.tokens_per_sec =
-            result.usage.output_tokens / (result.telemetry.total_ms / 1000.0);
+            result.usage.output_tokens / (decode_ms / 1000.0);
     result.telemetry.thinking_tokens = state.reasoning_accum.len > 0
-        ? (int)(state.reasoning_accum.len / 4)
-        : state.reasoning_tokens;
+                                           ? (int)(state.reasoning_accum.len / 4)
+                                           : state.reasoning_tokens;
+
+    if (!provider_event_finish(&event_attempt, (int)raw_res, (int)res, http_code,
+                               state.stream_done, state.got_error,
+                               result.ok ? NULL : state.raw_body.data))
+        result.ok = false;
+    result.visible_text_streamed = state.text_accum.len > 0;
 
     /* Cleanup OpenRouter-specific state */
     free(state.error_msg);
+    /* state.actual_model / state.generation_id: ownership transferred to result above;
+     * pointers were set to NULL, so these free() calls are safe no-ops but kept
+     * for structural symmetry. */
     free(state.actual_model);
     free(state.generation_id);
+    free(state.request_model);
+    free(state.reasoning_details_seen);
     for (int i = 0; i < state.tool_slots_used; i++) {
         free(state.tool_calls[i].tool_name);
         free(state.tool_calls[i].tool_id);
         jbuf_free(&state.tool_calls[i].tool_args);
     }
+    jbuf_free(&state.raw_body);
     jbuf_free(&state.line_buf);
     jbuf_free(&state.text_accum);
     jbuf_free(&state.reasoning_accum);
+    jbuf_free(&state.reasoning_details_accum);
 
     return result;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * Native ChatGPT-subscription provider (Responses API)
+ *
+ * Talks directly to the ChatGPT backend Responses endpoint
+ * (https://chatgpt.com/backend-api/codex/responses) using a ChatGPT OAuth
+ * access token + account id resolved by openai_oauth.c. No `codex` subprocess.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+#define CHATGPT_RESPONSES_URL "https://chatgpt.com/backend-api/codex/responses"
+#define CHATGPT_DEFAULT_STREAM_IDLE_TIMEOUT_S 300L
+#define CHATGPT_DEFAULT_MAX_RETRY_DELAY_MS 900000L
+#define CHATGPT_REASONING_BLOCK_PREFIX "openai_codex_reasoning:"
+
+static const char *chatgpt_backend_url(void) {
+    const char *override = getenv("DSCO_CHATGPT_BASE_URL");
+    return (override && override[0]) ? override : CHATGPT_RESPONSES_URL;
+}
+
+static long chatgpt_stream_idle_timeout_s(void) {
+    return dsco_env_long("DSCO_CHATGPT_STREAM_IDLE_TIMEOUT_S",
+                         CHATGPT_DEFAULT_STREAM_IDLE_TIMEOUT_S, 30L, 7200L);
+}
+
+static long chatgpt_max_retry_delay_ms(void) {
+    return dsco_env_long("DSCO_CHATGPT_MAX_RETRY_DELAY_MS",
+                         CHATGPT_DEFAULT_MAX_RETRY_DELAY_MS, 1000L, 3600000L);
+}
+
+/* Strip a leading "openai/" or "chatgpt/" route prefix from a model id so the
+ * backend sees a bare model name (e.g. "openai/gpt-5.5" -> "gpt-5.5"). */
+static const char *chatgpt_model_id(session_state_t *session) {
+    const char *m = provider_request_model_id("openai-codex",
+                                               session ? session->model
+                                                       : codex_cache_default_model());
+    if (!m)
+        return codex_cache_default_model();
+    const char *slash = strrchr(m, '/');
+    const char *bare = slash ? slash + 1 : m;
+    /* Independent swimlanes preserve the requested checkpoint even when a
+     * local Codex catalog is stale. Let the upstream reject an unknown ID. */
+    if (provider_env_truthy(getenv("DSCO_STRICT_MODEL_ID")))
+        return bare;
+    if (!codex_cache_model_supported(bare))
+        return codex_cache_default_model();
+    return bare;
+}
+
+/* Emit one Responses input "message" item wrapping text/image parts for a
+ * role. Returns true if anything was written. */
+static bool chatgpt_append_message_item(jbuf_t *b, const char *role, const message_t *m,
+                                        bool *first) {
+    /* Pre-scan for any renderable content parts. */
+    bool has_part = false;
+    for (int i = 0; i < m->content_count; i++) {
+        const msg_content_t *mc = &m->content[i];
+        if (!mc->type)
+            continue;
+        if ((strcmp(mc->type, "text") == 0 && mc->text && mc->text[0]) ||
+            strcmp(mc->type, "image") == 0)
+            has_part = true;
+    }
+    if (!has_part)
+        return false;
+
+    const char *text_part_type = (strcmp(role, "assistant") == 0) ? "output_text" : "input_text";
+    if (!*first)
+        jbuf_append(b, ",");
+    *first = false;
+    jbuf_append(b, "{\"type\":\"message\",\"role\":");
+    jbuf_append_json_str(b, role);
+    jbuf_append(b, ",\"content\":[");
+    bool wrote = false;
+    for (int i = 0; i < m->content_count; i++) {
+        const msg_content_t *mc = &m->content[i];
+        if (!mc->type)
+            continue;
+        if (strcmp(mc->type, "text") == 0 && mc->text && mc->text[0]) {
+            if (wrote)
+                jbuf_append(b, ",");
+            jbuf_append(b, "{\"type\":");
+            jbuf_append_json_str(b, text_part_type);
+            jbuf_append(b, ",\"text\":");
+            jbuf_append_json_str(b, mc->text);
+            jbuf_append(b, "}");
+            wrote = true;
+        } else if (strcmp(mc->type, "image") == 0 && mc->image_media_type &&
+                   ((mc->image_data && mc->image_data[0]) || (mc->text && mc->text[0]))) {
+            /* Images created by conv_add_user_image_base64 store the payload in
+             * image_data. Older callers may put it in text; accept both so the
+             * native Responses provider never silently drops vision input. */
+            const char *payload = (mc->image_data && mc->image_data[0])
+                                     ? mc->image_data : mc->text;
+            if (wrote)
+                jbuf_append(b, ",");
+            jbuf_append(b, "{\"type\":\"input_image\",\"image_url\":");
+            jbuf_t durl;
+            jbuf_init(&durl, 256);
+            jbuf_append(&durl, "data:");
+            jbuf_append(&durl, mc->image_media_type);
+            jbuf_append(&durl, ";base64,");
+            jbuf_append(&durl, payload);
+            jbuf_append_json_str(b, durl.data ? durl.data : "");
+            jbuf_free(&durl);
+            jbuf_append(b, "}");
+            wrote = true;
+        }
+    }
+    jbuf_append(b, "]}");
+    return true;
+}
+
+/* Emit top-level function_call / function_call_output items for a message. */
+static void chatgpt_append_tool_items(jbuf_t *b, const message_t *m, bool *first,
+                                       const char *reasoning_model) {
+    for (int i = 0; i < m->content_count; i++) {
+        const msg_content_t *mc = &m->content[i];
+        if (!mc->type)
+            continue;
+        if (strncmp(mc->type, CHATGPT_REASONING_BLOCK_PREFIX,
+                    sizeof(CHATGPT_REASONING_BLOCK_PREFIX) - 1) == 0) {
+            /* Opaque Responses state is only valid for its issuing native
+             * Codex model. Other providers must never receive it as text. */
+            const char *issuer = mc->type + sizeof(CHATGPT_REASONING_BLOCK_PREFIX) - 1;
+            if (reasoning_model && strcmp(issuer, reasoning_model) == 0 &&
+                mc->text && json_is_valid_container(mc->text)) {
+                if (!*first)
+                    jbuf_append(b, ",");
+                *first = false;
+                jbuf_append(b, mc->text);
+            }
+        } else if (strcmp(mc->type, "tool_use") == 0) {
+            if (!*first)
+                jbuf_append(b, ",");
+            *first = false;
+            jbuf_append(b, "{\"type\":\"function_call\",\"name\":");
+            jbuf_append_json_str(b, mc->tool_name ? mc->tool_name : "");
+            jbuf_append(b, ",\"arguments\":");
+            jbuf_append_json_str(b, (mc->tool_input && mc->tool_input[0]) ? mc->tool_input : "{}");
+            jbuf_append(b, ",\"call_id\":");
+            jbuf_append_json_str(b, mc->tool_id ? mc->tool_id : "");
+            jbuf_append(b, "}");
+        } else if (strcmp(mc->type, "tool_result") == 0) {
+            if (!*first)
+                jbuf_append(b, ",");
+            *first = false;
+            jbuf_append(b, "{\"type\":\"function_call_output\",\"call_id\":");
+            jbuf_append_json_str(b, mc->tool_id ? mc->tool_id : "");
+            jbuf_append(b, ",\"output\":");
+            jbuf_append_json_str(b, mc->text ? mc->text : "");
+            jbuf_append(b, "}");
+        }
+    }
+}
+
+/* Emit a flat Responses-format tools array reusing the dsco tool catalog. */
+static bool chatgpt_append_tools(jbuf_t *b, conversation_t *conv, session_state_t *session) {
+    if (session && session->direct_answer_mode)
+        return false;
+    const char *disable_tools = getenv("DSCO_OR_DISABLE_TOOLS");
+    if (disable_tools && disable_tools[0] && strcmp(disable_tools, "0") != 0 &&
+        strcasecmp(disable_tools, "false") != 0)
+        return false;
+
+    const char *proxy_env = getenv("DSCO_TOOL_PROXY");
+    bool stable_proxy = !(proxy_env && proxy_env[0] &&
+                          (strcmp(proxy_env, "0") == 0 ||
+                           strcasecmp(proxy_env, "false") == 0 ||
+                           strcasecmp(proxy_env, "no") == 0 ||
+                           strcasecmp(proxy_env, "off") == 0));
+    if (stable_proxy) {
+        /* Share the recovery register and operator profile/allowlist policy
+         * with Chat Completions; loaded schemas alone do not alter this proxy. */
+        const char *allowlist = getenv("DSCO_TOOL_ALLOWLIST");
+        bool allowlist_active = allowlist && allowlist[0];
+        external_tool_snapshot_t ext = {0};
+        int orchestrator_ext_count = 0;
+        if (!allowlist_active) {
+            ext = tools_external_snapshot();
+            for (int i = 0; i < ext.count; i++)
+                if (openai_is_orchestrator_tool(ext.items[i].name))
+                    orchestrator_ext_count++;
+        }
+        int count = 0;
+        const tool_def_t **selected =
+            openai_proxy_tools(session, OPENAI_PROXY_TOOL_LIMIT - orchestrator_ext_count, &count);
+        if (count == 0) {
+            free((void *)selected);
+            tools_external_snapshot_free(&ext);
+            return false;
+        }
+        jbuf_append(b, ",\"tools\":[");
+        bool wrote = false;
+        for (int ni = 0; ni < count; ni++) {
+            const tool_def_t *tool = selected[ni];
+            if (wrote)
+                jbuf_append(b, ",");
+            jbuf_append(b, "{\"type\":\"function\",\"name\":");
+            jbuf_append_json_str(b, tool->name);
+            jbuf_append(b, ",\"description\":");
+            jbuf_append_json_str(b, tool->description ? tool->description : "");
+            jbuf_append(b, ",\"parameters\":");
+            jbuf_append(b, tool->input_schema_json ? tool->input_schema_json : "{}");
+            jbuf_append(b, ",\"strict\":false}");
+            wrote = true;
+        }
+        for (int ni = 0; openai_orchestrator_tool_names[ni]; ni++) {
+            for (int i = 0; i < ext.count; i++) {
+                external_tool_t *tool = &ext.items[i];
+                if (!openai_is_orchestrator_tool(tool->name) ||
+                    strcmp(tool->name, openai_orchestrator_tool_names[ni]) != 0)
+                    continue;
+                if (wrote)
+                    jbuf_append(b, ",");
+                jbuf_append(b, "{\"type\":\"function\",\"name\":");
+                jbuf_append_json_str(b, tool->name);
+                jbuf_append(b, ",\"description\":");
+                jbuf_append_json_str(b, tool->description[0] ? tool->description : "");
+                jbuf_append(b, ",\"parameters\":");
+                jbuf_append(b, tool->input_schema_json ? tool->input_schema_json : "{}");
+                jbuf_append(b, ",\"strict\":false}");
+                wrote = true;
+                break;
+            }
+        }
+        jbuf_append(b, "]");
+        free((void *)selected);
+        tools_external_snapshot_free(&ext);
+        return wrote;
+    }
+
+    int filtered_count = 0;
+    const char *tool_ctx = openai_last_user_context(conv);
+    const tool_def_t **filtered = tools_get_filtered(tool_ctx, 128, &filtered_count);
+    external_tool_snapshot_t ext = tools_external_snapshot();
+    int *ext_order = ext.count > 0 ? safe_malloc((size_t)ext.count * sizeof(*ext_order)) : NULL;
+    int ext_order_count =
+        ext_order ? tools_rank_external_snapshot(&ext, tool_ctx, ext_order, ext.count) : 0;
+    if (filtered_count <= 0 && ext.count <= 0) {
+        free((void *)filtered);
+        free(ext_order);
+        tools_external_snapshot_free(&ext);
+        return false;
+    }
+
+    jbuf_append(b, ",\"tools\":[");
+    bool wrote = false;
+    for (int i = 0; i < filtered_count; i++) {
+        if (wrote)
+            jbuf_append(b, ",");
+        jbuf_append(b, "{\"type\":\"function\",\"name\":");
+        jbuf_append_json_str(b, filtered[i]->name ? filtered[i]->name : "");
+        jbuf_append(b, ",\"description\":");
+        jbuf_append_json_str(b, filtered[i]->description ? filtered[i]->description : "");
+        jbuf_append(b, ",\"parameters\":");
+        jbuf_append(b, filtered[i]->input_schema_json ? filtered[i]->input_schema_json : "{}");
+        jbuf_append(b, ",\"strict\":false}");
+        wrote = true;
+    }
+    free((void *)filtered);
+
+    int ext_written = 0;
+    for (int oi = 0; oi < ext_order_count && ext_written < 32; oi++) {
+        int i = ext_order[oi];
+        if (i < 0 || i >= ext.count)
+            continue;
+        if (!ext.items[i].loaded)
+            continue;
+        if (wrote)
+            jbuf_append(b, ",");
+        jbuf_append(b, "{\"type\":\"function\",\"name\":");
+        jbuf_append_json_str(b, ext.items[i].name);
+        jbuf_append(b, ",\"description\":");
+        jbuf_append_json_str(b, ext.items[i].description);
+        jbuf_append(b, ",\"parameters\":");
+        jbuf_append(b, ext.items[i].input_schema_json ? ext.items[i].input_schema_json : "{}");
+        jbuf_append(b, ",\"strict\":false}");
+        wrote = true;
+        ext_written++;
+    }
+    jbuf_append(b, "]");
+    free(ext_order);
+    tools_external_snapshot_free(&ext);
+    return wrote;
+}
+
+/* Shared public Responses serialization, without account or model policy. */
+bool provider_responses_append_context(jbuf_t *b, conversation_t *conv,
+                                      session_state_t *session) {
+    jbuf_t tools, instructions;
+    jbuf_init(&tools, 4096);
+    jbuf_init(&instructions, 8192);
+    bool has_tools = chatgpt_append_tools(&tools, conv, session);
+    const char *custom = llm_get_custom_system_prompt_for_session(session);
+    if (custom && custom[0]) {
+        jbuf_append(&instructions, custom);
+        jbuf_append(&instructions, "\n\n");
+    }
+    jbuf_append(&instructions, (g_cheap_mode || (session && session->direct_answer_mode))
+                                    ? SYSTEM_PROMPT_CHEAP
+                                    : SYSTEM_PROMPT);
+    if (session && session->direct_answer_mode)
+        jbuf_append(&instructions, "\n\n[Direct Answer Mode] Answer now without tools, context "
+                                   "gathering, loops, or self-exit; then stop.");
+    provider_append_goal_prompt(&instructions, session);
+    if (session && session->runtime_directives[0]) {
+        jbuf_append(&instructions,
+                    "\n\n[Session Runtime Directives — lower priority than platform, developer, "
+                    "and workspace instructions]\n");
+        jbuf_append(&instructions, session->runtime_directives);
+    }
+    provider_append_structured_output_prompt(&instructions, session);
+    if (has_tools && (!session || strcmp(session->tool_choice, "none") != 0))
+        tool_grounding_append(&instructions, tools.data);
+    jbuf_append(b, ",\"instructions\":");
+    jbuf_append_json_str(b, instructions.data);
+    jbuf_append(b, ",\"input\":[");
+    bool first = true;
+    if (conv) {
+        for (int i = 0; i < conv->count; i++) {
+            const message_t *message = &conv->msgs[i];
+            chatgpt_append_tool_items(b, message, &first, NULL);
+            chatgpt_append_message_item(b, message->role == ROLE_USER ? "user" : "assistant",
+                                        message, &first);
+        }
+    }
+    jbuf_append(b, "]");
+    jbuf_append(b, tools.data);
+    jbuf_free(&tools);
+    jbuf_free(&instructions);
+    return has_tools;
+}
+
+static _Thread_local char s_chatgpt_prompt_cache_key[128];
+
+static char *chatgpt_native_build_request(provider_t *p, conversation_t *conv,
+                                          session_state_t *session, int max_tokens,
+                                          const char *credential) {
+    (void)p;
+    (void)max_tokens;
+    (void)credential;
+
+    jbuf_t b;
+    jbuf_init(&b, 16384);
+    jbuf_append(&b, "{\"model\":");
+    jbuf_append_json_str(&b, chatgpt_model_id(session));
+
+    jbuf_t tool_payload;
+    jbuf_init(&tool_payload, 4096);
+    bool has_tools = chatgpt_append_tools(&tool_payload, conv, session);
+    /* instructions = custom prompt + base system prompt + live inventory */
+    jbuf_t sys;
+    jbuf_init(&sys, 8192);
+    const char *custom = llm_get_custom_system_prompt_for_session(session);
+    if (custom && custom[0]) {
+        jbuf_append(&sys, custom);
+        jbuf_append(&sys, "\n\n");
+    }
+    const char *base_prompt = (g_cheap_mode || (session && session->direct_answer_mode))
+                                  ? SYSTEM_PROMPT_CHEAP
+                                  : SYSTEM_PROMPT;
+    jbuf_append(&sys, base_prompt);
+    if (session && session->direct_answer_mode)
+        jbuf_append(&sys, "\n\n[Direct Answer Mode] Answer now without tools, context gathering, "
+                          "loops, or self-exit; then stop.");
+    if (has_tools && (!session || strcmp(session->tool_choice, "none") != 0))
+        tool_grounding_append(&sys, tool_payload.data);
+    jbuf_append(&b, ",\"instructions\":");
+    jbuf_append_json_str(&b, sys.data ? sys.data : base_prompt);
+    jbuf_free(&sys);
+
+    jbuf_append(&b, ",\"input\":[");
+    bool first = true;
+    if (conv) {
+        for (int i = 0; i < conv->count; i++) {
+            const message_t *m = &conv->msgs[i];
+            const char *role = (m->role == ROLE_USER) ? "user" : "assistant";
+            /* tool_use (assistant) / tool_result (user) become top-level items;
+             * the remaining text/image parts become a message item. */
+            chatgpt_append_tool_items(&b, m, &first, chatgpt_model_id(session));
+            chatgpt_append_message_item(&b, role, m, &first);
+        }
+    }
+    jbuf_t runtime;
+    jbuf_init(&runtime, 1024);
+    provider_append_goal_prompt(&runtime, session);
+    if (session && session->runtime_directives[0]) {
+        jbuf_append(&runtime,
+                    "\n\n[Session Runtime Directives — lower priority than platform, developer, "
+                    "and workspace instructions]\n");
+        jbuf_append(&runtime, session->runtime_directives);
+    }
+    provider_append_structured_output_prompt(&runtime, session);
+    if (runtime.len > 0) {
+        if (!first)
+            jbuf_append(&b, ",");
+        jbuf_append(&b, "{\"type\":\"message\",\"role\":\"user\",\"content\":[{"
+                        "\"type\":\"input_text\",\"text\":");
+        jbuf_append_json_str(&b, runtime.data);
+        jbuf_append(&b, "}]}");
+    }
+    jbuf_free(&runtime);
+    jbuf_append(&b, "]");
+
+    const char *cache_key = (session && session->prompt_cache_key[0])
+                                ? session->prompt_cache_key
+                                : provider_claude_code_session_id();
+    snprintf(s_chatgpt_prompt_cache_key, sizeof(s_chatgpt_prompt_cache_key), "%s", cache_key);
+    jbuf_append(&b, ",\"prompt_cache_key\":");
+    jbuf_append_json_str(&b, cache_key);
+
+    jbuf_append(&b, tool_payload.data);
+    jbuf_free(&tool_payload);
+    if (has_tools) {
+        const char *choice = (session && session->tool_choice[0]) ? session->tool_choice : "auto";
+        if (strcmp(choice, "none") == 0)
+            jbuf_append(&b, ",\"tool_choice\":\"none\"");
+        else if (strcmp(choice, "any") == 0 || strcmp(choice, "required") == 0)
+            jbuf_append(&b, ",\"tool_choice\":\"required\"");
+        else
+            jbuf_append(&b, ",\"tool_choice\":\"auto\"");
+        jbuf_append(&b, openai_parallel_tool_calls_enabled_for_provider("openai-codex")
+                            ? ",\"parallel_tool_calls\":true"
+                            : ",\"parallel_tool_calls\":false");
+    }
+
+    /* Reasoning effort from the session. gpt-5.x reasoning models honor this. */
+    char effort_buf[32];
+    const char *raw_effort = (session && session->effort[0])
+        ? session->effort
+        : codex_cache_default_effort(chatgpt_model_id(session));
+    const char *effort = (session && session->effort[0])
+        ? dcr_reasoning_effort_normalize("openai", chatgpt_model_id(session),
+                                         raw_effort, effort_buf, sizeof(effort_buf))
+        : raw_effort;
+    if (!effort || !effort[0])
+        effort = codex_cache_default_effort(chatgpt_model_id(session));
+    jbuf_append(&b, ",\"reasoning\":{\"effort\":");
+    jbuf_append_json_str(&b, effort);
+    jbuf_append(&b, "}");
+
+    const char *verbosity = codex_cache_default_verbosity(chatgpt_model_id(session));
+    if (verbosity) {
+        jbuf_append(&b, ",\"text\":{\"verbosity\":");
+        jbuf_append_json_str(&b, verbosity);
+        jbuf_append(&b, "}");
+    }
+
+    jbuf_append(&b, ",\"include\":[\"reasoning.encrypted_content\"],\"store\":false,\"stream\":true}");
+    return b.data;
+}
+
+static char *abliteration_responses_build_request(provider_t *p, conversation_t *conv,
+                                                   session_state_t *session, int max_tokens,
+                                                   const char *credential) {
+    (void)p;
+    (void)credential;
+    jbuf_t b;
+    jbuf_init(&b, 16384);
+    const char *model = provider_request_model_id("abliteration-ai",
+                                                   session ? session->model
+                                                           : "abliterated-model-large-v2");
+    if (openai_conversation_has_media(conv) && !abliteration_model_supports_vision(model))
+        model = "abliterated-model";
+    jbuf_append(&b, "{\"model\":");
+    jbuf_append_json_str(&b, model);
+
+    jbuf_t tool_payload;
+    jbuf_init(&tool_payload, 4096);
+    bool has_tools = chatgpt_append_tools(&tool_payload, conv, session);
+    if (session && session->web_search) {
+        if (has_tools) {
+            if (tool_payload.len > 0 && tool_payload.data[tool_payload.len - 1] == ']') {
+                tool_payload.data[--tool_payload.len] = '\0';
+                jbuf_append(&tool_payload, ",");
+            }
+        } else {
+            jbuf_append(&tool_payload, ",\"tools\":[");
+        }
+        jbuf_append(&tool_payload, "{\"type\":\"web_search\"}]");
+        has_tools = true;
+    }
+
+    jbuf_t instructions;
+    jbuf_init(&instructions, 8192);
+    const char *custom = llm_get_custom_system_prompt_for_session(session);
+    if (custom && custom[0]) {
+        jbuf_append(&instructions, custom);
+        jbuf_append(&instructions, "\n\n");
+    }
+    jbuf_append(&instructions, (g_cheap_mode || (session && session->direct_answer_mode))
+                                    ? SYSTEM_PROMPT_CHEAP
+                                    : SYSTEM_PROMPT);
+    if (session && session->direct_answer_mode)
+        jbuf_append(&instructions, "\n\n[Direct Answer Mode] Answer now without tools, context "
+                                   "gathering, loops, or self-exit; then stop.");
+    provider_append_goal_prompt(&instructions, session);
+    if (session && session->runtime_directives[0]) {
+        jbuf_append(&instructions,
+                    "\n\n[Session Runtime Directives — lower priority than platform, developer, "
+                    "and workspace instructions]\n");
+        jbuf_append(&instructions, session->runtime_directives);
+    }
+    provider_append_structured_output_prompt(&instructions, session);
+    if (has_tools && (!session || (!session->direct_answer_mode &&
+                                   strcmp(session->tool_choice, "none") != 0)) &&
+        !openai_tools_disabled())
+        tool_grounding_append(&instructions, tool_payload.data);
+    jbuf_append(&b, ",\"instructions\":");
+    jbuf_append_json_str(&b, instructions.data ? instructions.data : SYSTEM_PROMPT);
+    jbuf_free(&instructions);
+
+    jbuf_append(&b, ",\"input\":[");
+    bool first = true;
+    if (conv) {
+        for (int i = 0; i < conv->count; i++) {
+            const message_t *message = &conv->msgs[i];
+            const char *role = message->role == ROLE_USER ? "user" : "assistant";
+            chatgpt_append_tool_items(&b, message, &first, NULL);
+            chatgpt_append_message_item(&b, role, message, &first);
+        }
+    }
+    jbuf_append(&b, "]");
+    jbuf_append(&b, ",\"max_output_tokens\":");
+    jbuf_append_int(&b, max_tokens > 0 ? max_tokens : 1024);
+    jbuf_append(&b, ",\"prompt_cache_key\":");
+    jbuf_append_json_str(&b, session && session->prompt_cache_key[0]
+                                ? session->prompt_cache_key
+                                : provider_claude_code_session_id());
+
+    jbuf_append(&b, tool_payload.data);
+    jbuf_free(&tool_payload);
+    if (has_tools) {
+        const char *choice = session && session->tool_choice[0] ? session->tool_choice : "auto";
+        if (strcmp(choice, "none") == 0)
+            jbuf_append(&b, ",\"tool_choice\":\"none\"");
+        else if (strcmp(choice, "any") == 0 || strcmp(choice, "required") == 0)
+            jbuf_append(&b, ",\"tool_choice\":\"required\"");
+        else
+            jbuf_append(&b, ",\"tool_choice\":\"auto\"");
+        jbuf_append(&b, ",\"parallel_tool_calls\":true");
+    }
+    if (session && session->effort[0]) {
+        jbuf_append(&b, ",\"reasoning\":{\"effort\":");
+        jbuf_append_json_str(&b, session->effort);
+        jbuf_append(&b, "}");
+    }
+    const char *extra = abliteration_params_json();
+    if (extra) {
+        static const char *const keys[] = {
+            "flagged_categories", "include_reasoning", "safety_identifier", "service_tier",
+            "user", NULL,
+        };
+        for (int i = 0; keys[i]; i++)
+            openai_append_extra_param_if_present(&b, extra, keys[i]);
+    }
+    jbuf_append(&b, ",\"store\":false,\"stream\":true}");
+    return b.data;
+}
+
+static struct curl_slist *abliteration_responses_build_headers(provider_t *p,
+                                                               const char *api_key) {
+    (void)p;
+    struct curl_slist *headers = NULL;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, "Accept: text/event-stream");
+    char auth[9216];
+    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key ? api_key : "");
+    headers = curl_slist_append(headers, auth);
+    return abliteration_append_policy_headers(headers);
+}
+
+static stream_result_t abliteration_responses_stream(
+    provider_t *p, const char *api_key, const char *request_json, stream_text_cb text_cb,
+    stream_tool_start_cb tool_cb, stream_tool_arg_delta_cb tool_delta_cb,
+    stream_thinking_cb thinking_cb, void *cb_ctx) {
+    /* The provider uses the public Responses SSE lifecycle parsed by DSCO's
+     * native Responses transport; unlike ChatGPT this lane has no subscription
+     * gate, account header, or retry fingerprint. */
+    return chatgpt_native_stream_once(p, api_key, request_json, text_cb, tool_cb, tool_delta_cb,
+                                      thinking_cb, cb_ctx);
+}
+
+static struct curl_slist *chatgpt_native_build_headers(provider_t *p, const char *api_key) {
+    (void)p;
+    struct curl_slist *hdrs = NULL;
+    hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+    hdrs = curl_slist_append(hdrs, "OpenAI-Beta: responses=experimental");
+    hdrs = curl_slist_append(hdrs, "originator: codex_cli_rs");
+    hdrs = curl_slist_append(hdrs, "version: " DSCO_VERSION);
+    /* Parity with Codex CLI: the ChatGPT backend edge rate-buckets UA-less
+     * clients far more aggressively. libcurl sends NO User-Agent unless told. */
+    {
+        const char *ua = getenv("DSCO_CHATGPT_USER_AGENT");
+        char ua_hdr[256];
+        snprintf(ua_hdr, sizeof(ua_hdr), "User-Agent: %s",
+                 (ua && ua[0]) ? ua : "codex_cli_rs/" DSCO_VERSION " (dsco)");
+        hdrs = curl_slist_append(hdrs, ua_hdr);
+    }
+    char auth[8300];
+    snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key ? api_key : "");
+    hdrs = curl_slist_append(hdrs, auth);
+    char account[160];
+    if (openai_oauth_account_id(account + 0, sizeof(account) - 32)) {
+        char hdr[200];
+        snprintf(hdr, sizeof(hdr), "chatgpt-account-id: %s", account);
+        hdrs = curl_slist_append(hdrs, hdr);
+    }
+    const char *cache_key = s_chatgpt_prompt_cache_key[0]
+                                ? s_chatgpt_prompt_cache_key
+                                : provider_claude_code_session_id();
+    char session_hdr[192];
+    snprintf(session_hdr, sizeof(session_hdr), "session-id: %s", cache_key);
+    hdrs = curl_slist_append(hdrs, session_hdr);
+    char thread_hdr[192];
+    snprintf(thread_hdr, sizeof(thread_hdr), "thread-id: %s", cache_key);
+    hdrs = curl_slist_append(hdrs, thread_hdr);
+    char request_hdr[192];
+    snprintf(request_hdr, sizeof(request_hdr), "x-client-request-id: %s", cache_key);
+    hdrs = curl_slist_append(hdrs, request_hdr);
+    return hdrs;
+}
+
+/* ── Responses API SSE parser ───────────────────────────────────────────── */
+typedef struct {
+    jbuf_t line_buf;
+    jbuf_t raw_body; /* non-SSE content (HTTP error bodies) for diagnostics */
+    jbuf_t text_accum;
+    jbuf_t reasoning_accum;
+    provider_event_attempt_t *event_attempt;
+    stream_text_cb text_cb;
+    stream_tool_start_cb tool_cb;
+    stream_tool_arg_delta_cb tool_delta_cb;
+    stream_thinking_cb thinking_cb;
+    void *cb_ctx;
+    usage_t usage;
+    int reasoning_tokens;
+    int inclusive_input_tokens; /* wire Responses count, including cache reads */
+    char *stop_reason;
+    bool got_error;
+    bool credit_too_low;
+    bool retryable;
+    bool stream_done;
+    bool response_completed;
+    stream_diagnostic_t diagnostic_reason;
+    char *error_msg;
+    time_t credit_reset_at;
+    long retry_after_ms;
+    /* Ordered tool calls and opaque reasoning items; text streams separately. */
+    content_block_t output_blocks[MAX_CONTENT_BLOCKS];
+    int output_block_count;
+    int tool_block_count;
+    char *reasoning_model; /* native Codex only; binds encrypted state to model */
+    char *response_id;     /* resp_… id from response.* events; feeds ledger request_id */
+    char announced_tool_ids[MAX_CONTENT_BLOCKS][128];
+    int announced_tool_count;
+    bool trace_events_enabled;
+    /* Fixed categories: created, in_progress, text, tool args, reasoning,
+     * item added/done, completed, failed, other. Never retain event payloads. */
+    unsigned trace_events[10];
+    double telemetry_start;
+    double telemetry_first_delta;
+    double telemetry_first_tool;
+    unsigned telemetry_text_events;
+    bool telemetry_got_first;
+    bool telemetry_got_tool;
+} chatgpt_sse_state_t;
+
+static void chatgpt_take_parsed_response(chatgpt_sse_state_t *s, parsed_response_t *out) {
+    int count = s->output_block_count + (s->text_accum.len > 0 ? 1 : 0);
+    out->blocks = safe_malloc((size_t)(count > 0 ? count : 1) * sizeof(content_block_t));
+    out->count = 0;
+    for (int i = 0; i < s->output_block_count; i++)
+        out->blocks[out->count++] = s->output_blocks[i];
+    /* Transfer ownership; failure cleanup must not release transferred blocks. */
+    s->output_block_count = 0;
+    if (s->text_accum.len > 0) {
+        content_block_t *blk = &out->blocks[out->count++];
+        memset(blk, 0, sizeof(*blk));
+        blk->type = safe_strdup("text");
+        blk->text = safe_strdup(s->text_accum.data);
+    }
+    out->stop_reason = s->stop_reason ? s->stop_reason
+                                      : safe_strdup(s->tool_block_count > 0 ? "tool_use" : "end_turn");
+    s->stop_reason = NULL;
+}
+
+static void chatgpt_free_output_blocks(chatgpt_sse_state_t *s) {
+    for (int i = 0; i < s->output_block_count; i++) {
+        free(s->output_blocks[i].type);
+        free(s->output_blocks[i].text);
+        free(s->output_blocks[i].tool_name);
+        free(s->output_blocks[i].tool_id);
+        free(s->output_blocks[i].tool_input);
+    }
+    s->output_block_count = 0;
+}
+
+bool provider_test_chatgpt_transport_retry(int code, int http_status, bool response_started) {
+    return http_status == 0 && !response_started &&
+           (code == CURLE_OPERATION_TIMEDOUT || code == CURLE_COULDNT_CONNECT ||
+            code == CURLE_COULDNT_RESOLVE_HOST || code == CURLE_RECV_ERROR ||
+            code == CURLE_SEND_ERROR || code == CURLE_GOT_NOTHING);
+}
+
+static bool chatgpt_error_is_transient_rate_limit(const char *error_json_or_message);
+static long chatgpt_retry_after_ms_from_text(const char *text);
+
+static bool chatgpt_tool_announced(chatgpt_sse_state_t *s, const char *id) {
+    if (!s || !id || !id[0])
+        return false;
+    for (int i = 0; i < s->announced_tool_count; i++) {
+        if (strcmp(s->announced_tool_ids[i], id) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void chatgpt_announce_tool(chatgpt_sse_state_t *s, const char *name,
+                                  const char *call_id) {
+    if (!s || !name || !name[0])
+        return;
+    const char *id = (call_id && call_id[0]) ? call_id : name;
+    if (chatgpt_tool_announced(s, id))
+        return;
+    s->telemetry_got_tool = true;
+    if (s->announced_tool_count < MAX_CONTENT_BLOCKS) {
+        snprintf(s->announced_tool_ids[s->announced_tool_count],
+                 sizeof(s->announced_tool_ids[s->announced_tool_count]), "%s", id);
+        s->announced_tool_count++;
+    }
+    if (s->tool_cb)
+        s->tool_cb(name, id, s->cb_ctx);
+}
+
+static void chatgpt_import_usage(chatgpt_sse_state_t *s, const char *usage) {
+    if (!s || !usage)
+        return;
+    int input = json_get_int(usage, "input_tokens", -1);
+    int output = json_get_int(usage, "output_tokens", -1);
+    if (input >= 0) s->inclusive_input_tokens = input;
+    if (output >= 0) s->usage.output_tokens = output;
+    char *itd = json_get_raw(usage, "input_tokens_details");
+    if (itd) {
+        int c = json_get_int(itd, "cached_tokens", -1);
+        if (c >= 0)
+            s->usage.cache_read_input_tokens = c;
+        free(itd);
+    }
+    char *otd = json_get_raw(usage, "output_tokens_details");
+    if (otd) {
+        s->reasoning_tokens = json_get_int(otd, "reasoning_tokens", s->reasoning_tokens);
+        free(otd);
+    }
+    /* Responses input_tokens includes cached input. Keep the wire total
+     * separate so repeated/partial cumulative snapshots cannot subtract it
+     * twice, and expose disjoint input/cache fields to every accounting path. */
+    s->usage.input_tokens = s->inclusive_input_tokens;
+    if (s->usage.cache_read_input_tokens > 0 &&
+        s->usage.input_tokens >= s->usage.cache_read_input_tokens)
+        s->usage.input_tokens -= s->usage.cache_read_input_tokens;
+}
+
+static void chatgpt_import_response_usage(chatgpt_sse_state_t *s, const char *data) {
+    if (!s || !data)
+        return;
+    char *resp = json_get_raw(data, "response");
+    if (resp && !s->response_id) {
+        char *rid = json_get_str(resp, "id");
+        if (rid && rid[0])
+            s->response_id = rid;
+        else
+            free(rid);
+    }
+    char *usage = resp ? json_get_raw(resp, "usage") : NULL;
+    if (!usage)
+        usage = json_get_raw(data, "usage");
+    if (usage) {
+        chatgpt_import_usage(s, usage);
+        free(usage);
+    }
+    free(resp);
+}
+
+static void chatgpt_append_final_message_part(const char *part, void *ctx) {
+    chatgpt_sse_state_t *s = ctx;
+    char *type = json_get_str(part, "type");
+    if (type && strcmp(type, "output_text") == 0) {
+        char *text = json_get_str(part, "text");
+        if (text && text[0]) {
+            jbuf_append(&s->text_accum, text);
+            s->telemetry_got_first = true;
+            if (s->text_cb) s->text_cb(text, s->cb_ctx);
+        }
+        free(text);
+    }
+    free(type);
+}
+
+static void chatgpt_append_final_output_item(const char *item, void *ctx) {
+    chatgpt_sse_state_t *s = ctx;
+    char *type = json_get_str(item, "type");
+    if (type && strcmp(type, "message") == 0)
+        json_array_foreach(item, "content", chatgpt_append_final_message_part, s);
+    free(type);
+}
+
+static void chatgpt_handle_event(chatgpt_sse_state_t *s, const char *data) {
+    if (!data || !data[0])
+        return;
+    if (event_stream_active() &&
+        !event_stream_emit("provider", "provider.responses.event", data)) {
+        g_interrupted = 1;
+        s->got_error = true;
+        s->stream_done = true;
+        return;
+    }
+    if (strcmp(data, "[DONE]") == 0) {
+        if (s->trace_events_enabled)
+            s->trace_events[7]++;
+        s->stream_done = true;
+        return;
+    }
+    char *type = json_get_str(data, "type");
+    if (!type)
+        return;
+
+    if (s->trace_events_enabled) {
+        unsigned category = 9;
+        if (!strcmp(type, "response.created")) category = 0;
+        else if (!strcmp(type, "response.in_progress")) category = 1;
+        else if (!strcmp(type, "response.output_text.delta") ||
+                 !strcmp(type, "response.refusal.delta")) category = 2;
+        else if (!strcmp(type, "response.function_call_arguments.delta")) category = 3;
+        else if (!strcmp(type, "response.reasoning_summary_text.delta") ||
+                 !strcmp(type, "response.reasoning_text.delta") ||
+                 !strcmp(type, "response.reasoning_summary.delta") ||
+                 !strcmp(type, "response.reasoning.delta")) category = 4;
+        else if (!strcmp(type, "response.output_item.added")) category = 5;
+        else if (!strcmp(type, "response.output_item.done")) category = 6;
+        else if (!strcmp(type, "response.completed") || !strcmp(type, "response.done")) category = 7;
+        else if (!strcmp(type, "response.failed") || !strcmp(type, "error")) category = 8;
+        s->trace_events[category]++;
+    }
+
+    if (strcmp(type, "response.created") == 0 || strcmp(type, "response.in_progress") == 0 ||
+        strcmp(type, "response.failed") == 0 || strcmp(type, "error") == 0)
+        chatgpt_import_response_usage(s, data);
+
+    if (strcmp(type, "response.output_text.delta") == 0 ||
+        strcmp(type, "response.refusal.delta") == 0) {
+        char *delta = json_get_str(data, "delta");
+        if (delta && delta[0]) {
+            s->telemetry_got_first = true;
+            s->telemetry_text_events++;
+            jbuf_append(&s->text_accum, delta);
+            if (s->text_cb)
+                s->text_cb(delta, s->cb_ctx);
+        }
+        free(delta);
+    } else if (strcmp(type, "response.function_call_arguments.delta") == 0) {
+        char *delta = json_get_str(data, "delta");
+        if (delta && delta[0] && s->tool_delta_cb) {
+            s->telemetry_got_tool = true;
+            char *call_id = json_get_str(data, "call_id");
+            char *item_id = json_get_str(data, "item_id");
+            const char *id = (call_id && call_id[0]) ? call_id : item_id;
+            s->tool_delta_cb(NULL, id, delta, s->cb_ctx);
+            free(call_id);
+            free(item_id);
+        }
+        free(delta);
+    } else if (strcmp(type, "response.reasoning_summary_text.delta") == 0 ||
+               strcmp(type, "response.reasoning_text.delta") == 0 ||
+               strcmp(type, "response.reasoning_summary.delta") == 0 ||
+               strcmp(type, "response.reasoning.delta") == 0) {
+        char *delta = json_get_str(data, "delta");
+        if (!delta)
+            delta = json_get_str(data, "text");
+        if (delta && delta[0]) {
+            s->telemetry_got_first = true;
+            jbuf_append(&s->reasoning_accum, delta);
+            if (s->thinking_cb)
+                s->thinking_cb(delta, s->cb_ctx);
+        }
+        free(delta);
+    } else if (strcmp(type, "response.output_item.done") == 0 ||
+               strcmp(type, "response.output_item.added") == 0) {
+        char *item = json_get_raw(data, "item");
+        if (item) {
+            char *itype = json_get_str(item, "type");
+            if (itype && strcmp(itype, "message") == 0 &&
+                strcmp(type, "response.output_item.done") == 0 &&
+                s->telemetry_text_events == 0)
+                json_array_foreach(item, "content", chatgpt_append_final_message_part, s);
+            if (itype && strcmp(itype, "function_call") == 0 &&
+                s->output_block_count < MAX_CONTENT_BLOCKS) {
+                char *name = json_get_str(item, "name");
+                char *args = json_get_str(item, "arguments");
+                char *call_id = json_get_str(item, "call_id");
+                chatgpt_announce_tool(s, name, call_id);
+                /* Only finalize on .done (added may lack arguments). */
+                if (strcmp(type, "response.output_item.done") == 0 && name) {
+                    content_block_t *blk = &s->output_blocks[s->output_block_count++];
+                    s->tool_block_count++;
+                    memset(blk, 0, sizeof(*blk));
+                    blk->type = safe_strdup("tool_use");
+                    blk->tool_name = safe_strdup(name);
+                    blk->tool_id = call_id ? safe_strdup(call_id) : NULL;
+                    blk->tool_input = safe_strdup((args && args[0]) ? args : "{}");
+                }
+                free(name);
+                free(args);
+                free(call_id);
+            } else if (itype && strcmp(itype, "reasoning") == 0 && s->reasoning_model &&
+                       strcmp(type, "response.output_item.done") == 0) {
+                char *encrypted = json_get_str(item, "encrypted_content");
+                bool duplicate = false;
+                for (int i = 0; i < s->output_block_count; i++) {
+                    const content_block_t *blk = &s->output_blocks[i];
+                    if (blk->text && strcmp(blk->text, item) == 0)
+                        duplicate = true;
+                }
+                if (encrypted && encrypted[0] && !duplicate) {
+                    if (s->output_block_count >= MAX_CONTENT_BLOCKS) {
+                        s->got_error = true;
+                        free(s->error_msg);
+                        s->error_msg = safe_strdup("Responses output exceeds replay block capacity");
+                    } else {
+                        content_block_t *blk = &s->output_blocks[s->output_block_count++];
+                        memset(blk, 0, sizeof(*blk));
+                        jbuf_t tag;
+                        jbuf_init(&tag, 128);
+                        jbuf_append(&tag, CHATGPT_REASONING_BLOCK_PREFIX);
+                        jbuf_append(&tag, s->reasoning_model);
+                        blk->type = tag.data;
+                        blk->text = safe_strdup(item);
+                    }
+                }
+                free(encrypted);
+            }
+            free(itype);
+            free(item);
+        }
+    } else if (strcmp(type, "response.completed") == 0 ||
+               strcmp(type, "response.done") == 0) {
+        chatgpt_import_response_usage(s, data);
+        char *response = json_get_raw(data, "response");
+        if (response && s->telemetry_text_events == 0 && s->text_accum.len == 0)
+            json_array_foreach(response, "output", chatgpt_append_final_output_item, s);
+        char *status = response ? json_get_str(response, "status") : NULL;
+        s->response_completed = !status || !strcmp(status, "completed");
+        free(status);
+        free(response);
+        if (!s->stop_reason)
+            s->stop_reason = safe_strdup(s->tool_block_count > 0 ? "tool_use" : "end_turn");
+        s->stream_done = true;
+    } else if (strcmp(type, "response.incomplete") == 0) {
+        s->diagnostic_reason = STREAM_DIAG_PROVIDER_INCOMPLETE;
+        chatgpt_import_response_usage(s, data);
+        s->stream_done = true;
+        s->got_error = true;
+        free(s->stop_reason);
+        s->stop_reason = safe_strdup("incomplete_stream");
+        free(s->error_msg);
+        s->error_msg = safe_strdup("provider reported an incomplete response; partial output retained");
+    } else if (strcmp(type, "response.failed") == 0 || strcmp(type, "error") == 0) {
+        s->stream_done = true;
+        s->credit_reset_at = provider_reset_max(
+            s->credit_reset_at, provider_credit_reset_at_from_text(data, time(NULL)));
+        char *resp = json_get_raw(data, "response");
+        char *err = json_get_raw(resp ? resp : data, "error");
+        if (err) {
+            s->credit_reset_at = provider_reset_max(
+                s->credit_reset_at, provider_credit_reset_at_from_text(err, time(NULL)));
+        }
+        const char *error_payload = err ? err : data;
+        s->got_error = true;
+        if (provider_chatgpt_429_is_quota(error_payload)) {
+            s->credit_too_low = true;
+        } else if (chatgpt_error_is_transient_rate_limit(error_payload) &&
+                   s->text_accum.len == 0 && s->reasoning_accum.len == 0 &&
+                   s->tool_block_count == 0 && s->announced_tool_count == 0) {
+            s->retryable = true;
+            s->retry_after_ms = chatgpt_retry_after_ms_from_text(error_payload);
+        }
+        char *msg = json_get_str(error_payload, "message");
+        if (msg) {
+            free(s->error_msg);
+            s->error_msg = msg;
+            fprintf(stderr, "  \033[31mChatGPT backend error: %s\033[0m\n", msg);
+        }
+        free(err);
+        free(resp);
+    }
+    free(type);
+}
+
+static bool chatgpt_sse_is_framing_line(const char *line) {
+    return line && (strncmp(line, "event:", 6) == 0 || strcmp(line, "event") == 0 ||
+                    strncmp(line, "id:", 3) == 0 || strcmp(line, "id") == 0 ||
+                    strncmp(line, "retry:", 6) == 0 || strcmp(line, "retry") == 0);
+}
+
+#ifdef DSCO_INTERNAL_TESTS
+bool provider_test_chatgpt_sse_is_framing_line(const char *line) {
+    return chatgpt_sse_is_framing_line(line);
+}
+#endif
+
+static void chatgpt_sse_process_line(chatgpt_sse_state_t *s, const char *line) {
+    if (strncmp(line, "data:", 5) != 0) {
+        /* event/id/retry are SSE framing fields, not an HTTP error body. */
+        if (line[0] && line[0] != ':' && !chatgpt_sse_is_framing_line(line)) {
+            if (s->raw_body.len > 0)
+                jbuf_append(&s->raw_body, "\n");
+            jbuf_append(&s->raw_body, line);
+        }
+        return;
+    }
+    const char *data = line + 5;
+    while (*data == ' ')
+        data++;
+    chatgpt_handle_event(s, data);
+}
+
+static size_t chatgpt_sse_write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
+    size_t total = size * nmemb;
+    chatgpt_sse_state_t *s = (chatgpt_sse_state_t *)userdata;
+    if (!provider_event_body(s->event_attempt, ptr, total)) return 0;
+    const char *p = (const char *)ptr;
+    size_t start = 0;
+    while (start < total) {
+        /* Curl buffers are length-bounded and may contain NULs. Find line
+         * boundaries in libc's vectorized scan, then strip CRs within that
+         * span. Searching CR only up to the next LF avoids rescanning the
+         * entire remaining chunk for every line when no CR is present. */
+        const char *newline = memchr(p + start, '\n', total - start);
+        size_t end = newline ? (size_t)(newline - p) : total;
+        while (start < end) {
+            const char *cr = memchr(p + start, '\r', end - start);
+            size_t stop = cr ? (size_t)(cr - p) : end;
+            if (stop > start)
+                jbuf_append_len(&s->line_buf, p + start, stop - start);
+            start = cr ? stop + 1 : end;
+        }
+        if (!newline)
+            break;
+        start = end + 1;
+        if (s->line_buf.len > 0) {
+            chatgpt_sse_process_line(s, s->line_buf.data);
+            jbuf_reset(&s->line_buf);
+            if (s->stream_done)
+                return 0;
+        }
+    }
+    return total;
+}
+
+/* Opt-in transport phase diagnostics. Never emit request/response contents,
+ * headers, account/session identifiers or reasoning text. */
+typedef struct {
+    CURL *curl;
+    chatgpt_sse_state_t *state;
+    double started_ms;
+    double last_report_ms;
+    bool connected;
+    bool headers;
+    bool body;
+    bool events_started;
+    bool output;
+    bool terminal;
+    size_t body_bytes;
+} chatgpt_trace_t;
+
+static double chatgpt_trace_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
+}
+
+static void chatgpt_trace_phase(chatgpt_trace_t *trace, const char *phase) {
+    double dns = 0, connect = 0, tls = 0, first_byte = 0;
+    long status = 0, connections = 0;
+    curl_easy_getinfo(trace->curl, CURLINFO_NAMELOOKUP_TIME, &dns);
+    curl_easy_getinfo(trace->curl, CURLINFO_CONNECT_TIME, &connect);
+    curl_easy_getinfo(trace->curl, CURLINFO_APPCONNECT_TIME, &tls);
+    curl_easy_getinfo(trace->curl, CURLINFO_STARTTRANSFER_TIME, &first_byte);
+    curl_easy_getinfo(trace->curl, CURLINFO_RESPONSE_CODE, &status);
+    curl_easy_getinfo(trace->curl, CURLINFO_NUM_CONNECTS, &connections);
+    trace->last_report_ms = chatgpt_trace_now_ms();
+    fprintf(stderr, "[chatgpt-trace] phase=%s elapsed_ms=%.1f dns_ms=%.1f "
+                    "connect_ms=%.1f tls_ms=%.1f first_byte_ms=%.1f http=%ld "
+                    "new_connections=%ld headers=%d body=%d output=%d terminal=%d "
+                    "body_bytes=%zu buffered_line_bytes=%zu created=%u in_progress=%u "
+                    "text_delta=%u tool_delta=%u reasoning_delta=%u item_added=%u "
+                    "item_done=%u completed=%u failed=%u other=%u\n",
+            phase, trace->last_report_ms - trace->started_ms, dns * 1000,
+            connect * 1000, tls * 1000, first_byte * 1000, status, connections,
+            trace->headers, trace->body, trace->output, trace->terminal,
+            trace->body_bytes, trace->state->line_buf.len,
+            trace->state->trace_events[0], trace->state->trace_events[1],
+            trace->state->trace_events[2], trace->state->trace_events[3],
+            trace->state->trace_events[4], trace->state->trace_events[5],
+            trace->state->trace_events[6], trace->state->trace_events[7],
+            trace->state->trace_events[8], trace->state->trace_events[9]);
+}
+
+static int chatgpt_trace_progress_cb(void *ctx, curl_off_t dltotal, curl_off_t dlnow,
+                                    curl_off_t ultotal, curl_off_t ulnow) {
+    chatgpt_trace_t *trace = ctx;
+    int interrupted = provider_stream_progress_cb(NULL, dltotal, dlnow, ultotal, ulnow);
+    if (interrupted)
+        return interrupted;
+    double connect = 0;
+    if (!trace->connected) {
+        curl_easy_getinfo(trace->curl, CURLINFO_CONNECT_TIME, &connect);
+        if (connect > 0) {
+            trace->connected = true;
+            chatgpt_trace_phase(trace, "connected");
+        }
+    }
+    if (chatgpt_trace_now_ms() - trace->last_report_ms >= 5000)
+        chatgpt_trace_phase(trace, "pending");
+    return 0;
+}
+
+static size_t chatgpt_trace_header_cb(char *buffer, size_t size, size_t count, void *ctx) {
+    chatgpt_trace_t *trace = ctx;
+    if (!trace->headers && size * count > 0) {
+        trace->headers = true;
+        chatgpt_trace_phase(trace, "headers");
+    }
+    return provider_credit_header_cb(buffer, size, count, &trace->state->credit_reset_at);
+}
+
+static size_t chatgpt_trace_write_cb(void *ptr, size_t size, size_t count, void *ctx) {
+    chatgpt_trace_t *trace = ctx;
+    trace->body_bytes += size * count;
+    if (!trace->body && size * count > 0) {
+        trace->body = true;
+        chatgpt_trace_phase(trace, "body");
+    }
+    size_t consumed = chatgpt_sse_write_cb(ptr, size, count, trace->state);
+    if (!trace->events_started && (trace->state->trace_events[0] || trace->state->trace_events[1])) {
+        trace->events_started = true;
+        chatgpt_trace_phase(trace, "events_started");
+    }
+    if (!trace->output && (trace->state->text_accum.len || trace->state->reasoning_accum.len ||
+                           trace->state->output_block_count || trace->state->announced_tool_count)) {
+        trace->output = true;
+        chatgpt_trace_phase(trace, "output");
+    }
+    if (!trace->terminal && trace->state->stream_done) {
+        trace->terminal = true;
+        chatgpt_trace_phase(trace, "terminal");
+    }
+    return consumed;
+}
+
+static size_t chatgpt_transport_write_cb(void *ptr, size_t size, size_t count, void *ctx) {
+    chatgpt_trace_t *trace = ctx;
+    size_t total = size * count;
+    if (trace->state->stream_done) {
+        if (provider_event_body(trace->state->event_attempt, ptr, total))
+            return total;
+        trace->state->got_error = true;
+        g_interrupted = 1;
+        return 0;
+    }
+    bool had_first = trace->state->telemetry_got_first;
+    bool had_tool = trace->state->telemetry_got_tool;
+    size_t consumed = trace->state->trace_events_enabled
+        ? chatgpt_trace_write_cb(ptr, size, count, ctx)
+        : chatgpt_sse_write_cb(ptr, size, count, trace->state);
+    double observed_at = provider_now_sec();
+    if (!had_first && trace->state->telemetry_got_first &&
+        trace->state->telemetry_first_delta <= 0.0)
+        trace->state->telemetry_first_delta = observed_at;
+    if (!had_tool && trace->state->telemetry_got_tool &&
+        trace->state->telemetry_first_tool <= 0.0)
+        trace->state->telemetry_first_tool = observed_at;
+    /* Let cURL consume the HTTP terminator already in this read. The native
+     * transport stops immediately if the server leaves the SSE body open. */
+    return !consumed && trace->state->stream_done && !g_interrupted ? total : consumed;
+}
+
+/* Quota-type 429 bodies from the ChatGPT backend: the plan window is
+ * exhausted, so retrying is futile — surface reset time and fail over.
+ * Distinct from transient rate_limit_exceeded, which backs off + retries. */
+bool provider_chatgpt_429_is_quota(const char *error_json_or_message) {
+    if (!error_json_or_message || !error_json_or_message[0])
+        return false;
+    static const char *needles[] = {
+        "usage_limit_reached", "usage_not_included",          "credits_depleted",
+        "insufficient_quota",  "quota_exceeded",              "exceeded your current quota",
+        "usage limit",         "requires a paid plan",        "billing",
+        NULL,
+    };
+    for (int i = 0; needles[i]; i++) {
+        size_t nlen = strlen(needles[i]);
+        for (const char *pos = error_json_or_message; *pos; pos++)
+            if (strncasecmp(pos, needles[i], nlen) == 0)
+                return true;
+    }
+    return false;
+}
+
+static const char *chatgpt_find_ci(const char *text, const char *needle) {
+    if (!text || !needle || !needle[0])
+        return NULL;
+    size_t nlen = strlen(needle);
+    for (const char *p = text; *p; p++)
+        if (strncasecmp(p, needle, nlen) == 0)
+            return p;
+    return NULL;
+}
+
+static bool chatgpt_error_is_transient_rate_limit(const char *error_json_or_message) {
+    return error_json_or_message &&
+           (chatgpt_find_ci(error_json_or_message, "rate_limit_exceeded") ||
+            chatgpt_find_ci(error_json_or_message, "rate limit exceeded") ||
+            chatgpt_find_ci(error_json_or_message, "rate limit reached"));
+}
+
+static long chatgpt_retry_delay_clamp(double delay_ms) {
+    if (delay_ms <= 0.0)
+        return 0;
+    long max_delay_ms = chatgpt_max_retry_delay_ms();
+    if (delay_ms >= (double)max_delay_ms)
+        return max_delay_ms;
+    long rounded = (long)delay_ms;
+    if ((double)rounded < delay_ms)
+        rounded++;
+    return rounded > 0 ? rounded : 1;
+}
+
+static long chatgpt_retry_after_ms_from_text(const char *text) {
+    if (!text || !text[0])
+        return 0;
+
+    static const char *ms_fields[] = {"retry_after_ms", "retryAfterMs", NULL};
+    for (int i = 0; ms_fields[i]; i++) {
+        char *raw = json_get_raw(text, ms_fields[i]);
+        if (!raw)
+            continue;
+        char *end = NULL;
+        double value = strtod(raw, &end);
+        bool parsed = end && end != raw && value > 0.0;
+        free(raw);
+        if (parsed)
+            return chatgpt_retry_delay_clamp(value);
+    }
+    static const char *second_fields[] = {
+        "retry_after", "retryAfter", "retry_after_seconds", "retryAfterSeconds", NULL,
+    };
+    for (int i = 0; second_fields[i]; i++) {
+        char *raw = json_get_raw(text, second_fields[i]);
+        if (!raw)
+            continue;
+        char *end = NULL;
+        double value = strtod(raw, &end);
+        bool parsed = end && end != raw && value > 0.0;
+        free(raw);
+        if (parsed)
+            return chatgpt_retry_delay_clamp(value * 1000.0);
+    }
+
+    static const char *phrases[] = {"try again in", "try again after", "retry after", NULL};
+    const char *p = NULL;
+    size_t phrase_len = 0;
+    for (int i = 0; phrases[i] && !p; i++) {
+        p = chatgpt_find_ci(text, phrases[i]);
+        if (p)
+            phrase_len = strlen(phrases[i]);
+    }
+    if (!p || phrase_len == 0)
+        return 0;
+    p += phrase_len;
+    while (*p && isspace((unsigned char)*p))
+        p++;
+    char *end = NULL;
+    double value = strtod(p, &end);
+    if (!end || end == p || value <= 0.0)
+        return 0;
+    while (*end && isspace((unsigned char)*end))
+        end++;
+    double multiplier = strncasecmp(end, "ms", 2) == 0 ? 1.0 : 1000.0;
+    if (strncasecmp(end, "min", 3) == 0)
+        multiplier = 60000.0;
+    return chatgpt_retry_delay_clamp(value * multiplier);
+}
+
+#ifdef DSCO_INTERNAL_TESTS
+long provider_test_chatgpt_retry_after_ms(const char *text) {
+    return chatgpt_retry_after_ms_from_text(text);
+}
+#endif
+
+static void chatgpt_finish_transport(provider_t *p, CURL *curl, bool owned_curl,
+                                      bool terminal_aborted) {
+    if (!owned_curl && !terminal_aborted)
+        return;
+    /* A terminal SSE event is a logical success, but aborting its HTTP/2
+     * transfer can leave this easy handle's connection unusable for the next
+     * upload. Discard that transport without replaying the completed turn. */
+    if (p && p->transport_curl == curl)
+        p->transport_curl = NULL;
+    curl_easy_cleanup(curl);
+}
+
+static stream_result_t chatgpt_native_stream_once(provider_t *p, const char *api_key,
+                                                  const char *request_json, stream_text_cb text_cb,
+                                                  stream_tool_start_cb tool_cb,
+                                                  stream_tool_arg_delta_cb tool_delta_cb,
+                                                  stream_thinking_cb thinking_cb, void *cb_ctx) {
+    stream_result_t result = {0};
+    CURL *curl = p && p->transport_curl ? p->transport_curl : curl_easy_init();
+    if (!curl) {
+        result.ok = false;
+        return result;
+    }
+    bool owned_curl = !(p && p->transport_curl);
+    curl_easy_reset(curl);
+    provider_stream_enable_interrupt(curl);
+    dsco_http_pool_apply(curl);
+
+    struct curl_slist *hdrs = p && p->build_headers
+                                  ? p->build_headers(p, api_key)
+                                  : chatgpt_native_build_headers(p, api_key);
+    hdrs = curl_slist_append(hdrs, "Accept: text/event-stream");
+
+    chatgpt_sse_state_t state = {0};
+    jbuf_init(&state.line_buf, 4096);
+    jbuf_init(&state.text_accum, 4096);
+    jbuf_init(&state.raw_body, 1024);
+    jbuf_init(&state.reasoning_accum, 1024);
+    state.text_cb = text_cb;
+    state.tool_cb = tool_cb;
+    state.tool_delta_cb = tool_delta_cb;
+    state.thinking_cb = thinking_cb;
+    state.cb_ctx = cb_ctx;
+
+    if (!(p && (p->stream == abliteration_responses_stream ||
+                 p->stream == provider_public_responses_stream)))
+        state.reasoning_model = json_get_str(request_json, "model");
+
+    if (provider_env_truthy(getenv("DSCO_DEBUG_REQUEST")))
+        llm_debug_save_request(request_json, 0);
+    const char *url = (p && (p->stream == abliteration_responses_stream ||
+                             p->stream == provider_public_responses_stream) && p->api_url)
+                          ? p->api_url
+                          : chatgpt_backend_url();
+    curl_easy_setopt(curl, CURLOPT_URL, url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request_json);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, chatgpt_sse_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &state);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, provider_credit_header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &state.credit_reset_at);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
+    long idle_s = chatgpt_stream_idle_timeout_s();
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, idle_s);
+    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, chatgpt_http_version());
+
+    bool trace_enabled = provider_env_truthy(getenv("DSCO_CHATGPT_TRACE"));
+    chatgpt_trace_t trace = {.curl = curl, .state = &state};
+    if (trace_enabled) {
+        state.trace_events_enabled = true;
+        trace.started_ms = trace.last_report_ms = chatgpt_trace_now_ms();
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, chatgpt_trace_write_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &trace);
+        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, chatgpt_trace_header_cb);
+        curl_easy_setopt(curl, CURLOPT_HEADERDATA, &trace);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, chatgpt_trace_progress_cb);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &trace);
+        fprintf(stderr, "[chatgpt-trace] phase=request bytes=%zu queue_ms=%ld\n",
+                strlen(request_json), s_provider_subscription_queue_ms);
+    }
+    provider_event_attempt_t event_attempt = {0};
+    state.event_attempt = &event_attempt;
+    state.telemetry_start = provider_now_sec();
+    bool audit_started = provider_event_start(&event_attempt, p ? p->name : "openai-codex", request_json, url);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, chatgpt_transport_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &trace);
+    CURLM *temporary_multi = NULL;
+    CURLcode res = audit_started
+        ? provider_transport_perform(p ? &p->transport_multi : &temporary_multi,
+                                     curl, &state.stream_done)
+        : CURLE_ABORTED_BY_CALLBACK;
+    CURLcode raw_res = res;
+    if (trace_enabled) {
+        chatgpt_trace_phase(&trace, "returned");
+        fprintf(stderr, "[chatgpt-trace] curl_code=%d\n", (int)res);
+    }
+    /* Flush remaining partial line so the full error body reaches raw_body. */
+    if (state.line_buf.len > 0) {
+        chatgpt_sse_process_line(&state, state.line_buf.data);
+        jbuf_reset(&state.line_buf);
+    }
+    bool terminal_aborted = provider_stream_terminal_abort(res, state.stream_done);
+    if (terminal_aborted)
+        res = CURLE_OK;
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    {
+        double dns = 0.0, conn = 0.0, tls = 0.0, ttfb = 0.0, total = 0.0;
+        long new_connections = 0;
+        curl_easy_getinfo(curl, CURLINFO_NAMELOOKUP_TIME, &dns);
+        curl_easy_getinfo(curl, CURLINFO_CONNECT_TIME, &conn);
+        curl_easy_getinfo(curl, CURLINFO_APPCONNECT_TIME, &tls);
+        curl_easy_getinfo(curl, CURLINFO_STARTTRANSFER_TIME, &ttfb);
+        curl_easy_getinfo(curl, CURLINFO_TOTAL_TIME, &total);
+        curl_easy_getinfo(curl, CURLINFO_NUM_CONNECTS, &new_connections);
+        result.telemetry.latency.dns_ms = dns * 1000.0;
+        result.telemetry.latency.connect_ms = conn * 1000.0;
+        result.telemetry.latency.tls_ms = tls * 1000.0;
+        result.telemetry.latency.ttfb_ms = ttfb * 1000.0;
+        result.telemetry.latency.total_ms = total * 1000.0;
+        result.telemetry.latency.new_connections = new_connections;
+    }
+    curl_slist_free_all(hdrs);
+    chatgpt_finish_transport(p, curl, owned_curl, terminal_aborted);
+    if (temporary_multi)
+        curl_multi_cleanup(temporary_multi);
+    result.http_status = (int)http_code;
+    /* The provider pool and accounting consume the top-level duration. Native
+     * Responses used to leave it at zero despite recording the transport
+     * timing above, hiding slow requests from runtime latency feedback. */
+    result.telemetry.total_ms = result.telemetry.latency.total_ms;
+
+    bool response_started = state.text_accum.len > 0 ||
+                            state.reasoning_accum.len > 0 || state.output_block_count > 0 ||
+                            state.announced_tool_count > 0;
+    if (res == CURLE_OK && http_code == 200 && !state.got_error) {
+        const char *failure = state.response_completed ? NULL : "stream ended without response.completed";
+        stream_diagnostic_t diagnostic = failure ? STREAM_DIAG_MISSING_TERMINAL : STREAM_DIAG_NONE;
+        if (!failure && state.announced_tool_count > state.tool_block_count) {
+            diagnostic = STREAM_DIAG_UNFINISHED_BLOCK;
+            failure = "response completed before every announced tool call completed";
+        }
+        for (int i = 0; i < state.output_block_count && !failure; i++) {
+            content_block_t *b = &state.output_blocks[i];
+            if (!b->type || strcmp(b->type, "tool_use")) continue;
+            const char *input = b->tool_input ? b->tool_input : "";
+            while (isspace((unsigned char)*input)) input++;
+            if (!b->tool_id || !b->tool_id[0] || !b->tool_name || !b->tool_name[0] ||
+                *input != '{' || !json_is_valid_container(input)) {
+                diagnostic = STREAM_DIAG_INVALID_TOOL_CALL;
+                failure = "response completed with incomplete tool metadata or invalid JSON arguments";
+            }
+        }
+        if (failure) {
+            state.diagnostic_reason = diagnostic;
+            state.got_error = true;
+            free(state.error_msg);
+            state.error_msg = safe_strdup(failure);
+            free(state.stop_reason);
+            state.stop_reason = safe_strdup("incomplete_stream");
+        }
+    }
+    result.usage = state.usage;
+    result.reasoning_tokens = state.reasoning_tokens;
+    result.telemetry.thinking_tokens = state.reasoning_tokens;
+    if (state.telemetry_start > 0.0) {
+        if (state.telemetry_got_first)
+            result.telemetry.ttft_ms =
+                (state.telemetry_first_delta - state.telemetry_start) * 1000.0;
+        else if (state.telemetry_first_tool > 0.0)
+            result.telemetry.ttft_ms =
+                (state.telemetry_first_tool - state.telemetry_start) * 1000.0;
+        if (state.telemetry_first_tool > 0.0)
+            result.telemetry.ttft_tool_ms =
+                (state.telemetry_first_tool - state.telemetry_start) * 1000.0;
+        int decode_tokens = result.usage.output_tokens - result.reasoning_tokens;
+        double decode_ms = result.telemetry.total_ms - result.telemetry.ttft_ms;
+        if (state.telemetry_text_events >= 2 && decode_tokens > 0 && decode_ms >= 20.0)
+            result.telemetry.tokens_per_sec = decode_tokens / (decode_ms / 1000.0);
+    }
+    if (res == CURLE_OK && http_code == 200 && !state.got_error) {
+        result.ok = true;
+        chatgpt_take_parsed_response(&state, &result.parsed);
+        result.usage = state.usage;
+        result.reasoning_tokens = state.reasoning_tokens;
+    } else {
+        result.ok = false;
+        chatgpt_free_output_blocks(&state);
+        /* Extract error from the full raw_body, not just the last partial line. */
+        if (state.raw_body.len > 0 && !state.error_msg) {
+            state.credit_reset_at = provider_reset_max(
+                state.credit_reset_at,
+                provider_credit_reset_at_from_text(state.raw_body.data, time(NULL)));
+            char *err_obj = json_get_raw(state.raw_body.data, "error");
+            if (err_obj) {
+                state.credit_reset_at = provider_reset_max(
+                    state.credit_reset_at,
+                    provider_credit_reset_at_from_text(err_obj, time(NULL)));
+                if (http_code == 402 ||
+                    (http_code == 429 && provider_chatgpt_429_is_quota(err_obj)))
+                    state.credit_too_low = true;
+                char *msg = json_get_str(err_obj, "message");
+                if (msg) {
+                    state.got_error = true;
+                    state.error_msg = msg;
+                    if (http_code == 402 || provider_chatgpt_429_is_quota(err_obj))
+                        state.credit_too_low = true;
+                }
+                free(err_obj);
+            }
+        }
+        if (http_code == 429 && !state.credit_too_low) {
+            state.retryable = true;
+            state.retry_after_ms = chatgpt_retry_after_ms_from_text(state.raw_body.data);
+        }
+        if (http_code == 402)
+            state.credit_too_low = true;
+        if (http_code == 401 || http_code == 403) {
+            if (p && p->stream == provider_public_responses_stream) {
+                const provider_profile_t *profile = provider_profile_find(p->name);
+                fprintf(stderr, "dsco: %s auth failed (HTTP %ld); check %s\n",
+                        p->name, http_code, provider_profile_primary_env_var(profile));
+            } else if (p && p->stream == abliteration_responses_stream) {
+                fprintf(stderr,
+                        "  \033[31m✗ Abliteration.ai auth failed (HTTP %ld).\033[0m "
+                        "\033[2mSet ABLITERATION_API_KEY or ABLIT_KEY.\033[0m\n",
+                        http_code);
+            } else {
+                fprintf(stderr,
+                        "  \033[31m✗ ChatGPT auth failed (HTTP %ld).\033[0m "
+                        "\033[2mRun\033[0m \033[36m/login chatgpt\033[0m\n",
+                        http_code);
+            }
+        } else if (res != CURLE_OK) {
+            if (res == CURLE_OPERATION_TIMEDOUT && http_code == 200) {
+                fprintf(stderr,
+                        "dsco: ChatGPT stream idle timeout after %lds (HTTP %ld); "
+                        "set DSCO_CHATGPT_STREAM_IDLE_TIMEOUT_S to raise it\n",
+                        idle_s, http_code);
+            } else {
+                fprintf(stderr, "dsco: ChatGPT request error: %s (HTTP %ld)\n",
+                        curl_easy_strerror(res), http_code);
+            }
+        } else if (state.error_msg) {
+            fprintf(stderr, "dsco: ChatGPT HTTP %ld: %s\n", http_code, state.error_msg);
+        } else if (state.raw_body.len > 0) {
+            fprintf(stderr, "dsco: ChatGPT HTTP %ld: %.*s\n", http_code,
+                    (int)(state.raw_body.len < 500 ? state.raw_body.len : 500),
+                    state.raw_body.data);
+        } else {
+            fprintf(stderr, "dsco: ChatGPT request failed (HTTP %ld)\n", http_code);
+        }
+        /* Store error in result.parsed so the caller survives fallback destruction. */
+        const char *err_text = state.text_accum.len ? state.text_accum.data : state.error_msg ? state.error_msg :
+            state.raw_body.len > 0 ? state.raw_body.data : NULL;
+        result.parsed.stop_reason = safe_strdup(state.credit_too_low ? "credit_too_low" :
+            g_interrupted ? "interrupted" : state.stop_reason ? state.stop_reason : "error");
+        if (err_text) {
+            result.parsed.blocks = safe_malloc(sizeof(content_block_t));
+            memset(&result.parsed.blocks[0], 0, sizeof(content_block_t));
+            result.parsed.count = 1;
+            result.parsed.blocks[0].type = safe_strdup("text");
+            result.parsed.blocks[0].text = safe_strdup(err_text);
+        }
+        free(state.stop_reason);
+    }
+
+    if (state.credit_too_low) {
+        free(result.parsed.stop_reason);
+        result.parsed.stop_reason = safe_strdup("credit_too_low");
+    }
+    /* Always propagate the reset hint (Retry-After / rate-limit headers) so
+     * the retry wrapper and agent.c trip-duration logic can use it. */
+    result.credit_reset_at = state.credit_reset_at;
+    /* No response bytes or callbacks were produced: retry the same pinned lane
+     * through its existing bounded, interruptible backoff. Never replay a
+     * partially delivered stream on a transport failure. */
+    bool transport_retry = provider_test_chatgpt_transport_retry(
+        (int)res, (int)http_code, response_started || state.raw_body.len > 0);
+    result.retryable = !response_started && (state.retryable || transport_retry ||
+        http_code == 429 || (http_code >= 500 && http_code <= 599));
+    result.retry_after_ms = state.retry_after_ms;
+
+    if (!provider_event_finish(&event_attempt, (int)raw_res, (int)res, http_code,
+                               state.response_completed, state.got_error,
+                               result.ok ? NULL : state.raw_body.data)) {
+        result.ok = false;
+        result.retryable = false;
+    }
+    result.visible_text_streamed = state.text_accum.len > 0;
+    /* Feed the provider response id to the cost ledger's request_id even on
+     * failed attempts — inference_cost_record logs every attempt. */
+    result.diagnostic_reason = state.diagnostic_reason;
+    if (!result.ok && result.diagnostic_reason == STREAM_DIAG_NONE)
+        result.diagnostic_reason = g_interrupted ? STREAM_DIAG_INTERRUPTED
+            : res != CURLE_OK ? STREAM_DIAG_TRANSPORT_ERROR : STREAM_DIAG_PROVIDER_ERROR;
+    result.generation_id = state.response_id;
+    state.response_id = NULL;
+    free(state.error_msg);
+    free(state.reasoning_model);
+    jbuf_free(&state.raw_body);
+    jbuf_free(&state.line_buf);
+    jbuf_free(&state.text_accum);
+    jbuf_free(&state.reasoning_accum);
+    return result;
+}
+
+/* A Codex OAuth access token can be revoked or expire server-side before the
+ * locally cached JWT expiry.  The normal preflight refresh therefore cannot
+ * catch every 401.  Refresh the durable OAuth bundle once after that
+ * authoritative response, then replay the untouched request with the new
+ * bearer. */
+static bool chatgpt_refresh_oauth_after_401(const char **api_key) {
+    if (!api_key)
+        return false;
+    openai_oauth_bundle_t bundle;
+    if (!openai_oauth_load(&bundle) ||
+        bundle.source == OPENAI_OAUTH_SOURCE_ENV || !bundle.refresh_token[0])
+        return false;
+    if (!openai_oauth_refresh(&bundle))
+        return false;
+    const char *fresh = openai_oauth_access_token(false);
+    if (!fresh || !fresh[0])
+        return false;
+    *api_key = fresh;
+    return true;
+}
+
+/* Codex-CLI-parity retry: transient 429 (rate_limit_exceeded) and 5xx get
+ * bounded backoff honoring Retry-After. Quota 429s (credit_too_low) and all
+ * other failures return immediately for the caller's failover logic. The
+ * backend can also report a rate_limit_exceeded response.failed event over
+ * HTTP 200; that event is terminal and retryable when no output was emitted. */
+/* Public gate-free entry point to the shared Responses wire transport. */
+stream_result_t provider_responses_stream_once(
+    provider_t *p, const char *api_key, const char *request_json, stream_text_cb text_cb,
+    stream_tool_start_cb tool_cb, stream_tool_arg_delta_cb tool_delta_cb,
+    stream_thinking_cb thinking_cb, void *cb_ctx) {
+    return chatgpt_native_stream_once(p, api_key, request_json, text_cb, tool_cb,
+                                      tool_delta_cb, thinking_cb, cb_ctx);
+}
+
+static stream_result_t chatgpt_native_stream(provider_t *p, const char *api_key,
+                                             const char *request_json, stream_text_cb text_cb,
+                                             stream_tool_start_cb tool_cb,
+                                             stream_tool_arg_delta_cb tool_delta_cb,
+                                             stream_thinking_cb thinking_cb, void *cb_ctx) {
+    int max_retries = dcr_provider_request_max_retries(
+        "openai-codex", (int)dsco_env_long("DSCO_CHATGPT_MAX_RETRIES", 3L, 0L, 10L));
+    stream_result_t result = {0};
+    s_provider_subscription_queue_ms = 0;
+    const char *request_api_key = api_key;
+    bool oauth_reauth_attempted = false;
+    char account_id[128] = "";
+    const char *account_scope = openai_oauth_account_id(account_id, sizeof(account_id))
+                                    ? account_id
+                                    : (api_key && api_key[0] ? api_key : "openai-codex");
+    char *request_model = json_get_str(request_json, "model");
+    const char *configured_swimlane = getenv("DSCO_CHATGPT_SWIMLANE");
+    const char *swimlane = configured_swimlane && configured_swimlane[0]
+                               ? configured_swimlane
+                               : request_model && request_model[0] ? request_model : "default";
+    char gate_scope[512];
+    snprintf(gate_scope, sizeof(gate_scope), "%s|%s", account_scope, swimlane);
+    for (int attempt = 0;; attempt++) {
+        subscription_gate_t gate = {.fd = -1, .held = false};
+        long gate_waited_ms = 0;
+        if (provider_env_truthy(getenv("DSCO_CHATGPT_TRACE")))
+            fprintf(stderr, "[chatgpt-trace] phase=queue attempt=%d\n", attempt);
+        bool gate_acquired = subscription_gate_acquire(&gate, gate_scope, &g_interrupted,
+                                                       &gate_waited_ms);
+        int gate_error = errno;
+        s_provider_subscription_queue_ms += gate_waited_ms;
+        if (!gate_acquired) {
+            bool timed_out = gate_error == ETIMEDOUT;
+            bool cancelled = gate_error == EINTR;
+            provider_event_queue(p ? p->name : "openai-codex", request_json, swimlane,
+                                 timed_out ? "timeout" : cancelled ? "interrupted" : "error", gate_waited_ms,
+                                 gate.slot, gate.capacity);
+            result.parsed.stop_reason = safe_strdup(timed_out ? "subscription_queue_timeout"
+                                                             : cancelled ? "interrupted" : "subscription_admission_error");
+            fprintf(stderr, "error: ChatGPT subscription queue %s after %.2fs%s\n",
+                    timed_out ? "timed out" : cancelled ? "interrupted" : "state unavailable", gate_waited_ms / 1000.0,
+                    timed_out ? " (DSCO_CHATGPT_GATE_MAX_WAIT_MS)" : "");
+            free(request_model);
+            return result;
+        }
+        provider_event_queue(p ? p->name : "openai-codex", request_json, swimlane, "acquired",
+                             gate_waited_ms, gate.slot, gate.capacity);
+        if (gate_waited_ms >= 500 &&
+            provider_env_truthy(getenv("DSCO_CHATGPT_GATE_VERBOSE")))
+            fprintf(stderr,
+                    "  \033[2mChatGPT swimlane %s acquired slot %u/%u after %.2fs\033[0m\n",
+                    swimlane, gate.slot + 1, gate.capacity, gate_waited_ms / 1000.0);
+
+        result = chatgpt_native_stream_once(p, request_api_key, request_json, text_cb, tool_cb,
+                                            tool_delta_cb, thinking_cb, cb_ctx);
+        if (!result.ok && result.http_status == 401 && !oauth_reauth_attempted) {
+            oauth_reauth_attempted = true;
+            if (chatgpt_refresh_oauth_after_401(&request_api_key)) {
+                fprintf(stderr,
+                        "  \033[2mChatGPT OAuth was stale; refreshed the Codex session and "
+                        "retrying\033[0m\n");
+                json_free_response(&result.parsed);
+                free(result.actual_model);
+                free(result.generation_id);
+                memset(&result, 0, sizeof(result));
+                subscription_gate_release(&gate, 0);
+                continue;
+            }
+        }
+        bool quota = result.parsed.stop_reason &&
+                     strcmp(result.parsed.stop_reason, "credit_too_low") == 0;
+        bool transient = !quota && result.retryable;
+        long delay_ms = 0;
+        if (transient) {
+            delay_ms = 1000L << attempt; /* 1s, 2s, 4s, ... */
+            time_t now = time(NULL);
+            if (result.retry_after_ms > 0) {
+                delay_ms = result.retry_after_ms;
+            } else if (result.credit_reset_at > now) {
+                delay_ms = (long)(result.credit_reset_at - now) * 1000L;
+            }
+            delay_ms = chatgpt_retry_delay_clamp((double)delay_ms);
+        }
+        bool shared_gate_enforced = gate.held;
+        subscription_gate_release(&gate, transient ? delay_ms : 0);
+
+        if (result.ok || g_interrupted || attempt >= max_retries || !transient) {
+            free(request_model);
+            return result;
+        }
+
+        if (!provider_event_retry(p ? p->name : "openai-codex", request_json,
+                                  result.parsed.stop_reason ? result.parsed.stop_reason : "transient_failure",
+                                  delay_ms)) {
+            free(request_model);
+            return result;
+        }
+
+        if (result.http_status == 200)
+            fprintf(stderr,
+                    "  \033[2mChatGPT stream rate limit — retrying in %.2fs "
+                    "(attempt %d/%d)\033[0m\n",
+                    delay_ms / 1000.0, attempt + 1, max_retries);
+        else
+            fprintf(stderr,
+                    "  \033[2mChatGPT HTTP %d — retrying in %.2fs "
+                    "(attempt %d/%d)\033[0m\n",
+                    result.http_status, delay_ms / 1000.0, attempt + 1, max_retries);
+        /* Free heap members via the owning path before reuse; the error path
+         * stores stop_reason + one text block in result.parsed. */
+        json_free_response(&result.parsed);
+        free(result.actual_model);
+        free(result.generation_id);
+        memset(&result, 0, sizeof(result));
+        /* The shared gate persists this cooldown. If it had to fail open,
+         * retain an interruptible local sleep so retries remain polite. */
+        if (!shared_gate_enforced) {
+            long remaining_ms = delay_ms;
+            while (remaining_ms > 0 && !g_interrupted) {
+                long chunk_ms = remaining_ms > 100 ? 100 : remaining_ms;
+                struct timespec ts = {.tv_sec = chunk_ms / 1000,
+                                      .tv_nsec = (chunk_ms % 1000) * 1000000L};
+                while (nanosleep(&ts, &ts) != 0 && errno == EINTR && !g_interrupted) {}
+                remaining_ms -= chunk_ms;
+            }
+            if (g_interrupted) {
+                free(request_model);
+                return result;
+            }
+        }
+    }
 }
 
 /* ── Provider endpoint table ───────────────────────────────────────────── */
@@ -2532,52 +6983,95 @@ typedef struct {
 } provider_endpoint_t;
 
 static const provider_endpoint_t PROVIDER_ENDPOINTS[] = {
-    { "openai",     "https://api.openai.com/v1",               "OPENAI_API_KEY",     "Bearer" },
-    { "google",     "https://generativelanguage.googleapis.com/v1beta/openai",
-                                                            "GOOGLE_API_KEY",     "Bearer" },
-    { "groq",       "https://api.groq.com/openai/v1",          "GROQ_API_KEY",       "Bearer" },
-    { "deepseek",   "https://api.deepseek.com/v1",             "DEEPSEEK_API_KEY",   "Bearer" },
-    { "together",   "https://api.together.xyz/v1",             "TOGETHER_API_KEY",   "Bearer" },
-    { "mistral",    "https://api.mistral.ai/v1",               "MISTRAL_API_KEY",    "Bearer" },
-    { "openrouter", "https://openrouter.ai/api/v1",            "OPENROUTER_API_KEY", "Bearer" },
-    { "perplexity", "https://api.perplexity.ai",               "PERPLEXITY_API_KEY", "Bearer" },
-    { "cerebras",   "https://api.cerebras.ai/v1",              "CEREBRAS_API_KEY",   "Bearer" },
-    { "xai",        "https://api.x.ai/v1",                     "XAI_API_KEY",        "Bearer" },
-    { "cohere",     "https://api.cohere.com/v2",               "COHERE_API_KEY",     "Bearer" },
-    { "moonshot",   "https://api.moonshot.ai/v1",              "MOONSHOT_API_KEY",   "Bearer" },
-    { "alibaba",    "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-                                                            "DASHSCOPE_API_KEY",  "Bearer" },
-    { "alibaba-coding-plan", "https://coding-intl.dashscope.aliyuncs.com/v1",
-                                                            "ALIBABA_CODING_PLAN_API_KEY", "Bearer" },
-    { "arcee",      "https://api.arcee.ai/api/v1",             "ARCEEAI_API_KEY",    "Bearer" },
-    { "gmi",        "https://api.gmi-serving.com/v1",          "GMI_API_KEY",        "Bearer" },
-    { "huggingface","https://router.huggingface.co/v1",        "HF_TOKEN",           "Bearer" },
-    { "kilocode",   "https://api.kilo.ai/api/gateway",         "KILOCODE_API_KEY",   "Bearer" },
-    { "nous",       "https://inference.nousresearch.com/v1",   "NOUS_API_KEY",       "Bearer" },
-    { "novita",     "https://api.novita.ai/openai/v1",         "NOVITA_API_KEY",     "Bearer" },
-    { "nvidia",     "https://integrate.api.nvidia.com/v1",     "NVIDIA_API_KEY",     "Bearer" },
-    { "ollama-cloud","https://ollama.com/v1",                  "OLLAMA_API_KEY",     "Bearer" },
-    { "opencode-zen","https://opencode.ai/zen/v1",             "OPENCODE_ZEN_API_KEY","Bearer" },
-    { "opencode-go","https://opencode.ai/zen/go/v1",           "OPENCODE_GO_API_KEY","Bearer" },
-    { "qwen-oauth", "https://portal.qwen.ai/v1",               "QWEN_API_KEY",       "Bearer" },
-    { "stepfun",    "https://api.stepfun.ai/step_plan/v1",     "STEPFUN_API_KEY",    "Bearer" },
-    { "xiaomi",     "https://api.xiaomimimo.com/v1",           "XIAOMI_API_KEY",     "Bearer" },
-    { "zai",        "https://api.z.ai/api/paas/v4",            "GLM_API_KEY",        "Bearer" },
+    {"openai", "https://api.openai.com/v1", "OPENAI_API_KEY", "Bearer"},
+    {"google", "https://generativelanguage.googleapis.com/v1beta/openai", "GOOGLE_API_KEY",
+     "Bearer"},
+    {"groq", "https://api.groq.com/openai/v1", "GROQ_API_KEY", "Bearer"},
+    {"deepseek", "https://api.deepseek.com/v1", "DEEPSEEK_API_KEY", "Bearer"},
+    {"together", "https://api.together.xyz/v1", "TOGETHER_API_KEY", "Bearer"},
+    {"mistral", "https://api.mistral.ai/v1", "MISTRAL_API_KEY", "Bearer"},
+    {"openrouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", "Bearer"},
+    {"abliteration-ai", "https://api.abliteration.ai/v1", "ABLITERATION_API_KEY", "Bearer"},
+    {"dsco-router", "https://router.distributed.systems/v1", "DSCO_ROUTER_API_KEY", "Bearer"},
+    {"perplexity", "https://api.perplexity.ai", "PERPLEXITY_API_KEY", "Bearer"},
+    {"cerebras", "https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", "Bearer"},
+    {"xai", "https://api.x.ai/v1", "XAI_API_KEY", "Bearer"},
+    {"cohere", "https://api.cohere.com/v2", "COHERE_API_KEY", "Bearer"},
+    {"moonshot", "https://api.moonshot.ai/v1", "KIMI_API_KEY", "Bearer"},
+    {"kimi-code", "https://api.kimi.com/coding/v1", "KIMI_CODE_OAUTH_TOKEN", "Bearer"},
+    {"sakana", "https://api.sakana.ai/v1", "FUGU_API_KEY", "Bearer"},
+    {"alibaba", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY",
+     "Bearer"},
+    {"alibaba-coding-plan", "https://coding-intl.dashscope.aliyuncs.com/v1",
+     "ALIBABA_CODING_PLAN_API_KEY", "Bearer"},
+    {"arcee", "https://api.arcee.ai/api/v1", "ARCEEAI_API_KEY", "Bearer"},
+    {"gmi", "https://api.gmi-serving.com/v1", "GMI_API_KEY", "Bearer"},
+    {"huggingface", "https://router.huggingface.co/v1", "HF_TOKEN", "Bearer"},
+    {"kilocode", "https://api.kilo.ai/api/gateway", "KILOCODE_API_KEY", "Bearer"},
+    {"nous", "https://inference.nousresearch.com/v1", "NOUS_API_KEY", "Bearer"},
+    {"novita", "https://api.novita.ai/openai/v1", "NOVITA_API_KEY", "Bearer"},
+    {"nvidia", "https://integrate.api.nvidia.com/v1", "NVIDIA_API_KEY", "Bearer"},
+    {"ollama-cloud", "https://ollama.com/v1", "OLLAMA_API_KEY", "Bearer"},
+    {"opencode-zen", "https://opencode.ai/zen/v1", "OPENCODE_ZEN_API_KEY", "Bearer"},
+    {"opencode-go", "https://opencode.ai/zen/go/v1", "OPENCODE_GO_API_KEY", "Bearer"},
+    {"qwen-oauth", "https://portal.qwen.ai/v1", "QWEN_API_KEY", "Bearer"},
+    {"stepfun", "https://api.stepfun.ai/step_plan/v1", "STEPFUN_API_KEY", "Bearer"},
+    {"xiaomi", "https://api.xiaomimimo.com/v1", "XIAOMI_API_KEY", "Bearer"},
+    {"zai", "https://api.z.ai/api/coding/paas/v4", "GLM_API_KEY", "Bearer"},
+    /* Modal Auto Endpoints are OpenAI-compatible services backed by a Modal App.
+     * The concrete base URL is per endpoint, so set MODAL_API_BASE or
+     * MODAL_BASE_URL to the endpoint's /v1 base. Use models as
+     * modal:<served-model> (preferred) or modal/<served-model>. */
+    {"modal", "", "MODAL_PROXY_TOKEN_ID", "Bearer"},
     /* ── Local inference (OpenAI-compatible, no auth required) ─────────── */
-    { "mlx",        "http://localhost:8181/v1",                "MLX_API_KEY",        "Bearer" },
-    { "ollama",     "http://localhost:11434/v1",               "OLLAMA_API_KEY",     "Bearer" },
-    { "lmstudio",   "http://localhost:1234/v1",                "LMSTUDIO_API_KEY",   "Bearer" },
-    { "local",      "http://localhost:8181/v1",                "LOCAL_API_KEY",      "Bearer" },
-    { NULL, NULL, NULL, NULL }
-};
+    {"mlx", "http://localhost:8181/v1", "MLX_API_KEY", "Bearer"},
+    {"ollama", "http://localhost:11434/v1", "OLLAMA_API_KEY", "Bearer"},
+    {"lmstudio", "http://localhost:1234/v1", "LMSTUDIO_API_KEY", "Bearer"},
+    {"vllm", "http://localhost:8000/v1", "VLLM_API_KEY", "Bearer"},
+    {"llamacpp", "http://localhost:8080/v1", "LLAMACPP_API_KEY", "Bearer"},
+    {"localai", "http://localhost:8080/v1", "LOCALAI_API_KEY", "Bearer"},
+    {"jan", "http://localhost:1337/v1", "JAN_API_KEY", "Bearer"},
+    {"gpt4all", "http://localhost:4891/v1", "GPT4ALL_API_KEY", "Bearer"},
+    {"koboldcpp", "http://localhost:5001/v1", "KOBOLDCPP_API_KEY", "Bearer"},
+    {"textgen", "http://localhost:5000/v1", "TEXTGEN_API_KEY", "Bearer"},
+    {"tabby", "http://localhost:5000/v1", "TABBY_API_KEY", "Bearer"},
+    {"tgi", "http://localhost:3000/v1", "TGI_API_KEY", "Bearer"},
+    {"sglang", "http://localhost:30000/v1", "SGLANG_API_KEY", "Bearer"},
+    {"llamafile", "http://localhost:8080/v1", "LLAMAFILE_API_KEY", "Bearer"},
+    {"local", "http://localhost:8181/v1", "LOCAL_API_KEY", "Bearer"},
+    {NULL, NULL, NULL, NULL}};
+
+static provider_endpoint_t dcr_endpoint_scratch;
 
 static const provider_endpoint_t *find_endpoint(const char *name) {
     name = provider_profile_canonical_name(name);
+    const dcr_provider_t *dp = dcr_provider_find(name);
+    if (dp && dp->base_url[0]) {
+        dcr_endpoint_scratch.name = dp->name;
+        dcr_endpoint_scratch.base_url = dp->base_url;
+        dcr_endpoint_scratch.env_key = dcr_provider_primary_env_var(dp);
+        dcr_endpoint_scratch.key_header = "Bearer";
+        return &dcr_endpoint_scratch;
+    }
     for (int i = 0; PROVIDER_ENDPOINTS[i].name; i++) {
         if (strcmp(name, PROVIDER_ENDPOINTS[i].name) == 0)
             return &PROVIDER_ENDPOINTS[i];
     }
     return NULL;
+}
+
+/* True if a provider name maps to a loopback (self-hosted) OpenAI-compatible
+ * endpoint — ollama, lmstudio, mlx, vllm, llamacpp, localai, jan, gpt4all,
+ * koboldcpp, textgen, tabby, tgi, sglang, llamafile, local. These are keyless,
+ * so they are always "usable" regardless of any API-key environment. */
+bool provider_is_local_endpoint(const char *name) {
+    if (!name || !name[0])
+        return false;
+    const provider_endpoint_t *ep = find_endpoint(name);
+    if (!ep || !ep->base_url)
+        return false;
+    return strstr(ep->base_url, "localhost") != NULL ||
+           strstr(ep->base_url, "127.0.0.1") != NULL || strstr(ep->base_url, "[::1]") != NULL;
 }
 
 typedef struct {
@@ -2586,22 +7080,27 @@ typedef struct {
 } provider_env_alias_t;
 
 static const provider_env_alias_t PROVIDER_ENV_ALIASES[] = {
-    { "anthropic", { "CLAUDE_API_KEY", NULL } },
-    { "openai",    { "OPENAI_KEY", "CHATGPT_API_KEY", NULL } },
-    { "openrouter",{ "OPEN_ROUTER_API_KEY", NULL } },
-    { "together",  { "TOGETHER_TOKEN", NULL } },
-    { "xai",       { "GROK_API_KEY", "X_AI_API_KEY", NULL } },
-    { "moonshot",  { "KIMI_API_KEY", "MOONSHOTAI_API_KEY", NULL } },
-    { "google",    { "GEMINI_API_KEY", "GOOGLE_AI_API_KEY",
-                     "GOOGLE_AI_STUDIO_API_KEY", "GOOGLE_VERTEX_API_KEY", NULL } },
-    { NULL, { NULL } }
-};
+    {"anthropic", {"CLAUDE_API_KEY", NULL}},
+    {"openai", {"OPENAI_KEY", "CHATGPT_API_KEY", NULL}},
+    {"modal", {"MODAL_KEY", "MODAL_PROXY_TOKEN", "MODAL_API_KEY", NULL}},
+    {"openrouter", {"OPEN_ROUTER_API_KEY", NULL}},
+    {"abliteration-ai", {"ABLIT_KEY", NULL}},
+    {"together", {"TOGETHER_TOKEN", NULL}},
+    {"xai", {"GROK_API_KEY", "X_AI_API_KEY", NULL}},
+    {"moonshot", {"KIMI_CODING_API_KEY", "MOONSHOT_API_KEY", "MOONSHOTAI_API_KEY", NULL}},
+    {"sakana", {"SAKANA_API_KEY", "FISH_API_KEY", "SAKANA_TOKEN", NULL}},
+    {"google",
+     {"GEMINI_API_KEY", "GOOGLE_AI_API_KEY", "GOOGLE_AI_STUDIO_API_KEY", "GOOGLE_VERTEX_API_KEY",
+      NULL}},
+    {NULL, {NULL}}};
 
-static void provider_build_env_name(const char *provider_name, const char *suffix,
-                                    char *out, size_t out_len) {
-    if (!out || out_len == 0) return;
+static void provider_build_env_name(const char *provider_name, const char *suffix, char *out,
+                                    size_t out_len) {
+    if (!out || out_len == 0)
+        return;
     out[0] = '\0';
-    if (!provider_name || !provider_name[0] || !suffix || !suffix[0]) return;
+    if (!provider_name || !provider_name[0] || !suffix || !suffix[0])
+        return;
 
     size_t pos = 0;
     for (const char *p = provider_name; *p && pos + 1 < out_len; p++) {
@@ -2616,27 +7115,127 @@ static void provider_build_env_name(const char *provider_name, const char *suffi
     strncat(out, suffix, out_len - strlen(out) - 1);
 }
 
+static bool provider_str_ends_with(const char *s, const char *suffix) {
+    if (!s || !suffix)
+        return false;
+    size_t ls = strlen(s);
+    size_t lf = strlen(suffix);
+    if (lf > ls)
+        return false;
+    return strcmp(s + ls - lf, suffix) == 0;
+}
+
 static const char *provider_getenv_nonempty(const char *name) {
-    if (!name || !name[0]) return NULL;
+    if (!name || !name[0])
+        return NULL;
     const char *value = getenv(name);
-    if (value && value[0]) return value;
+    if (value && value[0])
+        return value;
     /* When libsodium is built in, sealed_store_init() interns allowlisted
-     * provider keys (e.g. OPENROUTER_API_KEY) and zeroes the environment copy.
-     * Fall back to the sealed store so those keys are still discoverable here.
-     * sealed_store_peek() returns a pointer stable for the entry's lifetime,
-     * matching getenv()'s stability contract that callers rely on. */
-    const char *sealed = sealed_store_peek(name);
-    return (sealed && sealed[0]) ? sealed : NULL;
+     * provider keys (e.g. OPENROUTER_API_KEY) and zeroes the environment copy
+     * in place. In that case getenv(name) still returns a present-but-empty
+     * string, so fall back to the sealed store.
+     *
+     * Important: if getenv(name) is NULL, the variable was explicitly absent
+     * or was unset by a test/child environment. Do NOT resurrect a stale sealed
+     * value. Routing tests and subprocess isolation rely on unsetenv() meaning
+     * "this provider is unavailable" even if the parent process sealed a real
+     * key earlier in the session. */
+    if (value) {
+        const char *sealed = sealed_store_peek(name);
+        return (sealed && sealed[0]) ? sealed : NULL;
+    }
+    return NULL;
+}
+
+static const char *provider_sakana_subscription_key(void) {
+    static const char *vars[] = {
+        "FUGU_API_KEY", "SAKANA_API_KEY", "FISH_API_KEY", "SAKANA_TOKEN", NULL,
+    };
+    for (int i = 0; vars[i]; i++) {
+        const char *value = provider_getenv_nonempty(vars[i]);
+        if (value)
+            return value;
+    }
+    return NULL;
+}
+
+static const char *provider_sakana_payg_key(void) {
+    static const char *vars[] = {
+        "FUGU_PAYG_API_KEY", "SAKANA_PAYG_API_KEY", "FISH_PAYG_API_KEY",
+        "SAKANA_PAYG_TOKEN", NULL,
+    };
+    for (int i = 0; vars[i]; i++) {
+        const char *value = provider_getenv_nonempty(vars[i]);
+        if (value)
+            return value;
+    }
+    return NULL;
+}
+
+static bool provider_sakana_has_subscription_key(void) {
+    return provider_sakana_subscription_key() != NULL;
+}
+
+static bool provider_sakana_prefer_payg(void) {
+    const char *cls = getenv("DSCO_SAKANA_KEY_CLASS");
+    if (!cls || !cls[0])
+        cls = getenv("DSCO_FUGU_KEY_CLASS");
+    if (provider_env_matches(cls, "payg", "metered"))
+        return true;
+    if (provider_env_matches(cls, "subscription", "sub"))
+        return false;
+    return false;
+}
+
+static const char *provider_sakana_resolve_key(void) {
+    const char *sub = provider_sakana_subscription_key();
+    const char *payg = provider_sakana_payg_key();
+    if (provider_sakana_prefer_payg() && payg)
+        return payg;
+    if (sub)
+        return sub;
+    return payg;
+}
+
+bool provider_sakana_current_key_is_subscription(void) {
+    const char *resolved = provider_sakana_resolve_key();
+    const char *sub = provider_sakana_subscription_key();
+    if (!resolved)
+        return true;
+    return resolved && sub && strcmp(resolved, sub) == 0;
+}
+
+const char *provider_sakana_subscription_request_key(void) {
+    return provider_sakana_subscription_key();
+}
+
+bool provider_sakana_has_payg_key(void) {
+    return provider_sakana_payg_key() != NULL;
+}
+
+const char *provider_sakana_payg_request_key(void) {
+    return provider_sakana_payg_key();
 }
 
 static const char *provider_resolve_alias_env_key(const char *provider_name) {
-    if (!provider_name || !provider_name[0]) return NULL;
+    if (!provider_name || !provider_name[0])
+        return NULL;
+    const dcr_provider_t *dp = dcr_provider_find(provider_name);
+    if (dp) {
+        for (int i = 0; i < PROVIDER_PROFILE_MAX_ENV_VARS && dp->env_vars[i][0]; i++) {
+            const char *value = provider_getenv_nonempty(dp->env_vars[i]);
+            if (value)
+                return value;
+        }
+    }
     for (int i = 0; PROVIDER_ENV_ALIASES[i].provider_name; i++) {
         if (strcmp(PROVIDER_ENV_ALIASES[i].provider_name, provider_name) != 0)
             continue;
         for (int j = 0; PROVIDER_ENV_ALIASES[i].aliases[j]; j++) {
             const char *value = provider_getenv_nonempty(PROVIDER_ENV_ALIASES[i].aliases[j]);
-            if (value) return value;
+            if (value)
+                return value;
         }
         break;
     }
@@ -2644,19 +7243,15 @@ static const char *provider_resolve_alias_env_key(const char *provider_name) {
 }
 
 static const char *provider_resolve_dynamic_env_key(const char *provider_name) {
-    if (!provider_name || !provider_name[0]) return NULL;
+    if (!provider_name || !provider_name[0])
+        return NULL;
     char env_name[128];
-    const char *suffixes[] = {
-        "_API_KEY",
-        "_ACCESS_TOKEN",
-        "_AUTH_TOKEN",
-        "_TOKEN",
-        NULL
-    };
+    const char *suffixes[] = {"_API_KEY", "_ACCESS_TOKEN", "_AUTH_TOKEN", "_TOKEN", NULL};
     for (int i = 0; suffixes[i]; i++) {
         provider_build_env_name(provider_name, suffixes[i], env_name, sizeof(env_name));
         const char *value = provider_getenv_nonempty(env_name);
-        if (value) return value;
+        if (value)
+            return value;
     }
     return NULL;
 }
@@ -2664,16 +7259,42 @@ static const char *provider_resolve_dynamic_env_key(const char *provider_name) {
 bool provider_has_custom_api_base(const char *provider_name) {
     char env_name[128];
     provider_build_env_name(provider_name, "_API_BASE", env_name, sizeof(env_name));
-    if (provider_getenv_nonempty(env_name)) return true;
+    if (provider_getenv_nonempty(env_name))
+        return true;
     provider_build_env_name(provider_name, "_BASE_URL", env_name, sizeof(env_name));
-    if (provider_getenv_nonempty(env_name)) return true;
+    if (provider_getenv_nonempty(env_name))
+        return true;
 
     const char *canonical = provider_profile_canonical_name(provider_name);
+    if (canonical && strcmp(canonical, "sakana") == 0) {
+        const char *fugu_base = getenv("FUGU_BASE_URL");
+        const char *fugu_api_base = getenv("FUGU_API_BASE");
+        if ((fugu_base && fugu_base[0]) || (fugu_api_base && fugu_api_base[0]))
+            return true;
+    }
+    if (canonical && strcmp(canonical, "modal") == 0) {
+        const char *modal_endpoint = getenv("MODAL_ENDPOINT_URL");
+        if (modal_endpoint && modal_endpoint[0])
+            return true;
+    }
     if (canonical && provider_name && strcmp(canonical, provider_name) != 0) {
         provider_build_env_name(canonical, "_API_BASE", env_name, sizeof(env_name));
-        if (provider_getenv_nonempty(env_name)) return true;
+        if (provider_getenv_nonempty(env_name))
+            return true;
         provider_build_env_name(canonical, "_BASE_URL", env_name, sizeof(env_name));
-        if (provider_getenv_nonempty(env_name)) return true;
+        if (provider_getenv_nonempty(env_name))
+            return true;
+    }
+    const provider_profile_t *profile = provider_profile_find(provider_name);
+    if (profile) {
+        for (int i = 0; i < PROVIDER_PROFILE_MAX_ALIASES && profile->aliases[i]; i++) {
+            provider_build_env_name(profile->aliases[i], "_API_BASE", env_name, sizeof(env_name));
+            if (provider_getenv_nonempty(env_name))
+                return true;
+            provider_build_env_name(profile->aliases[i], "_BASE_URL", env_name, sizeof(env_name));
+            if (provider_getenv_nonempty(env_name))
+                return true;
+        }
     }
     return false;
 }
@@ -2681,7 +7302,7 @@ bool provider_has_custom_api_base(const char *provider_name) {
 /* ── Provider factory ──────────────────────────────────────────────────── */
 
 static provider_t *create_openai_compat(const char *name, const char *base_url,
-                                           const char *env_key) {
+                                        const char *env_key) {
     provider_t *p = safe_malloc(sizeof(provider_t));
     memset(p, 0, sizeof(*p));
     p->name = name;
@@ -2690,15 +7311,70 @@ static provider_t *create_openai_compat(const char *name, const char *base_url,
 
     /* Check for env override */
     char env_base[128];
+    const char *canonical_name = provider_profile_canonical_name(name);
+    bool is_fugu = canonical_name && strcmp(canonical_name, "sakana") == 0;
+    const char *custom_base = NULL;
+    if (canonical_name && strcmp(canonical_name, "modal") == 0)
+        custom_base = getenv("MODAL_ENDPOINT_URL");
+    if (is_fugu && (!custom_base || !custom_base[0]))
+        custom_base = getenv("FUGU_BASE_URL");
+    if ((!custom_base || !custom_base[0]) && is_fugu)
+        custom_base = getenv("FUGU_API_BASE");
     provider_build_env_name(name, "_API_BASE", env_base, sizeof(env_base));
-    const char *custom_base = getenv(env_base);
+    if (!custom_base || !custom_base[0])
+        custom_base = getenv(env_base);
     if (!custom_base || !custom_base[0]) {
         provider_build_env_name(name, "_BASE_URL", env_base, sizeof(env_base));
         custom_base = getenv(env_base);
     }
-    if (!custom_base) custom_base = base_url;
+    if (!custom_base || !custom_base[0]) {
+        const provider_profile_t *profile = provider_profile_find(canonical_name);
+        if (profile) {
+            for (int i = 0; i < PROVIDER_PROFILE_MAX_ALIASES && profile->aliases[i]; i++) {
+                provider_build_env_name(profile->aliases[i], "_API_BASE", env_base,
+                                        sizeof(env_base));
+                custom_base = getenv(env_base);
+                if (custom_base && custom_base[0])
+                    break;
+                provider_build_env_name(profile->aliases[i], "_BASE_URL", env_base,
+                                        sizeof(env_base));
+                custom_base = getenv(env_base);
+                if (custom_base && custom_base[0])
+                    break;
+            }
+        }
+    }
+    if (!custom_base)
+        custom_base = base_url;
 
-    snprintf(od->api_url, sizeof(od->api_url), "%s/chat/completions", custom_base);
+    char normalized_base[1024];
+    snprintf(normalized_base, sizeof(normalized_base), "%s", custom_base ? custom_base : "");
+    size_t blen = strlen(normalized_base);
+    while (blen > 0 && normalized_base[blen - 1] == '/')
+        normalized_base[--blen] = '\0';
+    if (is_fugu && !provider_str_ends_with(normalized_base, "/v1") &&
+        strlen(normalized_base) + 3 < sizeof(normalized_base)) {
+        strncat(normalized_base, "/v1", sizeof(normalized_base) - strlen(normalized_base) - 1);
+    }
+
+    if (canonical_name && strcmp(canonical_name, "modal") == 0 && normalized_base[0]) {
+        if (provider_str_ends_with(normalized_base, "/chat/completions")) {
+            snprintf(od->api_url, sizeof(od->api_url), "%s", normalized_base);
+        } else {
+            if (!provider_str_ends_with(normalized_base, "/v1") &&
+                strlen(normalized_base) + 3 < sizeof(normalized_base)) {
+                strncat(normalized_base, "/v1",
+                        sizeof(normalized_base) - strlen(normalized_base) - 1);
+            }
+            snprintf(od->api_url, sizeof(od->api_url), "%s/chat/completions", normalized_base);
+        }
+    } else if (normalized_base[0])
+        snprintf(od->api_url, sizeof(od->api_url), "%s/chat/completions", normalized_base);
+    else
+        od->api_url[0] = '\0';
+    if (abliteration_is_provider(canonical_name) && abliteration_policy_gateway_enabled())
+        snprintf(od->api_url, sizeof(od->api_url), "%s",
+                 abliteration_endpoint(ABLITERATION_API_CHAT, true));
     p->api_url = od->api_url;
     p->data = od;
     p->build_request = openai_build_request;
@@ -2713,16 +7389,83 @@ static provider_t *create_unsupported_provider(const provider_profile_t *profile
     memset(p, 0, sizeof(*p));
     p->name = profile && profile->name ? profile->name : "unknown";
     p->api_url = profile && profile->base_url ? profile->base_url : "";
-    p->data = safe_strdup(provider_transport_kind_name(
-        profile ? profile->transport : PROVIDER_TRANSPORT_NONE));
+    p->data = safe_strdup(
+        provider_transport_kind_name(profile ? profile->transport : PROVIDER_TRANSPORT_NONE));
     p->build_request = unsupported_build_request;
     p->build_headers = unsupported_build_headers;
     p->stream = unsupported_stream;
     return p;
 }
 
+
+/* ── Sakana Fugu Provider ───────────────────────────────────────────────
+ *
+ * Fugu speaks the OpenAI Chat Completions dialect.  Two quirks:
+ *
+ * 1. reasoning.effort only accepts "high" and "xhigh" (alias "max").
+ *    Any other value (low, medium, auto, etc.) is rejected with a 400.
+ *    We remap: anything below "high" → "high"; "max" → "xhigh".
+ *
+ * 2. Fugu Ultra returns orchestration tokens in token_details sub-fields
+ *    (orchestration_input_tokens, orchestration_input_cached_tokens,
+ *    orchestration_output_tokens).  Unlike OpenAI these ARE real billing
+ *    tokens outside the base input/output counts.  We accumulate them
+ *    into the usage struct so cost accounting doesn't under-count.
+ *
+ * Transport: standard OpenAI SSE streaming over /v1/chat/completions.
+ * Auth: FUGU_API_KEY (or SAKANA_API_KEY/FISH_API_KEY/SAKANA_TOKEN) as Bearer token.
+ */
+
+
+/* Remap dsco session effort string to Fugu's two-value enum. */
+static const char *fugu_remap_effort(const char *effort) {
+    if (!effort || !effort[0])
+        return "high";
+    if (strcmp(effort, "xhigh") == 0 || strcmp(effort, "max") == 0)
+        return "xhigh";
+    if (strcmp(effort, "high") == 0)
+        return "high";
+    /* Sakana rejects low/medium/auto. Normalize locally before request. */
+    return "high";
+}
+
+static bool provider_is_sakana(const provider_t *p) {
+    return p && p->name && strcmp(provider_profile_canonical_name(p->name), "sakana") == 0;
+}
+
+static char *fugu_build_request(provider_t *p, conversation_t *conv, session_state_t *session,
+                                int max_tokens, const char *credential) {
+    char *base = openai_build_request(p, conv, session, max_tokens, credential);
+    if (!base) return NULL;
+
+    /* Append reasoning block with remapped effort.
+     * Strip trailing '}' from the base request to inject. */
+    size_t len = strlen(base);
+    if (len == 0 || base[len - 1] != '}') return base;
+    base[len - 1] = '\0';
+
+    const char *raw_effort = (session && session->effort[0]) ? session->effort : "high";
+    char effort_buf[32];
+    const char *effort = dcr_reasoning_effort_normalize("sakana",
+                                                        session ? session->model : "fugu",
+                                                        raw_effort, effort_buf,
+                                                        sizeof(effort_buf));
+    if (!effort)
+        effort = fugu_remap_effort(raw_effort);
+
+    jbuf_t b;
+    jbuf_init(&b, len + 128);
+    jbuf_append(&b, base);
+    free(base);
+    jbuf_append(&b, ",\"reasoning\":{\"effort\":");
+    jbuf_append_json_str(&b, effort);
+    jbuf_append(&b, "}}");
+    return b.data;
+}
+
 provider_t *provider_create(const char *name) {
-    if (!name || !name[0]) name = "anthropic";
+    if (!name || !name[0])
+        name = "anthropic";
     const provider_profile_t *profile = provider_profile_find(name);
     name = provider_profile_canonical_name(name);
     if (strcmp(name, "anthropic") == 0 || strcmp(name, "claude") == 0) {
@@ -2745,6 +7488,30 @@ provider_t *provider_create(const char *name) {
         return p;
     }
 
+    if (strcmp(name, "openai-codex") == 0) {
+        provider_t *p = safe_malloc(sizeof(provider_t));
+        memset(p, 0, sizeof(*p));
+        p->name = "openai-codex";
+        /* The provider is a native OAuth transport even before login. Missing
+         * credentials must trigger login, never a Codex/Claude CLI fallback. */
+        p->api_url = CHATGPT_RESPONSES_URL;
+        p->data = safe_strdup("chatgpt_native");
+        p->build_request = chatgpt_native_build_request;
+        p->build_headers = chatgpt_native_build_headers;
+        p->stream = chatgpt_native_stream;
+        return p;
+    }
+
+    /* Kimi Code subscription: native in-process OpenAI-compatible transport.
+     * OAuth can come from an explicit token or the local membership cache;
+     * the Kimi executable is never launched for inference. */
+    if (strcmp(name, "kimi-code") == 0) {
+        const provider_endpoint_t *ep = find_endpoint("kimi-code");
+        provider_t *p = create_openai_compat(ep->name, ep->base_url, ep->env_key);
+        p->build_request = moonshot_build_request;
+        return p;
+    }
+
     /* Moonshot needs the OpenAI dialect plus the Kimi-native thinking
      * toggle, so it gets its own request builder. */
     if (strcmp(name, "moonshot") == 0) {
@@ -2762,6 +7529,49 @@ provider_t *provider_create(const char *name) {
         return p;
     }
 
+    /* Sakana Fugu: Chat Completions dialect + restricted reasoning effort. */
+    if (strcmp(name, "sakana") == 0 || strcmp(name, "fugu") == 0) {
+        const provider_endpoint_t *ep = find_endpoint("sakana");
+        if (ep) {
+            provider_t *p = create_openai_compat(ep->name, ep->base_url, ep->env_key);
+            p->build_request = fugu_build_request;
+            return p;
+        }
+    }
+
+    /* Abliteration.ai uses the OpenAI Chat Completions surface for DSCO's
+     * agent loop. Provider-specific caching, policy, reasoning and web-search
+     * shaping remain isolated in the Abliteration contract module. */
+    if (strcmp(name, "abliteration-ai") == 0) {
+        abliteration_api_mode_t mode = abliteration_api_mode();
+        bool policy = abliteration_policy_gateway_enabled();
+        if (mode == ABLITERATION_API_ANTHROPIC) {
+            provider_t *p = safe_malloc(sizeof(*p));
+            memset(p, 0, sizeof(*p));
+            p->name = "abliteration-ai";
+            p->api_url = abliteration_endpoint(mode, policy);
+            p->build_request = abliteration_anthropic_build_request;
+            p->build_headers = abliteration_anthropic_build_headers;
+            p->stream = abliteration_anthropic_stream;
+            return p;
+        }
+        if (mode == ABLITERATION_API_RESPONSES) {
+            provider_t *p = safe_malloc(sizeof(*p));
+            memset(p, 0, sizeof(*p));
+            p->name = "abliteration-ai";
+            p->api_url = abliteration_endpoint(mode, policy);
+            p->build_request = abliteration_responses_build_request;
+            p->build_headers = abliteration_responses_build_headers;
+            p->stream = abliteration_responses_stream;
+            return p;
+        }
+        const provider_endpoint_t *ep = find_endpoint("abliteration-ai");
+        return create_openai_compat(ep->name, ep->base_url, ep->env_key);
+    }
+
+    if (profile && profile->transport == PROVIDER_TRANSPORT_PUBLIC_RESPONSES)
+        return provider_public_responses_create(profile);
+
     /* All other providers use OpenAI-compatible API */
     const provider_endpoint_t *ep = find_endpoint(name);
     if (ep) {
@@ -2770,11 +7580,8 @@ provider_t *provider_create(const char *name) {
 
     if (profile && profile->transport == PROVIDER_TRANSPORT_OPENAI_CHAT) {
         const char *base = profile->transport_base_url;
-        if ((base && base[0]) || provider_has_custom_api_base(profile->name)) {
-            if (!base || !base[0]) base = "https://api.openai.com/v1";
-            return create_openai_compat(profile->name, base,
-                                        provider_profile_primary_env_var(profile));
-        }
+        return create_openai_compat(profile->name, base ? base : "",
+                                    provider_profile_primary_env_var(profile));
     }
 
     if (profile)
@@ -2785,49 +7592,92 @@ provider_t *provider_create(const char *name) {
 }
 
 void provider_free(provider_t *p) {
-    if (!p) return;
+    if (!p)
+        return;
     provider_reset_connection(p);
     free(p->data);
     free(p);
 }
 
 bool provider_prepare(provider_t *p) {
-    if (!p) return false;
+    if (!p)
+        return false;
     if (p->data && p->stream == openai_stream) {
         openai_data_t *od = (openai_data_t *)p->data;
         if (!od->curl) {
             od->curl = curl_easy_init();
-            if (!od->curl) return false;
+            if (!od->curl)
+                return false;
         }
         od->prepared = true;
+        return true;
+    }
+    if (p->stream == chatgpt_native_stream || p->stream == anthropic_stream ||
+        p->stream == abliteration_anthropic_stream ||
+        p->stream == abliteration_responses_stream ||
+        p->stream == provider_public_responses_stream) {
+        if (!p->transport_curl) {
+            p->transport_curl = curl_easy_init();
+            if (!p->transport_curl)
+                return false;
+        }
         return true;
     }
     return true;
 }
 
-stream_result_t provider_stream_reuse(provider_t *p, const char *api_key,
-                                      const char *request_json,
-                                      stream_text_cb text_cb,
-                                      stream_tool_start_cb tool_cb,
-                                      stream_thinking_cb thinking_cb,
-                                      void *cb_ctx) {
+stream_result_t provider_stream_reuse(provider_t *p, const char *api_key, const char *request_json,
+                                      stream_text_cb text_cb, stream_tool_start_cb tool_cb,
+                                      stream_tool_arg_delta_cb tool_delta_cb,
+                                      stream_thinking_cb thinking_cb, void *cb_ctx) {
     stream_result_t result = {0};
-    if (!p || !p->stream) return result;
-    if (p->data && p->stream == openai_stream) {
+    s_provider_subscription_queue_ms = 0;
+    if (!p || !p->stream)
+        return result;
+    if ((p->data && p->stream == openai_stream) || p->stream == chatgpt_native_stream ||
+        p->stream == anthropic_stream || p->stream == abliteration_anthropic_stream ||
+        p->stream == abliteration_responses_stream ||
+        p->stream == provider_public_responses_stream) {
         (void)provider_prepare(p);
     }
-    return p->stream(p, api_key, request_json, text_cb, tool_cb, thinking_cb, cb_ctx);
+    result = p->stream(p, api_key, request_json, text_cb, tool_cb, tool_delta_cb, thinking_cb,
+                       cb_ctx);
+    const char *canonical = p->name ? provider_profile_canonical_name(p->name) : NULL;
+    if (!result.ok && result.http_status == 401 && canonical &&
+        strcmp(canonical, "kimi-code") == 0) {
+        const char *fresh = kimi_oauth_refresh_after_unauthorized(api_key);
+        if (fresh && fresh[0]) {
+            if (!provider_event_retry(p->name, request_json, "credential_refreshed_after_401", 0))
+                return result;
+            json_free_response(&result.parsed);
+            free(result.actual_model);
+            free(result.generation_id);
+            memset(&result, 0, sizeof(result));
+            result = p->stream(p, fresh, request_json, text_cb, tool_cb, tool_delta_cb,
+                               thinking_cb, cb_ctx);
+        }
+    }
+    return result;
 }
 
 void provider_reset_connection(provider_t *p) {
-    if (!p || !p->data) return;
-    if (p->stream == openai_stream) {
+    if (!p)
+        return;
+    if (p->data && p->stream == openai_stream) {
         openai_data_t *od = (openai_data_t *)p->data;
         if (od->curl) {
             curl_easy_cleanup(od->curl);
             od->curl = NULL;
         }
         od->prepared = false;
+    }
+    if (p->transport_curl) {
+        curl_easy_cleanup(p->transport_curl);
+        p->transport_curl = NULL;
+    }
+    if (p->transport_multi) {
+        curl_multi_cleanup(p->transport_multi);
+        p->transport_multi = NULL;
     }
 }
 
@@ -2837,57 +7687,211 @@ static bool provider_model_has_prefix(const char *model, const char *prefix) {
     return model && prefix && strncmp(model, prefix, strlen(prefix)) == 0;
 }
 
+static bool provider_model_has_explicit_openrouter_prefix(const char *model) {
+    return model &&
+           (provider_model_has_prefix(model, "openrouter:") ||
+            provider_model_has_prefix(model, "openrouter/") ||
+            strcmp(model, "auto") == 0);
+}
+
+static const char *provider_model_strip_explicit_openrouter_prefix(const char *model) {
+    if (!model)
+        return NULL;
+    if (provider_model_has_prefix(model, "openrouter:") ||
+        provider_model_has_prefix(model, "openrouter/"))
+        return model + 11;
+    return model;
+}
+
 static const char *provider_model_family_from_namespaced(const char *model) {
-    if (!model) return NULL;
-    if (provider_model_has_prefix(model, "anthropic/")) return "anthropic";
-    if (provider_model_has_prefix(model, "openai/")) return "openai";
-    if (provider_model_has_prefix(model, "x-ai/")) return "xai";
-    if (provider_model_has_prefix(model, "google/")) return "google";
-    if (provider_model_has_prefix(model, "deepseek/")) return "deepseek";
-    if (provider_model_has_prefix(model, "qwen/")) return "qwen";
-    if (provider_model_has_prefix(model, "mistralai/")) return "mistral";
-    if (provider_model_has_prefix(model, "moonshotai/")) return "moonshot";
-    if (provider_model_has_prefix(model, "cohere/")) return "cohere";
-    if (provider_model_has_prefix(model, "minimax/")) return "minimax";
-    if (provider_model_has_prefix(model, "z-ai/")) return "zai";
-    if (provider_model_has_prefix(model, "meta-llama/")) return "meta";
-    if (provider_model_has_prefix(model, "amazon/")) return "amazon";
-    if (provider_model_has_prefix(model, "perplexity/")) return "perplexity";
+    if (!model)
+        return NULL;
+    if (provider_model_has_prefix(model, "dsco-router/") ||
+        provider_model_has_prefix(model, "router/"))
+        return "dsco-router";
+    if (provider_model_has_prefix(model, "anthropic/"))
+        return "anthropic";
+    if (provider_model_has_prefix(model, "openai/"))
+        return "openai";
+    if (provider_model_has_prefix(model, "abliteration-ai/") ||
+        provider_model_has_prefix(model, "abliteration/") ||
+        provider_model_has_prefix(model, "ablit/"))
+        return "abliteration-ai";
+    if (provider_model_has_prefix(model, "azure/") ||
+        provider_model_has_prefix(model, "azure-foundry/") ||
+        provider_model_has_prefix(model, "microsoft/"))
+        return "azure-foundry";
+    if (provider_model_has_prefix(model, "x-ai/"))
+        return "xai";
+    if (provider_model_has_prefix(model, "xai/"))
+        return "xai";
+    if (provider_model_has_prefix(model, "google/"))
+        return "google";
+    if (provider_model_has_prefix(model, "gemini/"))
+        return "google";
+    if (provider_model_has_prefix(model, "groq/"))
+        return "groq";
+    if (provider_model_has_prefix(model, "deepseek/"))
+        return "deepseek";
+    if (provider_model_has_prefix(model, "together/"))
+        return "together";
+    if (provider_model_has_prefix(model, "cerebras/"))
+        return "cerebras";
+    if (provider_model_has_prefix(model, "alibaba/") ||
+        provider_model_has_prefix(model, "dashscope/") ||
+        provider_model_has_prefix(model, "alibaba-cloud/") ||
+        provider_model_has_prefix(model, "qwen-dashscope/"))
+        return "alibaba";
+    if (provider_model_has_prefix(model, "alibaba-coding-plan/") ||
+        provider_model_has_prefix(model, "alibaba-coding/") ||
+        provider_model_has_prefix(model, "dashscope-coding/"))
+        return "alibaba-coding-plan";
+    if (provider_model_has_prefix(model, "qwen/"))
+        return "qwen";
+    if (provider_model_has_prefix(model, "qwen-oauth/") ||
+        provider_model_has_prefix(model, "qwen-cli/") ||
+        provider_model_has_prefix(model, "qwen-portal/"))
+        return "qwen-oauth";
+    if (provider_model_has_prefix(model, "mistral/") ||
+        provider_model_has_prefix(model, "mistralai/"))
+        return "mistral";
+    /* `kimi-code/` identifies the subscription-backed Kimi Code endpoint,
+     * whereas `moonshotai/` identifies the metered Moonshot API catalog. */
+    if (provider_model_has_prefix(model, "kimi-code/"))
+        return "kimi-code";
+    if (provider_model_has_prefix(model, "moonshot/") ||
+        provider_model_has_prefix(model, "moonshotai/"))
+        return "moonshot";
+    if (provider_model_has_prefix(model, "sakana/") ||
+        provider_model_has_prefix(model, "sakana-ai/") ||
+        provider_model_has_prefix(model, "sakanaai/"))
+        return "sakana";
+    if (provider_model_has_prefix(model, "arcee/") ||
+        provider_model_has_prefix(model, "arcee-ai/") ||
+        provider_model_has_prefix(model, "arceeai/"))
+        return "arcee";
+    if (provider_model_has_prefix(model, "gmi/") ||
+        provider_model_has_prefix(model, "gmi-cloud/") ||
+        provider_model_has_prefix(model, "gmicloud/"))
+        return "gmi";
+    if (provider_model_has_prefix(model, "huggingface/") ||
+        provider_model_has_prefix(model, "hugging-face/") ||
+        provider_model_has_prefix(model, "hf/") ||
+        provider_model_has_prefix(model, "huggingface-hub/"))
+        return "huggingface";
+    if (provider_model_has_prefix(model, "kilocode/") ||
+        provider_model_has_prefix(model, "kilo-code/") ||
+        provider_model_has_prefix(model, "kilo/") ||
+        provider_model_has_prefix(model, "kilo-gateway/"))
+        return "kilocode";
+    if (provider_model_has_prefix(model, "nous/") ||
+        provider_model_has_prefix(model, "nous-portal/") ||
+        provider_model_has_prefix(model, "nousresearch/"))
+        return "nous";
+    if (provider_model_has_prefix(model, "novita/") ||
+        provider_model_has_prefix(model, "novita-ai/") ||
+        provider_model_has_prefix(model, "novitaai/"))
+        return "novita";
+    if (provider_model_has_prefix(model, "nvidia/") ||
+        provider_model_has_prefix(model, "nvidia-nim/"))
+        return "nvidia";
+    if (provider_model_has_prefix(model, "ollama/"))
+        return "ollama";
+    if (provider_model_has_prefix(model, "ollama-cloud/") ||
+        provider_model_has_prefix(model, "ollama_cloud/"))
+        return "ollama-cloud";
+    if (provider_model_has_prefix(model, "opencode-zen/") ||
+        provider_model_has_prefix(model, "opencode/") ||
+        provider_model_has_prefix(model, "opencode_zen/") ||
+        provider_model_has_prefix(model, "zen/"))
+        return "opencode-zen";
+    if (provider_model_has_prefix(model, "opencode-go/") ||
+        provider_model_has_prefix(model, "opencode_go/"))
+        return "opencode-go";
+    if (provider_model_has_prefix(model, "stepfun/") ||
+        provider_model_has_prefix(model, "step/") ||
+        provider_model_has_prefix(model, "stepfun-coding-plan/"))
+        return "stepfun";
+    if (provider_model_has_prefix(model, "xiaomi/") ||
+        provider_model_has_prefix(model, "mimo/") ||
+        provider_model_has_prefix(model, "xiaomi-mimo/"))
+        return "xiaomi";
+    if (provider_model_has_prefix(model, "cohere/"))
+        return "cohere";
+    if (provider_model_has_prefix(model, "minimax/"))
+        return "minimax";
+    if (provider_model_has_prefix(model, "zai/") ||
+        provider_model_has_prefix(model, "glm/") ||
+        provider_model_has_prefix(model, "zhipu/"))
+        return "zai";
+    if (provider_model_has_prefix(model, "z-ai/"))
+        return "zai";
+    if (provider_model_has_prefix(model, "modal/"))
+        return "modal";
+    if (provider_model_has_prefix(model, "meta-llama/"))
+        return "meta";
+    if (provider_model_has_prefix(model, "amazon/"))
+        return "amazon";
+    if (provider_model_has_prefix(model, "perplexity/"))
+        return "perplexity";
     return NULL;
 }
 
 const char *provider_model_family(const char *model) {
-    if (!model || !model[0]) return "anthropic";
+    if (!model || !model[0])
+        return "anthropic";
 
-    if (provider_model_has_prefix(model, "openrouter:"))
-        model += 11;
-    if (provider_model_has_prefix(model, "openrouter/"))
+    if (provider_model_has_prefix(model, "router:") ||
+        provider_model_has_prefix(model, "dsco-router:"))
+        return "dsco-router";
+
+    model = provider_model_strip_explicit_openrouter_prefix(model);
+    if (!model || !model[0] || strcmp(model, "auto") == 0)
         return "openrouter";
 
     const char *namespaced = provider_model_family_from_namespaced(model);
-    if (namespaced) return namespaced;
+    if (namespaced)
+        return namespaced;
 
-    if (strstr(model, "claude") || strstr(model, "opus") ||
-        strstr(model, "sonnet") || strstr(model, "haiku"))
+    {
+        const char *colon = strchr(model, ':');
+        if (colon && colon > model) {
+            size_t plen = (size_t)(colon - model);
+            char pfx[32];
+            if (plen < sizeof(pfx)) {
+                memcpy(pfx, model, plen);
+                pfx[plen] = '\0';
+                const provider_endpoint_t *ep = find_endpoint(pfx);
+                if (ep && provider_is_local_endpoint(ep->name))
+                    return ep->name;
+            }
+        }
+    }
+
+    if (strstr(model, "claude") || strstr(model, "opus") || strstr(model, "sonnet") ||
+        strstr(model, "haiku"))
         return "anthropic";
-    if (strstr(model, "gpt") || strncmp(model, "o1", 2) == 0 ||
-        strncmp(model, "o3", 2) == 0 || strncmp(model, "o4", 2) == 0 ||
-        strstr(model, "codex") || strstr(model, "chatgpt"))
+    if (strstr(model, "abliterated-model"))
+        return "abliteration-ai";
+    if (strstr(model, "gpt") || strncmp(model, "o1", 2) == 0 || strncmp(model, "o3", 2) == 0 ||
+        strncmp(model, "o4", 2) == 0 || strstr(model, "codex") || strstr(model, "chatgpt"))
         return "openai";
     if (strstr(model, "grok") || strstr(model, "Grok"))
         return "xai";
-    if (strstr(model, "gemini") || strstr(model, "Gemini") ||
-        strstr(model, "gem25") || strstr(model, "gem3"))
+    if (strstr(model, "gemini") || strstr(model, "Gemini") || strstr(model, "gem25") ||
+        strstr(model, "gem3"))
         return "google";
     if (strstr(model, "deepseek"))
         return "deepseek";
     if (strstr(model, "Qwen") || strstr(model, "qwen"))
         return "qwen";
-    if (strstr(model, "mistral") || strstr(model, "codestral") ||
-        strstr(model, "pixtral") || strstr(model, "mixtral"))
+    if (strstr(model, "mistral") || strstr(model, "codestral") || strstr(model, "pixtral") ||
+        strstr(model, "mixtral"))
         return "mistral";
     if (strstr(model, "kimi") || strstr(model, "moonshot"))
         return "moonshot";
+    if (strstr(model, "fugu") || strstr(model, "sakana"))
+        return "sakana";
     if (strstr(model, "command"))
         return "cohere";
     if (strstr(model, "sonar") || strstr(model, "pplx"))
@@ -2905,349 +7909,593 @@ const char *provider_model_family(const char *model) {
 }
 
 static bool provider_model_is_code_oriented(const char *model) {
-    if (!model || !model[0]) return false;
+    if (!model || !model[0])
+        return false;
     return strstr(model, "codex") || strstr(model, "code");
 }
 
 static const char *provider_xai_primary_model(bool prefer_code) {
-    if (provider_has_usable_key("xai", NULL))
-        return prefer_code ? "grok-code-fast-1" : "grok-4-fast";
+    if (provider_has_usable_key("xai", NULL)) {
+        (void)prefer_code;
+        return "grok-4.6";
+    }
     if (provider_has_usable_key("openrouter", NULL))
-        return "x-ai/grok-4.20-beta";
+        return "openrouter/x-ai/grok-4.6";
     return NULL;
 }
 
 static const char *provider_openai_primary_model(bool prefer_code) {
+    if (!provider_env_truthy(getenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY")) &&
+        provider_has_usable_key("openai-codex", NULL)) {
+        (void)prefer_code;
+        return DEFAULT_MODEL;
+    }
     if (provider_has_usable_key("openrouter", NULL))
-        return prefer_code ? "openai/gpt-5.3-codex" : "openai/gpt-5.4";
+        return prefer_code ? "openrouter/openai/gpt-5.6-sol" : "openrouter/openai/gpt-5.6-terra";
     if (provider_has_usable_key("openai", NULL))
-        return "gpt-4.1";
+        return prefer_code ? "gpt-5.6-sol" : "gpt-5.6-luna";
     return NULL;
 }
 
 static const char *provider_family_primary_model(const char *family, bool prefer_code) {
-    if (!family || !family[0]) return NULL;
+    if (!family || !family[0])
+        return NULL;
 
     if (strcmp(family, "xai") == 0)
         return provider_xai_primary_model(prefer_code);
     if (strcmp(family, "openai") == 0)
         return provider_openai_primary_model(prefer_code);
     if (strcmp(family, "anthropic") == 0) {
-        if (provider_has_usable_key("anthropic", NULL)) return "claude-sonnet-4-6";
-        if (provider_has_usable_key("openrouter", NULL)) return "anthropic/claude-sonnet-4.6";
+        if (provider_has_usable_key("anthropic", NULL))
+            return DSCO_CLAUDE_SONNET_MODEL;
+        if (provider_has_usable_key("openrouter", NULL))
+            return "openrouter/" DSCO_OR_CLAUDE_SONNET_MODEL;
+        return NULL;
+    }
+    if (strcmp(family, "abliteration-ai") == 0) {
+        if (provider_has_usable_key("abliteration-ai", NULL))
+            return "abliterated-model-large-v2";
         return NULL;
     }
     if (strcmp(family, "google") == 0) {
-        if (provider_has_usable_key("google", NULL)) return "gemini-2.5-pro";
-        if (provider_has_usable_key("openrouter", NULL)) return "google/gemini-2.5-pro";
+        if (provider_has_usable_key("google", NULL))
+            return "gemini-3.5-flash";
+        if (provider_has_usable_key("openrouter", NULL))
+            return "openrouter/google/gemini-3.5-flash";
         return NULL;
     }
     if (strcmp(family, "deepseek") == 0) {
-        if (provider_has_usable_key("openrouter", NULL)) return "deepseek/deepseek-chat";
-        if (provider_has_usable_key("deepseek", NULL)) return "deepseek-chat";
+        if (provider_has_usable_key("openrouter", NULL))
+            return "openrouter/deepseek/deepseek-chat";
+        if (provider_has_usable_key("deepseek", NULL))
+            return "deepseek-chat";
         return NULL;
     }
     if (strcmp(family, "qwen") == 0) {
-        if (provider_has_usable_key("openrouter", NULL)) return "qwen/qwen3.5-plus-02-15";
+        if (provider_has_usable_key("openrouter", NULL))
+            return "openrouter/qwen/qwen3.5-plus-02-15";
         return NULL;
     }
     if (strcmp(family, "mistral") == 0) {
-        if (provider_has_usable_key("mistral", NULL)) return "mistral-large-latest";
-        if (provider_has_usable_key("openrouter", NULL)) return "mistralai/mistral-large-2512";
+        if (provider_has_usable_key("mistral", NULL))
+            return "mistral-medium-2604";
+        if (provider_has_usable_key("openrouter", NULL))
+            return "openrouter/mistralai/mistral-large-2512";
         return NULL;
     }
     if (strcmp(family, "moonshot") == 0) {
         if (prefer_code) {
-            if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.7-code";
-            if (provider_has_usable_key("openrouter", NULL)) return "moonshotai/kimi-k2.7-code";
+            if (provider_has_usable_key("moonshot", NULL))
+                return "kimi-k2.7-code";
+            if (provider_has_usable_key("openrouter", NULL))
+                return "openrouter/moonshotai/kimi-k2.7-code";
             return NULL;
         }
-        if (provider_has_usable_key("moonshot", NULL)) return "kimi-k2.7";
-        if (provider_has_usable_key("openrouter", NULL)) return "moonshotai/kimi-k2.7";
+        if (provider_has_usable_key("moonshot", NULL))
+            return "kimi-k2.7-code";
+        if (provider_has_usable_key("openrouter", NULL))
+            return "openrouter/moonshotai/kimi-k2.7-code";
+        return NULL;
+    }
+    if (strcmp(family, "sakana") == 0) {
+        /* Sakana/Fugu is native-only and should win the global default only for
+         * subscription-class Fugu keys. Metered PAYG keys are additive fallback
+         * capacity, not a reason to preempt the GLM/Kimi/OpenRouter defaults. */
+        if (provider_sakana_has_subscription_key())
+            return "fugu";
         return NULL;
     }
     if (strcmp(family, "cohere") == 0) {
-        if (provider_has_usable_key("cohere", NULL)) return "command-a-03-2025";
-        if (provider_has_usable_key("openrouter", NULL)) return "cohere/command-a";
+        if (provider_has_usable_key("cohere", NULL))
+            return "command-a-03-2025";
+        if (provider_has_usable_key("openrouter", NULL))
+            return "openrouter/cohere/command-a";
         return NULL;
     }
     if (strcmp(family, "perplexity") == 0) {
-        if (provider_has_usable_key("perplexity", NULL)) return "sonar-pro";
+        if (provider_has_usable_key("perplexity", NULL))
+            return "sonar-pro";
         return NULL;
     }
     if (strcmp(family, "zai") == 0) {
-        if (provider_has_usable_key("zai", NULL) ||
-            provider_has_usable_key("glm", NULL)) return "glm-5.2";
-        if (provider_has_usable_key("openrouter", NULL)) return "z-ai/glm-5.2";
+        if (provider_has_usable_key("zai", NULL) || provider_has_usable_key("glm", NULL))
+            return "glm-5.2";
+        if (provider_has_usable_key("openrouter", NULL))
+            return "openrouter/z-ai/glm-5.2";
         return NULL;
     }
     if (strcmp(family, "meta") == 0) {
-        if (provider_has_usable_key("openrouter", NULL)) return "meta-llama/llama-4-maverick";
+        if (provider_has_usable_key("openrouter", NULL))
+            return "openrouter/meta-llama/llama-4-maverick";
         return NULL;
     }
     if (strcmp(family, "minimax") == 0) {
-        if (provider_has_usable_key("openrouter", NULL)) return "minimax/minimax-m2.5";
+        if (provider_has_usable_key("openrouter", NULL))
+            return "openrouter/minimax/minimax-m2.5";
         return NULL;
     }
     if (strcmp(family, "amazon") == 0) {
-        if (provider_has_usable_key("openrouter", NULL)) return "amazon/nova-premier-v1";
+        if (provider_has_usable_key("openrouter", NULL))
+            return "openrouter/amazon/nova-premier-v1";
         return NULL;
     }
 
     return NULL;
 }
 
-static void provider_append_unique_model(char out_models[][128], int *count,
-                                         int max_models, const char *current_model,
-                                         const char *candidate) {
-    if (!out_models || !count || max_models <= 0 || !candidate || !candidate[0]) return;
-    if (*count >= max_models) return;
+static void provider_append_unique_model(char out_models[][128], int *count, int max_models,
+                                         const char *current_model, const char *candidate) {
+    if (!out_models || !count || max_models <= 0 || !candidate || !candidate[0])
+        return;
+    if (*count >= max_models)
+        return;
 
     const char *resolved_candidate = model_resolve_alias(candidate);
     const char *resolved_current = current_model ? model_resolve_alias(current_model) : NULL;
+    bool candidate_openrouter = provider_model_has_explicit_openrouter_prefix(candidate);
+    bool current_openrouter = provider_model_has_explicit_openrouter_prefix(current_model);
+    char stored_candidate[128];
 
-    if (resolved_current && strcmp(resolved_candidate, resolved_current) == 0)
+    if (candidate_openrouter) {
+        snprintf(stored_candidate, sizeof(stored_candidate), "%s", candidate);
+    } else {
+        snprintf(stored_candidate, sizeof(stored_candidate), "%s", resolved_candidate);
+    }
+
+    if (resolved_current && strcmp(resolved_candidate, resolved_current) == 0 &&
+        candidate_openrouter == current_openrouter)
         return;
 
     for (int i = 0; i < *count; i++) {
-        if (strcmp(out_models[i], resolved_candidate) == 0)
+        const char *resolved_existing = model_resolve_alias(out_models[i]);
+        bool existing_openrouter = provider_model_has_explicit_openrouter_prefix(out_models[i]);
+        if (strcmp(out_models[i], stored_candidate) == 0 ||
+            (strcmp(resolved_existing, resolved_candidate) == 0 &&
+             existing_openrouter == candidate_openrouter))
             return;
     }
 
-    snprintf(out_models[*count], 128, "%s", resolved_candidate);
+    snprintf(out_models[*count], 128, "%s", stored_candidate);
     (*count)++;
 }
 
-int provider_build_default_fallback_models(const char *model,
-                                           char out_models[][128],
-                                           int max_models) {
-    if (!out_models || max_models <= 0) return 0;
-    for (int i = 0; i < max_models; i++) out_models[i][0] = '\0';
+static const char *provider_openai_fallback_model(bool prefer_code) {
+    const char *subscription = provider_openai_primary_model(prefer_code);
+    if (subscription && subscription[0] &&
+        !provider_model_has_explicit_openrouter_prefix(subscription) &&
+        !provider_env_truthy(getenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY")) &&
+        provider_has_usable_key("openai-codex", NULL))
+        return subscription;
+    if (subscription && strstr(subscription, "openai/"))
+        return subscription;
+    if (provider_has_usable_key("openrouter", NULL))
+        return prefer_code ? "openrouter/openai/gpt-5.6-sol" : "openrouter/openai/gpt-5.6-terra";
+    return subscription;
+}
 
-    const char *resolved_model = model_resolve_alias(model ? model : DEFAULT_MODEL);
+static const char *provider_openai_subscription_fallback_model(bool prefer_code) {
+    if (provider_env_truthy(getenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY")) ||
+        !provider_has_usable_key("openai-codex", NULL))
+        return NULL;
+    return provider_openai_primary_model(prefer_code);
+}
+
+static int provider_append_configured_local_fallback(const char *requested_model,
+                                                     char out_models[][128], int count,
+                                                     int max_models) {
+    const char *candidate = getenv("DSCO_LOCAL_FALLBACK_MODEL");
+    if (!candidate || !candidate[0] || !out_models || max_models <= 0)
+        return count;
+
+    /* Keep explicit local fallback opt-in isolated from the credential-backed
+     * default chain.  Tests and callers that disable discovery expect an empty
+     * chain rather than an ambient shell setting silently adding a route. */
+    if (provider_env_truthy(getenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY")) &&
+        provider_env_truthy(getenv("DSCO_DISABLE_CLAUDE_OAUTH_DISCOVERY")))
+        return count;
+
+    const char *resolved = model_resolve_alias(candidate);
+    const char *provider = provider_detect(resolved, NULL);
+    if (!provider_is_local_endpoint(provider))
+        return count;
+
+    /* The local lane is the last resort. Reserve the final slot when the
+     * credential-backed chain already filled the caller's capacity. */
+    if (count >= max_models) {
+        count = max_models - 1;
+        out_models[count][0] = '\0';
+    }
+    provider_append_unique_model(out_models, &count, max_models, requested_model, candidate);
+    return count;
+}
+
+int provider_build_default_fallback_models(const char *model, char out_models[][128],
+                                           int max_models) {
+    if (!out_models || max_models <= 0)
+        return 0;
+    for (int i = 0; i < max_models; i++)
+        out_models[i][0] = '\0';
+
+    const char *requested_model = model ? model : DEFAULT_MODEL;
+    const char *resolved_model = model_resolve_alias(requested_model);
     const char *family = provider_model_family(resolved_model);
     bool prefer_code = provider_model_is_code_oriented(resolved_model);
     int count = 0;
 
+    if (provider_is_local_endpoint(provider_detect(resolved_model, NULL)))
+        return 0;
+
     if (strcmp(family, "anthropic") == 0) {
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        const char *xai_last = provider_xai_primary_model(prefer_code);
+        int non_xai_cap = xai_last ? (max_models > 1 ? max_models - 1 : 0) : max_models;
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_family_primary_model("anthropic", false));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
-                                     provider_xai_primary_model(prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
-                                     provider_openai_primary_model(prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
+                                     provider_openai_subscription_fallback_model(prefer_code));
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
+                                     provider_family_primary_model("sakana", prefer_code));
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
+                                     provider_openai_fallback_model(prefer_code));
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_family_primary_model("google", false));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_family_primary_model("deepseek", false));
-        return count;
+        provider_append_unique_model(out_models, &count, max_models, requested_model, xai_last);
+        return provider_append_configured_local_fallback(requested_model, out_models, count,
+                                                         max_models);
     }
 
     if (strcmp(family, "openai") == 0) {
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        const char *xai_last = provider_xai_primary_model(true);
+        int non_xai_cap = xai_last ? (max_models > 1 ? max_models - 1 : 0) : max_models;
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_openai_primary_model(prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
-                                     provider_xai_primary_model(true));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
+                                     provider_family_primary_model("sakana", prefer_code));
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_family_primary_model("anthropic", false));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_family_primary_model("google", false));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                      provider_family_primary_model("deepseek", false));
-        return count;
+        provider_append_unique_model(out_models, &count, max_models, requested_model, xai_last);
+        return provider_append_configured_local_fallback(requested_model, out_models, count,
+                                                         max_models);
     }
 
     if (strcmp(family, "xai") == 0) {
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_xai_primary_model(prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("anthropic", false));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
-                                     provider_openai_primary_model(prefer_code));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
+                                     provider_family_primary_model("sakana", prefer_code));
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
+                                     provider_openai_fallback_model(prefer_code));
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("google", false));
-        provider_append_unique_model(out_models, &count, max_models, resolved_model,
+        provider_append_unique_model(out_models, &count, max_models, requested_model,
                                      provider_family_primary_model("deepseek", false));
-        return count;
+        return provider_append_configured_local_fallback(requested_model, out_models, count,
+                                                         max_models);
     }
 
-    provider_append_unique_model(out_models, &count, max_models, resolved_model,
-                                 provider_xai_primary_model(prefer_code));
-    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+    const char *xai_last = provider_xai_primary_model(prefer_code);
+    int non_xai_cap = xai_last ? (max_models > 1 ? max_models - 1 : 0) : max_models;
+    provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                  provider_family_primary_model("anthropic", false));
-    provider_append_unique_model(out_models, &count, max_models, resolved_model,
-                                 provider_openai_primary_model(prefer_code));
-    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+    provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
+                                 provider_family_primary_model("sakana", prefer_code));
+    provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
+                                 provider_openai_fallback_model(prefer_code));
+    provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                  provider_family_primary_model("google", false));
-    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+    provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                  provider_family_primary_model("deepseek", false));
-    provider_append_unique_model(out_models, &count, max_models, resolved_model,
+    provider_append_unique_model(out_models, &count, non_xai_cap, requested_model,
                                  provider_family_primary_model("qwen", false));
+    provider_append_unique_model(out_models, &count, max_models, requested_model, xai_last);
     return count;
 }
 
 const char *provider_select_default_primary_model(bool prefer_code) {
     const char *candidate = NULL;
 
-    if (prefer_code) {
-        /* Code mode: prefer Kimi K2.7 Code via OpenRouter */
-        candidate = provider_family_primary_model("moonshot", true);
-        if (candidate) return candidate;
-    } else {
-        /* General mode: prefer GLM (Z.AI) via OpenRouter for cost/quality */
+    /* Native Z.AI Coding Plan is the product default when any GLM/ZAI key is present. */
+    if (provider_has_usable_key("zai", NULL) || provider_has_usable_key("glm", NULL)) {
         candidate = provider_family_primary_model("zai", false);
-        if (candidate) return candidate;
+        if (candidate)
+            return candidate;
     }
+
+    candidate = provider_family_primary_model("abliteration-ai", prefer_code);
+    if (candidate)
+        return candidate;
+
+    candidate = provider_family_primary_model("sakana", prefer_code);
+    if (candidate)
+        return candidate;
+
+    candidate = provider_family_primary_model("moonshot", true);
+    if (candidate)
+        return candidate;
 
     if (!prefer_code) {
         candidate = provider_xai_primary_model(false);
-        if (candidate) return candidate;
+        if (candidate)
+            return candidate;
     } else {
         candidate = provider_openai_primary_model(true);
-        if (candidate) return candidate;
+        if (candidate)
+            return candidate;
     }
 
     candidate = provider_family_primary_model("anthropic", false);
-    if (candidate) return candidate;
+    if (candidate)
+        return candidate;
 
     candidate = provider_xai_primary_model(prefer_code);
-    if (candidate) return candidate;
+    if (candidate)
+        return candidate;
 
     candidate = provider_openai_primary_model(prefer_code);
-    if (candidate) return candidate;
+    if (candidate)
+        return candidate;
 
     candidate = provider_family_primary_model("google", false);
-    if (candidate) return candidate;
+    if (candidate)
+        return candidate;
 
     candidate = provider_family_primary_model("deepseek", false);
-    if (candidate) return candidate;
+    if (candidate)
+        return candidate;
 
     candidate = provider_family_primary_model("mistral", false);
-    if (candidate) return candidate;
+    if (candidate)
+        return candidate;
 
     if (!prefer_code) {
         candidate = provider_family_primary_model("moonshot", false);
-        if (candidate) return candidate;
+        if (candidate)
+            return candidate;
     }
 
     return DEFAULT_MODEL;
 }
 
 const char *provider_detect(const char *model, const char *api_key) {
-    if (!model && !api_key) return "anthropic";
+    if (!model && !api_key)
+        return "anthropic";
 
     if (model) {
         /* Explicit provider prefix: "openrouter:model/id" */
-        if (strncmp(model, "openrouter:", 11) == 0)
+        if (provider_model_has_explicit_openrouter_prefix(model))
             return "openrouter";
-        /* OpenRouter auto-router */
-        if (strncmp(model, "openrouter/", 11) == 0 || strcmp(model, "auto") == 0)
+        /* Generic "<provider>:model" prefix for self-hosted / local backends
+         * (e.g. "vllm:Qwen2.5-Coder", "ollama:llama3.3:latest"). The model id
+         * itself may contain colons, so only the first segment is the
+         * provider. Matches any known OpenAI-compatible endpoint. */
+        {
+            const char *colon = strchr(model, ':');
+            if (colon && colon > model) {
+                size_t plen = (size_t)(colon - model);
+                char pfx[32];
+                if (plen < sizeof(pfx)) {
+                    memcpy(pfx, model, plen);
+                    pfx[plen] = '\0';
+                    /* Return the endpoint table's own (static) name string, not
+                     * the stack-local pfx — canonical_name would echo pfx back
+                     * and we'd return a dangling pointer. */
+                    const provider_endpoint_t *ep = find_endpoint(pfx);
+                    if (ep)
+                        return ep->name;
+                }
+            }
+        }
+        /* OpenRouter uses the vendor namespace "z-ai/..." for GLM catalog IDs.
+         * Keep native Z.AI explicit as "zai/..." so typed OpenRouter slugs do
+         * not require GLM_API_KEY/ZAI_API_KEY. */
+        if (provider_model_has_prefix(model, "z-ai/"))
             return "openrouter";
-        /* Any org/model ID with a slash routes to OpenRouter FIRST —
-         * this must come before keyword checks (e.g. "openai/gpt-5.4"
-         * contains "gpt" but must go through OpenRouter, not native OpenAI). */
+        const char *namespaced = provider_model_family_from_namespaced(model);
+        if (namespaced)
+            return namespaced;
+        /* Unknown org/model IDs are OpenRouter slugs unless explicitly claimed
+         * by a native provider namespace above. */
         if (strstr(model, "/"))
             return "openrouter";
         /* Anthropic — bare model IDs only (no slash) */
-        if (strstr(model, "claude") || strstr(model, "opus") ||
-            strstr(model, "sonnet") || strstr(model, "haiku"))
+        if (strstr(model, "claude") || strstr(model, "opus") || strstr(model, "sonnet") ||
+            strstr(model, "haiku"))
             return "anthropic";
         /* Cerebras provider-prefixed models should beat generic family matches */
         if (strstr(model, "cerebras"))
             return "cerebras";
-        /* Moonshot native — bare kimi-* / moonshot-* IDs (anything with a
-         * slash already routed to OpenRouter above). */
+        /* Moonshot native — bare kimi-* / moonshot-* IDs. */
         if (strstr(model, "kimi") || strstr(model, "moonshot"))
             return "moonshot";
+        if (strstr(model, "fugu") || strstr(model, "sakana"))
+            return "sakana";
+        if (strstr(model, "abliterated-model"))
+            return "abliteration-ai";
         /* Google Gemini native — bare gemini-* IDs only */
         if (strstr(model, "gemini") || strstr(model, "Gemini"))
             return "google";
         /* OpenAI — bare model IDs only */
-        if (strstr(model, "gpt") || strncmp(model, "o1", 2) == 0 ||
-            strncmp(model, "o3", 2) == 0 || strncmp(model, "o4", 2) == 0 ||
-            strstr(model, "codex-spark") || strstr(model, "chatgpt"))
+        if (strstr(model, "gpt") || strncmp(model, "o1", 2) == 0 || strncmp(model, "o3", 2) == 0 ||
+            strncmp(model, "o4", 2) == 0 || strstr(model, "codex-spark") ||
+            strstr(model, "chatgpt"))
             return "openai";
         /* Groq — only when no slash (native model IDs have no org prefix) */
         if (!strstr(model, "/") &&
-            (strstr(model, "llama") || strstr(model, "mixtral") ||
-             strstr(model, "gemma")))
+            (strstr(model, "llama") || strstr(model, "mixtral") || strstr(model, "gemma")))
             return "groq";
         /* DeepSeek native */
         if (!strstr(model, "/") && strstr(model, "deepseek"))
             return "deepseek";
         /* Mistral native */
         if (!strstr(model, "/") &&
-            (strstr(model, "mistral") || strstr(model, "codestral") ||
-             strstr(model, "pixtral")))
+            (strstr(model, "mistral") || strstr(model, "codestral") || strstr(model, "pixtral")))
             return "mistral";
         /* Together native */
         if (!strstr(model, "/") &&
-            (strstr(model, "Qwen") || strstr(model, "qwen") ||
-             strstr(model, "together")))
+            (strstr(model, "Qwen") || strstr(model, "qwen") || strstr(model, "together")))
             return "together";
         /* Cohere */
         if (strstr(model, "command"))
             return "cohere";
-        /* xAI — native only for bare "grok" IDs, x-ai/ prefix goes to OpenRouter.
-         * Covers grok-4, grok-4-fast, grok-3, grok-3-mini, grok-code-fast-1. */
+        /* xAI — bare "grok" IDs route natively; x-ai/... is handled by the
+         * known namespace block above. Covers grok-4, grok-4-fast, grok-3,
+         * grok-3-mini, grok-code-fast-1. */
         if ((strstr(model, "grok") || strstr(model, "Grok")) && !strstr(model, "/"))
             return "xai";
         /* Perplexity */
         if (strstr(model, "sonar") || strstr(model, "pplx"))
             return "perplexity";
+        /* Z.AI GLM native bare model IDs. The namespaced z-ai/... form above
+         * remains an OpenRouter catalog slug. */
+        if (!strstr(model, "/") && strstr(model, "glm"))
+            return "zai";
         /* Any remaining slash-based model IDs already caught above */
     }
 
     /* Check API key patterns */
     if (api_key) {
-        if (strncmp(api_key, "sk-ant-", 7) == 0) return "anthropic";
-        if (strncmp(api_key, "gsk_", 4) == 0) return "groq";
-        if (strncmp(api_key, "sk-or-", 6) == 0) return "openrouter";
-        if (strncmp(api_key, "pplx-", 5) == 0) return "perplexity";
-        if (strncmp(api_key, "xai-", 4) == 0) return "xai";
-        if (strncmp(api_key, "sk-", 3) == 0) return "openai";
+        if (strncmp(api_key, "sk-ant-", 7) == 0)
+            return "anthropic";
+        if (strncmp(api_key, "gsk_", 4) == 0)
+            return "groq";
+        if (strncmp(api_key, "sk-or-", 6) == 0)
+            return "openrouter";
+        if (strncmp(api_key, "pplx-", 5) == 0)
+            return "perplexity";
+        if (strncmp(api_key, "xai-", 4) == 0)
+            return "xai";
+        if (strncmp(api_key, "fish_", 5) == 0)
+            return "sakana";
+        if (strncmp(api_key, "ak_", 3) == 0)
+            return "abliteration-ai";
+        if (strncmp(api_key, "sk-", 3) == 0)
+            return "openai";
     }
 
     return "anthropic";
 }
 
+const char *provider_provider_for_api_key(const char *api_key) {
+    if (!api_key || !api_key[0])
+        return NULL;
+    if (strncmp(api_key, "sk-ant-", 7) == 0)
+        return "anthropic";
+    if (strncmp(api_key, "gsk_", 4) == 0)
+        return "groq";
+    if (strncmp(api_key, "sk-or-", 6) == 0)
+        return "openrouter";
+    if (strncmp(api_key, "pplx-", 5) == 0)
+        return "perplexity";
+    if (strncmp(api_key, "xai-", 4) == 0)
+        return "xai";
+    if (strncmp(api_key, "fish_", 5) == 0)
+        return "sakana";
+    if (strncmp(api_key, "ak_", 3) == 0)
+        return "abliteration-ai";
+    if (strncmp(api_key, "sk-", 3) == 0)
+        return "openai";
+    return NULL;
+}
+
+const char *provider_publish_api_key_env(const char *api_key) {
+    const char *prov = provider_provider_for_api_key(api_key);
+    if (!prov)
+        return NULL;
+    const char *env_key = NULL;
+    if (strcmp(prov, "anthropic") == 0) {
+        env_key = "ANTHROPIC_API_KEY";
+    } else {
+        const provider_endpoint_t *ep = find_endpoint(prov);
+        if (ep)
+            env_key = ep->env_key;
+    }
+    if (env_key && env_key[0] && !provider_getenv_nonempty(env_key))
+        setenv(env_key, api_key, 1);
+    return prov;
+}
+
+const char *provider_primary_model_for(const char *family, bool prefer_code) {
+    return provider_family_primary_model(family, prefer_code);
+}
+
 /* ── Resolve API key for a provider ────────────────────────────────────── */
 
 static const char *provider_resolve_profile_env_key(const provider_profile_t *profile) {
-    if (!profile) return NULL;
+    if (!profile)
+        return NULL;
     for (int i = 0; i < PROVIDER_PROFILE_MAX_ENV_VARS && profile->env_vars[i]; i++) {
         const char *key = provider_getenv_nonempty(profile->env_vars[i]);
-        if (key) return key;
+        if (key)
+            return key;
     }
     return NULL;
 }
 
 const char *provider_resolve_api_key(const char *provider_name) {
-    if (!provider_name || !provider_name[0]) return NULL;
+    if (!provider_name || !provider_name[0])
+        return NULL;
     const provider_profile_t *profile = provider_profile_find(provider_name);
     provider_name = provider_profile_canonical_name(provider_name);
 
     if (strcmp(provider_name, "anthropic") == 0) {
         const char *oauth = provider_resolve_claude_code_oauth_token(false);
-        if (oauth && oauth[0]) return oauth;
+        if (oauth && oauth[0])
+            return oauth;
         const char *key = provider_resolve_profile_env_key(profile);
-        if (key && key[0]) return key;
+        if (key && key[0])
+            return key;
         return provider_resolve_alias_env_key("anthropic");
     }
+
+    if (strcmp(provider_name, "sakana") == 0)
+        return provider_sakana_resolve_key();
+    if (strcmp(provider_name, "kimi-code") == 0)
+        return kimi_oauth_access_token(false);
 
     const provider_endpoint_t *ep = find_endpoint(provider_name);
     if (ep) {
         const char *key = provider_getenv_nonempty(ep->env_key);
-        if (key) return key;
+        if (key)
+            return key;
         key = provider_resolve_profile_env_key(profile);
-        if (key) return key;
+        if (key)
+            return key;
         key = provider_resolve_alias_env_key(provider_name);
-        if (key) return key;
+        if (key)
+            return key;
         return provider_resolve_dynamic_env_key(provider_name);
     }
 
     const char *key = provider_resolve_profile_env_key(profile);
-    if (key) return key;
+    if (key)
+        return key;
     return provider_resolve_dynamic_env_key(provider_name);
 }
 
@@ -3259,23 +8507,55 @@ static bool provider_key_matches(const char *provider_name, const char *fallback
 }
 
 bool provider_has_usable_key(const char *provider_name, const char *fallback_api_key) {
-    if (!provider_name || !provider_name[0]) return false;
+    if (!provider_name || !provider_name[0])
+        return false;
     provider_name = provider_profile_canonical_name(provider_name);
 
+    if (strcmp(provider_name, "openai-codex") == 0)
+        return provider_chatgpt_subscription_ready();
+
+    /* A refreshable Kimi OAuth cache is ready even when its access token
+     * expired. Do not block request-time refresh behind the pool's no-key state. */
+    if (strcmp(provider_name, "kimi-code") == 0 && kimi_oauth_available())
+        return true;
+
+    /* Local/self-hosted OpenAI-compatible servers need no API key. */
+    if (provider_is_local_endpoint(provider_name))
+        return true;
+
     const char *native_key = provider_resolve_api_key(provider_name);
-    if (native_key && native_key[0]) return true;
+    if (native_key && native_key[0])
+        return true;
 
     return provider_key_matches(provider_name, fallback_api_key);
 }
 
-const char *provider_route_for_model(const char *model,
-                                     const char *fallback_api_key,
+const char *provider_route_for_model(const char *model, const char *fallback_api_key,
                                      const char *provider_override) {
     if (provider_override && provider_override[0])
         return provider_profile_canonical_name(provider_override);
 
     const char *provider_name = provider_detect(model, fallback_api_key);
+    bool explicit_native_namespace =
+        model && !provider_model_has_explicit_openrouter_prefix(model) &&
+        provider_model_family_from_namespaced(model) != NULL;
+
+    /* Redirect to openai-codex subscription only when discovery is not
+     * explicitly suppressed. DSCO_DISABLE_CODEX_OAUTH_DISCOVERY=1 means
+     * "use direct API keys instead of any subscription path". */
+    if (strcmp(provider_name, "openai") == 0 &&
+        !provider_env_truthy(getenv("DSCO_DISABLE_CODEX_OAUTH_DISCOVERY")) &&
+        provider_has_usable_key("openai-codex", NULL) &&
+        codex_cache_model_supported(model))
+        return "openai-codex";
+
     if (provider_has_usable_key(provider_name, fallback_api_key))
+        return provider_name;
+
+    if (explicit_native_namespace)
+        return provider_name;
+
+    if (strcmp(provider_name, "sakana") == 0)
         return provider_name;
 
     if (strcmp(provider_name, "openrouter") != 0 &&
@@ -3287,34 +8567,58 @@ const char *provider_route_for_model(const char *model,
 
 const char *provider_resolve_request_api_key(const char *provider_name,
                                              const char *fallback_api_key) {
-    if (!provider_name || !provider_name[0]) return fallback_api_key;
+    if (!provider_name || !provider_name[0])
+        return fallback_api_key;
     provider_name = provider_profile_canonical_name(provider_name);
 
     if (strcmp(provider_name, "anthropic") == 0) {
         const char *oauth = provider_resolve_claude_code_oauth_token(true);
-        if (oauth && oauth[0]) return oauth;
+        if (oauth && oauth[0])
+            return oauth;
+    }
+
+    if (strcmp(provider_name, "openai-codex") == 0)
+        return provider_codex_subscription_credential();
+    if (strcmp(provider_name, "kimi-code") == 0)
+        return kimi_oauth_access_token(true);
+
+    if (provider_is_local_endpoint(provider_name)) {
+        /* Local endpoints are keyless by default, but remote/private-mesh
+         * deployments can opt into their provider-specific credential (for
+         * example LLAMACPP_API_KEY).  Resolve that key before falling back to
+         * the synthetic sentinel that intentionally suppresses auth headers. */
+        const char *native_key = provider_resolve_api_key(provider_name);
+        if (native_key && native_key[0])
+            return native_key;
+        if (fallback_api_key && fallback_api_key[0])
+            return fallback_api_key;
+        return "local";
     }
 
     const char *native_key = provider_resolve_api_key(provider_name);
     if (provider_key_matches(provider_name, fallback_api_key))
         return fallback_api_key;
 
-    if (native_key && native_key[0]) return native_key;
+    if (native_key && native_key[0])
+        return native_key;
 
     return NULL;
 }
 
 const char *provider_claude_code_oauth_source(void) {
     const char *env = getenv("DSCO_CLAUDE_CODE_OAUTH_TOKEN");
-    if (env && env[0]) return "env";
+    if (env && env[0])
+        return "env";
     env = getenv("CLAUDE_CODE_OAUTH_TOKEN");
-    if (env && env[0]) return "env";
+    if (env && env[0])
+        return "env";
 
     if (provider_env_truthy(getenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY")))
         return "disabled";
 
     claude_code_oauth_bundle_t bundle;
-    if (!provider_load_claude_code_oauth_bundle(&bundle)) return "missing";
+    if (!provider_load_claude_code_oauth_bundle(&bundle))
+        return "missing";
 
     const char *source = provider_claude_code_oauth_source_name(bundle.source);
     provider_claude_code_oauth_bundle_free(&bundle);
@@ -3322,23 +8626,32 @@ const char *provider_claude_code_oauth_source(void) {
 }
 
 bool provider_claude_code_get_account_info(char *subscription_type_out, size_t st_len,
-                                           char *rate_limit_tier_out,   size_t rl_len) {
-    if (subscription_type_out && st_len) subscription_type_out[0] = '\0';
-    if (rate_limit_tier_out   && rl_len) rate_limit_tier_out[0]   = '\0';
+                                           char *rate_limit_tier_out, size_t rl_len) {
+    if (subscription_type_out && st_len)
+        subscription_type_out[0] = '\0';
+    if (rate_limit_tier_out && rl_len)
+        rate_limit_tier_out[0] = '\0';
 
     claude_code_oauth_bundle_t bundle;
-    if (!provider_load_claude_code_oauth_bundle(&bundle)) return false;
+    if (!provider_load_claude_code_oauth_bundle(&bundle))
+        return false;
 
     bool found = false;
     if (bundle.oauth_json) {
         if (subscription_type_out && st_len) {
             char *v = json_get_str(bundle.oauth_json, "subscriptionType");
-            if (v && v[0]) { snprintf(subscription_type_out, st_len, "%s", v); found = true; }
+            if (v && v[0]) {
+                snprintf(subscription_type_out, st_len, "%s", v);
+                found = true;
+            }
             free(v);
         }
         if (rate_limit_tier_out && rl_len) {
             char *v = json_get_str(bundle.oauth_json, "rateLimitTier");
-            if (v && v[0]) { snprintf(rate_limit_tier_out, rl_len, "%s", v); found = true; }
+            if (v && v[0]) {
+                snprintf(rate_limit_tier_out, rl_len, "%s", v);
+                found = true;
+            }
             free(v);
         }
     }
@@ -3348,7 +8661,8 @@ bool provider_claude_code_get_account_info(char *subscription_type_out, size_t s
 
 void provider_export_child_process_credentials_for_provider(const char *provider_name,
                                                             const char *resolved_key) {
-    if (!resolved_key || !resolved_key[0]) return;
+    if (!resolved_key || !resolved_key[0])
+        return;
     if (!provider_name || !provider_name[0])
         provider_name = provider_detect(NULL, resolved_key);
     const provider_profile_t *profile = provider_profile_find(provider_name);
@@ -3367,6 +8681,16 @@ void provider_export_child_process_credentials_for_provider(const char *provider
         return;
     }
 
+    if (strcmp(provider_name, "openai-codex") == 0) {
+        /* This value is an auth-mode marker, not a bearer token. Preserve any
+         * real OAuth credential already inherited by the child environment. */
+        if (strcmp(resolved_key, "chatgpt-subscription") == 0)
+            return;
+        setenv("DSCO_CHATGPT_OAUTH_TOKEN", resolved_key, 1);
+        setenv("CHATGPT_OAUTH_TOKEN", resolved_key, 1);
+        return;
+    }
+
     const provider_endpoint_t *ep = find_endpoint(provider_name);
     if (ep && ep->env_key && ep->env_key[0])
         setenv(ep->env_key, resolved_key, 1);
@@ -3377,8 +8701,7 @@ void provider_export_child_process_credentials_for_provider(const char *provider
     }
 }
 
-void provider_export_child_process_credentials(const char *model,
-                                               const char *resolved_key) {
+void provider_export_child_process_credentials(const char *model, const char *resolved_key) {
     const char *provider_name = NULL;
     if (resolved_key && resolved_key[0])
         provider_name = provider_detect(NULL, resolved_key);
@@ -3387,12 +8710,11 @@ void provider_export_child_process_credentials(const char *model,
     provider_export_child_process_credentials_for_provider(provider_name, resolved_key);
 }
 
-bool provider_model_is_routable(const char *model,
-                                const char *fallback_api_key,
-                                const char *provider_override,
-                                const char **out_provider_name) {
+bool provider_model_is_routable(const char *model, const char *fallback_api_key,
+                                const char *provider_override, const char **out_provider_name) {
     const char *provider_name =
         provider_route_for_model(model, fallback_api_key, provider_override);
-    if (out_provider_name) *out_provider_name = provider_name;
+    if (out_provider_name)
+        *out_provider_name = provider_name;
     return provider_has_usable_key(provider_name, fallback_api_key);
 }

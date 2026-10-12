@@ -1,5 +1,14 @@
 # Architecture Diagrams
 
+## 0. Fugu-Weighted Provider Fabric
+
+![DSCO provider fabric](assets/provider_fabric.svg)
+
+`provider_fabric` fans one task across independent provider-pinned `dsco`
+worker processes. Sakana Fugu is weighted first for subscription saturation,
+while Anthropic, OpenAI-Codex, and Z.AI lanes provide parallel capacity and
+health-driven fallback.
+
 ## 1. Interactive Turn Sequence
 
 ```mermaid
@@ -104,3 +113,42 @@ stateDiagram-v2
   Normal --> Table: table row start
   Table --> Normal: non-table line
 ```
+
+## 7. Local-First Hosted Control Plane
+
+`dsco` should treat hosted `distributed.systems` services as optional
+accelerators. Local execution, policy, secrets, and audit state remain
+authoritative; hosted planes provide shared tool discovery, durable remote work,
+fleet health, and advisory routing data.
+
+```mermaid
+flowchart LR
+  subgraph Local["Local dsco edge"]
+    Agent["agent.c / main.c"]
+    Policy["global + project policy"]
+    LocalTools["built-ins / MCP / plugins"]
+    Stores["Baseline / Chronicle / IPC / control DB"]
+    Secrets["env / sealed store / Keychain"]
+  end
+
+  subgraph Hosted["distributed.systems"]
+    Tools["tools.distributed.systems"]
+    Control["future control plane"]
+    Graph["future graph/memory plane"]
+    Artifacts["future artifact plane"]
+  end
+
+  Agent --> Policy
+  Policy --> LocalTools
+  Agent --> Stores
+  Agent --> Secrets
+  LocalTools -->|optional bearer-token calls| Tools
+  Agent -->|optional signed heartbeat| Control
+  Stores -->|optional redacted summaries| Artifacts
+  Stores -->|optional aggregate priors| Graph
+  Control -->|advisory desired-state hints| Agent
+  Tools -->|catalog / execute / batch / recommend| LocalTools
+```
+
+See [`LOCAL_CONTROL_PLANE.md`](LOCAL_CONTROL_PLANE.md) for the detailed
+hybrid-control-plane flows, sync policy, offline behavior, and service split.

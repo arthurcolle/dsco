@@ -1,0 +1,34 @@
+# Deny-by-default allowlist. `make dsco` only needs src/, include/, vendor/,
+# the Makefile, and the specific bootstrap/bake-data scripts it shells out to
+# (Makefile:606-608: `bash scripts/bake_data.sh data src/generated include`,
+# which globs `find data -maxdepth 1 -type f`). Everything else in this
+# monorepo — reports/, environments/, email-mcp/, research_notes/, generated/,
+# 640MB+ of data/ subdirectories, etc. — is irrelevant to the build and would
+# otherwise balloon the context to multiple GB.
+#
+# This is also a deliberate security boundary, not just a size one:
+# data/dsco_secrets.txt sits directly under data/ (matching the Makefile's
+# bake-data glob) and is real local, gitignored credential material — if it
+# were ever swept into a build context, `bake_data.sh` would compile its
+# contents directly into the `dsco` binary as a linked-in byte array,
+# extractable from the image with `strings`. It is intentionally NOT in the
+# allowlist below, and never should be.
+**
+
+!Makefile
+!scripts/bootstrap.sh
+!scripts/bake_data.sh
+!scripts/bake_data.py
+!scripts/embed_lingo.py
+!src/**
+!include/**
+!vendor/**
+!lingo/**
+!gsl/**
+!docker/entrypoint.sh
+
+# Exact files only — no directory-level `data/` rule, so nothing new dropped
+# into data/ is ever included without an explicit decision to add it here.
+!data/abliteration_docs_index.json
+!data/constants_env_index.json
+!data/tool_embeddings.bin

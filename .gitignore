@@ -1,15 +1,26 @@
 # Build artifacts
 *.o
 build/
-dsco
-dsco-debug
-dsco-asan
-dsco-ubsan
-dsco-codex
-dsco_asan
-test_runner
-asan-test_runner
-ubsan-test_runner
+/libdsco.a
+/crates/dsco-core/target/
+/dsco
+/dsco.distributed.systems
+/dsco.distributed.systems.com.dbg
+/dsco.distributed.systems.dbg
+/dsco.distributed.systems.aarch64.elf
+/dsco.com
+/dsco.com.dbg
+/dsco.com.aarch64.elf
+/dsco.aarch64.elf
+/dsco-debug
+/dsco-asan
+/dsco-ubsan
+/dsco-codex
+/dsco_asan
+/test_runner
+/asan-test_runner
+/ubsan-test_runner
+/test_*
 *.dSYM/
 
 # Editor / OS
@@ -29,17 +40,38 @@ error
 __pycache__/
 *.pyc
 *.pyo
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
 .venv/
 venv/
+.test-venv/
+.web-venv/
 
 # IDE
 .vscode/
 .idea/
+# Language server (clangd/emacs) — generated, contains absolute paths
+compile_commands.json
+.cache/
+.clangd/index/
 
-# Private notes / scratch
+# Private notes / scratch / personal files
+research_notes/
 notes/
+memory/
 prompt*.txt
 trading_mind.txt
+*.personal.md
+*.scratch.md
+bufkit.py
+kukulkan.py
+calibration.py
+kalman_bias.py
+nwp_pipeline.py
+realtime.py
+msty_explainer.html
+weather_api_schemas.json
 
 # Secrets / credentials
 .env
@@ -55,6 +87,7 @@ data/ginnie/
 # Agent harness / local state
 .claude/
 .arthur/
+email-mcp/
 
 # Build outputs (single-file + variant binaries)
 dsc
@@ -68,7 +101,9 @@ ipc_experiment
 response.json
 
 # Large data / generated corpora (relocated out of repo)
-data/
+# data/ is the pizza-box — tracked in git
+data/cache/
+data/tmp/
 books/
 climate_data/
 papers/
@@ -86,3 +121,146 @@ DEEP_REVIEW_IMPROVEMENTS.md
 DOCS_MANIFEST.md
 RAPID_INTEGRATION_PLAN.md
 CLAUDE_CODE_AUTH_QUICK_REFERENCE.md
+face_calibrate.py
+face_landmarker.task
+src/*.bak*
+src/*.gov_patch_backup
+src/topology_novel.c
+src/generated/
+
+# ── Session-local logs & smoke artifacts ──────────────────────────────────
+logs/
+smoke.out
+smoke.err
+mcp_smoke
+/tests/*.log
+
+# ── Generated ontology data (large; regenerable via scripts/) ──────────────
+# Source generators + schemas + docs ARE tracked; the multi-hundred-MB CSV/JSONL
+# outputs are not. Regenerate with scripts/consumer_profile_ontology/.
+data/consumer_profile_ontology/*.csv
+data/consumer_profile_ontology/*.jsonl
+dsco-instrumented
+
+# hardening: secret key material + generated encrypted blobs (build artifacts)
+include/embedded_key.gen.h
+build/.embed_key
+src/generated/embedded_*.c
+include/embedded_data_registry.h
+include/cstring_key.gen.h
+build/.cstring_key
+build-harden/
+build-hardenmax/
+
+# ── Phase 0 hygiene: credentials, IDE projects, large generated & run artifacts ──
+# Local credential material — must never be committed.
+data/dsco_secrets.txt
+data/*secrets*.txt
+# GNAT/GPS IDE project scratch
+*.gpr
+*.rep/
+dsco-cli.rep/
+# Slim spine build outputs (binary + depfile; source src/spine_dsco_slim.c is tracked)
+/spine-dsco-slim
+/spine-dsco-slim.d
+# Swarm / perf run outputs (regenerable, large)
+.swarm/
+.dsco-perf-agents/
+# Large generated corpora & vendored scratch trees
+/generated/
+oh-my-pi/
+# DSPy session distillation dumps (regenerable via scripts/)
+reports/*.html
+reports/dspy_session_distill_*
+reports/dspy_deep_enrichment_map.html
+# Personal / brief scratch HTML
+PAT_BOLAND_*.html
+memory_shortage_*.html
+*.png
+# local native-compositor test binaries + runtime lock (never commit)
+dsco-native-stable*
+dsco-native-test
+dsco-kitty
+dsco-banner
+dsco-cli.lock
+spine-dsco-slim
+# generated facet index data (rebuildable)
+data/consumer_profile_ontology/facet_index/
+dsco-kitty-lab
+
+# local Zig/Ghidra/generated review artifacts
+/build-zig/
+/dsco-zig
+/raag.lock
+/examples/dspy_model_enrichment_dossier.html
+
+# release-cut hygiene (v1.1.0, 2026-08-26): local data/venvs/build artifacts never ship
+/environments/
+/experiments/
+/data/cap_classifier/
+/crates/dsco-core/target/
+/dsco-agent-ui-gallery
+/dsco-kitty-tastes
+/bench/ai_writing_tells_swarm_raw.txt
+/openai_roles.txt
+__pycache__/
+*.orig
+
+# personal artifacts (never publish)
+reports/THE_OPEN_HAND_HORIZON_30_PAGE_REPORT.pdf
+reports/1111_34TH_STREET_CYBER_AI_LAB_DUE_DILIGENCE.md
+rana-hajdini-evidence-report.html
+
+# top-level build droppings (2026-08 cleanup)
+/*.dbg
+/*.elf
+/*.dSYM/
+/test_runner
+/test_plan_optimizer
+/test_overmind
+/test_plan_cache_tsan
+/test_cap_hardening
+/test_command_plane
+/dsco-zig
+/dsco-kitty*
+/spine-dsco-slim
+/dsco-banner
+/dsco-lite
+/dsc
+/mobius
+/quine
+/compile_commands.json
+/__pycache__/
+/.DS_Store
+/oh-my-pi/
+/raag.rep/
+/dsco-cli.rep/
+
+# Embedded Lingo runtime generated from reviewed Lua source
+include/lingo_runtime.gen.h
+include/lingo_operator.gen.h
+include/lingo_dsco.gen.h
+include/lingo_autobot.gen.h
+include/lingo_chimera.gen.h
+
+# ── 2026-09-14 sync hygiene ────────────────────────────────────────────────
+# Backup/scratch copies at any depth (src/swarm.c.bak2-*, tests/test.c.bak-*)
+*.bak*
+# scala-cli / BSP IDE state
+.bsp/
+.scala-build/
+# One-off replication probes
+.replication-probe-*/
+# Repo-local scratch
+/tmp/
+# Abliteration benchmark worker run outputs (timestamped, regenerable)
+/benchmarks/
+# Agent swarm run outputs under reports/ — runtime state (full build trees,
+# sqlite DBs, .o/.dylib binaries, logs), not source. Top-level reports/*.md
+# summaries stay tracked.
+/reports/*/
+!/reports/patches/
+!/reports/perf_push_limit/
+# Packaged zip duplicates of committed docs bundles
+/docs/*.zip
+image_index.sqlite3

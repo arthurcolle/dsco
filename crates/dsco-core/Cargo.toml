@@ -1,0 +1,11 @@
+[package]
+name = "dsco-core"
+version = "0.1.0"
+edition = "2021"
+description = "Typed Rust core for DSCO — safe wrapper over the C Context Fabric via FFI."
+
+[lib]
+crate-type = ["rlib"]
+
+# No dependencies on purpose: builds offline, no libclang, no bindgen.
+# The FFI surface is hand-written in src/ffi.rs against include/context_fabric.h.

@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Three small changes that made our agent's JSON path 3–30× faster</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --text: #d7dae0;
+    --muted: #8b929e;
+    --accent: #7aa2f7;
+    --green: #9ece6a;
+    --border: #232838;
+    --code-bg: #0d1017;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 17px/1.7 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 64px 24px 120px; }
+  header { margin-bottom: 48px; }
+  .kicker {
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    font-size: 12px;
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 14px;
+  }
+  h1 {
+    font-size: 40px;
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+    margin: 0 0 18px;
+    font-weight: 700;
+  }
+  .byline { color: var(--muted); font-size: 15px; }
+  h2 {
+    font-size: 26px;
+    letter-spacing: -0.01em;
+    margin: 56px 0 16px;
+    padding-top: 8px;
+  }
+  h3 { font-size: 19px; margin: 32px 0 10px; color: #eef1f6; }
+  p { margin: 18px 0; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code {
+    font-family: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.86em;
+    background: #1b1f2a;
+    padding: 2px 6px;
+    border-radius: 5px;
+    color: #c0caf5;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+    overflow-x: auto;
+    font-size: 14px;
+    line-height: 1.55;
+    margin: 22px 0;
+  }
+  pre code { background: none; padding: 0; font-size: 13.5px; color: inherit; }
+  blockquote {
+    border-left: 3px solid var(--accent);
+    margin: 22px 0;
+    padding: 2px 20px;
+    color: var(--muted);
+    font-style: italic;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 24px 0;
+    font-size: 15px;
+  }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; }
+  td.num { font-family: "SF Mono", ui-monospace, monospace; }
+  .win { color: var(--green); font-weight: 600; }
+  .callout {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 4px 22px;
+    margin: 26px 0;
+  }
+  hr { border: none; border-top: 1px solid var(--border); margin: 48px 0; }
+  .footnote { color: var(--muted); font-size: 14px; }
+  .tag {
+    display: inline-block;
+    background: #1b1f2a;
+    color: var(--muted);
+    font-size: 12px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    margin-right: 6px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="kicker">Performance / dsco-cli</div>
+  <h1>Three small changes that made our agent's JSON path 3–30× faster</h1>
+  <p class="byline">
+    <span class="tag">C</span><span class="tag">NEON / SSE2</span><span class="tag">JSON</span><br>
+    On the per-turn hot loop that every agent, and every swarm, pays for.
+  </p>
+</header>
+
+<p>
+dsco-cli is a coding agent written in C. Run a single agent and it feels fast enough that
+nobody thinks about it. Fan out to a swarm and the story changes. Dozens of agents, each
+grinding through its own tool loop, and the per-turn cost stops being a rounding error. It
+becomes the bill.
+</p>
+
+<p>
+So I went looking for the work that happens on every turn of every agent, no matter which model
+is answering. That work is pure CPU we spend on our own hardware. Two functions stood out, both
+in the JSON layer. Neither is glamorous. Between them they were doing a lot of avoidable work.
+</p>
+
+<div class="callout">
+<p><strong>The short version.</strong> Reading fields out of a JSON object allocated a heap
+buffer for every key it walked past. That stops, and it's 2.8× faster. Escaping text into a
+JSON string ran one byte at a time, and decoding a string back out did too. Both go sixteen
+bytes at a time instead, worth 9.2× and 30×. Every one of the three produces the same bytes as
+the code it replaced.</p>
+</div>
+
+<h2>Where the time actually goes</h2>
+
+<p>
+An agent turn has an obvious expensive part, which is waiting on the model. It also has a boring
+part nobody profiles. You build the request, you read the response, and both run locally on
+every turn. That work grows with the conversation. Two things dominate it.
+</p>
+
+<ul>
+<li>Pulling fields out of the response and out of each tool call, through
+<code>json_get_str</code>, <code>json_get_int</code>, and friends.</li>
+<li>Serializing the whole conversation back into the next request. That means escaping every
+message into a JSON string with <code>jbuf_append_json_str</code>.</li>
+</ul>
+
+<p>
+Both were written the straightforward way years ago and never touched again. That's usually
+where the easy wins are hiding.
+</p>
+
+<h2>1. Stop allocating just to compare a key</h2>
+
+<p>
+The scalar field accessors re-scan the object from the top on every call. That's fine, even
+optimal, when you want a single field. The problem was how they matched keys. Here is the
+original <code>find_key</code>, lightly trimmed.
+</p>
+
+<pre><code class="language-c">static const char *find_key(const char *p, const char *key) {
+    p = skip_ws(p);
+    while (*p && *p != '}') {
+        if (*p == '"') {
+            char *k = NULL;
+            const char *after = parse_string(p, &k);   // &lt;-- mallocs a decoded copy
+            /* ... */
+            if (k &amp;&amp; strcmp(k, key) == 0) {
+                free(k);
+                return after;
+            }
+            free(k);                                    // &lt;-- ...just to throw it away
+            after = skip_value(after);
+            /* advance to next key */
+        } else {
+            p++;
+        }
+    }
+    return NULL;
+}</code></pre>
+
+<p>
+<code>parse_string</code> decodes a JSON string into a freshly allocated, escape-expanded
+buffer. <code>find_key</code> called it on every key it stepped over. Allocate a copy, run a
+<code>strcmp</code>, free the copy, move on. Pull eight fields out of a sixteen-key object and
+you have done well over a hundred malloc and free pairs to read eight values.
+</p>
+
+<p>
+One fact makes this cheap to fix. JSON keys almost never contain escape sequences. A key is
+nearly always a plain identifier like <code>"max_tokens"</code>. So compare the raw bytes in
+place, and fall back to the decoding path only when the key actually holds a backslash. The
+common case turns into a length check and a <code>memcmp</code>, with no allocation at all.
+</p>
+
+<pre><code class="language-c">/* Scan past a JSON string literal. On return [*cs, *ce) is the raw content and
+ * *simple is true iff it had no backslash escape (so the raw span == the value). */
+static const char *scan_string(const char *p, const char **cs, const char **ce, bool *simple) {
+    p++;                          /* past opening quote */
+    *cs = p;
+    bool esc = false;
+    while (*p &amp;&amp; *p != '"') {
+        if (*p == '\\') { esc = true; p++; if (!*p) break; }
+        p++;
+    }
+    *ce = p;
+    *simple = !esc;
+    return (*p == '"') ? p + 1 : p;
+}
+
+/* ...inside find_key: */
+const char *cs, *ce; bool simple;
+const char *after = scan_string(p, &amp;cs, &amp;ce, &amp;simple);
+bool matched;
+if (simple) {
+    matched = ((size_t)(ce - cs) == keylen) &amp;&amp; memcmp(cs, key, keylen) == 0;
+} else {
+    char *k = NULL;              /* rare: escaped key, decode exactly as before */
+    parse_string(p, &amp;k);
+    matched = (k &amp;&amp; strcmp(k, key) == 0);
+    free(k);
+}</code></pre>
+
+<p>
+That's the whole idea. The escaped-key path stays exactly as it was, so nothing about the
+output changes. The common path just stopped touching the allocator.
+</p>
+
+<p>
+A micro-benchmark that pulls a realistic mix of early, middle, and late fields out of a
+tool-call object, two million times:
+</p>
+
+<table>
+  <thead><tr><th>Version</th><th>Per iteration</th><th></th></tr></thead>
+  <tbody>
+    <tr><td>Original (decode + strcmp)</td><td class="num">2504 ns</td><td></td></tr>
+    <tr><td>In-place compare</td><td class="num">902 ns</td><td class="win">2.8×</td></tr>
+  </tbody>
+</table>
+
+<h2>2. Escape a string 16 bytes at a time</h2>
+
+<p>
+The second function escapes arbitrary text into a JSON string literal. It runs on every message
+when we build a request, so its input adds up to the whole conversation. Here is how it looked.
+</p>
+
+<pre><code class="language-c">void jbuf_append_json_str(jbuf_t *b, const char *s) {
+    jbuf_append_char(b, '"');
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) {
+        if (*p == '"')       { jbuf_append(b, "\\\""); p++; }
+        else if (*p == '\\') { jbuf_append(b, "\\\\"); p++; }
+        else if (*p == '\n') { jbuf_append(b, "\\n");  p++; }
+        /* ...other escapes, UTF-8 validation... */
+        else { jbuf_append_char(b, (char)*p); p++; }   // &lt;-- the common case
+    }
+    jbuf_append_char(b, '"');
+}</code></pre>
+
+<p>
+For ordinary text, which is almost all of it, every byte took that last branch.
+<code>jbuf_append_char</code> does a bounds check and writes a NUL terminator on each call. A
+kilobyte of plain ASCII became a thousand branch-and-append round trips to emit a kilobyte.
+</p>
+
+<p>
+The fix is the standard escaping move. Bulk-copy the run of bytes that need no escaping, and
+stop only when you hit one that does. How long is the next safe run? That's the kind of
+byte-classification a SIMD lane sweep answers well. A byte is unsafe when it's a control
+character below <code>0x20</code>, a quote, a backslash, or has the high bit set, which means it
+needs UTF-8 validation. Everything else copies verbatim.
+</p>
+
+<p>
+We already had a small portable SIMD header covering NEON and SSE2, with a scalar fallback, and
+almost nothing used it. Here is the new primitive. The NEON path is shown, and the SSE2 and
+scalar paths live next to it.
+</p>
+
+<pre><code class="language-c">/* Count leading bytes that can be copied verbatim into a JSON string:
+ * printable ASCII (0x20..0x7E) except '"' and '\'. */
+static inline size_t dsco_simd_json_safe_run(const char *base, size_t len) {
+    const uint8_t *p = (const uint8_t *)base;
+    size_t i = 0;
+#if DSCO_SIMD_NEON
+    const uint8x16_t lo = vdupq_n_u8(0x20), hi = vdupq_n_u8(0x7e);
+    const uint8x16_t q = vdupq_n_u8('"'), bs = vdupq_n_u8('\\');
+    for (; i + 16 &lt;= len; i += 16) {
+        uint8x16_t v = vld1q_u8(p + i);
+        uint8x16_t bad = vcltq_u8(v, lo);      /* &lt; 0x20  controls        */
+        bad = vorrq_u8(bad, vcgtq_u8(v, hi));  /* &gt; 0x7e  high bytes + DEL */
+        bad = vorrq_u8(bad, vceqq_u8(v, q));   /* '"'                     */
+        bad = vorrq_u8(bad, vceqq_u8(v, bs));  /* '\\'                    */
+        if (vmaxvq_u8(bad) == 0) continue;     /* all 16 safe, keep going */
+        /* first bad lane: narrow each 0xFF lane to a nibble, ctz/4 = index */
+        uint8x8_t nb = vshrn_n_u16(vreinterpretq_u16_u8(bad), 4);
+        uint64_t m = vget_lane_u64(vreinterpret_u64_u8(nb), 0);
+        return i + ((size_t)__builtin_ctzll(m) >> 2);
+    }
+#endif
+    for (; i &lt; len; i++) {
+        uint8_t c = p[i];
+        if (c &lt; 0x20 || c > 0x7e || c == '"' || c == '\\') return i;
+    }
+    return i;
+}</code></pre>
+
+<p>
+On x86 the same classification is even tidier. A signed <code>cmplt(v, 0x20)</code> flags both
+the control bytes and the high bytes in one instruction, because <code>0x80..0xFF</code> are
+negative as signed bytes. The escaping loop then becomes a run-scan plus one <code>memcpy</code>
+per run, and the original per-byte logic handles only the bytes that really need it.
+</p>
+
+<p>
+Escaping an 8&nbsp;KB blob of source-like text, measured both ways:
+</p>
+
+<table>
+  <thead><tr><th>Version</th><th>Per call</th><th>Throughput</th><th></th></tr></thead>
+  <tbody>
+    <tr><td>Original (per byte)</td><td class="num">15986 ns</td><td class="num">0.51 GB/s</td><td></td></tr>
+    <tr><td>SIMD run-scan</td><td class="num">1758 ns</td><td class="num">4.66 GB/s</td><td class="win">9.2×</td></tr>
+  </tbody>
+</table>
+
+<h2>3. Decode the same way you encode</h2>
+
+<p>
+The escaping win has an obvious twin. If writing a JSON string was slow one byte at a time, so
+was reading one. <code>parse_string</code>, the function behind <code>json_get_str</code>, runs
+for every string value pulled out of a response. It decoded character by character into a
+growing buffer, and clocked the same 0.51&nbsp;GB/s.
+</p>
+
+<p>
+The fix mirrors the encoder. Bulk-copy the run of ordinary characters up to the next quote,
+backslash, or terminating NUL, and drop into the scalar path only for real escape sequences.
+One wrinkle makes this harder than the encoder, though.
+</p>
+
+<p>
+The encoder knew its input length up front, so its SIMD loop could stop a clean sixteen bytes
+before the end. The decoder can't. It gets a pointer into a NUL-terminated buffer with no
+length, and a sixteen-byte vector load starting near the end could stride into the next memory
+page and fault on a byte the program was never going to read. That's the hazard that makes a
+naive SIMD <code>strlen</code> crash.
+</p>
+
+<p>
+The fix is the one libc uses. Only ever issue 16-byte-<em>aligned</em> loads, and ignore the
+lanes before where you actually started. A page is a multiple of sixteen, so an aligned
+sixteen-byte block never straddles two pages. The block holding your terminator always sits
+fully inside the page you were already reading. No length needed, and no page ever gets touched
+that your own bytes don't reach.
+</p>
+
+<pre><code class="language-c">static inline size_t dsco_simd_json_unescaped_run(const char *p) {
+    const uint8_t *s = (const uint8_t *)p;
+    const uint8x16_t q = vdupq_n_u8('"'), bs = vdupq_n_u8('\\'), z = vdupq_n_u8(0);
+    uintptr_t addr = (uintptr_t)s;
+    const uint8_t *base = (const uint8_t *)(addr &amp; ~(uintptr_t)15);   /* align down */
+    size_t off = (size_t)(addr - (uintptr_t)base);
+    uint8x16_t v = vld1q_u8(base);                                    /* aligned load */
+    uint8x16_t m = vorrq_u8(vorrq_u8(vceqq_u8(v,q), vceqq_u8(v,bs)), vceqq_u8(v,z));
+    uint8x8_t nb = vshrn_n_u16(vreinterpretq_u16_u8(m), 4);
+    uint64_t bits = vget_lane_u64(vreinterpret_u64_u8(nb), 0) &amp; (~0ULL &lt;&lt; (off*4));
+    if (bits) return ((size_t)__builtin_ctzll(bits) >> 2) - off;      /* mask lanes before p */
+    for (const uint8_t *cur = base + 16;; cur += 16) {                /* now fully aligned */
+        v = vld1q_u8(cur);
+        m = vorrq_u8(vorrq_u8(vceqq_u8(v,q), vceqq_u8(v,bs)), vceqq_u8(v,z));
+        if (vmaxvq_u8(m) == 0) continue;
+        nb = vshrn_n_u16(vreinterpretq_u16_u8(m), 4);
+        bits = vget_lane_u64(vreinterpret_u64_u8(nb), 0);
+        return (size_t)(cur - s) + ((size_t)__builtin_ctzll(bits) >> 2);
+    }
+}</code></pre>
+
+<p>
+Decoding an 8&nbsp;KB string value:
+</p>
+
+<table>
+  <thead><tr><th>Version</th><th>Per call</th><th>Throughput</th><th></th></tr></thead>
+  <tbody>
+    <tr><td>Original (per byte)</td><td class="num">15700 ns</td><td class="num">0.51 GB/s</td><td></td></tr>
+    <tr><td>SIMD aligned run-scan</td><td class="num">517 ns</td><td class="num">15.5 GB/s</td><td class="win">30×</td></tr>
+  </tbody>
+</table>
+
+<p>
+Thirty times, and the biggest of the three. Decoding has no escaping work to do on the output
+side, so it's pure scan-and-copy, which is what the vector unit is for. To check the alignment
+trick was actually safe and not just lucky, the decoder ran against an unmapped guard page with
+its terminator placed at every offset in the last forty bytes before the boundary. Thirty-two
+placements, zero faults. The 200,000-case differential fuzz, run over escapes,
+<code>\u</code> sequences, lone surrogates, and valid surrogate pairs, matched the original byte
+for byte.
+</p>
+
+<h2>Under the hood: what the object code actually does</h2>
+
+<p>
+Wall-clock numbers are the outcome. They don't explain themselves. Both changes get a lot more
+convincing once you look at what the compiler emitted and what the process does at runtime.
+</p>
+
+<h3>find_key: counting the allocations that disappear</h3>
+
+<p>
+The point of the key-matching change wasn't instruction count, it was allocator traffic. And the
+allocations don't happen in <code>find_key</code> itself. They happen one level down, in
+<code>parse_string</code>. To measure them I redirected <code>malloc</code> and
+<code>free</code> in the JSON translation unit to counting wrappers, then ran 100,000 iterations
+of the same five-field read, two strings and three ints.
+</p>
+
+<table>
+  <thead><tr><th>Version</th><th>mallocs / 100k reads</th><th>Per read</th><th></th></tr></thead>
+  <tbody>
+    <tr><td>Original</td><td class="num">4,400,000</td><td class="num">44</td><td></td></tr>
+    <tr><td>In-place compare</td><td class="num">200,000</td><td class="num">2</td><td class="win">22× fewer</td></tr>
+  </tbody>
+</table>
+
+<p>
+Forty-four allocations to read five fields. Each read walked the object from the top, and every
+key it stepped over got decoded into a fresh heap buffer and freed a moment later. The two that
+survive in the new version aren't waste. They're the two string values we asked for and hand
+back to the caller. The three integer reads now allocate nothing, where before each one
+allocated once per key it passed. Same answers, 22× less garbage through the allocator.
+</p>
+
+<h3>jbuf_append_json_str: reading the emitted NEON</h3>
+
+<p>
+The escaping change is the opposite kind of story. No allocation difference, all instruction
+mix. The classifier compiles to a tight vector loop. Here is the core of what
+<code>clang -O3 -march=native</code> emitted on arm64.
+</p>
+
+<pre><code class="language-armasm">    movi.16b  v3, #129              ; 0x81
+    movi.16b  v4, #161              ; 0xA1
+    movi.16b  v5, #34               ; '"'
+    movi.16b  v6, #92               ; '\'
+    ldr       q0, [x21, x23]        ; load 16 bytes
+    add.16b   v1, v0, v3            ; byte + 0x81
+    cmhi.16b  v1, v4, v1            ; 0xA1 >u (byte+0x81)   -> control OR high, in ONE compare
+    cmeq.16b  v2, v0, v5            ; == '"'
+    cmeq.16b  v0, v0, v6            ; == '\'
+    orr.16b   v0, v2, v0
+    orr.16b   v0, v0, v1            ; combined "unsafe" mask
+    umaxv.16b b1, v0                ; any lane set?  (fast reject)
+    shrn.8b   v0, v0, #4            ; narrow each 0xFF lane to a nibble</code></pre>
+
+<p>
+There is a nice piece of compiler work in there. I wrote the "is this byte a control character
+or a high byte" test as two separate unsigned comparisons, below <code>0x20</code> or above
+<code>0x7e</code>. The compiler saw that as a single range test and folded it into
+<code>add #0x81</code> followed by one <code>cmhi #0xA1</code>. Shift the byte so the safe
+printable range lands in a contiguous window, then do one unsigned compare. Two comparisons
+became one. I didn't ask for that. Recognizing the range idiom is what a good backend does once
+you've written the classification without branches.
+</p>
+
+<p>
+Here is the shape that matters. The original loop did roughly one branch and one bounds-checked
+byte append per input byte. This loop classifies sixteen bytes with about eleven vector
+instructions, and when they're all safe, which is the common case, it takes a single
+<code>umaxv</code> fast-reject and moves on to bulk-copy the whole run. The per-byte overhead is
+gone. What's left is basically the memory bandwidth of the copy, which is why the throughput
+lands near 4.7&nbsp;GB/s instead of 0.5.
+</p>
+
+<blockquote>
+Static instruction count actually went up. The function grew from about 294 to 364 instructions,
+because the SIMD fast path sits next to the untouched scalar path that still handles the escapes
+and the UTF-8. More static code, far less dynamic work. Bigger function, faster function.
+</blockquote>
+
+<h2>Proving it didn't change the output</h2>
+
+<p>
+A faster escaper that emits different bytes isn't a faster escaper. It's a bug. The only result
+that matters for any of these changes is that the new code produces exactly what the old code
+did. So the old <code>jbuf_append_json_str</code> got pulled out under a different name and run
+side by side against the new one over 400,000 randomized inputs, biased toward the bytes that
+break things: control characters, quotes, backslashes, high bytes, truncated and invalid UTF-8,
+lone surrogates, and <code>0x7F</code>.
+</p>
+
+<pre><code class="language-text">FUZZ: 400k random + edge cases BYTE-IDENTICAL</code></pre>
+
+<p>
+The key matcher got the same treatment. Prefix keys, where <code>"ab"</code> must not match
+<code>"abc"</code>. Escaped keys, where <code>"abc"</code> decodes to <code>"abc"</code>. Empty
+keys, nested objects and arrays as values, and unterminated input. All identical to the
+original.
+</p>
+
+<p>
+The full suite is 5221 of 5222 passing. The one failure is a trace-logging test that fails the
+same way on a clean checkout with none of these changes applied. Pre-existing, and nothing to do
+with JSON. I would rather say that plainly than round it up.
+</p>
+
+<h2>Why bother, at this size</h2>
+
+<p>
+Nanoseconds per call sounds like the kind of thing you're not supposed to care about. The reason
+to care is the multiplier. This code runs on every field read and every message serialized, on
+every turn, for every agent. When you're trying to run a big swarm cheaply, the floor is set by
+exactly this kind of unglamorous per-turn work. The floor had a couple of feet of slack in it.
+</p>
+
+<p>
+None of the three is clever. One deletes allocations that never needed to happen. The other two
+let the CPU look at sixteen bytes at once instead of one. Most wins at this layer look like
+that. Not a new algorithm, just noticing that the old code was politely doing far more work than
+the problem asked for.
+</p>
+
+<hr>
+<p class="footnote">
+Numbers measured on an Apple&nbsp;Silicon M4&nbsp;Max, <code>clang -O3 -march=native</code>.
+Benchmarks and the differential harness are checked in under <code>bench/</code>. Reproduce
+with <code>cc -O3 -Iinclude bench/bench_json_getkey.c src/json_util.c -o /tmp/bjk &amp;&amp; /tmp/bjk</code>.
+</p>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</body>
+</html>

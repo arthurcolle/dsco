@@ -1,0 +1,132 @@
+-- Explicitly execute one selected direct plan, then judge observed output in
+-- the shared world. args.previous may retain a rejected earlier completion.
+-- args.recorded is an explicit replay path: it performs zero provider calls.
+local l=require("lingo")
+local c=require("lingo.chimera")
+local p=require("lingo.platform")
+local plan,result
+if args.recorded then
+  result=args.recorded
+else
+  plan=c.preferences{allowed_models={args.model},require_known_price=true}:plan{
+    task=args.task,strategy="direct",max_calls=1,max_output_tokens=args.tokens,
+    max_expected_cost_usd=.01,max_worst_case_cost_usd=.01}
+  result=plan:execute()
+end
+
+-- One acceptance function is shared by raw and explicitly adapted values.
+local function acceptance(value,required,minimum)
+  local errors=l.array{}
+  if type(value)~="table" then
+    errors[#errors+1]="output must be a JSON record"
+  else
+    if type(value.summary)~="string" or #value.summary<21 then
+      errors[#errors+1]="summary must contain at least 21 bytes"
+    end
+    if type(value.risk)~="string" or #value.risk<21 then
+      errors[#errors+1]="risk must be a string containing at least 21 bytes"
+    end
+    local checks=value.checks
+    local seen={}
+    local valid=type(checks)=="table" and #checks==required
+    if valid then
+      local keys=0
+      for index,item in pairs(checks) do
+        keys=keys+1
+        if type(index)~="number" or index%1~=0 or index<1 or index>required or
+          type(item)~="table" or (item.symbol~="verify_expected" and item.symbol~="claim_execution") or
+          seen[item.symbol] or type(item.invariant)~="string" or #item.invariant<minimum then
+          valid=false
+        else seen[item.symbol]=true end
+      end
+      valid=valid and keys==required and seen.verify_expected and seen.claim_execution
+    end
+    if not valid then errors[#errors+1]="checks must be a dense two-item array covering each source symbol once" end
+  end
+  return {accepted=#errors==0,errors=errors,validation="structure_and_source_symbol_coverage",
+    semantic_correctness="requires_review"}
+end
+
+local function exact_keys(record,keys)
+  if type(record)~="table" then return false end
+  local count=0
+  for key in pairs(record) do if not keys[key] then return false end;count=count+1 end
+  local expected=0;for _ in pairs(keys) do expected=expected+1 end
+  return count==expected
+end
+
+local function world()
+  local w=p.world{id="chimera-source-analysis"}
+  w:define("AnalysisAcceptance",{
+    required_checks=l.stored("integer",2),min_explanation=l.stored("integer",26),
+  },{version="1"})
+  w:define("SourceAnalysis",{
+    observation=l.stored(l.types.ref("Observation")),
+    policy=l.stored(l.types.ref("AnalysisAcceptance")),
+    verdict=l.derived("json",function(self)
+      local receipt=self.observation.payload
+      local raw=receipt.completion.choices[1].message.content
+      local ok,value=l.try(function() return l.decode(raw) end)
+      local verdict=acceptance(ok and value or nil,self.policy.required_checks,self.policy.min_explanation)
+      verdict.model=receipt.completion.execution.measured.reported_model
+      verdict.execution_id=receipt.completion.execution.contract.execution_id
+      return verdict
+    end),
+    adapted=l.derived("json",function(self)
+      local receipt=self.observation.payload
+      local ok,value=l.try(function() return l.decode(receipt.completion.choices[1].message.content) end)
+      local recognized=ok and exact_keys(value,{summary=true,checks=true,risk=true})
+        and type(value.summary)=="string" and type(value.risk)=="string"
+        and exact_keys(value.checks,{verify_expected=true,claim_execution=true})
+      if recognized then
+        for _,symbol in ipairs({"verify_expected","claim_execution"}) do
+          recognized=recognized and exact_keys(value.checks[symbol],{invariant=true})
+            and type(value.checks[symbol].invariant)=="string"
+        end
+      end
+      if not recognized then return {available=false,reason="unrecognized exact source shape"} end
+      return {available=true,format="lingo.analysis-adaptation/1",
+        adapter={name="source-check-map-to-array",version="1"},
+        source_execution_id=receipt.completion.execution.contract.execution_id,
+        value={summary=value.summary,risk=value.risk,checks=l.array{
+          {symbol="verify_expected",invariant=value.checks.verify_expected.invariant},
+          {symbol="claim_execution",invariant=value.checks.claim_execution.invariant},
+        }}}
+    end),
+    adapted_verdict=l.derived("json",function(self)
+      local artifact=self.adapted
+      local verdict=acceptance(artifact.available and artifact.value or nil,
+        self.policy.required_checks,self.policy.min_explanation)
+      verdict.artifact="explicit_derived_adaptation"
+      return verdict
+    end),
+  },{version="2"})
+  return w
+end
+
+local w=world()
+local policy=w:new("AnalysisAcceptance","acceptance/default",{})
+local function ingest(id,receipt,consistency)
+  local observation=p.observe(w,"observation/"..id,{
+    origin={system="chimera",operation="guarded-completion",source_id=receipt.completion.execution.contract.execution_id},
+    observed_at=receipt.observed_at,consistency=consistency,payload=receipt,
+  })
+  return w:new("SourceAnalysis","analysis/"..id,{observation=observation,policy=policy})
+end
+local previous=args.previous and ingest("previous",args.previous,"recorded") or nil
+local current=ingest("current",result,args.recorded and "recorded" or "live")
+local current_verdict=current.verdict
+local address=w:address(current,"verdict")
+local explanation=w:why(current,"verdict")
+local adaptation={artifact=current.adapted,verdict=current.adapted_verdict,
+  address=w:address(current,"adapted"),verdict_address=w:address(current,"adapted_verdict"),
+  explanation=w:why(current,"adapted_verdict")}
+local snapshot=w:snapshot()
+local reopened=world()
+reopened:load(snapshot)
+adaptation.reopened=reopened:read(adaptation.address)
+adaptation.reopened_verdict=reopened:read(adaptation.verdict_address)
+return {plan=plan,result=result,previous=previous and previous.verdict or nil,current=current_verdict,
+  address=address,reopened=reopened:read(address),explanation=explanation,snapshot=snapshot,
+  adaptation=adaptation,
+  phase=args.recorded and "recorded_validation" or "one_explicit_execution"}

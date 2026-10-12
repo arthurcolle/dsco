@@ -3,6 +3,8 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
+#include "mcp_stream.h"
 
 /* MCP (Model Context Protocol) client — JSON-RPC over stdio transport.
  *
@@ -15,6 +17,10 @@
  *   ./.dsco/config.json
  *   ~/.claude.json, ~/.claude/settings*.json, Claude Desktop configs
  *   ~/.codex/config.toml and ./.codex/config.toml
+ *   ~/.hermes/config.yaml and ~/.hermes/mcp_servers.yaml
+ *
+ * Set DSCO_MCP_SERVER=<name>[,<name>...] to load only selected server names.
+ * The CLI flag `--mcp-server <name>` sets this env var for one run.
  *
  * {
  *   "servers": {
@@ -32,7 +38,9 @@
  */
 
 #define MCP_MAX_SERVERS    64
-#define MCP_MAX_TOOLS      512
+/* Large registry gateways currently advertise 2,500+ tools. Keep enough room
+ * for that catalog plus additional concurrently configured MCP servers. */
+#define MCP_MAX_TOOLS      4096
 #define MCP_MAX_LINE       (256 * 1024)
 #define MCP_MAX_ARGS       32
 #define MCP_MAX_ENV        32
@@ -44,10 +52,11 @@ typedef enum {
 } mcp_transport_t;
 
 typedef struct {
-    char  name[128];
-    char  remote_name[128];     /* exact MCP tool name to send in tools/call */
-    char  description[512];
-    char  input_schema[4096];  /* JSON schema string */
+    char  name[256];
+    char  remote_name[256];     /* exact MCP tool name to send in tools/call */
+    char  description[1024];
+    char  input_schema[16384];  /* JSON schema string */
+    char  output_schema[8192];  /* Optional JSON schema string */
     int   server_idx;          /* which server owns this tool */
 } mcp_tool_t;
 
@@ -55,8 +64,13 @@ typedef struct {
     char  name[128];
     char  command[512];
     char  url[1024];
+    char  fallback_url[1024]; /* optional local mirror, tried when url fails */
     char  cwd[512];
     char  source[256];
+    /* Operator-facing configuration text.  Propagated to the external-tool
+     * registry so discovery can resolve a service by its configured identity
+     * (for example, "Cloudmail MCP"), not only by a short server key. */
+    char  description[1024];
     char  args[MCP_MAX_ARGS][256];
     int   argc;
     char  env_keys[MCP_MAX_ENV][128];
@@ -69,8 +83,11 @@ typedef struct {
     int   pid;
     int   stdin_fd;
     int   stdout_fd;
-    int   rpc_id;              /* monotonic JSON-RPC id */
+    int64_t rpc_id;            /* atomically admitted JSON-RPC identity */
+    mcp_stream_t *stdio_stream; /* owned receive buffer and request lock */
     mcp_transport_t transport;
+    long  last_http_status; /* redacted diagnostics */
+    int   last_transport_error;
     bool  initialized;
 } mcp_server_t;
 
@@ -90,6 +107,11 @@ int  mcp_init(mcp_registry_t *reg);
 /* Suppress mcp_init's stderr progress lines (useful when init runs in a
  * background thread and would otherwise corrupt the TUI input panel). */
 void mcp_set_silent(bool silent);
+
+/* Ask any in-flight MCP init/discovery work to abort quickly. This is used by
+ * fast restart paths before joining the background init thread. */
+void mcp_cancel(void);
+void mcp_cancel_reset(void);
 
 /* Shutdown all servers */
 void mcp_shutdown(mcp_registry_t *reg);

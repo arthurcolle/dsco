@@ -40,6 +40,10 @@ void dsco_pool_apply(size_t n, void *ctx, dsco_pool_iter_fn fn);
 
 /* Fire-and-forget. Returns a handle suitable for dsco_pool_join. */
 dsco_task_t *dsco_pool_submit(dsco_pool_work_fn fn, void *ctx);
+/* Nonblocking queue admission: EAGAIN when the portable queue is full,
+ * ECANCELED during shutdown. Initialize/shut down on the coordinating owner.
+ * Callers must impose an in-flight bound when using GCD (no public queue limit). */
+dsco_task_t *dsco_pool_try_submit(dsco_pool_work_fn fn, void *ctx);
 void         dsco_pool_join(dsco_task_t *t);
 
 /* Number of worker threads in the global pool. */

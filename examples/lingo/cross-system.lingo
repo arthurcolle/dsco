@@ -1,0 +1,86 @@
+-- One governed workflow across DSCO, GraphSub, Autobot and Chimera.
+-- Requires configured service connections and a known pure text-transform tool.
+-- args: input (existing file), output (new file), autobot_tool (exact registered
+-- name or remote tool ID), optional autobot_query, buffer_name, shard_id, limit.
+local l = require("lingo")
+local dsco = require("lingo.dsco")
+local graphsub = require("lingo.graphsub")
+local autobot = require("lingo.autobot")
+local chimera = require("lingo.chimera")
+
+assert(type(args.input) == "string", "args.input is required")
+assert(type(args.output) == "string", "args.output must name a new output file")
+assert(type(args.autobot_tool) == "string" and #args.autobot_tool > 0,
+  "args.autobot_tool must identify the specific tool you intend to execute")
+
+-- read_file returns a bounded textual observation, including its line numbers.
+local file_receipt = dsco.tool("read_file"):call {path=args.input, limit=40}
+assert(file_receipt.ok, file_receipt.result)
+local graph = graphsub.attach {connection="default", shard_id=args.shard_id or 0}
+local schema = graph:schema()
+local page = graph:list {limit=args.limit or 3, offset=0}
+local ids = l.array {}
+for _, node in ipairs(page.data.nodes) do ids[#ids+1] = node.id end
+
+local found = autobot.discover {
+  source="tool_management", query=args.autobot_query or args.autobot_tool, limit=4,
+}
+local selected, metadata
+for _, candidate in ipairs(found.matches) do
+  if candidate.name == args.autobot_tool or candidate.remote_tool_id == args.autobot_tool then
+    selected, metadata = found.tools[candidate.name], candidate
+    break
+  end
+end
+assert(selected, "the requested Autobot tool was not returned by discovery")
+-- This example expects the selected tool's documented input to be {text=...}.
+local transform_input = file_receipt.result .. "\nGraphSub IDs: " .. table.concat(ids, ",")
+local transformed, transform_receipt = selected:json {text=transform_input}
+
+-- Planning calls the actual Router's Chimera selector; it performs no inference
+-- and does not change the running DSCO session's provider or model.
+local preferences = chimera.preferences {
+  cost_weight=0.2, quality_weight=0.7, latency_weight=0.1,
+}
+local plan = preferences:plan {
+  task="Summarize the supplied file observation and GraphSub object IDs.",
+  strategy="direct", max_calls=1, max_output_tokens=64,
+  max_expected_cost_usd=0.02, max_worst_case_cost_usd=0.03,
+}
+assert(plan.executed == false and plan.scope == "request", "expected a request-scoped plan")
+
+local summary = {
+  kind="lingo-cross-system-observation",
+  consistency="independent_live_observations",
+  input={path=args.input, observation=file_receipt.result},
+  graphsub={schema=schema, page=page, object_ids=ids},
+  autobot={tool=metadata.name, remote_tool_id=metadata.remote_tool_id,
+    input={text=transform_input}, result=transformed},
+  chimera=plan,
+  persistence_note="This file and DSCO buffer are local artifacts; no GraphSub transaction was committed.",
+}
+local encoded = l.encode(summary) .. "\n"
+local buffer = dsco.tool("buffer")
+local created = buffer:json {
+  action="create", name=args.buffer_name or "cross-system-summary", kind="scratch", content=encoded,
+}
+local chunks, offset, read_pages = {}, 0, 0
+repeat
+  local page = buffer:json {
+    action="read", buffer_id=created.buffer.buffer_id, offset=offset, max_bytes=32768,
+  }
+  assert(page.offset == offset and page.next_offset <= #encoded,
+    "buffer returned an inconsistent page cursor")
+  assert(not page.truncated or page.next_offset > offset, "buffer cursor made no progress")
+  chunks[#chunks+1], offset, read_pages = page.text, page.next_offset, read_pages + 1
+  if not page.truncated then break end
+until false
+assert(table.concat(chunks) == encoded, "buffer content differs from the composed summary")
+local saved = buffer:json {action="save", buffer_id=created.buffer.buffer_id, path=args.output}
+return {
+  summary=summary,
+  artifact={path=args.output, buffer_id=created.buffer.buffer_id,
+    revision=created.buffer.revision, read_pages=read_pages},
+  save=saved,
+  receipts={file=file_receipt, discovery=found.receipt, transform=transform_receipt},
+}

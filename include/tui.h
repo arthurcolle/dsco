@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <pthread.h>
+#include <stdint.h>
 
 /* ── ANSI Colors & Styles ─────────────────────────────────────────────── */
 #define TUI_RESET     "\033[0m"
@@ -49,6 +50,55 @@
 #define TUI_FG256(n)  "\033[38;5;" #n "m"
 #define TUI_BG256(n)  "\033[48;5;" #n "m"
 
+/* Extended 256-color palette */
+#define TUI_SKY           TUI_FG256(75)
+#define TUI_TEAL          TUI_FG256(37)
+#define TUI_MINT          TUI_FG256(121)
+#define TUI_LIME          TUI_FG256(154)
+#define TUI_GOLD          TUI_FG256(220)
+#define TUI_AMBER         TUI_FG256(214)
+#define TUI_CORAL         TUI_FG256(203)
+#define TUI_PINK          TUI_FG256(205)
+#define TUI_VIOLET        TUI_FG256(141)
+#define TUI_LAVENDER      TUI_FG256(183)
+#define TUI_SLATE         TUI_FG256(244)
+#define TUI_STEEL         TUI_FG256(67)
+
+/* Semantic UI roles */
+#define TUI_ACCENT_PRIMARY   TUI_SKY
+#define TUI_ACCENT_SECONDARY TUI_VIOLET
+#define TUI_ACCENT_SUCCESS   TUI_MINT
+#define TUI_ACCENT_WARN      TUI_GOLD
+#define TUI_ACCENT_DANGER    TUI_CORAL
+#define TUI_ACCENT_MUTED     TUI_SLATE
+
+/* ── Status roles (Integument: meaning-coded surface) ─────────────────────
+ * These name the SEMANTIC INTENT of the classic 8-color status palette so
+ * call sites express meaning ("this is a failure") rather than appearance
+ * ("this is red"). They alias the literal ANSI colors to preserve the exact
+ * current rendering while making the surface migratable to a theme later. */
+#define TUI_ROLE_OK       TUI_GREEN    /* success / healthy / pass        */
+#define TUI_ROLE_FAIL     TUI_RED      /* failure / error / danger        */
+#define TUI_ROLE_WARN     TUI_YELLOW   /* warning / degraded / retry      */
+#define TUI_ROLE_INFO     TUI_CYAN     /* informational accent / model    */
+#define TUI_ROLE_MUTED    TUI_DIM      /* secondary / de-emphasized       */
+
+/* Semantic syntax roles */
+#define TUI_SYN_COMMENT   TUI_SLATE
+#define TUI_SYN_STRING    TUI_MINT
+#define TUI_SYN_ESCAPE    TUI_GOLD
+#define TUI_SYN_NUMBER    TUI_AMBER
+#define TUI_SYN_KEYWORD   TUI_VIOLET
+#define TUI_SYN_DECL      TUI_PINK
+#define TUI_SYN_TYPE      TUI_GOLD
+#define TUI_SYN_FUNCTION  TUI_SKY
+#define TUI_SYN_CONSTANT  TUI_CORAL
+#define TUI_SYN_PROPERTY  TUI_TEAL
+#define TUI_SYN_TAG       TUI_SKY
+#define TUI_SYN_OPERATOR  TUI_LAVENDER
+#define TUI_SYN_PUNCT     TUI_STEEL
+#define TUI_SYN_PREPROC   TUI_PINK
+
 /* ── Activity indicator (Claude Code aesthetic) ───────────────────────── */
 /* ⏺  U+23FA — the primary action bullet */
 #define TUI_RECORD        "\xe2\x8f\xba"
@@ -89,10 +139,33 @@ void tui_screen_reset_full(void);  /* full reset + scrollback wipe for clean fir
 void tui_clear_line(void);
 void tui_save_cursor(void);
 void tui_restore_cursor(void);
+void tui_terminal_restore_sane(void);
+bool tui_cursor_report_queries_enabled(void);
 
 /* Terminal output mutex — serialize cursor-positioned writes between threads */
 void tui_term_lock(void);
 void tui_term_unlock(void);
+
+/* Terminal state management — crash recovery and centralized mode control */
+void tui_install_crash_handlers(void);
+
+/* ── Error Recovery Framework ─────────────────────────────────────────── */
+typedef enum {
+    TUI_ERR_NONE,           /* No error */
+    TUI_ERR_WARNING,        /* Non-fatal, continue */
+    TUI_ERR_DEGRADED,       /* Reduced functionality */
+    TUI_ERR_FATAL           /* Must exit */
+} tui_error_severity_t;
+
+typedef struct {
+    tui_error_severity_t severity;
+    const char *message;
+    const char *context;
+    int error_code;
+} tui_error_t;
+
+/* Emergency cleanup for fatal errors */
+void tui_cleanup(void);
 
 /* ── Box drawing ──────────────────────────────────────────────────────── */
 
@@ -333,6 +406,14 @@ void tui_set_glyph_tier(tui_glyph_tier_t tier);
 
 typedef struct { unsigned char r, g, b; } tui_rgb_t;
 
+typedef struct {
+    char     name[160];
+    char     hex[8];
+    tui_rgb_t rgb;
+    int      ansi256;
+    uint64_t hash;
+} tui_named_color_t;
+
 /* Terminal capability levels */
 typedef enum {
     TUI_COLOR_NONE,      /* no color */
@@ -348,8 +429,24 @@ bool              tui_supports_truecolor(void);
 /* HSV (h=0-360, s/v=0-1) → RGB conversion */
 tui_rgb_t tui_hsv_to_rgb(float h, float s, float v);
 
+/* Deterministic named-color sampler. Names are unbounded; truecolor terminals
+ * expose up to 16,777,216 RGB colors, with automatic fallback elsewhere. */
+uint64_t  tui_color_name_hash(const char *name);
+int       tui_rgb_to_256(tui_rgb_t c);
+tui_rgb_t tui_named_color_rgb(const char *name);
+void      tui_named_color_sample(const char *name, tui_named_color_t *out);
+void      tui_construct_color_sample(const char *kind, const char *name,
+                                     const char *state, double weight,
+                                     tui_named_color_t *out);
+
 /* Write a foreground truecolor escape to stderr */
 void tui_fg_rgb(tui_rgb_t c);
+void tui_write_fg(FILE *out, tui_rgb_t c);
+void tui_write_bg(FILE *out, tui_rgb_t c);
+const char *tui_rgb_fg_escape(tui_rgb_t c);
+const char *tui_rgb_bg_escape(tui_rgb_t c);
+const char *tui_named_fg(const char *name);
+const char *tui_named_bg(const char *name);
 
 /* Print text with horizontal hue gradient (h_start→h_end degrees) */
 void tui_gradient_text(const char *text, float h_start, float h_end, float s, float v);
@@ -382,6 +479,7 @@ tui_rgb_t       tui_tool_rgb(tui_tool_type_t type);
 typedef struct {
     pthread_t       thread;
     pthread_mutex_t mutex;
+    pthread_cond_t  cond;      /* wakes spinner thread instantly on stop */
     volatile bool   running;
     const char     *label;
     const char     *color;
@@ -392,13 +490,22 @@ typedef struct {
 
 void tui_async_spinner_start(tui_async_spinner_t *s, const char *label,
                              tui_tool_type_t tool_type);
+/* Display-art tools (e.g. `plot`) — their result is shown in full color rather
+ * than a dim one-line preview. tui_print_tool_art prints the full result and
+ * returns true for such tools; false otherwise (caller does its dim preview). */
+bool tui_tool_is_display_art(const char *name);
+bool tui_print_tool_art(const char *name, const char *result);
+
 void tui_async_spinner_stop(tui_async_spinner_t *s, bool ok,
                             const char *result_preview, double elapsed_ms,
                             const char *suffix);
 
 /* ── Batch Spinner (multi-tool) ───────────────────────────────────────── */
 
-#define TUI_BATCH_MAX 32
+/* Provider request builders can expose up to 128 tools and models may return
+ * wide independent batches. Keep execution/display capacity aligned so calls
+ * beyond the old 32-entry UI ceiling are not silently dropped. */
+#define TUI_BATCH_MAX 128
 
 typedef struct {
     char     name[64];
@@ -413,6 +520,7 @@ typedef struct {
 typedef struct {
     pthread_t        thread;
     pthread_mutex_t  mutex;
+    pthread_cond_t   cond;     /* wakes spinner thread instantly on stop */
     volatile bool    running;
     tui_batch_entry_t entries[TUI_BATCH_MAX];
     int              count;
@@ -434,6 +542,7 @@ typedef struct {
     bool     enabled;
     bool     visible;
     bool     show_clock;
+    bool     animations_enabled;
     bool     panel_active;  /* true while tui_composer_read is actively reading
                              * keystrokes — drives dual-state caret color */
     char     model[64];
@@ -441,29 +550,54 @@ typedef struct {
     int      input_tokens;
     int      output_tokens;
     double   cost;
+    double   budget_limit; /* session cap; <=0 disables budget HUD */
+    double   burn_rate;    /* USD/hour EWMA/simple rate supplied by agent */
+    double   percent;      /* 0-100 budget consumed */
+    double   runway;       /* seconds until exhaustion at burn_rate; <0 unknown */
     int      turn;
     int      tools_used;
+    bool     autonomy_active; /* inner agent loop owns the next transition */
+    char     autonomy_phase[24]; /* planning|reasoning|responding|tools|paused */
+    char     autonomy_detail[96]; /* concise current objective/action */
+    int      autonomy_step;
+    int      autonomy_queue_depth;
+    double   autonomy_started_at;
     int      panel_rows;    /* bottom panel rows: top rule + input + status (3) */
+    double   splash_started_at;
+    double   motion_started_at;
+    int      motion_frame;
 } tui_status_bar_t;
 
 void tui_status_bar_init(tui_status_bar_t *sb, const char *model);
 void tui_status_bar_set_model(tui_status_bar_t *sb, const char *model, const char *slot_name);
 void tui_status_bar_update(tui_status_bar_t *sb, int in_tok, int out_tok,
                            double cost, int turn, int tools);
+void tui_status_bar_set_budget(tui_status_bar_t *sb, double budget_limit,
+                               double burn_rate, double percent, double runway);
+/* Persistent autonomy telemetry: remains visible while reasoning, streaming,
+ * executing tools, and waiting at a continuation boundary. */
+void tui_status_bar_set_autonomy(tui_status_bar_t *sb, bool active,
+                                 const char *phase, const char *detail,
+                                 int step, int queue_depth);
+/* Update steering depth without resetting the active phase or elapsed timer. */
+void tui_status_bar_set_autonomy_queue_depth(tui_status_bar_t *sb, int queue_depth);
 void tui_status_bar_enable(tui_status_bar_t *sb);
 void tui_status_bar_disable(tui_status_bar_t *sb);
 void tui_status_bar_render(tui_status_bar_t *sb);
+bool tui_motion_enabled(void);
+const char *tui_motion_activity_frame(int frame, bool unicode);
 
-/* ── Input Panel (ephemeral bottom panel) ─────────────────────────────── */
-/* The bottom panel is 3 rows, painted only when reading user input:
- *   row N-2 : top horizontal rule with model badge ─[ model ]──────
- *   row N-1 : "❯ " + current input
- *   row N   : powerline status bar (drawn by tui_status_bar_render)
+/* ── Input Panel (persistent bottom command deck) ─────────────────────── */
+/* The composer stays mounted at the bottom of the terminal:
+ *   row N-3 : top rule ("input" / "live")
+ *   row N-2 : "› " + current input
+ *   row N-1 : bottom rule
+ *   row N   : hint footer
  *
- * When the user submits, the panel is erased and the input is echoed into
- * scrollback, so the agent's response streams freely through the terminal.
- * The panel re-renders before the next read. No DECSTBM scroll region:
- * text rendering uses the whole terminal during streaming.
+ * Submit clears the typed bytes but leaves the pane in place. DECSTBM
+ * clamps the transcript above it so labeled USER/assistant rows cannot
+ * overwrite the input deck. A follow-up reader keeps the pane live while
+ * the agent is working. User cancellation / raw-stdin tools may unmount it.
  */
 #define TUI_COMPOSER_PANEL_ROWS   3
 #define TUI_COMPOSER_BUF_CAP      16384
@@ -496,10 +630,21 @@ void tui_panel_set_active(tui_status_bar_t *sb, bool active);
 void tui_input_panel_render(tui_status_bar_t *sb, const char *prompt_hint);
 void tui_input_panel_clear(tui_status_bar_t *sb);
 void tui_bottom_panel_refresh(tui_status_bar_t *sb, const char *prompt_hint);
+bool tui_prepare_external_output(void);
+/* Same operation with no internal locking; caller must hold tui_term_lock(). */
+bool tui_prepare_external_output_locked(void);
+/* Clamp DECSTBM to the transcript above a mounted composer. Does not move
+ * the cursor — used between live token chunks so the viewframe keeps filling. */
+void tui_transcript_ensure_region(void);
+/* While live, composer repaints restore the stream cursor instead of the
+ * input caret so tokens keep landing in the viewframe. */
+void tui_transcript_stream_set_live(bool live);
+bool tui_transcript_stream_is_live(void);
 
 /* Push cursor down with newlines until it sits just above the input panel
- * area (row `rows - 3`). No-op if cursor already at/past that row. Queries
- * cursor row via DSR (ESC[6n); briefly enters raw mode if stdin is a tty.
+ * area (row `rows - 3`). No-op if cursor already at/past that row. By default
+ * this avoids terminal DSR cursor queries by default; set DSCO_TUI_DSR=1 to opt into
+ * ESC[6n cursor-position reports on terminals where they are known safe.
  * Call once after the startup banner + notes finish printing so the bottom
  * panel sits flush against them on tall terminals. */
 void tui_pad_to_panel_anchor(void);
@@ -510,12 +655,42 @@ void tui_pad_to_panel_anchor(void);
  *   • plain Enter submits
  *   • backspace, left/right/home/end, up/down history
  *   • Ctrl+A/E/U/W, Ctrl+C cancels, Ctrl+D on empty returns NULL
+ *   • Ctrl+O toggles native voice without submitting or losing the draft
+ *   • final voice input returns normally while the typed draft is retained
  *   • bracketed paste (multi-line paste preserved)
  * Returns `out` on success, NULL on EOF/quit.
  * `prompt` is drawn on the first input row before the text; pass NULL for "❯ ".
  */
 char *tui_composer_read(tui_status_bar_t *sb, const char *prompt,
                         char *out, size_t out_sz);
+/* Optional bare-ESC hook. Return true to consume ESC and make the composer
+ * return promptly; return false to keep the normal composer behavior
+ * (dismiss picker/menu, then cancel the input). Used by the agent loop so ESC
+ * can pause an in-flight stream/tool even when the follow-up composer owns
+ * stdin. */
+typedef bool (*tui_composer_escape_hook_t)(void *ctx);
+void tui_composer_set_transcript_hook(void (*hook)(void *), void *ctx);
+void tui_composer_set_escape_hook(tui_composer_escape_hook_t hook, void *ctx);
+/* Signal handler hook for Ctrl+C while the composer owns stdin.
+ * Returns 0 when no composer is reading, 1 when cancellation was requested,
+ * and 2 when an interrupt was already pending. */
+int tui_composer_signal_interrupt(void);
+/* Async-signal-safe: request a composer repaint after SIGWINCH/font zoom. */
+void tui_composer_signal_resize(void);
+bool tui_composer_is_reading(void);
+/* True while the ANSI command deck is tracked at the bottom of the screen. */
+bool tui_composer_is_mounted(void);
+/* Last transcript row above a mounted command deck (1-based), or 0. */
+int tui_composer_transcript_row(void);
+/* Keep the native command deck mounted when an internal reader handoff
+ * interrupts the composer. User cancellation and raw-stdin tools leave this
+ * disabled so their terminal ownership remains unambiguous. */
+void tui_composer_preserve_on_interrupt(bool preserve);
+/* Idle native workflow clicks wake the agent with an empty successful read;
+ * the draft and byte cursor survive that handoff. Disable during the live
+ * follow-up reader: the agent consumes its action queue at a model boundary. */
+void tui_composer_set_action_wakeup(bool enabled);
+void tui_composer_clear_retained_draft(void);
 
 /* ── Swarm UI ─────────────────────────────────────────────────────────── */
 typedef struct {
@@ -1239,6 +1414,7 @@ typedef struct {
 typedef struct {
     tui_evt_sub_t   subs[TUI_EVT_SUBS_MAX];
     int             sub_count;
+    int             removed_count;    /* Track removed subs for compaction triggering */
     pthread_mutex_t mutex;
     /* Ring buffer for recent events (debugging/replay) */
     tui_event_t     history[64];
@@ -1306,6 +1482,7 @@ tui_stream_phase_t tui_stream_state_phase(const tui_stream_state_t *ss);
 typedef struct {
     pthread_t       thread;
     pthread_mutex_t mutex;
+    pthread_cond_t  cond;           /* wakes indicator thread instantly on stop */
     volatile bool   running;        /* false → thread should exit */
     volatile bool   visible;        /* heartbeat indicator currently on screen */
     double          last_poke;      /* timestamp of last visible output */
@@ -1375,6 +1552,7 @@ typedef struct {
     pthread_cond_t   cond;         /* signal render thread */
     pthread_t        render_thread;
     volatile bool    running;
+    bool             initialized;
 
     FILE            *out;          /* output target (stderr) */
 
@@ -1469,6 +1647,7 @@ typedef struct {
 typedef struct {
     pthread_t        thread;
     pthread_mutex_t  mutex;
+    pthread_cond_t   cond;    /* wakes clock thread on subscribe/activate/stop */
     volatile bool    running;
 
     tui_anim_sub_t   subs[TUI_ANIM_MAX_SUBS];
@@ -1594,6 +1773,7 @@ void tui_reset_title(void);
 typedef struct {
     pthread_t       thread;
     pthread_mutex_t mutex;
+    pthread_cond_t  cond;        /* wakes shimmer thread instantly on stop */
     volatile bool   running;
     const char     *label;
     double          start_time;
@@ -1662,6 +1842,7 @@ typedef struct {
     /* ── branching gate: show this question only if question index `gate_q`
      *    resolved to one of gate_vals[]. gate_q < 0 ⇒ always shown. ── */
     int  gate_q;
+    char gate_id[64];       /* unresolved gate id; preserved across session reopen */
     char gate_vals[TUI_ASK_MAX_GATEVALS][128];
     int  n_gate_vals;
 
@@ -1846,5 +2027,28 @@ void tui_menu_set_expanded(tui_menu_item_t *it, bool expanded);
  * or TUI_MENU_CANCELLED on Esc/q. Stores the resolved item pointer in *out_item
  * (may be NULL). Submenus toggle on Enter/→/←; leaves confirm on Enter. */
 int tui_menu_run(tui_menu_t *m, tui_menu_item_t **out_item);
+
+#ifdef DSCO_INTERNAL_TESTS
+typedef enum {
+    TUI_TEST_KEY_UNKNOWN = 0,
+    TUI_TEST_KEY_UP = 1000,
+    TUI_TEST_KEY_DOWN,
+    TUI_TEST_KEY_LEFT,
+    TUI_TEST_KEY_RIGHT,
+    TUI_TEST_KEY_TAB,
+    TUI_TEST_KEY_BACKTAB,
+    TUI_TEST_KEY_ENTER,
+    TUI_TEST_KEY_ESC,
+    TUI_TEST_KEY_SPACE,
+    TUI_TEST_KEY_PAGE_UP,
+    TUI_TEST_KEY_PAGE_DOWN,
+    TUI_TEST_KEY_HOME,
+    TUI_TEST_KEY_END,
+} tui_test_key_t;
+
+int tui_test_decode_key_sequence(const char *seq);
+int tui_test_dialog_move_row(int row, int maxrow, int key);
+int tui_test_menu_move_selection(const bool *selectable, int nrows, int selected, int delta);
+#endif
 
 #endif

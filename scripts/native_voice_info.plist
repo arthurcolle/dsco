@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>systems.dsco.cli</string>
+    <key>CFBundleName</key>
+    <string>dsco</string>
+    <key>CFBundleDisplayName</key>
+    <string>dsco</string>
+    <key>CFBundleExecutable</key>
+    <string>dsco</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>dsco uses the microphone for optional hands-free, on-device voice input.</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>dsco transcribes optional voice input on this Mac and does not fall back to cloud recognition.</string>
+</dict>
+</plist>

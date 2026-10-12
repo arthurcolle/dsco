@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
+#if defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * VFS-backed Vector Store — Implementation
@@ -17,19 +20,35 @@
 
 struct vecstore {
     vfs_db_t *vfs;
-    char      vec_bucket[80];   /* "vec_<collection>" */
-    char      meta_bucket[80];  /* "vecmeta_<collection>" */
-    int       default_dim;
+    char vec_bucket[80];  /* "vec_<collection>" */
+    char meta_bucket[80]; /* "vecmeta_<collection>" */
+    int default_dim;
 };
 
 /* ── Cosine Similarity ────────────────────────────────────────────────── */
 
+/* Cosine similarity. NEON-vectorized on Apple Silicon / ARM (measured ~4.6x
+ * over the scalar loop at dim=1024 — the vecstore brute-force query hot path);
+ * scalar fallback keeps the cosmo/APE, wasm, and non-NEON lanes correct. */
 float cosine_similarity_f(const float *a, const float *b, int dim) {
     float dot = 0.0f, na = 0.0f, nb = 0.0f;
-    for (int i = 0; i < dim; i++) {
+    int i = 0;
+#if defined(__ARM_NEON)
+    float32x4_t vdot = vdupq_n_f32(0), vna = vdupq_n_f32(0), vnb = vdupq_n_f32(0);
+    for (; i + 4 <= dim; i += 4) {
+        float32x4_t xa = vld1q_f32(a + i), xb = vld1q_f32(b + i);
+        vdot = vfmaq_f32(vdot, xa, xb);
+        vna = vfmaq_f32(vna, xa, xa);
+        vnb = vfmaq_f32(vnb, xb, xb);
+    }
+    dot = vaddvq_f32(vdot);
+    na = vaddvq_f32(vna);
+    nb = vaddvq_f32(vnb);
+#endif
+    for (; i < dim; i++) {
         dot += a[i] * b[i];
-        na  += a[i] * a[i];
-        nb  += b[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
     }
     float denom = sqrtf(na) * sqrtf(nb);
     return denom > 1e-8f ? dot / denom : 0.0f;
@@ -38,13 +57,15 @@ float cosine_similarity_f(const float *a, const float *b, int dim) {
 /* ── Lifecycle ────────────────────────────────────────────────────────── */
 
 vecstore_t *vecstore_open(vfs_db_t *vfs, const char *collection) {
-    if (!vfs || !collection || !collection[0]) return NULL;
+    if (!vfs || !collection || !collection[0])
+        return NULL;
 
     vecstore_t *vs = calloc(1, sizeof(*vs));
-    if (!vs) return NULL;
+    if (!vs)
+        return NULL;
 
     vs->vfs = vfs;
-    snprintf(vs->vec_bucket,  sizeof(vs->vec_bucket),  "vec_%s", collection);
+    snprintf(vs->vec_bucket, sizeof(vs->vec_bucket), "vec_%s", collection);
     snprintf(vs->meta_bucket, sizeof(vs->meta_bucket), "vecmeta_%s", collection);
     vs->default_dim = VECSTORE_MAX_DIM;
 
@@ -52,14 +73,16 @@ vecstore_t *vecstore_open(vfs_db_t *vfs, const char *collection) {
 }
 
 void vecstore_close(vecstore_t *vs) {
-    if (vs) free(vs);
+    if (vs)
+        free(vs);
 }
 
 /* ── Insert ───────────────────────────────────────────────────────────── */
 
-bool vecstore_insert(vecstore_t *vs, const char *id,
-                     const float *vec, int dim, const char *metadata) {
-    if (!vs || !id || !vec || dim <= 0 || dim > VECSTORE_MAX_DIM) return false;
+bool vecstore_insert(vecstore_t *vs, const char *id, const float *vec, int dim,
+                     const char *metadata) {
+    if (!vs || !id || !vec || dim <= 0 || dim > VECSTORE_MAX_DIM)
+        return false;
 
     /* Store vector as raw float blob */
     size_t blob_len = (size_t)dim * sizeof(float);
@@ -77,7 +100,8 @@ bool vecstore_insert(vecstore_t *vs, const char *id,
 /* ── Delete ───────────────────────────────────────────────────────────── */
 
 bool vecstore_delete(vecstore_t *vs, const char *id) {
-    if (!vs || !id) return false;
+    if (!vs || !id)
+        return false;
     vfs_kv_delete(vs->vfs, vs->meta_bucket, id);
     return vfs_kv_delete(vs->vfs, vs->vec_bucket, id);
 }
@@ -85,14 +109,17 @@ bool vecstore_delete(vecstore_t *vs, const char *id) {
 /* ── Get ──────────────────────────────────────────────────────────────── */
 
 float *vecstore_get(vecstore_t *vs, const char *id, int *out_dim) {
-    if (!vs || !id) return NULL;
+    if (!vs || !id)
+        return NULL;
 
     size_t blob_len = 0;
     void *blob = vfs_kv_get(vs->vfs, vs->vec_bucket, id, &blob_len);
-    if (!blob || blob_len < sizeof(float)) return NULL;
+    if (!blob || blob_len < sizeof(float))
+        return NULL;
 
     int dim = (int)(blob_len / sizeof(float));
-    if (out_dim) *out_dim = dim;
+    if (out_dim)
+        *out_dim = dim;
 
     /* blob is already a malloc'd float array from vfs_kv_get */
     return (float *)blob;
@@ -104,25 +131,30 @@ float *vecstore_get(vecstore_t *vs, const char *id, int *out_dim) {
 static int result_cmp_desc(const void *a, const void *b) {
     float sa = ((const vecstore_result_t *)a)->score;
     float sb = ((const vecstore_result_t *)b)->score;
-    if (sb > sa) return 1;
-    if (sb < sa) return -1;
+    if (sb > sa)
+        return 1;
+    if (sb < sa)
+        return -1;
     return 0;
 }
 
-int vecstore_query(vecstore_t *vs, const float *query_vec, int dim,
-                   vecstore_result_t *out, int max_results) {
-    if (!vs || !query_vec || dim <= 0 || !out || max_results <= 0) return 0;
+int vecstore_query(vecstore_t *vs, const float *query_vec, int dim, vecstore_result_t *out,
+                   int max_results) {
+    if (!vs || !query_vec || dim <= 0 || !out || max_results <= 0)
+        return 0;
 
     /* Enumerate all keys in the vector bucket */
     int key_count = 0;
     char **keys = vfs_kv_keys(vs->vfs, vs->vec_bucket, &key_count);
-    if (!keys || key_count == 0) return 0;
+    if (!keys || key_count == 0)
+        return 0;
 
     /* Allocate temporary candidates (may exceed max_results) */
     int cap = key_count < 4096 ? key_count : 4096;
     vecstore_result_t *candidates = calloc((size_t)cap, sizeof(vecstore_result_t));
     if (!candidates) {
-        for (int i = 0; i < key_count; i++) free(keys[i]);
+        for (int i = 0; i < key_count; i++)
+            free(keys[i]);
         free(keys);
         return 0;
     }
@@ -131,7 +163,11 @@ int vecstore_query(vecstore_t *vs, const float *query_vec, int dim,
     for (int i = 0; i < key_count && n_cand < cap; i++) {
         size_t blob_len = 0;
         float *vec = (float *)vfs_kv_get(vs->vfs, vs->vec_bucket, keys[i], &blob_len);
-        if (!vec) { free(keys[i]); keys[i] = NULL; continue; }
+        if (!vec) {
+            free(keys[i]);
+            keys[i] = NULL;
+            continue;
+        }
 
         int vec_dim = (int)(blob_len / sizeof(float));
         int cmp_dim = vec_dim < dim ? vec_dim : dim;
@@ -140,10 +176,10 @@ int vecstore_query(vecstore_t *vs, const float *query_vec, int dim,
         free(vec);
 
         if (score > 0.01f) {
-            candidates[n_cand].id = keys[i];  /* take ownership */
+            candidates[n_cand].id = keys[i]; /* take ownership */
             candidates[n_cand].score = score;
             candidates[n_cand].metadata = NULL;
-            keys[i] = NULL;  /* mark as consumed */
+            keys[i] = NULL; /* mark as consumed */
             n_cand++;
         } else {
             free(keys[i]);
@@ -153,7 +189,7 @@ int vecstore_query(vecstore_t *vs, const float *query_vec, int dim,
 
     /* Free any remaining unconsumed keys (from early cap cutoff) */
     for (int i = 0; i < key_count; i++) {
-        free(keys[i]);  /* safe: consumed entries are NULL */
+        free(keys[i]); /* safe: consumed entries are NULL */
     }
     free(keys);
 
@@ -163,7 +199,7 @@ int vecstore_query(vecstore_t *vs, const float *query_vec, int dim,
     /* Copy top results to output */
     int count = n_cand < max_results ? n_cand : max_results;
     for (int i = 0; i < count; i++) {
-        out[i].id = candidates[i].id;       /* transfer ownership */
+        out[i].id = candidates[i].id; /* transfer ownership */
         out[i].score = candidates[i].score;
         /* Load metadata lazily */
         out[i].metadata = vfs_kv_get_str(vs->vfs, vs->meta_bucket, out[i].id);
@@ -179,7 +215,8 @@ int vecstore_query(vecstore_t *vs, const float *query_vec, int dim,
 }
 
 void vecstore_result_free(vecstore_result_t *results, int count) {
-    if (!results) return;
+    if (!results)
+        return;
     for (int i = 0; i < count; i++) {
         free(results[i].id);
         free(results[i].metadata);
@@ -189,11 +226,13 @@ void vecstore_result_free(vecstore_result_t *results, int count) {
 /* ── Count ────────────────────────────────────────────────────────────── */
 
 int vecstore_count(vecstore_t *vs) {
-    if (!vs) return 0;
+    if (!vs)
+        return 0;
     int count = 0;
     char **keys = vfs_kv_keys(vs->vfs, vs->vec_bucket, &count);
     if (keys) {
-        for (int i = 0; i < count; i++) free(keys[i]);
+        for (int i = 0; i < count; i++)
+            free(keys[i]);
         free(keys);
     }
     return count;

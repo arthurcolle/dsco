@@ -1,0 +1,30 @@
+DSCO modern-C-lib profiling — Apple Silicon M4 Max, clang -O3 -march=native
+(reproduce: see bench/README or the cc lines in git log for this commit)
+
+[JSON]  parse+extract Anthropic response (445B)
+  dsco json_parse_response      1434 ns
+  yyjson read+walk               191 ns     -> 7.5x
+  single field, one-shot:  dsco 46ns  < yyjson 116ns   (scan-to-key wins one-shot)
+  multi field, doc reused: yyjson 0.7 ns/field         -> 66x (the real win)
+  CORRECTNESS: differential fuzz found json_get_int() silently corrupts int64
+               (atoi 32-bit overflow): 9223372036854775807 -> -1. yyjson correct.
+               string/bool paths: 100% parity over real+adversarial corpus.
+
+[HASH]  BLAKE3 vs libsodium SHA-256 (the incumbent DSCO links)
+  4 KiB:   SHA256 7699 ns   BLAKE3 1868 ns   -> 4.12x
+  64 KiB:  SHA256 120784ns  BLAKE3 28805ns   -> 4.19x
+  1 MiB:   BLAKE3 2112 MiB/s                  -> 4.18x
+
+[VEC]   cosine similarity dim=1024 (vecstore brute-force hot loop)
+  scalar 873 ns   NEON 189 ns   -> 4.6x   (parity max err 1.6e-7)   [INTEGRATED]
+
+[COMPRESS] zstd-19 on real trace events (per-event frames)
+  no dict 1.39x   +trained dict 3.82x   -> dict 2.75x better
+
+[HTTP]  request parse
+  sscanf 42ns   picohttpparser 56ns  -> 0.75x (SLOWER; value is full-header
+  parsing + keep-alive, not speed). Deprioritized.
+
+VERDICTS: adopt yyjson(multi-field/full-parse) + SIMD cosine[done] + BLAKE3 +
+zstd/dict. picohttp = correctness-only. SimSIMD C API churned to "numkong"
+tiled dispatch — hand-rolled NEON used instead (zero dep).

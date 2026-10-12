@@ -48,6 +48,48 @@ typedef enum {
 #define MEM_CONSOLIDATION_IMPORTANCE    0.7 /* importance to auto-promote */
 #define MEM_CONSOLIDATION_INTERVAL      30  /* seconds between consolidation sweeps */
 
+/* ── keep_score weighting (doctrine/MEMORY.md Rule 0, 2026-06-28) ──────────
+ * Computable promotion/retrieval score grounded in Generative Agents
+ * (arXiv:2304.03442) + MemGPT (arXiv:2310.08560). Two modes: PROMOTION
+ * (keep-forever; importance dominates, recency must not decay an old lesson)
+ * and RETRIEVAL (recall-now; recency leads). See scripts/memory/keep_score.py. */
+#define MEM_KEEP_PROMOTION_W_RECENCY    0.05
+#define MEM_KEEP_PROMOTION_W_IMPORTANCE 0.65
+#define MEM_KEEP_PROMOTION_W_RELEVANCE  0.30
+#define MEM_KEEP_RETRIEVAL_W_RECENCY    0.34
+#define MEM_KEEP_RETRIEVAL_W_IMPORTANCE 0.33
+#define MEM_KEEP_RETRIEVAL_W_RELEVANCE  0.33
+
+/* Promotion gates on keep_score (PROMOTION mode, +evidence bonus).
+ * Episodic->Semantic is the durable commitment and needs a higher bar than
+ * Working->Episodic — preserves the original "more evidence for semantic" rule. */
+#define MEM_KEEP_PROMOTE_GATE_EPISODIC  0.50  /* working  -> episodic */
+#define MEM_KEEP_PROMOTE_GATE_SEMANTIC  0.62  /* episodic -> semantic */
+
+typedef enum {
+    MEM_KEEP_PROMOTION = 0,  /* what to keep forever  */
+    MEM_KEEP_RETRIEVAL = 1   /* what to recall now    */
+} memory_keep_mode_t;
+
+/* ── Classification levels (doctrine/CLASSIFICATION.md §1, §5) ─────────────
+ * Sovereign four-level taxonomy. Consolidation gates:
+ *   L0 OPEN   — consolidates freely
+ *   L1 HELD   — consolidates freely, tagged
+ *   L2 SEALED — episodic OK; episodic->semantic promotion requires an explicit
+ *               review flag (memory_classify_review). Never auto-promotes to
+ *               semantic (consolidation-leak counter, SECRECY_HARDENING §7).
+ *   L3 UMBRAL — working memory only. Never promoted by the sweep. Purged by
+ *               memory_purge_umbral() at session close unless explicitly
+ *               promoted by a Tier 0 principal via memory_classify_review +
+ *               memory_promote.
+ * There is no L4 by construction (glass ceiling). */
+typedef enum {
+    MEM_CLASS_OPEN   = 0,  /* L0 */
+    MEM_CLASS_HELD   = 1,  /* L1 — default for operational material */
+    MEM_CLASS_SEALED = 2,  /* L2 — compartmented */
+    MEM_CLASS_UMBRAL = 3   /* L3 — existence-classified, working-only */
+} memory_class_t;
+
 /* ── Memory Entry ─────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -65,6 +107,10 @@ typedef struct {
     bool           pinned;         /* exempt from decay */
     bool           active;
     bool           has_embedding;  /* true if embedding cached in vecstore */
+    memory_class_t classification; /* L0-L3, default MEM_CLASS_OPEN */
+    bool           class_reviewed; /* explicit review flag: permits gated promotion
+                                      (L2 episodic->semantic; L3 any promotion).
+                                      Set only via memory_classify_review(). */
 } memory_entry_t;
 
 /* ── Memory Store ─────────────────────────────────────────────────────── */
@@ -139,6 +185,23 @@ bool memory_unpin(memory_store_t *m, const char *key);
 /* Manually promote entry to next tier. */
 bool memory_promote(memory_store_t *m, const char *key);
 
+/* ── Classification (doctrine/CLASSIFICATION.md §5) ───────────────────── */
+
+/* Set classification level on an entry. Upgrades always allowed; downgrades
+   are out-of-band operations and must go through the DECLASSIFY ritual —
+   this function refuses to lower a label (returns false). */
+bool memory_classify(memory_store_t *m, const char *key, memory_class_t level);
+
+/* Grant one gated promotion review (L2 episodic->semantic, or L3 promotion).
+   Caller is responsible for principal-tier authorization (Tier 0 for L3). */
+bool memory_classify_review(memory_store_t *m, const char *key);
+
+/* Purge non-promoted UMBRAL working entries at session close. Returns count. */
+int memory_purge_umbral(memory_store_t *m);
+
+/* True if the consolidation sweep may promote this entry out of its tier. */
+bool memory_class_promotable(const memory_entry_t *e);
+
 /* ── Decay & Consolidation ────────────────────────────────────────────── */
 
 /* Apply decay to all entries. Evict entries below threshold.
@@ -148,6 +211,12 @@ int memory_decay_tick(memory_store_t *m, double threshold);
 /* Run consolidation: promote frequently-accessed or important memories.
    Returns number of promotions. */
 int memory_consolidate(memory_store_t *m);
+
+/* Computable keep/promote score in [0,1] for one entry.
+ * relevance is caller-supplied in [0,1] (0.5 = neutral/no query).
+ * Additive: does not alter memory_consolidate() behavior. */
+double memory_keep_score(const memory_entry_t *e, memory_keep_mode_t mode,
+                         double relevance, double now);
 
 /* Full maintenance pass (decay + consolidate). */
 int memory_tick(memory_store_t *m);
@@ -163,6 +232,8 @@ int memory_status_json(const memory_store_t *m, char *buf, size_t len);
 
 const char *memory_tier_name(memory_tier_t t);
 double memory_tier_halflife(memory_tier_t t);
+const char *memory_class_name(memory_class_t c);
+bool memory_class_from_name(const char *s, memory_class_t *out);
 
 /* Calculate current strength after decay.
    Returns 0.0 if fully decayed, 1.0 if just stored. */

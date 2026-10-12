@@ -1,0 +1,41 @@
+# clangd configuration for dsco-cli.
+# Pairs with compile_commands.json produced by `make compile-commands`.
+# Doom Emacs reads this automatically via (cc +lsp +tree-sitter).
+
+CompileFlags:
+  # Fallback flags applied to files/headers that aren't in the compile database
+  # (e.g. a stray header with no owning .c), so clangd still sees the include
+  # roots and the C2y standard instead of guessing.
+  Add:
+    - -std=c2y
+    - -Iinclude
+    - -Igsl
+    - -D_POSIX_C_SOURCE=200809L
+    - -Wall
+    - -Wextra
+  # Drop link-only / sanitizer flags clangd can't act on (matters if you point
+  # it at the asan/ubsan command sets).
+  Remove:
+    - -Wl,*
+    - -fsanitize=*
+    - -fno-sanitize-recover=*
+
+Index:
+  Background: Build
+  StandardLibrary: Yes
+
+InlayHints:
+  Enabled: Yes
+  Parameters: Yes
+  DeducedTypes: Yes
+
+Diagnostics:
+  ClangTidy:
+    FastCheckFilter: None
+  UnusedIncludes: None
+
+Hover:
+  ShowAKA: Yes
+
+Completion:
+  AllScopes: Yes

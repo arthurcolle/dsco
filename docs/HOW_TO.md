@@ -89,6 +89,54 @@ Checklist:
 3. Use `/mcp reload` after config updates.
 4. Verify tools appear in `/tools` under MCP section.
 
+For a one-run pin, use `--mcp-server NAME` or `DSCO_MCP_SERVER=NAME`.
+DSCO expands `$VAR` and `${VAR}` references in MCP headers/env after loading the
+saved setup env and the current directory `.env`; use `--env-file PATH` to point
+at a specific env file.
+
+Project-local OpenRouter MCP example:
+
+```json
+{
+  "mcpServers": {
+    "openrouter": {
+      "url": "https://mcp.openrouter.ai/mcp",
+      "transport": "http",
+      "headers": {
+        "Authorization": "Bearer $OPENROUTER_API_KEY"
+      }
+    }
+  }
+}
+```
+
+```bash
+./dsco --mcp-server openrouter -m openrouter/anthropic/claude-sonnet-4 -i
+```
+
+Hermes Agent is a direct stdio MCP bridge:
+
+```bash
+./dsco --tool-exec hermes_agent '{"action":"capabilities"}'
+./dsco --tool-exec hermes_agent '{"action":"mcp_preset"}'
+```
+
+The capability showcase lists the major Hermes surfaces DSCO knows about:
+MCP bridge, ACP editor mode, CLI/TUI, provider routing, Nous Portal tool gateway,
+cross-platform messaging, skills, persistent memory, cron scheduling, terminal
+backends, delegation, context files, approvals/security, and research trajectory
+exports.
+
+The MCP preset uses `hermes mcp serve`. DSCO also imports Hermes MCP client server
+blocks from `~/.hermes/config.yaml` and `~/.hermes/mcp_servers.yaml` when those
+files exist.
+
+For editor-native Hermes, use Agent Client Protocol instead:
+
+```bash
+./dsco --tool-exec hermes_agent '{"action":"acp_preset"}'
+```
+
 ## 8. Add a Plugin
 
 1. Build shared library exposing `dsco_plugin_*` symbols.
@@ -113,6 +161,8 @@ Commands:
 ```bash
 ./scripts/gen_api_reference.sh
 ./scripts/gen_tool_catalog.sh
+python3 scripts/gen_external_tool_catalog.py --root .
+python3 scripts/gen_repo_coverage.py --root .
 make docs-check
 ```
 

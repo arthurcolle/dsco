@@ -13,9 +13,10 @@
  *                       breakpoint injection and in-memory code patches.
  *
  *  3. File watcher    — kqueue EVFILT_VNODE (macOS / BSD) or inotify (Linux)
- *                       watching the binary file itself.  Fires if any external
- *                       process opens, writes, or renames the file — e.g. Ghidra
- *                       loading it for analysis.
+ *                       watching the loaded inode. On macOS, in-place writes,
+ *                       revocation and security metadata changes are fatal;
+ *                       reads, rename/unlink and atomic replacement are not.
+ *                       Updates take effect on a future launch, not mid-work.
  *
  *  4. Response        — registered wipers are called first (zero API keys,
  *                       session state, etc.).  If DSCO_TAMPER_DESTRUCT=1 env var

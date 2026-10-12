@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: dsco-agent
+
+resources:
+  - ../../base
+
+patches:
+  - path: patch-resources.yaml
+    target:
+      kind: StatefulSet
+      name: dsco-agent
+
+images:
+  - name: dsco-agent
+    newName: dsco-agent
+    newTag: latest  # CI should pin this to a real digest/version at deploy time

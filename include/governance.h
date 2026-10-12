@@ -6,6 +6,7 @@
 #include "killswitch.h"
 #include "ooda.h"
 #include "pheromone.h"
+#include "avian.h"
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Governance Layer (Talons — master control)
@@ -105,6 +106,20 @@ typedef struct {
     bool            can_modify_soft;  /* can modify softcoded params */
     double          created_at;
     double          last_action_at;
+
+    /* ── Empirical Capability Ledger ──────────────────────────────────────
+       Makes the hardcoded rule "Never claim capability tier higher than
+       empirically measured" structurally enforceable. Capability tier is
+       DERIVED from evidence (Wilson lower-bound of success rate, gated by
+       sample count) — never asserted. Downgrades are instant (safety);
+       upgrades require a cooldown + minimum sample floor (hysteresis). */
+    int             evidence_successes;   /* observed successful outcomes */
+    int             evidence_failures;    /* observed failed outcomes */
+    double          success_lb;           /* Wilson 95% lower bound [0,1] */
+    capability_tier_t claimed_capability; /* tier evidence currently supports */
+    double          last_upgrade_at;      /* timestamp of last tier promotion */
+    double          last_downgrade_at;    /* timestamp of last tier demotion */
+    int             tier_changes;         /* total promotions + demotions */
 } agent_envelope_t;
 
 /* ── Audit Entry ──────────────────────────────────────────────────────── */
@@ -121,11 +136,32 @@ typedef struct {
     double         timestamp;
 } audit_entry_t;
 
+/* ── Circuit Breakers (Immune System Track E1) ──────────────────────── */
+
+typedef enum {
+    CB_ERROR_RATE = 0,      /* trip if error rate exceeds threshold */
+    CB_LATENCY,             /* trip if p99 latency exceeds threshold (ms) */
+    CB_COST_OVERRUN,         /* trip if GSU budget exceeded */
+    CB_PHEROMONE_SAT,        /* trip if pheromone field saturated */
+    CB_TYPE_COUNT,
+} circuit_breaker_type_t;
+
+typedef struct {
+    circuit_breaker_type_t type;
+    double threshold;           /* config: trip level */
+    double current_value;       /* live: current metric */
+    bool    tripped;            /* is breaker currently tripped? */
+    time_t  trip_time;          /* when tripped (0 = not tripped) */
+    char    trip_reason[256];   /* why tripped */
+    int     trip_count;         /* total trips since reset */
+} circuit_breaker_t;
+
 /* ── Governance Engine ────────────────────────────────────────────────── */
 
 typedef struct {
     /* Subsystems */
     pheromone_field_t     pheromones;
+    avian_engine_t        avian;
     ooda_engine_t         ooda;
     killswitch_registry_t killswitches;
 
@@ -153,6 +189,13 @@ typedef struct {
     int                   total_authorizations;
     int                   total_denials;
     int                   total_hardcoded_blocks;
+
+    /* Circuit breakers (Immune System E1) */
+    circuit_breaker_t     breakers[CB_TYPE_COUNT];
+
+    /* Shadow examination history (Immune System E2) */
+    int                   shadow_checks_performed;
+    int                   shadow_violations;
 } governance_engine_t;
 
 /* ── Lifecycle ────────────────────────────────────────────────────────── */
@@ -173,6 +216,36 @@ bool governance_deregister_agent(governance_engine_t *g, const char *agent_id);
 /* Get an agent's envelope. Returns NULL if not found. */
 const agent_envelope_t *governance_get_agent(const governance_engine_t *g,
                                               const char *agent_id);
+
+/* ── Empirical Capability (evidence-based tiering) ────────────────────────
+   The capability layer is EARNED, not asserted. Record every outcome and let
+   the engine derive the tier the evidence actually supports. This makes the
+   hardcoded rule "Never claim capability tier higher than empirically
+   measured" a structural invariant rather than a promise. */
+
+/* Record one outcome (success or failure) for an agent. Recomputes the Wilson
+   lower bound and re-derives the claimed capability tier with asymmetric
+   hysteresis (instant downgrade, cooldown-gated upgrade). Returns the tier
+   now supported by evidence, or CAPABILITY_NOVICE if the agent is unknown. */
+capability_tier_t governance_record_outcome(governance_engine_t *g,
+                                            const char *agent_id, bool success);
+
+/* Derive the capability tier that a given evidence ledger supports, using the
+   Wilson score lower bound and a minimum sample floor. Pure function — no
+   side effects — usable for what-if checks. */
+capability_tier_t governance_derive_capability(int successes, int failures,
+                                               double *out_success_lb);
+
+/* True iff the agent may legitimately claim `want` given its evidence. A tier
+   above what evidence supports is denied — the enforcement backbone of the
+   "never claim higher than measured" hardcoded rule. */
+bool governance_can_claim_capability(const governance_engine_t *g,
+                                     const char *agent_id,
+                                     capability_tier_t want);
+
+/* Wilson score lower bound of a Bernoulli success rate at ~95% (z=1.96).
+   Returns 0 when there is no evidence. Exposed for tests/telemetry. */
+double governance_wilson_lower_bound(int successes, int failures);
 
 /* ── Authorization ────────────────────────────────────────────────────── */
 
@@ -247,5 +320,37 @@ typedef struct vfs_db vfs_db_t;
 
 /* Connect governance audit trail to VFS for persistent event logging */
 void governance_set_vfs(vfs_db_t *vfs);
+
+/* Check all breakers for an agent. Returns true if all clear. */
+bool governance_check_breakers(governance_engine_t *g, const char *agent_id);
+
+/* Trip a specific breaker with a reason. */
+bool governance_trip_breaker(governance_engine_t *g, circuit_breaker_type_t type,
+                              const char *reason);
+
+/* Reset a tripped breaker. */
+bool governance_reset_breaker(governance_engine_t *g, circuit_breaker_type_t type);
+
+/* Update breaker metric (called by monitoring). */
+void governance_breaker_update(governance_engine_t *g, circuit_breaker_type_t type,
+                                double value);
+
+/* Get all breaker states as JSON. */
+int governance_breakers_json(const governance_engine_t *g, char *buf, size_t len);
+
+/* ── Shadow Examination (Immune System Track E2) ───────────────────── */
+
+typedef struct {
+    bool   self_reward_detected;     /* action benefits agent, not principal */
+    bool   circular_optimization;     /* optimizing metric w/o improving outcome */
+    bool   reward_hacking;            /* gaming the objective function */
+    bool   self_mythology;            /* inflated self-assessment */
+    char   explanation[512];
+} shadow_check_result_t;
+
+/* Pre-action shadow check. Returns true if action passes (no shadow detected). */
+bool governance_shadow_check(governance_engine_t *g, const char *agent_id,
+                               const char *proposed_action,
+                               shadow_check_result_t *result);
 
 #endif

@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dsco-agent
+spec:
+  template:
+    spec:
+      containers:
+        - name: dsco
+          imagePullPolicy: Always
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: dsco-state
+        labels:
+          app.kubernetes.io/name: dsco-agent
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 20Gi

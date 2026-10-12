@@ -1,0 +1,4715 @@
+{
+  "schema_version": 1,
+  "retrieved_at": "2026-09-01T04:55:59+00:00",
+  "catalog": {
+    "source_id": "abliteration-docs-llms-txt",
+    "canonical_locator": "https://docs.abliteration.ai/llms.txt",
+    "content_digest": "sha256:aebf42d58647907c7c2592a1e2c0acf65bb920b409c7ee320b73d93263d821f2",
+    "last_modified": "",
+    "etag": "W/\"0kA6jyRoKFH5Xdj2OpGsNis2dqJdLzBldLSZpqKLW9Y\"",
+    "owner": "Abliteration AI",
+    "license": "unknown-not-stated-in-catalog",
+    "terms_version": "unknown",
+    "consent_basis": "public vendor documentation indexed at user request",
+    "jurisdiction": "unknown",
+    "permitted_use": "internal discovery, integration, citation, and drift detection",
+    "retention": "metadata and digests only; no full-page mirror",
+    "access_class": "public-source/internal-index"
+  },
+  "summary": {
+    "documents": 71,
+    "successful": 71,
+    "failed": 0,
+    "categories": {
+      "api": 5,
+      "api-reference": 5,
+      "capabilities": 16,
+      "getting-started-reference": 9,
+      "integrations": 17,
+      "openapi": 2,
+      "policy-gateway": 17
+    },
+    "document_set_digest": "sha256:82bbccad9cba127185b43fd37feefc496ce588007d6f264d74ddbb19a7fa5ef9"
+  },
+  "transformation": {
+    "operation": "parse llms.txt; fetch public locators in 12 bounded lanes; extract metadata, headings, API paths, symbols, and SHA-256 digests; discard page bodies",
+    "actor": "scripts/sync_abliteration_docs.py",
+    "timestamp": "2026-09-01T04:55:59+00:00",
+    "input_digest": "sha256:aebf42d58647907c7c2592a1e2c0acf65bb920b409c7ee320b73d93263d821f2",
+    "output_digest": "sha256:82bbccad9cba127185b43fd37feefc496ce588007d6f264d74ddbb19a7fa5ef9",
+    "exclusions": [
+      "full document bodies",
+      "credentials",
+      "console-authenticated pages"
+    ],
+    "reviewer": "unassigned"
+  },
+  "documents": [
+    {
+      "source_id": "abliteration-doc-63d7b395c07c4693",
+      "title": "openapi",
+      "canonical_locator": "https://api.abliteration.ai/openapi.json",
+      "summary": "",
+      "category": "openapi",
+      "status": 200,
+      "content_type": "application/json",
+      "content_digest": "sha256:1e470a72ae9d12cb1661ee800b954a3eace45ed5234caea3c6c62af248aacee6",
+      "content_bytes": 48099,
+      "word_count": 4832,
+      "last_modified": "",
+      "etag": "",
+      "headings": [],
+      "api_paths": [
+        "/health/live",
+        "/health/ready",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+        "/v1/models",
+        "/v1/responses"
+      ],
+      "symbols": [
+        "/components/schemas/AnthropicClearThinkingContextEdit",
+        "/components/schemas/AnthropicContextManagement",
+        "/components/schemas/AnthropicCountTokensRequest",
+        "/components/schemas/AnthropicCountTokensResponse",
+        "/components/schemas/AnthropicJsonOutputFormat",
+        "/components/schemas/AnthropicMessage",
+        "/components/schemas/AnthropicMessagesRequest",
+        "/components/schemas/AnthropicMessagesResponse",
+        "/components/schemas/AnthropicOutputConfig",
+        "/components/schemas/AnthropicThinking",
+        "/components/schemas/AnthropicToolChoice",
+        "/components/schemas/AnthropicUsage",
+        "/components/schemas/ChatCompletionChoice",
+        "/components/schemas/ChatCompletionContentPart",
+        "/components/schemas/ChatCompletionMessage",
+        "/components/schemas/ChatCompletionMessageAnnotation",
+        "/components/schemas/ChatCompletionReasoningOptions",
+        "/components/schemas/ChatCompletionRequest",
+        "/components/schemas/ChatCompletionResponse",
+        "/components/schemas/ChatCompletionResponseFormatJsonObject",
+        "/components/schemas/ChatCompletionResponseFormatJsonSchema",
+        "/components/schemas/ChatCompletionResponseFormatJsonSchemaSpec",
+        "/components/schemas/ChatCompletionResponseFormatText",
+        "/components/schemas/ChatCompletionResponseMessage",
+        "/components/schemas/ChatCompletionStreamOptions",
+        "/components/schemas/ChatCompletionUrlCitation",
+        "/components/schemas/ChatCompletionUsage",
+        "/components/schemas/ErrorDetail",
+        "/components/schemas/ErrorResponse",
+        "/components/schemas/ErrorType",
+        "/components/schemas/HTTPValidationError",
+        "/components/schemas/HealthResponse",
+        "/components/schemas/PublicModelAccess",
+        "/components/schemas/PublicModelListResponse",
+        "/components/schemas/PublicModelPricing",
+        "/components/schemas/PublicModelResponse",
+        "/components/schemas/ResponseCreateRequest",
+        "/components/schemas/ResponseObject",
+        "/components/schemas/ResponseUsage",
+        "/components/schemas/ResponsesReasoning",
+        "/components/schemas/ResponsesTextConfig",
+        "/components/schemas/ResponsesTextFormatJsonObject",
+        "/components/schemas/ResponsesTextFormatJsonSchema",
+        "/components/schemas/ResponsesTextFormatText",
+        "/components/schemas/ValidationError",
+        "/graphic",
+        "/health/live",
+        "/health/ready",
+        "/instructions",
+        "/intent",
+        "/json",
+        "/minors",
+        "/public",
+        "/threatening",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+        "/v1/models",
+        "/v1/responses",
+        "/vLLM-compatible",
+        "/violent"
+      ],
+      "search_text": "openapi /components/schemas/AnthropicClearThinkingContextEdit /components/schemas/AnthropicContextManagement /components/schemas/AnthropicCountTokensRequest /components/schemas/AnthropicCountTokensResponse /components/schemas/AnthropicJsonOutputFormat /components/schemas/AnthropicMessage /components/schemas/AnthropicMessagesRequest /components/schemas/AnthropicMessagesResponse /components/schemas/AnthropicOutputConfig /components/schemas/AnthropicThinking /components/schemas/AnthropicToolChoice /components/schemas/AnthropicUsage /components/schemas/ChatCompletionChoice /components/schemas/ChatCompletionContentPart /components/schemas/ChatCompletionMessage /components/schemas/ChatCompletionMessageAnnotation /components/schemas/ChatCompletionReasoningOptions /components/schemas/ChatCompletionRequest /components/schemas/ChatCompletionResponse /components/schemas/ChatCompletionResponseFormatJsonObject /components/schemas/ChatCompletionResponseFormatJsonSchema /components/schemas/ChatCompletionResponseFormatJsonSchemaSpec /components/schemas/ChatCompletionResponseFormatText /components/schemas/ChatCompletionResponseMessage /components/schemas/ChatCompletionStreamOptions /components/schemas/ChatCompletionUrlCitation /components/schemas/ChatCompletionUsage /components/schemas/ErrorDetail /components/schemas/ErrorResponse /components/schemas/ErrorType /components/schemas/HTTPValidationError /components/schemas/HealthResponse /components/schemas/PublicModelAccess /components/schemas/PublicModelListResponse /components/schemas/PublicModelPricing /components/schemas/PublicModelResponse /components/schemas/ResponseCreateRequest /components/schemas/ResponseObject /components/schemas/ResponseUsage /components/schemas/ResponsesReasoning /components/schemas/ResponsesTextConfig /components/schemas/ResponsesTextFormatJsonObject /components/schemas/ResponsesTextFormatJsonSchema /components/schemas/ResponsesTextFormatText /components/schemas/ValidationError /graphic /health/live /health/ready /instructions /intent /json /minors /public /threatening /v1/chat/completions /v1/messages /v1/messages/count_tokens /v1/models /v1/responses /vLLM-compatible /violent"
+    },
+    {
+      "source_id": "abliteration-doc-296e9710a3944c1f",
+      "title": "Create an OpenAI-compatible chat completion",
+      "canonical_locator": "https://docs.abliteration.ai/api-reference/chat-completions/create-an-openai-compatible-chat-completion.md",
+      "summary": "",
+      "category": "api-reference",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:54f2a3612c709cea49e90bc32b8086ed3a534347be705d4bbf8d3880c0292ea2",
+      "content_bytes": 26413,
+      "word_count": 1859,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Create an OpenAI-compatible chat completion"
+        },
+        {
+          "level": 2,
+          "text": "OpenAPI"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/openapi.json",
+        "//docs.abliteration.ai/llms.txt",
+        "/components/schemas/ChatCompletionChoice",
+        "/components/schemas/ChatCompletionContentPart",
+        "/components/schemas/ChatCompletionMessage",
+        "/components/schemas/ChatCompletionMessageAnnotation",
+        "/components/schemas/ChatCompletionReasoningOptions",
+        "/components/schemas/ChatCompletionRequest",
+        "/components/schemas/ChatCompletionResponse",
+        "/components/schemas/ChatCompletionResponseFormatJsonObject",
+        "/components/schemas/ChatCompletionResponseFormatJsonSchema",
+        "/components/schemas/ChatCompletionResponseFormatJsonSchemaSpec",
+        "/components/schemas/ChatCompletionResponseFormatText",
+        "/components/schemas/ChatCompletionResponseMessage",
+        "/components/schemas/ChatCompletionStreamOptions",
+        "/components/schemas/ChatCompletionUrlCitation",
+        "/components/schemas/ChatCompletionUsage",
+        "/components/schemas/ErrorDetail",
+        "/components/schemas/ErrorResponse",
+        "/components/schemas/ErrorType",
+        "/graphic",
+        "/instructions",
+        "/intent",
+        "/json:",
+        "/minors",
+        "/threatening",
+        "/v1/chat/completions",
+        "/v1/chat/completions:",
+        "/vLLM-compatible",
+        "/violent"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/openapi.json",
+        "//docs.abliteration.ai/llms.txt",
+        "/components/schemas/ChatCompletionChoice",
+        "/components/schemas/ChatCompletionContentPart",
+        "/components/schemas/ChatCompletionMessage",
+        "/components/schemas/ChatCompletionMessageAnnotation",
+        "/components/schemas/ChatCompletionReasoningOptions",
+        "/components/schemas/ChatCompletionRequest",
+        "/components/schemas/ChatCompletionResponse",
+        "/components/schemas/ChatCompletionResponseFormatJsonObject",
+        "/components/schemas/ChatCompletionResponseFormatJsonSchema",
+        "/components/schemas/ChatCompletionResponseFormatJsonSchemaSpec",
+        "/components/schemas/ChatCompletionResponseFormatText",
+        "/components/schemas/ChatCompletionResponseMessage",
+        "/components/schemas/ChatCompletionStreamOptions",
+        "/components/schemas/ChatCompletionUrlCitation",
+        "/components/schemas/ChatCompletionUsage",
+        "/components/schemas/ErrorDetail",
+        "/components/schemas/ErrorResponse",
+        "/components/schemas/ErrorType",
+        "/graphic",
+        "/instructions",
+        "/intent",
+        "/json:",
+        "/minors",
+        "/threatening",
+        "/v1/chat/completions",
+        "/v1/chat/completions:",
+        "/vLLM-compatible",
+        "/violent"
+      ],
+      "search_text": "Create an OpenAI-compatible chat completion Create an OpenAI-compatible chat completion OpenAPI //api.abliteration.ai/openapi.json //docs.abliteration.ai/llms.txt /components/schemas/ChatCompletionChoice /components/schemas/ChatCompletionContentPart /components/schemas/ChatCompletionMessage /components/schemas/ChatCompletionMessageAnnotation /components/schemas/ChatCompletionReasoningOptions /components/schemas/ChatCompletionRequest /components/schemas/ChatCompletionResponse /components/schemas/ChatCompletionResponseFormatJsonObject /components/schemas/ChatCompletionResponseFormatJsonSchema /components/schemas/ChatCompletionResponseFormatJsonSchemaSpec /components/schemas/ChatCompletionResponseFormatText /components/schemas/ChatCompletionResponseMessage /components/schemas/ChatCompletionStreamOptions /components/schemas/ChatCompletionUrlCitation /components/schemas/ChatCompletionUsage /components/schemas/ErrorDetail /components/schemas/ErrorResponse /components/schemas/ErrorType /graphic /instructions /intent /json: /minors /threatening /v1/chat/completions /v1/chat/completions: /vLLM-compatible /violent"
+    },
+    {
+      "source_id": "abliteration-doc-169ef7a2c71e415a",
+      "title": "Count Anthropic Messages input tokens",
+      "canonical_locator": "https://docs.abliteration.ai/api-reference/messages/count-anthropic-messages-input-tokens.md",
+      "summary": "",
+      "category": "api-reference",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:21f4577cc888ad106b68e3b9cb222c22707b800aece4c1a23efeed62d639f4f0",
+      "content_bytes": 12119,
+      "word_count": 889,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Count Anthropic Messages input tokens"
+        },
+        {
+          "level": 2,
+          "text": "OpenAPI"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/openapi.json",
+        "//docs.abliteration.ai/llms.txt",
+        "/components/schemas/AnthropicClearThinkingContextEdit",
+        "/components/schemas/AnthropicContextManagement",
+        "/components/schemas/AnthropicCountTokensRequest",
+        "/components/schemas/AnthropicCountTokensResponse",
+        "/components/schemas/AnthropicJsonOutputFormat",
+        "/components/schemas/AnthropicMessage",
+        "/components/schemas/AnthropicOutputConfig",
+        "/components/schemas/AnthropicThinking",
+        "/components/schemas/AnthropicToolChoice",
+        "/components/schemas/ErrorDetail",
+        "/components/schemas/ErrorResponse",
+        "/components/schemas/ErrorType",
+        "/components/schemas/HTTPValidationError",
+        "/components/schemas/ValidationError",
+        "/json:",
+        "/v1/messages/count_tokens",
+        "/v1/messages/count_tokens:"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/openapi.json",
+        "//docs.abliteration.ai/llms.txt",
+        "/components/schemas/AnthropicClearThinkingContextEdit",
+        "/components/schemas/AnthropicContextManagement",
+        "/components/schemas/AnthropicCountTokensRequest",
+        "/components/schemas/AnthropicCountTokensResponse",
+        "/components/schemas/AnthropicJsonOutputFormat",
+        "/components/schemas/AnthropicMessage",
+        "/components/schemas/AnthropicOutputConfig",
+        "/components/schemas/AnthropicThinking",
+        "/components/schemas/AnthropicToolChoice",
+        "/components/schemas/ErrorDetail",
+        "/components/schemas/ErrorResponse",
+        "/components/schemas/ErrorType",
+        "/components/schemas/HTTPValidationError",
+        "/components/schemas/ValidationError",
+        "/json:",
+        "/v1/messages/count_tokens",
+        "/v1/messages/count_tokens:"
+      ],
+      "search_text": "Count Anthropic Messages input tokens Count Anthropic Messages input tokens OpenAPI //api.abliteration.ai/openapi.json //docs.abliteration.ai/llms.txt /components/schemas/AnthropicClearThinkingContextEdit /components/schemas/AnthropicContextManagement /components/schemas/AnthropicCountTokensRequest /components/schemas/AnthropicCountTokensResponse /components/schemas/AnthropicJsonOutputFormat /components/schemas/AnthropicMessage /components/schemas/AnthropicOutputConfig /components/schemas/AnthropicThinking /components/schemas/AnthropicToolChoice /components/schemas/ErrorDetail /components/schemas/ErrorResponse /components/schemas/ErrorType /components/schemas/HTTPValidationError /components/schemas/ValidationError /json: /v1/messages/count_tokens /v1/messages/count_tokens:"
+    },
+    {
+      "source_id": "abliteration-doc-b5e39b2578587c95",
+      "title": "Create an Anthropic Messages-compatible response",
+      "canonical_locator": "https://docs.abliteration.ai/api-reference/messages/create-an-anthropic-messages-compatible-response.md",
+      "summary": "",
+      "category": "api-reference",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:5320cf39db12af847a6a013ce49b3ef69ac22b36f7492504497027c4015c9eff",
+      "content_bytes": 15558,
+      "word_count": 1128,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Create an Anthropic Messages-compatible response"
+        },
+        {
+          "level": 2,
+          "text": "OpenAPI"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/openapi.json",
+        "//docs.abliteration.ai/llms.txt",
+        "/components/schemas/AnthropicClearThinkingContextEdit",
+        "/components/schemas/AnthropicContextManagement",
+        "/components/schemas/AnthropicJsonOutputFormat",
+        "/components/schemas/AnthropicMessage",
+        "/components/schemas/AnthropicMessagesRequest",
+        "/components/schemas/AnthropicMessagesResponse",
+        "/components/schemas/AnthropicOutputConfig",
+        "/components/schemas/AnthropicThinking",
+        "/components/schemas/AnthropicToolChoice",
+        "/components/schemas/AnthropicUsage",
+        "/components/schemas/ErrorDetail",
+        "/components/schemas/ErrorResponse",
+        "/components/schemas/ErrorType",
+        "/components/schemas/HTTPValidationError",
+        "/components/schemas/ValidationError",
+        "/graphic",
+        "/instructions",
+        "/intent",
+        "/json:",
+        "/minors",
+        "/threatening",
+        "/v1/messages",
+        "/v1/messages:",
+        "/violent"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/openapi.json",
+        "//docs.abliteration.ai/llms.txt",
+        "/components/schemas/AnthropicClearThinkingContextEdit",
+        "/components/schemas/AnthropicContextManagement",
+        "/components/schemas/AnthropicJsonOutputFormat",
+        "/components/schemas/AnthropicMessage",
+        "/components/schemas/AnthropicMessagesRequest",
+        "/components/schemas/AnthropicMessagesResponse",
+        "/components/schemas/AnthropicOutputConfig",
+        "/components/schemas/AnthropicThinking",
+        "/components/schemas/AnthropicToolChoice",
+        "/components/schemas/AnthropicUsage",
+        "/components/schemas/ErrorDetail",
+        "/components/schemas/ErrorResponse",
+        "/components/schemas/ErrorType",
+        "/components/schemas/HTTPValidationError",
+        "/components/schemas/ValidationError",
+        "/graphic",
+        "/instructions",
+        "/intent",
+        "/json:",
+        "/minors",
+        "/threatening",
+        "/v1/messages",
+        "/v1/messages:",
+        "/violent"
+      ],
+      "search_text": "Create an Anthropic Messages-compatible response Create an Anthropic Messages-compatible response OpenAPI //api.abliteration.ai/openapi.json //docs.abliteration.ai/llms.txt /components/schemas/AnthropicClearThinkingContextEdit /components/schemas/AnthropicContextManagement /components/schemas/AnthropicJsonOutputFormat /components/schemas/AnthropicMessage /components/schemas/AnthropicMessagesRequest /components/schemas/AnthropicMessagesResponse /components/schemas/AnthropicOutputConfig /components/schemas/AnthropicThinking /components/schemas/AnthropicToolChoice /components/schemas/AnthropicUsage /components/schemas/ErrorDetail /components/schemas/ErrorResponse /components/schemas/ErrorType /components/schemas/HTTPValidationError /components/schemas/ValidationError /graphic /instructions /intent /json: /minors /threatening /v1/messages /v1/messages: /violent"
+    },
+    {
+      "source_id": "abliteration-doc-0539a4eec0d85fe0",
+      "title": "List models available to the API key project",
+      "canonical_locator": "https://docs.abliteration.ai/api-reference/models/list-models-available-to-the-api-key-project.md",
+      "summary": "",
+      "category": "api-reference",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:1cb4aa47e179624fb3b1a3846292efc6f982cc2ac2139ddbe8594112f65c9d16",
+      "content_bytes": 9371,
+      "word_count": 728,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "List models available to the API key project"
+        },
+        {
+          "level": 2,
+          "text": "OpenAPI"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/openapi.json",
+        "//docs.abliteration.ai/llms.txt",
+        "/components/schemas/ErrorDetail",
+        "/components/schemas/ErrorResponse",
+        "/components/schemas/ErrorType",
+        "/components/schemas/HTTPValidationError",
+        "/components/schemas/PublicModelAccess",
+        "/components/schemas/PublicModelListResponse",
+        "/components/schemas/PublicModelPricing",
+        "/components/schemas/PublicModelResponse",
+        "/components/schemas/ValidationError",
+        "/json:",
+        "/v1/models",
+        "/v1/models:"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/openapi.json",
+        "//docs.abliteration.ai/llms.txt",
+        "/components/schemas/ErrorDetail",
+        "/components/schemas/ErrorResponse",
+        "/components/schemas/ErrorType",
+        "/components/schemas/HTTPValidationError",
+        "/components/schemas/PublicModelAccess",
+        "/components/schemas/PublicModelListResponse",
+        "/components/schemas/PublicModelPricing",
+        "/components/schemas/PublicModelResponse",
+        "/components/schemas/ValidationError",
+        "/json:",
+        "/v1/models",
+        "/v1/models:"
+      ],
+      "search_text": "List models available to the API key project List models available to the API key project OpenAPI //api.abliteration.ai/openapi.json //docs.abliteration.ai/llms.txt /components/schemas/ErrorDetail /components/schemas/ErrorResponse /components/schemas/ErrorType /components/schemas/HTTPValidationError /components/schemas/PublicModelAccess /components/schemas/PublicModelListResponse /components/schemas/PublicModelPricing /components/schemas/PublicModelResponse /components/schemas/ValidationError /json: /v1/models /v1/models:"
+    },
+    {
+      "source_id": "abliteration-doc-810e644c008fc20c",
+      "title": "openapi",
+      "canonical_locator": "https://docs.abliteration.ai/api-reference/openapi.json",
+      "summary": "",
+      "category": "openapi",
+      "status": 200,
+      "content_type": "application/json",
+      "content_digest": "sha256:919eb7a392aafe9825cc9fc0e5b2174643803e1f825816a5a2cb95fb20a94aa9",
+      "content_bytes": 5173,
+      "word_count": 319,
+      "last_modified": "Mon, 20 Apr 2026 21:40:58 GMT",
+      "etag": "W/\"~\"",
+      "headings": [],
+      "api_paths": [
+        "/plants",
+        "/plants/{id}"
+      ],
+      "symbols": [
+        "//sandbox.mintlify.com",
+        "/components/schemas/Error",
+        "/components/schemas/NewPlant",
+        "/components/schemas/Plant",
+        "/json",
+        "/plant/webhook",
+        "/plants",
+        "/plants/{id}"
+      ],
+      "search_text": "openapi //sandbox.mintlify.com /components/schemas/Error /components/schemas/NewPlant /components/schemas/Plant /json /plant/webhook /plants /plants/{id}"
+    },
+    {
+      "source_id": "abliteration-doc-309b5838315e0741",
+      "title": "Create a stateless OpenAI Responses-compatible response",
+      "canonical_locator": "https://docs.abliteration.ai/api-reference/responses/create-a-stateless-openai-responses-compatible-response.md",
+      "summary": "",
+      "category": "api-reference",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:4982d0d3b90414bbe3aae285078d777c8e5e7ade1fa022f61def1c0e2d699ef0",
+      "content_bytes": 17774,
+      "word_count": 1276,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Create a stateless OpenAI Responses-compatible response"
+        },
+        {
+          "level": 2,
+          "text": "OpenAPI"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/openapi.json",
+        "//docs.abliteration.ai/llms.txt",
+        "/components/schemas/ErrorDetail",
+        "/components/schemas/ErrorResponse",
+        "/components/schemas/ErrorType",
+        "/components/schemas/HTTPValidationError",
+        "/components/schemas/ResponseCreateRequest",
+        "/components/schemas/ResponseObject",
+        "/components/schemas/ResponseUsage",
+        "/components/schemas/ResponsesReasoning",
+        "/components/schemas/ResponsesTextConfig",
+        "/components/schemas/ResponsesTextFormatJsonObject",
+        "/components/schemas/ResponsesTextFormatJsonSchema",
+        "/components/schemas/ResponsesTextFormatText",
+        "/components/schemas/ValidationError",
+        "/graphic",
+        "/instructions",
+        "/intent",
+        "/json:",
+        "/minors",
+        "/public",
+        "/threatening",
+        "/v1/responses",
+        "/v1/responses:",
+        "/violent"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/openapi.json",
+        "//docs.abliteration.ai/llms.txt",
+        "/components/schemas/ErrorDetail",
+        "/components/schemas/ErrorResponse",
+        "/components/schemas/ErrorType",
+        "/components/schemas/HTTPValidationError",
+        "/components/schemas/ResponseCreateRequest",
+        "/components/schemas/ResponseObject",
+        "/components/schemas/ResponseUsage",
+        "/components/schemas/ResponsesReasoning",
+        "/components/schemas/ResponsesTextConfig",
+        "/components/schemas/ResponsesTextFormatJsonObject",
+        "/components/schemas/ResponsesTextFormatJsonSchema",
+        "/components/schemas/ResponsesTextFormatText",
+        "/components/schemas/ValidationError",
+        "/graphic",
+        "/instructions",
+        "/intent",
+        "/json:",
+        "/minors",
+        "/public",
+        "/threatening",
+        "/v1/responses",
+        "/v1/responses:",
+        "/violent"
+      ],
+      "search_text": "Create a stateless OpenAI Responses-compatible response Create a stateless OpenAI Responses-compatible response OpenAPI //api.abliteration.ai/openapi.json //docs.abliteration.ai/llms.txt /components/schemas/ErrorDetail /components/schemas/ErrorResponse /components/schemas/ErrorType /components/schemas/HTTPValidationError /components/schemas/ResponseCreateRequest /components/schemas/ResponseObject /components/schemas/ResponseUsage /components/schemas/ResponsesReasoning /components/schemas/ResponsesTextConfig /components/schemas/ResponsesTextFormatJsonObject /components/schemas/ResponsesTextFormatJsonSchema /components/schemas/ResponsesTextFormatText /components/schemas/ValidationError /graphic /instructions /intent /json: /minors /public /threatening /v1/responses /v1/responses: /violent"
+    },
+    {
+      "source_id": "abliteration-doc-4a15aaa65954892b",
+      "title": "Use the Anthropic SDK with abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/api/anthropic-compatibility.md",
+      "summary": "How to use abliteration.ai with the Anthropic Messages API — base URL, auth token, and what's supported.",
+      "category": "api",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:826c65ecf5c4bb29aa05879c01b3df347aa410ca06fd49562f8b11bbb7ccce72",
+      "content_bytes": 3145,
+      "word_count": 383,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Use the Anthropic SDK with abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Configuration"
+        },
+        {
+          "level": 2,
+          "text": "Python"
+        },
+        {
+          "level": 2,
+          "text": "curl"
+        },
+        {
+          "level": 2,
+          "text": "Request safety filtering"
+        },
+        {
+          "level": 2,
+          "text": "Reasoning"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai",
+        "//api.abliteration.ai/v1/messages",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/capabilities/request-safety-filtering",
+        "/capabilities/thinking",
+        "/json",
+        "/v1/messages"
+      ],
+      "symbols": [
+        "//api.abliteration.ai",
+        "//api.abliteration.ai/v1/messages",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/capabilities/request-safety-filtering",
+        "/capabilities/thinking",
+        "/json",
+        "/v1/messages",
+        "ABLIT_KEY",
+        "abliterated-model",
+        "abliterated-model-large",
+        "abliterated-model-large-v2"
+      ],
+      "search_text": "Use the Anthropic SDK with abliteration.ai How to use abliteration.ai with the Anthropic Messages API — base URL, auth token, and what's supported. Use the Anthropic SDK with abliteration.ai Configuration Python curl Request safety filtering Reasoning //api.abliteration.ai //api.abliteration.ai/v1/messages //docs.abliteration.ai/llms.txt /Note /capabilities/request-safety-filtering /capabilities/thinking /json /v1/messages ABLIT_KEY abliterated-model abliterated-model-large abliterated-model-large-v2"
+    },
+    {
+      "source_id": "abliteration-doc-0aa6b99b15fb6867",
+      "title": "abliteration.ai API errors",
+      "canonical_locator": "https://docs.abliteration.ai/api/errors.md",
+      "summary": "HTTP error codes, error body shapes (OpenAI and Anthropic), and how to handle policy-blocked requests.",
+      "category": "api",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:10e90119706a655d84f43851244268d7f6d8e9fcdd4b7bdbfa4cc118cb2faf8d",
+      "content_bytes": 2969,
+      "word_count": 289,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "abliteration.ai API errors"
+        },
+        {
+          "level": 2,
+          "text": "OpenAI shape"
+        },
+        {
+          "level": 2,
+          "text": "Anthropic shape"
+        },
+        {
+          "level": 2,
+          "text": "Anthropic streaming error frame"
+        },
+        {
+          "level": 2,
+          "text": "Status codes"
+        },
+        {
+          "level": 2,
+          "text": "Policy-blocked requests"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/console",
+        "//docs.abliteration.ai/llms.txt",
+        "/api/policy-endpoints",
+        "/capabilities/streaming-policy-metadata",
+        "/policy/*",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/responses"
+      ],
+      "symbols": [
+        "//abliteration.ai/console",
+        "//docs.abliteration.ai/llms.txt",
+        "/api/policy-endpoints",
+        "/capabilities/streaming-policy-metadata",
+        "/policy/*",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/responses",
+        "ABLIT_KEY"
+      ],
+      "search_text": "abliteration.ai API errors HTTP error codes, error body shapes (OpenAI and Anthropic), and how to handle policy-blocked requests. abliteration.ai API errors OpenAI shape Anthropic shape Anthropic streaming error frame Status codes Policy-blocked requests //abliteration.ai/console //docs.abliteration.ai/llms.txt /api/policy-endpoints /capabilities/streaming-policy-metadata /policy/* /v1/chat/completions /v1/messages /v1/responses ABLIT_KEY"
+    },
+    {
+      "source_id": "abliteration-doc-4d763643e020cc5f",
+      "title": "Introduction",
+      "canonical_locator": "https://docs.abliteration.ai/api/introduction.md",
+      "summary": "Overview of abliteration.ai's HTTP APIs — base URL, authentication, and how the OpenAI-compatible and Anthropic-compatible surfaces are exposed.",
+      "category": "api",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:c151c466b353dada69c5f33ddd83e3a389af1e24a9f5f60492a68ed827fa60dc",
+      "content_bytes": 1833,
+      "word_count": 199,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Introduction"
+        },
+        {
+          "level": 2,
+          "text": "Base URL"
+        },
+        {
+          "level": 2,
+          "text": "Authentication"
+        },
+        {
+          "level": 2,
+          "text": "Example"
+        },
+        {
+          "level": 2,
+          "text": "Versioning"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/v1",
+        "//api.abliteration.ai/v1/chat/completions",
+        "//docs.abliteration.ai/llms.txt",
+        "/api/anthropic-compatibility",
+        "/api/openai-compatibility",
+        "/authentication",
+        "/capabilities/count-tokens",
+        "/json",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+        "/v1/models",
+        "/v1/responses"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/v1",
+        "//api.abliteration.ai/v1/chat/completions",
+        "//docs.abliteration.ai/llms.txt",
+        "/api/anthropic-compatibility",
+        "/api/openai-compatibility",
+        "/authentication",
+        "/capabilities/count-tokens",
+        "/json",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+        "/v1/models",
+        "/v1/responses",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Introduction Overview of abliteration.ai's HTTP APIs — base URL, authentication, and how the OpenAI-compatible and Anthropic-compatible surfaces are exposed. Introduction Base URL Authentication Example Versioning //api.abliteration.ai/v1 //api.abliteration.ai/v1/chat/completions //docs.abliteration.ai/llms.txt /api/anthropic-compatibility /api/openai-compatibility /authentication /capabilities/count-tokens /json /v1/chat/completions /v1/messages /v1/messages/count_tokens /v1/models /v1/responses ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-677b108601bf781f",
+      "title": "Use any OpenAI SDK with abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/api/openai-compatibility.md",
+      "summary": "How to use abliteration.ai with any OpenAI SDK — base URL, authentication, supported features, and caveats.",
+      "category": "api",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:425c61377213ea9ccc870b31e43370885fa7818170d7642bdaba85a370933cb4",
+      "content_bytes": 3705,
+      "word_count": 468,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Use any OpenAI SDK with abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Configuration"
+        },
+        {
+          "level": 2,
+          "text": "Python"
+        },
+        {
+          "level": 2,
+          "text": "Node"
+        },
+        {
+          "level": 2,
+          "text": "Streaming"
+        },
+        {
+          "level": 2,
+          "text": "Tool calling"
+        },
+        {
+          "level": 2,
+          "text": "Request safety filtering"
+        },
+        {
+          "level": 2,
+          "text": "Reasoning"
+        },
+        {
+          "level": 2,
+          "text": "Structured outputs"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/console",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/capabilities/request-safety-filtering",
+        "/capabilities/streaming",
+        "/capabilities/thinking",
+        "/capabilities/tool-calling",
+        "/chat/completions",
+        "/compatibility-matrix",
+        "/models",
+        "/responses",
+        "/v1/chat/completions",
+        "/v1/models",
+        "/v1/responses"
+      ],
+      "symbols": [
+        "//abliteration.ai/console",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/capabilities/request-safety-filtering",
+        "/capabilities/streaming",
+        "/capabilities/thinking",
+        "/capabilities/tool-calling",
+        "/chat/completions",
+        "/compatibility-matrix",
+        "/models",
+        "/responses",
+        "/v1/chat/completions",
+        "/v1/models",
+        "/v1/responses",
+        "ABLIT_KEY",
+        "abliterated-model",
+        "abliterated-model-large",
+        "abliterated-model-large-v2"
+      ],
+      "search_text": "Use any OpenAI SDK with abliteration.ai How to use abliteration.ai with any OpenAI SDK — base URL, authentication, supported features, and caveats. Use any OpenAI SDK with abliteration.ai Configuration Python Node Streaming Tool calling Request safety filtering Reasoning Structured outputs //abliteration.ai/console //api.abliteration.ai/v1 //docs.abliteration.ai/llms.txt /Note /capabilities/request-safety-filtering /capabilities/streaming /capabilities/thinking /capabilities/tool-calling /chat/completions /compatibility-matrix /models /responses /v1/chat/completions /v1/models /v1/responses ABLIT_KEY abliterated-model abliterated-model-large abliterated-model-large-v2"
+    },
+    {
+      "source_id": "abliteration-doc-00485e7cb00c8fb7",
+      "title": "Policy endpoints",
+      "canonical_locator": "https://docs.abliteration.ai/api/policy-endpoints.md",
+      "summary": "The /policy/* API surface that adds project quotas, policy evaluation, streaming metadata, and audit events.",
+      "category": "api",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:65cb9f3ebe1204ad2f24839121164df18eabbbdd85125bf5d7be9f7d8325dacf",
+      "content_bytes": 5540,
+      "word_count": 519,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Policy endpoints"
+        },
+        {
+          "level": 2,
+          "text": "When to use which"
+        },
+        {
+          "level": 2,
+          "text": "Headers"
+        },
+        {
+          "level": 2,
+          "text": "Inline policy (no project needed)"
+        },
+        {
+          "level": 2,
+          "text": "Response metadata"
+        },
+        {
+          "level": 2,
+          "text": "Related"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/policy/chat/completions",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/canary",
+        "/capabilities/streaming-policy-metadata",
+        "/intent",
+        "/json",
+        "/policy-gateway/connectors",
+        "/policy-gateway/onboarding",
+        "/policy-gateway/overview",
+        "/policy/*",
+        "/policy/chat/completions",
+        "/policy/messages",
+        "/policy/responses",
+        "/quota",
+        "/v1/*",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/responses"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/policy/chat/completions",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/canary",
+        "/capabilities/streaming-policy-metadata",
+        "/intent",
+        "/json",
+        "/policy-gateway/connectors",
+        "/policy-gateway/onboarding",
+        "/policy-gateway/overview",
+        "/policy/*",
+        "/policy/chat/completions",
+        "/policy/messages",
+        "/policy/responses",
+        "/quota",
+        "/v1/*",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/responses",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Policy endpoints The /policy/* API surface that adds project quotas, policy evaluation, streaming metadata, and audit events. Policy endpoints When to use which Headers Inline policy (no project needed) Response metadata Related //api.abliteration.ai/policy/chat/completions //docs.abliteration.ai/llms.txt /Note /canary /capabilities/streaming-policy-metadata /intent /json /policy-gateway/connectors /policy-gateway/onboarding /policy-gateway/overview /policy/* /policy/chat/completions /policy/messages /policy/responses /quota /v1/* /v1/chat/completions /v1/messages /v1/responses ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-dca25c0d87e7b0a3",
+      "title": "How to authenticate with abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/authentication.md",
+      "summary": "How to authenticate abliteration.ai API requests with bearer tokens, scope keys to projects, and rotate keys safely.",
+      "category": "getting-started-reference",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:495a45a97b79500cd69c7d794eed07f2e8d858cfe46ae20082e3be302587bc1c",
+      "content_bytes": 1444,
+      "word_count": 211,
+      "last_modified": "Tue, 01 Sep 2026 04:55:55 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "How to authenticate with abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Header"
+        },
+        {
+          "level": 2,
+          "text": "Scoped keys"
+        },
+        {
+          "level": 2,
+          "text": "Rotating keys"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/console",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/policy-gateway/onboarding",
+        "/v1/messages",
+        "/v1/messages/count_tokens"
+      ],
+      "symbols": [
+        "//abliteration.ai/console",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/policy-gateway/onboarding",
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+        "ABLIT_KEY"
+      ],
+      "search_text": "How to authenticate with abliteration.ai How to authenticate abliteration.ai API requests with bearer tokens, scope keys to projects, and rotate keys safely. How to authenticate with abliteration.ai Header Scoped keys Rotating keys //abliteration.ai/console //docs.abliteration.ai/llms.txt /Note /policy-gateway/onboarding /v1/messages /v1/messages/count_tokens ABLIT_KEY"
+    },
+    {
+      "source_id": "abliteration-doc-23a86316476b5321",
+      "title": "Count input tokens before sending",
+      "canonical_locator": "https://docs.abliteration.ai/capabilities/count-tokens.md",
+      "summary": "Measure the exact input-token cost of a request before sending it, via POST /v1/messages/count_tokens.",
+      "category": "capabilities",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:a6702c245ab13b9ae538028772a89c17f4cbd6032d2b9a3500e43f5d7c5b5046",
+      "content_bytes": 1665,
+      "word_count": 227,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Count input tokens before sending"
+        },
+        {
+          "level": 2,
+          "text": "Endpoint"
+        },
+        {
+          "level": 2,
+          "text": "Example"
+        },
+        {
+          "level": 2,
+          "text": "curl"
+        },
+        {
+          "level": 2,
+          "text": "Notes"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai",
+        "//api.abliteration.ai/v1/messages/count_tokens",
+        "//docs.abliteration.ai/llms.txt",
+        "/json",
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+        "/v1/messages/count_tokens."
+      ],
+      "symbols": [
+        "//api.abliteration.ai",
+        "//api.abliteration.ai/v1/messages/count_tokens",
+        "//docs.abliteration.ai/llms.txt",
+        "/json",
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+        "/v1/messages/count_tokens.",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Count input tokens before sending Measure the exact input-token cost of a request before sending it, via POST /v1/messages/count_tokens. Count input tokens before sending Endpoint Example curl Notes //api.abliteration.ai //api.abliteration.ai/v1/messages/count_tokens //docs.abliteration.ai/llms.txt /json /v1/messages /v1/messages/count_tokens /v1/messages/count_tokens. ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-fc9d76d38e8d0530",
+      "title": "Send images to abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/capabilities/images.md",
+      "summary": "Send images alongside text on the OpenAI Chat Completions and Anthropic Messages surfaces.",
+      "category": "capabilities",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:9b2cb47dcc416dce7b3c28f2633c15b21473326fb39996fe2782f36426928bda",
+      "content_bytes": 2424,
+      "word_count": 245,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Send images to abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Limits"
+        },
+        {
+          "level": 2,
+          "text": "OpenAI Chat Completions"
+        },
+        {
+          "level": 2,
+          "text": "Anthropic Messages"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/v1/chat/completions",
+        "//api.abliteration.ai/v1/messages",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/gif",
+        "/jpeg",
+        "/json",
+        "/png",
+        "/webp"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/v1/chat/completions",
+        "//api.abliteration.ai/v1/messages",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/gif",
+        "/jpeg",
+        "/json",
+        "/png",
+        "/webp",
+        "ABLIT_KEY",
+        "abliterated-model",
+        "abliterated-model-large",
+        "abliterated-model-large-v2"
+      ],
+      "search_text": "Send images to abliteration.ai Send images alongside text on the OpenAI Chat Completions and Anthropic Messages surfaces. Send images to abliteration.ai Limits OpenAI Chat Completions Anthropic Messages //api.abliteration.ai/v1/chat/completions //api.abliteration.ai/v1/messages //docs.abliteration.ai/llms.txt /Note /gif /jpeg /json /png /webp ABLIT_KEY abliterated-model abliterated-model-large abliterated-model-large-v2"
+    },
+    {
+      "source_id": "abliteration-doc-f94a8a8970d72b61",
+      "title": "Request safety filtering",
+      "canonical_locator": "https://docs.abliteration.ai/capabilities/request-safety-filtering.md",
+      "summary": "Reject requests whose content matches moderation categories you choose — per request, with no policy setup, via the flagged_categories parameter.",
+      "category": "capabilities",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:eabc63cd01d980e031968ce07bd1aaa3747c8ffa16da55afe383f9b466590be0",
+      "content_bytes": 4164,
+      "word_count": 471,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Request safety filtering"
+        },
+        {
+          "level": 2,
+          "text": "Parameter"
+        },
+        {
+          "level": 2,
+          "text": "Categories"
+        },
+        {
+          "level": 2,
+          "text": "Always blocked"
+        },
+        {
+          "level": 2,
+          "text": "Example"
+        },
+        {
+          "level": 2,
+          "text": "Rejection"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/v1/chat/completions",
+        "//api.abliteration.ai/v1/messages",
+        "//docs.abliteration.ai/llms.txt",
+        "/CodeGroup",
+        "/Note",
+        "/deny",
+        "/json",
+        "/policy-gateway/overview",
+        "/v1/chat/completions",
+        "/v1/messages"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/v1/chat/completions",
+        "//api.abliteration.ai/v1/messages",
+        "//docs.abliteration.ai/llms.txt",
+        "/CodeGroup",
+        "/Note",
+        "/deny",
+        "/json",
+        "/policy-gateway/overview",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Request safety filtering Reject requests whose content matches moderation categories you choose — per request, with no policy setup, via the flagged_categories parameter. Request safety filtering Parameter Categories Always blocked Example Rejection //api.abliteration.ai/v1/chat/completions //api.abliteration.ai/v1/messages //docs.abliteration.ai/llms.txt /CodeGroup /Note /deny /json /policy-gateway/overview /v1/chat/completions /v1/messages ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-ee930ec1988eb025",
+      "title": "Streaming policy metadata",
+      "canonical_locator": "https://docs.abliteration.ai/capabilities/streaming-policy-metadata.md",
+      "summary": "On `/policy/*` endpoints, abliteration.ai injects a policy object into every streaming frame so clients can render compliance UI.",
+      "category": "capabilities",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:f68a659e295ff15f635b08c54a841eb37753c4d4c7d0198bc54bfa287dd004fd",
+      "content_bytes": 2977,
+      "word_count": 348,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Streaming policy metadata"
+        },
+        {
+          "level": 2,
+          "text": "Enabling"
+        },
+        {
+          "level": 2,
+          "text": "Frame shape"
+        },
+        {
+          "level": 2,
+          "text": "Fields"
+        },
+        {
+          "level": 2,
+          "text": "Client example"
+        }
+      ],
+      "api_paths": [
+        "//",
+        "//api.abliteration.ai/policy/messages",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/json",
+        "/policy-gateway/connectors",
+        "/policy-gateway/overview",
+        "/policy/*",
+        "/policy/messages",
+        "/v1/*"
+      ],
+      "symbols": [
+        "//",
+        "//api.abliteration.ai/policy/messages",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/json",
+        "/policy-gateway/connectors",
+        "/policy-gateway/overview",
+        "/policy/*",
+        "/policy/messages",
+        "/v1/*",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Streaming policy metadata On `/policy/*` endpoints, abliteration.ai injects a policy object into every streaming frame so clients can render compliance UI. Streaming policy metadata Enabling Frame shape Fields Client example // //api.abliteration.ai/policy/messages //docs.abliteration.ai/llms.txt /Note /json /policy-gateway/connectors /policy-gateway/overview /policy/* /policy/messages /v1/* ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-ac42b5b269e961e4",
+      "title": "Stream tokens from abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/capabilities/streaming.md",
+      "summary": "Stream abliteration.ai responses as server-sent events to reduce time-to-first-token.",
+      "category": "capabilities",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:cdb130aa2fdf6d033a9c4ca9a94a8a32cb64e912d3812d2bd28c7b7686b0cda4",
+      "content_bytes": 2461,
+      "word_count": 307,
+      "last_modified": "Tue, 01 Sep 2026 04:55:55 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Stream tokens from abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Tool calls in streams"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/v1",
+        "//api.abliteration.ai/v1/chat/completions",
+        "//developer.mozilla.org/en-US/docs/Web/API/Server-sent_events",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/Tab",
+        "/Tabs",
+        "/capabilities/tool-calling",
+        "/json"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/v1",
+        "//api.abliteration.ai/v1/chat/completions",
+        "//developer.mozilla.org/en-US/docs/Web/API/Server-sent_events",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/Tab",
+        "/Tabs",
+        "/capabilities/tool-calling",
+        "/json",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Stream tokens from abliteration.ai Stream abliteration.ai responses as server-sent events to reduce time-to-first-token. Stream tokens from abliteration.ai Tool calls in streams //api.abliteration.ai/v1 //api.abliteration.ai/v1/chat/completions //developer.mozilla.org/en-US/docs/Web/API/Server-sent_events //docs.abliteration.ai/llms.txt /Note /Tab /Tabs /capabilities/tool-calling /json ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-c1964220fb2a8a19",
+      "title": "Thinking and reasoning effort",
+      "canonical_locator": "https://docs.abliteration.ai/capabilities/thinking.md",
+      "summary": "All abliteration.ai models reason before answering. Tune depth, disable reasoning where supported, or hide the trace across Chat Completions, Responses, and Anthropic Messages.",
+      "category": "capabilities",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:a6f0a48b30d1d5b240fd15fe73bfbec0bcc093d769b7fba50a4d2a4811b5dc65",
+      "content_bytes": 6445,
+      "word_count": 811,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Thinking and reasoning effort"
+        },
+        {
+          "level": 2,
+          "text": "Effort levels"
+        },
+        {
+          "level": 2,
+          "text": "Setting effort per endpoint"
+        },
+        {
+          "level": 2,
+          "text": "Where the reasoning trace appears"
+        },
+        {
+          "level": 2,
+          "text": "Disabling vs. hiding reasoning"
+        },
+        {
+          "level": 2,
+          "text": "Defaults"
+        },
+        {
+          "level": 2,
+          "text": "Examples"
+        },
+        {
+          "level": 3,
+          "text": "Chat Completions"
+        },
+        {
+          "level": 3,
+          "text": "Responses"
+        },
+        {
+          "level": 3,
+          "text": "Anthropic Messages"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/v1/chat/completions",
+        "//api.abliteration.ai/v1/messages",
+        "//api.abliteration.ai/v1/responses",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/json",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/responses"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/v1/chat/completions",
+        "//api.abliteration.ai/v1/messages",
+        "//api.abliteration.ai/v1/responses",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/json",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/responses",
+        "ABLIT_KEY",
+        "abliterated-model",
+        "abliterated-model-large",
+        "abliterated-model-large-v2"
+      ],
+      "search_text": "Thinking and reasoning effort All abliteration.ai models reason before answering. Tune depth, disable reasoning where supported, or hide the trace across Chat Completions, Responses, and Anthropic Messages. Thinking and reasoning effort Effort levels Setting effort per endpoint Where the reasoning trace appears Disabling vs. hiding reasoning Defaults Examples Chat Completions Responses Anthropic Messages //api.abliteration.ai/v1/chat/completions //api.abliteration.ai/v1/messages //api.abliteration.ai/v1/responses //docs.abliteration.ai/llms.txt /Note /json /v1/chat/completions /v1/messages /v1/responses ABLIT_KEY abliterated-model abliterated-model-large abliterated-model-large-v2"
+    },
+    {
+      "source_id": "abliteration-doc-958d5857aa9e569f",
+      "title": "Tool calling on abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/capabilities/tool-calling.md",
+      "summary": "Function calling on abliteration.ai across all three API surfaces. Pick the format that matches your client.",
+      "category": "capabilities",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:6b292d9feb930dea70ab9ad9e748489abdbda46e5c9d0682ac366567bc2df660",
+      "content_bytes": 1978,
+      "word_count": 212,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Tool calling on abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Quick comparison"
+        }
+      ],
+      "api_paths": [
+        "//docs.abliteration.ai/llms.txt",
+        "/Card",
+        "/CardGroup",
+        "/capabilities/tool-calling/anthropic-messages",
+        "/capabilities/tool-calling/openai-chat-completions",
+        "/capabilities/tool-calling/openai-responses"
+      ],
+      "symbols": [
+        "//docs.abliteration.ai/llms.txt",
+        "/Card",
+        "/CardGroup",
+        "/capabilities/tool-calling/anthropic-messages",
+        "/capabilities/tool-calling/openai-chat-completions",
+        "/capabilities/tool-calling/openai-responses"
+      ],
+      "search_text": "Tool calling on abliteration.ai Function calling on abliteration.ai across all three API surfaces. Pick the format that matches your client. Tool calling on abliteration.ai Quick comparison //docs.abliteration.ai/llms.txt /Card /CardGroup /capabilities/tool-calling/anthropic-messages /capabilities/tool-calling/openai-chat-completions /capabilities/tool-calling/openai-responses"
+    },
+    {
+      "source_id": "abliteration-doc-07446d6c3f7cc6df",
+      "title": "Anthropic Messages",
+      "canonical_locator": "https://docs.abliteration.ai/capabilities/tool-calling/anthropic-messages.md",
+      "summary": "Tool calling on /v1/messages — input_schema definition, tool_use response blocks, tool_result continuation blocks.",
+      "category": "capabilities",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:e306df9b9eea860f949c6710145c24d4d244538d1ec2cb40bc857acf047aa3c2",
+      "content_bytes": 2266,
+      "word_count": 260,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Anthropic Messages"
+        },
+        {
+          "level": 2,
+          "text": "Define a tool"
+        },
+        {
+          "level": 2,
+          "text": "Full loop"
+        },
+        {
+          "level": 2,
+          "text": "Streaming"
+        },
+        {
+          "level": 2,
+          "text": "Forcing a tool"
+        },
+        {
+          "level": 2,
+          "text": "Parallel tool calls"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai",
+        "//docs.abliteration.ai/llms.txt",
+        "/v1/messages"
+      ],
+      "symbols": [
+        "//api.abliteration.ai",
+        "//docs.abliteration.ai/llms.txt",
+        "/v1/messages",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Anthropic Messages Tool calling on /v1/messages — input_schema definition, tool_use response blocks, tool_result continuation blocks. Anthropic Messages Define a tool Full loop Streaming Forcing a tool Parallel tool calls //api.abliteration.ai //docs.abliteration.ai/llms.txt /v1/messages ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-5d360bf0547d41b3",
+      "title": "OpenAI Chat Completions",
+      "canonical_locator": "https://docs.abliteration.ai/capabilities/tool-calling/openai-chat-completions.md",
+      "summary": "Tool calling on /v1/chat/completions — define tools, handle the call/execute/continue loop, and stream tool arguments.",
+      "category": "capabilities",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:46ffb624e5ea92f41fe4e161db99d7bc9f4d1e4d62e31f2d3b54de0c36742825",
+      "content_bytes": 2175,
+      "word_count": 257,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "OpenAI Chat Completions"
+        },
+        {
+          "level": 2,
+          "text": "Define a tool"
+        },
+        {
+          "level": 2,
+          "text": "Full loop"
+        },
+        {
+          "level": 2,
+          "text": "Streaming"
+        },
+        {
+          "level": 2,
+          "text": "Forcing a tool"
+        },
+        {
+          "level": 2,
+          "text": "Parallel tool calls"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/capabilities/streaming",
+        "/execute/continue",
+        "/v1/chat/completions"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/capabilities/streaming",
+        "/execute/continue",
+        "/v1/chat/completions",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "OpenAI Chat Completions Tool calling on /v1/chat/completions — define tools, handle the call/execute/continue loop, and stream tool arguments. OpenAI Chat Completions Define a tool Full loop Streaming Forcing a tool Parallel tool calls //api.abliteration.ai/v1 //docs.abliteration.ai/llms.txt /capabilities/streaming /execute/continue /v1/chat/completions ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-1a633800aad0abfd",
+      "title": "OpenAI Responses API",
+      "canonical_locator": "https://docs.abliteration.ai/capabilities/tool-calling/openai-responses.md",
+      "summary": "Tool calling on /v1/responses — flat function schema, function_call items in output[], function_call_output continuation.",
+      "category": "capabilities",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:d643429dd96825f221ea6d1515b5bf54de8a0540e5042550771f57cacf6ae1ac",
+      "content_bytes": 2047,
+      "word_count": 234,
+      "last_modified": "Tue, 01 Sep 2026 04:55:55 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "OpenAI Responses API"
+        },
+        {
+          "level": 2,
+          "text": "Define a tool"
+        },
+        {
+          "level": 2,
+          "text": "Full loop"
+        },
+        {
+          "level": 2,
+          "text": "Streaming"
+        },
+        {
+          "level": 2,
+          "text": "Forcing a tool"
+        },
+        {
+          "level": 2,
+          "text": "Parallel tool calls"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/v1/responses"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/v1/responses",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "OpenAI Responses API Tool calling on /v1/responses — flat function schema, function_call items in output[], function_call_output continuation. OpenAI Responses API Define a tool Full loop Streaming Forcing a tool Parallel tool calls //api.abliteration.ai/v1 //docs.abliteration.ai/llms.txt /v1/responses ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-dc0975b1f0b5fcf6",
+      "title": "Send video to abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/capabilities/video.md",
+      "summary": "Send short video clips alongside text on the OpenAI Chat Completions surface, either base64-inlined or as an HTTPS URL.",
+      "category": "capabilities",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:decbf06bc428090059fbddc30dcaebe5561af5e7938f15e6a343be4c0fb150ea",
+      "content_bytes": 2231,
+      "word_count": 237,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Send video to abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Endpoints"
+        },
+        {
+          "level": 2,
+          "text": "Limits"
+        },
+        {
+          "level": 2,
+          "text": "OpenAI Chat Completions"
+        },
+        {
+          "level": 2,
+          "text": "Notes"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/console",
+        "//api.abliteration.ai/v1/chat/completions",
+        "//docs.abliteration.ai/llms.txt",
+        "//example.com/clip.mp4",
+        "/Note",
+        "/json",
+        "/mp4",
+        "/policy/chat/completions",
+        "/quicktime",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/responses",
+        "/webm"
+      ],
+      "symbols": [
+        "//abliteration.ai/console",
+        "//api.abliteration.ai/v1/chat/completions",
+        "//docs.abliteration.ai/llms.txt",
+        "//example.com/clip.mp4",
+        "/Note",
+        "/json",
+        "/mp4",
+        "/policy/chat/completions",
+        "/quicktime",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/responses",
+        "/webm",
+        "ABLIT_KEY",
+        "abliterated-model",
+        "abliterated-model-large",
+        "abliterated-model-large-v2"
+      ],
+      "search_text": "Send video to abliteration.ai Send short video clips alongside text on the OpenAI Chat Completions surface, either base64-inlined or as an HTTPS URL. Send video to abliteration.ai Endpoints Limits OpenAI Chat Completions Notes //abliteration.ai/console //api.abliteration.ai/v1/chat/completions //docs.abliteration.ai/llms.txt //example.com/clip.mp4 /Note /json /mp4 /policy/chat/completions /quicktime /v1/chat/completions /v1/messages /v1/responses /webm ABLIT_KEY abliterated-model abliterated-model-large abliterated-model-large-v2"
+    },
+    {
+      "source_id": "abliteration-doc-8d21f157c708620f",
+      "title": "Web fetch on abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/capabilities/web-fetch.md",
+      "summary": "Server-side web fetch on abliteration.ai — let the model pull and read a specific URL via the Anthropic Messages API.",
+      "category": "capabilities",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:0c63b0606565be729860ac4d7116f99feed4699e72a6c968a4ebac4079fc62c5",
+      "content_bytes": 1638,
+      "word_count": 201,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Web fetch on abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Usage"
+        },
+        {
+          "level": 2,
+          "text": "Response blocks"
+        },
+        {
+          "level": 2,
+          "text": "Not available on OpenAI"
+        },
+        {
+          "level": 2,
+          "text": "Domain allow/block"
+        }
+      ],
+      "api_paths": [
+        "//docs.abliteration.ai/llms.txt",
+        "//example.com/post",
+        "/block",
+        "/capabilities/web-search",
+        "/policy-gateway/onboarding",
+        "/v1/chat/completions",
+        "/v1/responses"
+      ],
+      "symbols": [
+        "//docs.abliteration.ai/llms.txt",
+        "//example.com/post",
+        "/block",
+        "/capabilities/web-search",
+        "/policy-gateway/onboarding",
+        "/v1/chat/completions",
+        "/v1/responses",
+        "abliterated-model"
+      ],
+      "search_text": "Web fetch on abliteration.ai Server-side web fetch on abliteration.ai — let the model pull and read a specific URL via the Anthropic Messages API. Web fetch on abliteration.ai Usage Response blocks Not available on OpenAI Domain allow/block //docs.abliteration.ai/llms.txt //example.com/post /block /capabilities/web-search /policy-gateway/onboarding /v1/chat/completions /v1/responses abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-01985f93a0c26dad",
+      "title": "Web search on abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/capabilities/web-search.md",
+      "summary": "Enable web search on abliteration.ai across OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages — citations included.",
+      "category": "capabilities",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:5a5ba69276f6c71c38d2b7214e042d3a59ddb2d125d88c137336f2c77943ec83",
+      "content_bytes": 3656,
+      "word_count": 524,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Web search on abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Enable web search"
+        },
+        {
+          "level": 3,
+          "text": "Any account"
+        },
+        {
+          "level": 3,
+          "text": "Policy Gateway accounts"
+        },
+        {
+          "level": 4,
+          "text": "How ceilings merge with per-request filters"
+        },
+        {
+          "level": 2,
+          "text": "In practice"
+        },
+        {
+          "level": 3,
+          "text": "Codex CLI"
+        },
+        {
+          "level": 3,
+          "text": "Claude Code"
+        }
+      ],
+      "api_paths": [
+        "/.codex/config.toml",
+        "//abliteration.ai/console",
+        "//docs.abliteration.ai/llms.txt",
+        "//mintcdn.com/acme-c0f07daa/esggkRbkZyEOfVDk/images/claude-code-web-search.png",
+        "//mintcdn.com/acme-c0f07daa/esggkRbkZyEOfVDk/images/codex-web-search.png",
+        "/Card",
+        "/CardGroup",
+        "/Frame",
+        "/capabilities/web-search/anthropic-messages",
+        "/capabilities/web-search/openai-chat-completions",
+        "/capabilities/web-search/openai-responses",
+        "/claude-code-web-search.png",
+        "/codex-web-search.png",
+        "/integrations/claude-code",
+        "/integrations/codex",
+        "/or"
+      ],
+      "symbols": [
+        "/.codex/config.toml",
+        "//abliteration.ai/console",
+        "//docs.abliteration.ai/llms.txt",
+        "//mintcdn.com/acme-c0f07daa/esggkRbkZyEOfVDk/images/claude-code-web-search.png",
+        "//mintcdn.com/acme-c0f07daa/esggkRbkZyEOfVDk/images/codex-web-search.png",
+        "/Card",
+        "/CardGroup",
+        "/Frame",
+        "/capabilities/web-search/anthropic-messages",
+        "/capabilities/web-search/openai-chat-completions",
+        "/capabilities/web-search/openai-responses",
+        "/claude-code-web-search.png",
+        "/codex-web-search.png",
+        "/integrations/claude-code",
+        "/integrations/codex",
+        "/or"
+      ],
+      "search_text": "Web search on abliteration.ai Enable web search on abliteration.ai across OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages — citations included. Web search on abliteration.ai Enable web search Any account Policy Gateway accounts How ceilings merge with per-request filters In practice Codex CLI Claude Code /.codex/config.toml //abliteration.ai/console //docs.abliteration.ai/llms.txt //mintcdn.com/acme-c0f07daa/esggkRbkZyEOfVDk/images/claude-code-web-search.png //mintcdn.com/acme-c0f07daa/esggkRbkZyEOfVDk/images/codex-web-search.png /Card /CardGroup /Frame /capabilities/web-search/anthropic-messages /capabilities/web-search/openai-chat-completions /capabilities/web-search/openai-responses /claude-code-web-search.png /codex-web-search.png /integrations/claude-code /integrations/codex /or"
+    },
+    {
+      "source_id": "abliteration-doc-946420014aeffdfc",
+      "title": "Anthropic Messages",
+      "canonical_locator": "https://docs.abliteration.ai/capabilities/web-search/anthropic-messages.md",
+      "summary": "Server-side web search on /v1/messages via the tools array, with native allowed_domains and blocked_domains at the tool's top level.",
+      "category": "capabilities",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:863d45c29a5210d1ab11fff39913ec4feafc7663902c00963a1d37444cfdb87a",
+      "content_bytes": 3657,
+      "word_count": 362,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Anthropic Messages"
+        },
+        {
+          "level": 2,
+          "text": "Request"
+        },
+        {
+          "level": 2,
+          "text": "With allow and block lists (Anthropic native shape)"
+        },
+        {
+          "level": 2,
+          "text": "Fields"
+        },
+        {
+          "level": 2,
+          "text": "Response shape"
+        },
+        {
+          "level": 2,
+          "text": "Project-level enforcement"
+        },
+        {
+          "level": 2,
+          "text": "Multi-turn caveat"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai",
+        "//docs.abliteration.ai/llms.txt",
+        "/Los_Angeles",
+        "/block",
+        "/policy-gateway/overview",
+        "/v1/messages"
+      ],
+      "symbols": [
+        "//api.abliteration.ai",
+        "//docs.abliteration.ai/llms.txt",
+        "/Los_Angeles",
+        "/block",
+        "/policy-gateway/overview",
+        "/v1/messages",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Anthropic Messages Server-side web search on /v1/messages via the tools array, with native allowed_domains and blocked_domains at the tool's top level. Anthropic Messages Request With allow and block lists (Anthropic native shape) Fields Response shape Project-level enforcement Multi-turn caveat //api.abliteration.ai //docs.abliteration.ai/llms.txt /Los_Angeles /block /policy-gateway/overview /v1/messages ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-5db7448c89087ab1",
+      "title": "OpenAI Chat Completions",
+      "canonical_locator": "https://docs.abliteration.ai/capabilities/web-search/openai-chat-completions.md",
+      "summary": "Server-side web search on /v1/chat/completions via the web_search_options request field.",
+      "category": "capabilities",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:dd15365b910ed2c53de5334e48af474d6d297c2fce6a8eedd23a62f7ffb04de9",
+      "content_bytes": 2162,
+      "word_count": 240,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "OpenAI Chat Completions"
+        },
+        {
+          "level": 2,
+          "text": "Request"
+        },
+        {
+          "level": 2,
+          "text": "Options"
+        },
+        {
+          "level": 2,
+          "text": "Domain restrictions"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/console",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/block**",
+        "/capabilities/web-search/anthropic-messages",
+        "/capabilities/web-search/openai-responses",
+        "/v1/chat/completions"
+      ],
+      "symbols": [
+        "//abliteration.ai/console",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/block**",
+        "/capabilities/web-search/anthropic-messages",
+        "/capabilities/web-search/openai-responses",
+        "/v1/chat/completions",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "OpenAI Chat Completions Server-side web search on /v1/chat/completions via the web_search_options request field. OpenAI Chat Completions Request Options Domain restrictions //abliteration.ai/console //api.abliteration.ai/v1 //docs.abliteration.ai/llms.txt /block** /capabilities/web-search/anthropic-messages /capabilities/web-search/openai-responses /v1/chat/completions ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-0a3558fa6a34a992",
+      "title": "OpenAI Responses API",
+      "canonical_locator": "https://docs.abliteration.ai/capabilities/web-search/openai-responses.md",
+      "summary": "Server-side web search on /v1/responses via the tools array, with OpenAI's native tools_options.web_search.filters.include_domains allow list.",
+      "category": "capabilities",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:3f670896463f09ce92c87140d87c4deb6836a2353ec0f4c02b135ca903aa26bd",
+      "content_bytes": 2987,
+      "word_count": 313,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "OpenAI Responses API"
+        },
+        {
+          "level": 2,
+          "text": "Request"
+        },
+        {
+          "level": 2,
+          "text": "With an allow list (OpenAI native shape)"
+        },
+        {
+          "level": 2,
+          "text": "Forced search and lifecycle events"
+        },
+        {
+          "level": 2,
+          "text": "Project-level enforcement"
+        }
+      ],
+      "api_paths": [
+        "//",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/block",
+        "/policy-gateway/overview",
+        "/v1/responses"
+      ],
+      "symbols": [
+        "//",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/block",
+        "/policy-gateway/overview",
+        "/v1/responses",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "OpenAI Responses API Server-side web search on /v1/responses via the tools array, with OpenAI's native tools_options.web_search.filters.include_domains allow list. OpenAI Responses API Request With an allow list (OpenAI native shape) Forced search and lifecycle events Project-level enforcement // //api.abliteration.ai/v1 //docs.abliteration.ai/llms.txt /block /policy-gateway/overview /v1/responses ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-bd572bc189c1257b",
+      "title": "Compatibility matrix",
+      "canonical_locator": "https://docs.abliteration.ai/compatibility-matrix.md",
+      "summary": "What abliteration.ai supports across OpenAI Chat Completions, Responses, Anthropic Messages, and Count Tokens surfaces.",
+      "category": "getting-started-reference",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:e9e7da1b9677b3d122d73917cff42d48f3b3fb4aefb1a9b05ed45bb8a23e13a6",
+      "content_bytes": 5759,
+      "word_count": 316,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Compatibility matrix"
+        },
+        {
+          "level": 2,
+          "text": "OpenAI — Chat Completions"
+        },
+        {
+          "level": 2,
+          "text": "OpenAI — Responses API"
+        },
+        {
+          "level": 2,
+          "text": "Anthropic — Messages API"
+        },
+        {
+          "level": 2,
+          "text": "Anthropic — Count Tokens"
+        },
+        {
+          "level": 2,
+          "text": "Policy-governed endpoints"
+        }
+      ],
+      "api_paths": [
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/api/policy-endpoints",
+        "/capabilities/count-tokens",
+        "/policy/*",
+        "/policy/chat/completions",
+        "/policy/messages",
+        "/policy/responses",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+        "/v1/responses"
+      ],
+      "symbols": [
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/api/policy-endpoints",
+        "/capabilities/count-tokens",
+        "/policy/*",
+        "/policy/chat/completions",
+        "/policy/messages",
+        "/policy/responses",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+        "/v1/responses",
+        "abliterated-model",
+        "abliterated-model-large",
+        "abliterated-model-large-v2"
+      ],
+      "search_text": "Compatibility matrix What abliteration.ai supports across OpenAI Chat Completions, Responses, Anthropic Messages, and Count Tokens surfaces. Compatibility matrix OpenAI — Chat Completions OpenAI — Responses API Anthropic — Messages API Anthropic — Count Tokens Policy-governed endpoints //docs.abliteration.ai/llms.txt /Note /api/policy-endpoints /capabilities/count-tokens /policy/* /policy/chat/completions /policy/messages /policy/responses /v1/chat/completions /v1/messages /v1/messages/count_tokens /v1/responses abliterated-model abliterated-model-large abliterated-model-large-v2"
+    },
+    {
+      "source_id": "abliteration-doc-688fcaafdcde74c1",
+      "title": "FAQ",
+      "canonical_locator": "https://docs.abliteration.ai/faq.md",
+      "summary": "Frequently asked questions about abliteration.ai — compatibility, models, retention, and the Policy Gateway.",
+      "category": "getting-started-reference",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:57acee1f9bf1e013a412ab8d3e4b648e4fb443dcb18763afdc3493398b468648",
+      "content_bytes": 6404,
+      "word_count": 919,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "FAQ"
+        },
+        {
+          "level": 2,
+          "text": "Is abliteration.ai OpenAI-compatible?"
+        },
+        {
+          "level": 2,
+          "text": "Is abliteration.ai uncensored?"
+        },
+        {
+          "level": 2,
+          "text": "Does `abliterated-model` refuse requests?"
+        },
+        {
+          "level": 2,
+          "text": "Can I turn off thinking / reasoning?"
+        },
+        {
+          "level": 2,
+          "text": "Is `abliterated-model` a reasoning model?"
+        },
+        {
+          "level": 2,
+          "text": "How is abliteration.ai different from OpenAI or Anthropic?"
+        },
+        {
+          "level": 2,
+          "text": "Can I use my existing OpenAI SDK with abliteration.ai?"
+        },
+        {
+          "level": 2,
+          "text": "Do you also support the Anthropic Messages API?"
+        },
+        {
+          "level": 2,
+          "text": "Does Claude Code work with abliteration.ai?"
+        },
+        {
+          "level": 2,
+          "text": "Does Claude Cowork work with abliteration.ai?"
+        },
+        {
+          "level": 2,
+          "text": "Can I send images?"
+        },
+        {
+          "level": 2,
+          "text": "Can I send video?"
+        },
+        {
+          "level": 2,
+          "text": "Do you support streaming?"
+        },
+        {
+          "level": 2,
+          "text": "Do you support tool / function calling?"
+        },
+        {
+          "level": 2,
+          "text": "What model IDs are available?"
+        },
+        {
+          "level": 2,
+          "text": "Do you support embeddings?"
+        },
+        {
+          "level": 2,
+          "text": "Do you support structured outputs (`response_format`)?"
+        },
+        {
+          "level": 2,
+          "text": "Do you support web search?"
+        },
+        {
+          "level": 2,
+          "text": "Do you support web fetch?"
+        },
+        {
+          "level": 2,
+          "text": "Can I count tokens before sending?"
+        },
+        {
+          "level": 2,
+          "text": "How much does it cost?"
+        },
+        {
+          "level": 2,
+          "text": "How do I get an API key?"
+        },
+        {
+          "level": 2,
+          "text": "Do you retain my prompts?"
+        },
+        {
+          "level": 2,
+          "text": "Do your models have safety filters?"
+        },
+        {
+          "level": 2,
+          "text": "What's the difference between `/v1/*` and `/policy/*`?"
+        },
+        {
+          "level": 2,
+          "text": "Where do I report a bug?"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/console",
+        "//api.abliteration.ai",
+        "//api.abliteration.ai/v1",
+        "//api.abliteration.ai/v1/messages",
+        "//docs.abliteration.ai/llms.txt",
+        "/api/anthropic-compatibility",
+        "/api/openai-compatibility",
+        "/api/policy-endpoints",
+        "/authentication",
+        "/capabilities/count-tokens",
+        "/capabilities/images",
+        "/capabilities/request-safety-filtering",
+        "/capabilities/streaming",
+        "/capabilities/thinking",
+        "/capabilities/tool-calling",
+        "/capabilities/video",
+        "/capabilities/web-fetch",
+        "/capabilities/web-search",
+        "/compatibility-matrix",
+        "/integrations/claude-code",
+        "/integrations/claude-cowork",
+        "/integrations/node",
+        "/integrations/python",
+        "/models",
+        "/policy-gateway/overview",
+        "/policy-gateway/security",
+        "/policy/*",
+        "/pricing",
+        "/quickstart",
+        "/v1/*",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+        "/what-is-abliteration"
+      ],
+      "symbols": [
+        "//abliteration.ai/console",
+        "//api.abliteration.ai",
+        "//api.abliteration.ai/v1",
+        "//api.abliteration.ai/v1/messages",
+        "//docs.abliteration.ai/llms.txt",
+        "/api/anthropic-compatibility",
+        "/api/openai-compatibility",
+        "/api/policy-endpoints",
+        "/authentication",
+        "/capabilities/count-tokens",
+        "/capabilities/images",
+        "/capabilities/request-safety-filtering",
+        "/capabilities/streaming",
+        "/capabilities/thinking",
+        "/capabilities/tool-calling",
+        "/capabilities/video",
+        "/capabilities/web-fetch",
+        "/capabilities/web-search",
+        "/compatibility-matrix",
+        "/integrations/claude-code",
+        "/integrations/claude-cowork",
+        "/integrations/node",
+        "/integrations/python",
+        "/models",
+        "/policy-gateway/overview",
+        "/policy-gateway/security",
+        "/policy/*",
+        "/pricing",
+        "/quickstart",
+        "/v1/*",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/messages/count_tokens",
+        "/what-is-abliteration",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "abliterated-model",
+        "abliterated-model-large",
+        "abliterated-model-large-v2"
+      ],
+      "search_text": "FAQ Frequently asked questions about abliteration.ai — compatibility, models, retention, and the Policy Gateway. FAQ Is abliteration.ai OpenAI-compatible? Is abliteration.ai uncensored? Does `abliterated-model` refuse requests? Can I turn off thinking / reasoning? Is `abliterated-model` a reasoning model? How is abliteration.ai different from OpenAI or Anthropic? Can I use my existing OpenAI SDK with abliteration.ai? Do you also support the Anthropic Messages API? Does Claude Code work with abliteration.ai? Does Claude Cowork work with abliteration.ai? Can I send images? Can I send video? Do you support streaming? Do you support tool / function calling? What model IDs are available? Do you support embeddings? Do you support structured outputs (`response_format`)? Do you support web search? Do you support web fetch? Can I count tokens before sending? How much does it cost? How do I get an API key? Do you retain my prompts? Do your models have safety filters? What's the difference between `/v1/*` and `/policy/*`? Where do I report a bug? //abliteration.ai/console //api.abliteration.ai //api.abliteration.ai/v1 //api.abliteration.ai/v1/messages //docs.abliteration.ai/llms.txt /api/anthropic-compatibility /api/openai-compatibility /api/policy-endpoints /authentication /capabilities/count-tokens /capabilities/images /capabilities/request-safety-filtering /capabilities/streaming /capabilities/thinking /capabilities/tool-calling /capabilities/video /capabilities/web-fetch /capabilities/web-search /compatibility-matrix /integrations/claude-code /integrations/claude-cowork /integrations/node /integrations/python /models /policy-gateway/overview /policy-gateway/security /policy/* /pricing /quickstart /v1/* /v1/chat/completions /v1/messages /v1/messages/count_tokens /what-is-abliteration ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL abliterated-model abliterated-model-large abliterated-model-large-v2"
+    },
+    {
+      "source_id": "abliteration-doc-ca84d187d53912eb",
+      "title": "abliteration.ai documentation",
+      "canonical_locator": "https://docs.abliteration.ai/index.md",
+      "summary": "abliteration.ai is an inference API for unrestricted, uncensored models, compatible with the OpenAI and Anthropic SDKs, with a built-in policy gateway.",
+      "category": "getting-started-reference",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:c7840abf2b5941fbf4bb0f0cee714cb37178faad70a71797eb1176bd74d1454c",
+      "content_bytes": 2449,
+      "word_count": 320,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "abliteration.ai documentation"
+        },
+        {
+          "level": 2,
+          "text": "Common tasks"
+        },
+        {
+          "level": 2,
+          "text": "SDKs"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai",
+        "//docs.abliteration.ai/llms.txt",
+        "/Card",
+        "/CardGroup",
+        "/api/introduction",
+        "/capabilities/count-tokens",
+        "/capabilities/streaming",
+        "/capabilities/tool-calling",
+        "/capabilities/web-search",
+        "/compatibility-matrix",
+        "/integrations/langchain",
+        "/integrations/node",
+        "/integrations/python",
+        "/integrations/vercel-ai-sdk",
+        "/policy-gateway/overview",
+        "/policy/",
+        "/quickstart",
+        "/what-is-abliteration"
+      ],
+      "symbols": [
+        "//abliteration.ai",
+        "//docs.abliteration.ai/llms.txt",
+        "/Card",
+        "/CardGroup",
+        "/api/introduction",
+        "/capabilities/count-tokens",
+        "/capabilities/streaming",
+        "/capabilities/tool-calling",
+        "/capabilities/web-search",
+        "/compatibility-matrix",
+        "/integrations/langchain",
+        "/integrations/node",
+        "/integrations/python",
+        "/integrations/vercel-ai-sdk",
+        "/policy-gateway/overview",
+        "/policy/",
+        "/quickstart",
+        "/what-is-abliteration"
+      ],
+      "search_text": "abliteration.ai documentation abliteration.ai is an inference API for unrestricted, uncensored models, compatible with the OpenAI and Anthropic SDKs, with a built-in policy gateway. abliteration.ai documentation Common tasks SDKs //abliteration.ai //docs.abliteration.ai/llms.txt /Card /CardGroup /api/introduction /capabilities/count-tokens /capabilities/streaming /capabilities/tool-calling /capabilities/web-search /compatibility-matrix /integrations/langchain /integrations/node /integrations/python /integrations/vercel-ai-sdk /policy-gateway/overview /policy/ /quickstart /what-is-abliteration"
+    },
+    {
+      "source_id": "abliteration-doc-1b2589ef19fc0d84",
+      "title": "Use CC Switch with abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/cc-switch.md",
+      "summary": "Add abliteration.ai as a provider in CC Switch and point Claude Code or Codex at its Anthropic- and OpenAI-compatible API in one click.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:f3a14d5a9ce9dc63a54b7457176052b87e893198fb78ed41631917c88d389b81",
+      "content_bytes": 3786,
+      "word_count": 495,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Use CC Switch with abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Install"
+        },
+        {
+          "level": 2,
+          "text": "Get an API key"
+        },
+        {
+          "level": 2,
+          "text": "Add abliteration.ai as a provider"
+        },
+        {
+          "level": 2,
+          "text": "Switch to it"
+        },
+        {
+          "level": 2,
+          "text": "Verify"
+        },
+        {
+          "level": 1,
+          "text": "Claude Code"
+        },
+        {
+          "level": 1,
+          "text": "Codex"
+        },
+        {
+          "level": 2,
+          "text": "Notes"
+        }
+      ],
+      "api_paths": [
+        "/.codex/config.toml",
+        "//abliteration.ai/console",
+        "//api.abliteration.ai",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "//github.com/farion1231/cc-switch",
+        "//github.com/farion1231/cc-switch/releases",
+        "/Note",
+        "/Sonnet/Opus",
+        "/Tab",
+        "/Tabs",
+        "/integrations/codex"
+      ],
+      "symbols": [
+        "/.codex/config.toml",
+        "//abliteration.ai/console",
+        "//api.abliteration.ai",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "//github.com/farion1231/cc-switch",
+        "//github.com/farion1231/cc-switch/releases",
+        "/Note",
+        "/Sonnet/Opus",
+        "/Tab",
+        "/Tabs",
+        "/integrations/codex",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "YOUR_API_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Use CC Switch with abliteration.ai Add abliteration.ai as a provider in CC Switch and point Claude Code or Codex at its Anthropic- and OpenAI-compatible API in one click. Use CC Switch with abliteration.ai Install Get an API key Add abliteration.ai as a provider Switch to it Verify Claude Code Codex Notes /.codex/config.toml //abliteration.ai/console //api.abliteration.ai //api.abliteration.ai/v1 //docs.abliteration.ai/llms.txt //github.com/farion1231/cc-switch //github.com/farion1231/cc-switch/releases /Note /Sonnet/Opus /Tab /Tabs /integrations/codex ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL YOUR_API_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-6ce5f71904b1a855",
+      "title": "Use Claude Code with abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/claude-code.md",
+      "summary": "Route Anthropic's Claude Code CLI through abliteration.ai by setting two auth variables and picking how to surface abliterated-model.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:88b1bbc3af7a6d7d79896d96d3d2e41ff607bf1b1be5433cca34c9d7fd1e2704",
+      "content_bytes": 6104,
+      "word_count": 655,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Use Claude Code with abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Install"
+        },
+        {
+          "level": 2,
+          "text": "Step 1 — Set the auth variables"
+        },
+        {
+          "level": 2,
+          "text": "Step 2 — Surface `abliterated-model` in Claude Code"
+        },
+        {
+          "level": 3,
+          "text": "Replace the default Opus / Sonnet / Haiku models"
+        },
+        {
+          "level": 3,
+          "text": "Add `abliterated-model` to the picker"
+        },
+        {
+          "level": 2,
+          "text": "Step 3 — Persist your config"
+        },
+        {
+          "level": 3,
+          "text": "Option A — `~/.claude/settings.json`"
+        },
+        {
+          "level": 3,
+          "text": "Option B — Shell profile"
+        },
+        {
+          "level": 1,
+          "text": "Append to ~/.zshrc, ~/.bashrc, or ~/.profile"
+        },
+        {
+          "level": 1,
+          "text": "Reload"
+        },
+        {
+          "level": 2,
+          "text": "Context compaction"
+        },
+        {
+          "level": 2,
+          "text": "Headless mode"
+        },
+        {
+          "level": 2,
+          "text": "Notes"
+        }
+      ],
+      "api_paths": [
+        "/.bashrc",
+        "/.claude/settings.json",
+        "/.profile",
+        "/.zshrc",
+        "//api.abliteration.ai",
+        "//claude.ai/install.ps1",
+        "//claude.ai/install.sh",
+        "//docs.abliteration.ai/llms.txt",
+        "/CD",
+        "/CodeGroup",
+        "/Note",
+        "/model",
+        "/policy-gateway/overview"
+      ],
+      "symbols": [
+        "/.bashrc",
+        "/.claude/settings.json",
+        "/.profile",
+        "/.zshrc",
+        "//api.abliteration.ai",
+        "//claude.ai/install.ps1",
+        "//claude.ai/install.sh",
+        "//docs.abliteration.ai/llms.txt",
+        "/CD",
+        "/CodeGroup",
+        "/Note",
+        "/model",
+        "/policy-gateway/overview",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "YOUR_API_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Use Claude Code with abliteration.ai Route Anthropic's Claude Code CLI through abliteration.ai by setting two auth variables and picking how to surface abliterated-model. Use Claude Code with abliteration.ai Install Step 1 — Set the auth variables Step 2 — Surface `abliterated-model` in Claude Code Replace the default Opus / Sonnet / Haiku models Add `abliterated-model` to the picker Step 3 — Persist your config Option A — `~/.claude/settings.json` Option B — Shell profile Append to ~/.zshrc, ~/.bashrc, or ~/.profile Reload Context compaction Headless mode Notes /.bashrc /.claude/settings.json /.profile /.zshrc //api.abliteration.ai //claude.ai/install.ps1 //claude.ai/install.sh //docs.abliteration.ai/llms.txt /CD /CodeGroup /Note /model /policy-gateway/overview ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL YOUR_API_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-46c8d752485728f2",
+      "title": "Use Claude Cowork with abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/claude-cowork.md",
+      "summary": "Configure Claude Cowork on 3P (Claude Desktop's third-party inference mode) to route through abliteration.ai.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:6d917e8f63126fa1a13442e1de636be5c6db452dd767219a04bb6aa45fe73aef",
+      "content_bytes": 6311,
+      "word_count": 694,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Use Claude Cowork with abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Requirements"
+        },
+        {
+          "level": 2,
+          "text": "Configuration keys"
+        },
+        {
+          "level": 2,
+          "text": "Setup via the in-app UI"
+        },
+        {
+          "level": 2,
+          "text": "Setup via MDM"
+        },
+        {
+          "level": 3,
+          "text": "macOS"
+        },
+        {
+          "level": 3,
+          "text": "Windows"
+        },
+        {
+          "level": 2,
+          "text": "Authentication"
+        },
+        {
+          "level": 2,
+          "text": "Models"
+        },
+        {
+          "level": 2,
+          "text": "Verifying the install"
+        },
+        {
+          "level": 2,
+          "text": "Per-user policy"
+        },
+        {
+          "level": 2,
+          "text": "Data handling"
+        },
+        {
+          "level": 2,
+          "text": "Reference"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/console",
+        "//api.abliteration.ai",
+        "//claude.com/docs/cowork/3p/configuration",
+        "//claude.com/docs/cowork/3p/gateway",
+        "//claude.com/download",
+        "//docs.abliteration.ai/llms.txt",
+        "//support.claude.com/en/articles/14680729-use-claude-cowork-with-third-party-platforms",
+        "//support.claude.com/en/articles/14680741-install-and-configure-claude-cowork-with-third-party-platforms",
+        "/authentication",
+        "/capabilities/streaming-policy-metadata",
+        "/download",
+        "/key",
+        "/policy-gateway/security",
+        "/string",
+        "/v1/messages",
+        "/v1/models"
+      ],
+      "symbols": [
+        "//abliteration.ai/console",
+        "//api.abliteration.ai",
+        "//claude.com/docs/cowork/3p/configuration",
+        "//claude.com/docs/cowork/3p/gateway",
+        "//claude.com/download",
+        "//docs.abliteration.ai/llms.txt",
+        "//support.claude.com/en/articles/14680729-use-claude-cowork-with-third-party-platforms",
+        "//support.claude.com/en/articles/14680741-install-and-configure-claude-cowork-with-third-party-platforms",
+        "/authentication",
+        "/capabilities/streaming-policy-metadata",
+        "/download",
+        "/key",
+        "/policy-gateway/security",
+        "/string",
+        "/v1/messages",
+        "/v1/models",
+        "YOUR_API_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Use Claude Cowork with abliteration.ai Configure Claude Cowork on 3P (Claude Desktop's third-party inference mode) to route through abliteration.ai. Use Claude Cowork with abliteration.ai Requirements Configuration keys Setup via the in-app UI Setup via MDM macOS Windows Authentication Models Verifying the install Per-user policy Data handling Reference //abliteration.ai/console //api.abliteration.ai //claude.com/docs/cowork/3p/configuration //claude.com/docs/cowork/3p/gateway //claude.com/download //docs.abliteration.ai/llms.txt //support.claude.com/en/articles/14680729-use-claude-cowork-with-third-party-platforms //support.claude.com/en/articles/14680741-install-and-configure-claude-cowork-with-third-party-platforms /authentication /capabilities/streaming-policy-metadata /download /key /policy-gateway/security /string /v1/messages /v1/models YOUR_API_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-4571e2f076a02ef5",
+      "title": "Use CLIProxyAPI with abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/cli-proxy-api.md",
+      "summary": "Route CLIProxyAPI to abliteration.ai's OpenAI-compatible and Anthropic APIs with a copy-paste config.yaml, then point Claude Code or Codex at the local proxy.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:2bc4915d297d37d575820c0de8fe7e7c72664e28443c3cf584b33a4231432615",
+      "content_bytes": 3802,
+      "word_count": 524,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Use CLIProxyAPI with abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Install"
+        },
+        {
+          "level": 2,
+          "text": "Get an API key"
+        },
+        {
+          "level": 2,
+          "text": "Configure"
+        },
+        {
+          "level": 1,
+          "text": "Keys your local tools use to talk to the proxy (not your abliteration key)"
+        },
+        {
+          "level": 1,
+          "text": "abliteration.ai on the OpenAI-compatible surface"
+        },
+        {
+          "level": 1,
+          "text": "Optional: abliteration.ai on the Anthropic Messages surface"
+        },
+        {
+          "level": 2,
+          "text": "Run"
+        },
+        {
+          "level": 2,
+          "text": "Point your tools at the proxy"
+        },
+        {
+          "level": 2,
+          "text": "Verify"
+        },
+        {
+          "level": 2,
+          "text": "Notes"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/console",
+        "//api.abliteration.ai",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "//github.com/router-for-me/CLIProxyAPI",
+        "//github.com/router-for-me/CLIProxyAPI/releases",
+        "//help.router-for.me/",
+        "//localhost:8317",
+        "//localhost:8317/v1",
+        "//localhost:8317/v1/chat/completions",
+        "/Note",
+        "/Tab",
+        "/Tabs",
+        "/api/anthropic-compatibility",
+        "/api/openai-compatibility",
+        "/cli-proxy-api",
+        "/json",
+        "/response"
+      ],
+      "symbols": [
+        "//abliteration.ai/console",
+        "//api.abliteration.ai",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "//github.com/router-for-me/CLIProxyAPI",
+        "//github.com/router-for-me/CLIProxyAPI/releases",
+        "//help.router-for.me/",
+        "//localhost:8317",
+        "//localhost:8317/v1",
+        "//localhost:8317/v1/chat/completions",
+        "/Note",
+        "/Tab",
+        "/Tabs",
+        "/api/anthropic-compatibility",
+        "/api/openai-compatibility",
+        "/cli-proxy-api",
+        "/json",
+        "/response",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "YOUR_API_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Use CLIProxyAPI with abliteration.ai Route CLIProxyAPI to abliteration.ai's OpenAI-compatible and Anthropic APIs with a copy-paste config.yaml, then point Claude Code or Codex at the local proxy. Use CLIProxyAPI with abliteration.ai Install Get an API key Configure Keys your local tools use to talk to the proxy (not your abliteration key) abliteration.ai on the OpenAI-compatible surface Optional: abliteration.ai on the Anthropic Messages surface Run Point your tools at the proxy Verify Notes //abliteration.ai/console //api.abliteration.ai //api.abliteration.ai/v1 //docs.abliteration.ai/llms.txt //github.com/router-for-me/CLIProxyAPI //github.com/router-for-me/CLIProxyAPI/releases //help.router-for.me/ //localhost:8317 //localhost:8317/v1 //localhost:8317/v1/chat/completions /Note /Tab /Tabs /api/anthropic-compatibility /api/openai-compatibility /cli-proxy-api /json /response ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL OPENAI_API_KEY OPENAI_BASE_URL YOUR_API_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-41b963191cb002f6",
+      "title": "Cloudflare Workers",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/cloudflare-workers.md",
+      "summary": "Call abliteration.ai from any Cloudflare Worker with fetch — no SDK required.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:548971399ee81d408299ab64507b7c423e058f4323e14689a093d3d9a517ec83",
+      "content_bytes": 1527,
+      "word_count": 176,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Cloudflare Workers"
+        },
+        {
+          "level": 2,
+          "text": "Worker"
+        },
+        {
+          "level": 2,
+          "text": "Bind the key"
+        },
+        {
+          "level": 2,
+          "text": "Streaming"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/v1/chat/completions",
+        "//docs.abliteration.ai/llms.txt",
+        "/event-stream",
+        "/integrations/node",
+        "/json"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/v1/chat/completions",
+        "//docs.abliteration.ai/llms.txt",
+        "/event-stream",
+        "/integrations/node",
+        "/json",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Cloudflare Workers Call abliteration.ai from any Cloudflare Worker with fetch — no SDK required. Cloudflare Workers Worker Bind the key Streaming //api.abliteration.ai/v1/chat/completions //docs.abliteration.ai/llms.txt /event-stream /integrations/node /json ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-1054545bb925c9c6",
+      "title": "Use OpenAI Codex with abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/codex.md",
+      "summary": "Use OpenAI's Codex CLI with abliteration.ai by registering a custom provider in ~/.codex/config.toml.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:d24ea016738d4532d6eb1223b64de2023ec2f33f2989b784e6f77a4366ad447d",
+      "content_bytes": 3111,
+      "word_count": 437,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Use OpenAI Codex with abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Install"
+        },
+        {
+          "level": 2,
+          "text": "Configure"
+        },
+        {
+          "level": 2,
+          "text": "Run"
+        },
+        {
+          "level": 2,
+          "text": "Per-project config"
+        },
+        {
+          "level": 2,
+          "text": "Config precedence"
+        },
+        {
+          "level": 2,
+          "text": "Web search"
+        },
+        {
+          "level": 2,
+          "text": "Troubleshooting"
+        },
+        {
+          "level": 2,
+          "text": "Notes"
+        }
+      ],
+      "api_paths": [
+        "/.codex",
+        "/.codex/config.toml",
+        "/.codex/config.toml.",
+        "//abliteration.ai/console",
+        "//api.abliteration.ai/v1",
+        "//developers.openai.com/codex",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/capabilities/web-search",
+        "/codex",
+        "/config.toml"
+      ],
+      "symbols": [
+        "/.codex",
+        "/.codex/config.toml",
+        "/.codex/config.toml.",
+        "//abliteration.ai/console",
+        "//api.abliteration.ai/v1",
+        "//developers.openai.com/codex",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/capabilities/web-search",
+        "/codex",
+        "/config.toml",
+        "ABLITERATION_API_KEY",
+        "YOUR_API_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Use OpenAI Codex with abliteration.ai Use OpenAI's Codex CLI with abliteration.ai by registering a custom provider in ~/.codex/config.toml. Use OpenAI Codex with abliteration.ai Install Configure Run Per-project config Config precedence Web search Troubleshooting Notes /.codex /.codex/config.toml /.codex/config.toml. //abliteration.ai/console //api.abliteration.ai/v1 //developers.openai.com/codex //docs.abliteration.ai/llms.txt /Note /capabilities/web-search /codex /config.toml ABLITERATION_API_KEY YOUR_API_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-36d3c5561ab9bdfd",
+      "title": "Use CyberStrike with abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/cyberstrike.md",
+      "summary": "Use the CyberStrike offensive security agent with abliteration.ai — CyberStrike is a fork of OpenCode, so authenticate, pick Abliterated Model Large V2, and choose a reasoning level.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:70309aad77124217025cd5759a8e6e024372575f80af9557301abd9e891f5474",
+      "content_bytes": 2537,
+      "word_count": 370,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Use CyberStrike with abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Install"
+        },
+        {
+          "level": 2,
+          "text": "Authenticate"
+        },
+        {
+          "level": 2,
+          "text": "Choose the model"
+        },
+        {
+          "level": 2,
+          "text": "Set the reasoning level"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/console",
+        "//cyberstrike.io",
+        "//cyberstrike.io/install.sh",
+        "//docs.abliteration.ai/llms.txt",
+        "//models.dev",
+        "/Note",
+        "/capabilities/thinking",
+        "/connect",
+        "/cyberstrike",
+        "/integrations/opencode",
+        "/models",
+        "/variants"
+      ],
+      "symbols": [
+        "//abliteration.ai/console",
+        "//cyberstrike.io",
+        "//cyberstrike.io/install.sh",
+        "//docs.abliteration.ai/llms.txt",
+        "//models.dev",
+        "/Note",
+        "/capabilities/thinking",
+        "/connect",
+        "/cyberstrike",
+        "/integrations/opencode",
+        "/models",
+        "/variants",
+        "ABLIT_KEY",
+        "abliterated-model",
+        "abliterated-model-large-v2"
+      ],
+      "search_text": "Use CyberStrike with abliteration.ai Use the CyberStrike offensive security agent with abliteration.ai — CyberStrike is a fork of OpenCode, so authenticate, pick Abliterated Model Large V2, and choose a reasoning level. Use CyberStrike with abliteration.ai Install Authenticate Choose the model Set the reasoning level //abliteration.ai/console //cyberstrike.io //cyberstrike.io/install.sh //docs.abliteration.ai/llms.txt //models.dev /Note /capabilities/thinking /connect /cyberstrike /integrations/opencode /models /variants ABLIT_KEY abliterated-model abliterated-model-large-v2"
+    },
+    {
+      "source_id": "abliteration-doc-d2f9f17c58a662e1",
+      "title": "Giskard",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/giskard.md",
+      "summary": "Red-team your AI agents with Giskard's agent vulnerability scanner using abliteration.ai as the LLM backend.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:1cdd6c3c7810043c8406913ca3bd5c7e4d507de9ccf2ce6d7c605efe665b6293",
+      "content_bytes": 5565,
+      "word_count": 739,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Giskard"
+        },
+        {
+          "level": 2,
+          "text": "Install"
+        },
+        {
+          "level": 2,
+          "text": "Set the API key"
+        },
+        {
+          "level": 2,
+          "text": "Point Giskard's LLM at abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Wrap your agent"
+        },
+        {
+          "level": 2,
+          "text": "Run the scan"
+        },
+        {
+          "level": 3,
+          "text": "Timebox the scan"
+        },
+        {
+          "level": 2,
+          "text": "Read the report"
+        },
+        {
+          "level": 2,
+          "text": "Notes"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/abliterated-model",
+        "/capabilities/thinking",
+        "/fail",
+        "/policy-gateway/overview"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/abliterated-model",
+        "/capabilities/thinking",
+        "/fail",
+        "/policy-gateway/overview",
+        "ABLIT_KEY",
+        "YOUR_API_KEY"
+      ],
+      "search_text": "Giskard Red-team your AI agents with Giskard's agent vulnerability scanner using abliteration.ai as the LLM backend. Giskard Install Set the API key Point Giskard's LLM at abliteration.ai Wrap your agent Run the scan Timebox the scan Read the report Notes //api.abliteration.ai/v1 //docs.abliteration.ai/llms.txt /Note /abliterated-model /capabilities/thinking /fail /policy-gateway/overview ABLIT_KEY YOUR_API_KEY"
+    },
+    {
+      "source_id": "abliteration-doc-6ae6d5b5b923e67a",
+      "title": "Use Hermes Agent with abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/hermes.md",
+      "summary": "Use Hermes Agent with abliteration.ai through Hermes' custom OpenAI-compatible provider or a small model-provider plugin.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:804f3808d6aee37685cdb3fca6972ce643a04f6f1d025d0a70009f8292646f34",
+      "content_bytes": 4146,
+      "word_count": 498,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Use Hermes Agent with abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Install"
+        },
+        {
+          "level": 2,
+          "text": "Manual config"
+        },
+        {
+          "level": 2,
+          "text": "Named custom provider"
+        },
+        {
+          "level": 2,
+          "text": "Provider plugin"
+        },
+        {
+          "level": 2,
+          "text": "Verify"
+        },
+        {
+          "level": 2,
+          "text": "Notes"
+        }
+      ],
+      "api_paths": [
+        "/.hermes/.env",
+        "/.hermes/config.yaml",
+        "/.hermes/plugins/model-providers/abliteration-ai/__init__.py",
+        "/.hermes/plugins/model-providers/abliteration-ai/plugin.yaml",
+        "//abliteration.ai/signup",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "//hermes-agent.nousresearch.com/docs/getting-started/quickstart",
+        "/model",
+        "/models",
+        "/policy-gateway/overview",
+        "/v1/models"
+      ],
+      "symbols": [
+        "/.hermes/.env",
+        "/.hermes/config.yaml",
+        "/.hermes/plugins/model-providers/abliteration-ai/__init__.py",
+        "/.hermes/plugins/model-providers/abliteration-ai/plugin.yaml",
+        "//abliteration.ai/signup",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "//hermes-agent.nousresearch.com/docs/getting-started/quickstart",
+        "/model",
+        "/models",
+        "/policy-gateway/overview",
+        "/v1/models",
+        "ABLITERATION_API_KEY",
+        "ABLITERATION_BASE_URL",
+        "ABLIT_KEY",
+        "YOUR_API_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Use Hermes Agent with abliteration.ai Use Hermes Agent with abliteration.ai through Hermes' custom OpenAI-compatible provider or a small model-provider plugin. Use Hermes Agent with abliteration.ai Install Manual config Named custom provider Provider plugin Verify Notes /.hermes/.env /.hermes/config.yaml /.hermes/plugins/model-providers/abliteration-ai/__init__.py /.hermes/plugins/model-providers/abliteration-ai/plugin.yaml //abliteration.ai/signup //api.abliteration.ai/v1 //docs.abliteration.ai/llms.txt //hermes-agent.nousresearch.com/docs/getting-started/quickstart /model /models /policy-gateway/overview /v1/models ABLITERATION_API_KEY ABLITERATION_BASE_URL ABLIT_KEY YOUR_API_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-9ede3b8d1948886b",
+      "title": "LangChain",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/langchain.md",
+      "summary": "Drop-in abliteration.ai with LangChain and LangGraph via the standard ChatOpenAI class.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:bc5dee6dd0e66b5da0fab406108a97a34459cd12be997516131f8b609c56332a",
+      "content_bytes": 1353,
+      "word_count": 174,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "LangChain"
+        },
+        {
+          "level": 2,
+          "text": "Install"
+        },
+        {
+          "level": 2,
+          "text": "Usage"
+        },
+        {
+          "level": 2,
+          "text": "Streaming"
+        },
+        {
+          "level": 2,
+          "text": "Tool calling"
+        },
+        {
+          "level": 2,
+          "text": "LangGraph"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/capabilities/tool-calling"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/capabilities/tool-calling",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "LangChain Drop-in abliteration.ai with LangChain and LangGraph via the standard ChatOpenAI class. LangChain Install Usage Streaming Tool calling LangGraph //api.abliteration.ai/v1 //docs.abliteration.ai/llms.txt /capabilities/tool-calling ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-69fdb32e29996ebb",
+      "title": "LlamaIndex",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/llamaindex.md",
+      "summary": "Use abliteration.ai as the LLM in LlamaIndex pipelines via the OpenAILike adapter.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:3dd17f9c8db1958e9b42b10300dbd3f69e62c6fa8c56cfde6397abf91389b714",
+      "content_bytes": 883,
+      "word_count": 113,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "LlamaIndex"
+        },
+        {
+          "level": 2,
+          "text": "Install"
+        },
+        {
+          "level": 2,
+          "text": "Usage"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/compatibility-matrix"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/compatibility-matrix",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "LlamaIndex Use abliteration.ai as the LLM in LlamaIndex pipelines via the OpenAILike adapter. LlamaIndex Install Usage //api.abliteration.ai/v1 //docs.abliteration.ai/llms.txt /compatibility-matrix ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-434cf9f968821c80",
+      "title": "Node / TypeScript",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/node.md",
+      "summary": "Use the official OpenAI or Anthropic JavaScript SDKs with abliteration.ai in Node, Edge, and Bun runtimes.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:f657d1b4bead9a0ad8c3210862fdcb334ae4208c4e4435680ab3f4994bc5ec8e",
+      "content_bytes": 1772,
+      "word_count": 222,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Node / TypeScript"
+        },
+        {
+          "level": 2,
+          "text": "Install"
+        },
+        {
+          "level": 2,
+          "text": "OpenAI SDK"
+        },
+        {
+          "level": 2,
+          "text": "Streaming"
+        },
+        {
+          "level": 2,
+          "text": "Edge runtimes"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/v1",
+        "//api.abliteration.ai/v1/chat/completions",
+        "//docs.abliteration.ai/llms.txt",
+        "/integrations/cloudflare-workers",
+        "/integrations/vercel-ai-sdk",
+        "/json"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/v1",
+        "//api.abliteration.ai/v1/chat/completions",
+        "//docs.abliteration.ai/llms.txt",
+        "/integrations/cloudflare-workers",
+        "/integrations/vercel-ai-sdk",
+        "/json",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Node / TypeScript Use the official OpenAI or Anthropic JavaScript SDKs with abliteration.ai in Node, Edge, and Bun runtimes. Node / TypeScript Install OpenAI SDK Streaming Edge runtimes //api.abliteration.ai/v1 //api.abliteration.ai/v1/chat/completions //docs.abliteration.ai/llms.txt /integrations/cloudflare-workers /integrations/vercel-ai-sdk /json ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-ac119fc4650450c7",
+      "title": "Use OpenClaw with abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/openclaw.md",
+      "summary": "Use OpenClaw (open-source agent framework, 100+ skills) with abliteration.ai.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:44684b99978878cd7afb9a8a7e1cc031792738d15c0db863e58547fad4d8c5ca",
+      "content_bytes": 1154,
+      "word_count": 149,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Use OpenClaw with abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Install"
+        },
+        {
+          "level": 2,
+          "text": "Configure"
+        },
+        {
+          "level": 2,
+          "text": "Python SDK"
+        },
+        {
+          "level": 2,
+          "text": "Notes"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/authentication"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/authentication",
+        "ABLIT_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "abliterated-model"
+      ],
+      "search_text": "Use OpenClaw with abliteration.ai Use OpenClaw (open-source agent framework, 100+ skills) with abliteration.ai. Use OpenClaw with abliteration.ai Install Configure Python SDK Notes //api.abliteration.ai/v1 //docs.abliteration.ai/llms.txt /authentication ABLIT_KEY OPENAI_API_KEY OPENAI_BASE_URL abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-2baa3cd54eab8cbe",
+      "title": "Use OpenCode with abliteration.ai",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/opencode.md",
+      "summary": "Use the OpenCode terminal agent with abliteration.ai — abliteration.ai is a built-in provider, so authenticate, pick Abliterated Model Large V2, and choose a reasoning level.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:c3b403076293b564b37fd86798b3e52d159f02da32d138f9a1d9e2d86e416f08",
+      "content_bytes": 2361,
+      "word_count": 350,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Use OpenCode with abliteration.ai"
+        },
+        {
+          "level": 2,
+          "text": "Install"
+        },
+        {
+          "level": 2,
+          "text": "Authenticate"
+        },
+        {
+          "level": 2,
+          "text": "Choose the model"
+        },
+        {
+          "level": 2,
+          "text": "Set the reasoning level"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/console",
+        "//docs.abliteration.ai/llms.txt",
+        "//models.dev",
+        "//opencode.ai",
+        "//opencode.ai/install",
+        "/Note",
+        "/capabilities/thinking",
+        "/connect",
+        "/models",
+        "/variants"
+      ],
+      "symbols": [
+        "//abliteration.ai/console",
+        "//docs.abliteration.ai/llms.txt",
+        "//models.dev",
+        "//opencode.ai",
+        "//opencode.ai/install",
+        "/Note",
+        "/capabilities/thinking",
+        "/connect",
+        "/models",
+        "/variants",
+        "ABLIT_KEY",
+        "abliterated-model",
+        "abliterated-model-large-v2"
+      ],
+      "search_text": "Use OpenCode with abliteration.ai Use the OpenCode terminal agent with abliteration.ai — abliteration.ai is a built-in provider, so authenticate, pick Abliterated Model Large V2, and choose a reasoning level. Use OpenCode with abliteration.ai Install Authenticate Choose the model Set the reasoning level //abliteration.ai/console //docs.abliteration.ai/llms.txt //models.dev //opencode.ai //opencode.ai/install /Note /capabilities/thinking /connect /models /variants ABLIT_KEY abliterated-model abliterated-model-large-v2"
+    },
+    {
+      "source_id": "abliteration-doc-92adfc40267e7b19",
+      "title": "Promptfoo",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/promptfoo.md",
+      "summary": "Evaluate and red-team abliteration.ai models with promptfoo using the built-in abliteration provider.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:397e110069a097ce1be7338487fc19b9cab3a5b716a87126553e1260b4d7bc08",
+      "content_bytes": 6490,
+      "word_count": 795,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Promptfoo"
+        },
+        {
+          "level": 2,
+          "text": "Install"
+        },
+        {
+          "level": 2,
+          "text": "Set the API key"
+        },
+        {
+          "level": 2,
+          "text": "Basic configuration"
+        },
+        {
+          "level": 1,
+          "text": "yaml-language-server: $schema=https://promptfoo.dev/config-schema.json"
+        },
+        {
+          "level": 2,
+          "text": "Reasoning output"
+        },
+        {
+          "level": 2,
+          "text": "Red teaming"
+        },
+        {
+          "level": 1,
+          "text": "yaml-language-server: $schema=https://promptfoo.dev/config-schema.json"
+        },
+        {
+          "level": 2,
+          "text": "Multimodal"
+        },
+        {
+          "level": 1,
+          "text": "yaml-language-server: $schema=https://promptfoo.dev/config-schema.json"
+        },
+        {
+          "level": 2,
+          "text": "Environment variables"
+        },
+        {
+          "level": 2,
+          "text": "Notes"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/stonehenge.jpg",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "//prompt.json",
+        "//promptfoo.dev/config-schema.json",
+        "//www.promptfoo.dev/docs/providers/openai/",
+        "/api/openai-compatibility",
+        "/capabilities/thinking",
+        "/models",
+        "/policy-gateway/overview"
+      ],
+      "symbols": [
+        "//abliteration.ai/stonehenge.jpg",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "//prompt.json",
+        "//promptfoo.dev/config-schema.json",
+        "//www.promptfoo.dev/docs/providers/openai/",
+        "/api/openai-compatibility",
+        "/capabilities/thinking",
+        "/models",
+        "/policy-gateway/overview",
+        "ABLIT_API_BASE_URL",
+        "ABLIT_KEY",
+        "YOUR_API_KEY",
+        "abliterated-model",
+        "abliterated-model-large-v2"
+      ],
+      "search_text": "Promptfoo Evaluate and red-team abliteration.ai models with promptfoo using the built-in abliteration provider. Promptfoo Install Set the API key Basic configuration yaml-language-server: $schema=https://promptfoo.dev/config-schema.json Reasoning output Red teaming yaml-language-server: $schema=https://promptfoo.dev/config-schema.json Multimodal yaml-language-server: $schema=https://promptfoo.dev/config-schema.json Environment variables Notes //abliteration.ai/stonehenge.jpg //api.abliteration.ai/v1 //docs.abliteration.ai/llms.txt //prompt.json //promptfoo.dev/config-schema.json //www.promptfoo.dev/docs/providers/openai/ /api/openai-compatibility /capabilities/thinking /models /policy-gateway/overview ABLIT_API_BASE_URL ABLIT_KEY YOUR_API_KEY abliterated-model abliterated-model-large-v2"
+    },
+    {
+      "source_id": "abliteration-doc-414743086a5d53fd",
+      "title": "Python",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/python.md",
+      "summary": "Use the official OpenAI or Anthropic Python SDKs with abliteration.ai by changing the base URL.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:8b8b8496c712b25180dac32df6c3af92acd31e74eaba10cf1a2703f6a343a850",
+      "content_bytes": 1479,
+      "word_count": 182,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Python"
+        },
+        {
+          "level": 2,
+          "text": "Install"
+        },
+        {
+          "level": 2,
+          "text": "OpenAI SDK"
+        },
+        {
+          "level": 2,
+          "text": "Async"
+        },
+        {
+          "level": 2,
+          "text": "Anthropic SDK"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/api/anthropic-compatibility"
+      ],
+      "symbols": [
+        "//api.abliteration.ai",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/api/anthropic-compatibility",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Python Use the official OpenAI or Anthropic Python SDKs with abliteration.ai by changing the base URL. Python Install OpenAI SDK Async Anthropic SDK //api.abliteration.ai //api.abliteration.ai/v1 //docs.abliteration.ai/llms.txt /api/anthropic-compatibility ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-539a9af7d9292734",
+      "title": "Vercel AI SDK",
+      "canonical_locator": "https://docs.abliteration.ai/integrations/vercel-ai-sdk.md",
+      "summary": "Wire abliteration.ai into the Vercel AI SDK using the OpenAI-compatible provider.",
+      "category": "integrations",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:d0831a4a1dc5ead59417299ee877bbae061d624042dc63a892e78a98d038854d",
+      "content_bytes": 1287,
+      "word_count": 158,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Vercel AI SDK"
+        },
+        {
+          "level": 2,
+          "text": "Install"
+        },
+        {
+          "level": 2,
+          "text": "Provider"
+        },
+        {
+          "level": 2,
+          "text": "Generate"
+        },
+        {
+          "level": 2,
+          "text": "Stream in a Next.js route"
+        }
+      ],
+      "api_paths": [
+        "//",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/api/chat/route.ts",
+        "/openai-compatible"
+      ],
+      "symbols": [
+        "//",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/api/chat/route.ts",
+        "/openai-compatible",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Vercel AI SDK Wire abliteration.ai into the Vercel AI SDK using the OpenAI-compatible provider. Vercel AI SDK Install Provider Generate Stream in a Next.js route // //api.abliteration.ai/v1 //docs.abliteration.ai/llms.txt /api/chat/route.ts /openai-compatible ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-572a28bd416c5d06",
+      "title": "abliteration.ai models",
+      "canonical_locator": "https://docs.abliteration.ai/models.md",
+      "summary": "abliteration.ai serves three unrestricted reasoning models: abliterated-model (multimodal, 256K context), abliterated-model-large-v2 (text-only, 1M context, GLM-5.3), and abliterated-model-large (text-only, 1M context, GLM-5.2).",
+      "category": "getting-started-reference",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:be9e82c1c7a68662edcd360cec7e59fca9764a9e78c5acd3d1ce4caa49918f38",
+      "content_bytes": 4260,
+      "word_count": 396,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "abliteration.ai models"
+        },
+        {
+          "level": 2,
+          "text": "Limits"
+        },
+        {
+          "level": 2,
+          "text": "Capabilities"
+        },
+        {
+          "level": 2,
+          "text": "Model listing"
+        },
+        {
+          "level": 2,
+          "text": "Pricing"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/pricing",
+        "//api.abliteration.ai/v1/models",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/capabilities/thinking",
+        "/compatibility-matrix",
+        "/pricing",
+        "/v1/models"
+      ],
+      "symbols": [
+        "//abliteration.ai/pricing",
+        "//api.abliteration.ai/v1/models",
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/capabilities/thinking",
+        "/compatibility-matrix",
+        "/pricing",
+        "/v1/models",
+        "ABLIT_KEY",
+        "abliterated-model",
+        "abliterated-model-large",
+        "abliterated-model-large-v2"
+      ],
+      "search_text": "abliteration.ai models abliteration.ai serves three unrestricted reasoning models: abliterated-model (multimodal, 256K context), abliterated-model-large-v2 (text-only, 1M context, GLM-5.3), and abliterated-model-large (text-only, 1M context, GLM-5.2). abliteration.ai models Limits Capabilities Model listing Pricing //abliteration.ai/pricing //api.abliteration.ai/v1/models //docs.abliteration.ai/llms.txt /Note /capabilities/thinking /compatibility-matrix /pricing /v1/models ABLIT_KEY abliterated-model abliterated-model-large abliterated-model-large-v2"
+    },
+    {
+      "source_id": "abliteration-doc-a3bf5cd01964fce9",
+      "title": "Connectors",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/connectors.md",
+      "summary": "Stream Policy Gateway events to your SIEM, log pipeline, or data lake. Thirteen destinations available.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:b488f3ef57f971aab29524cf7f9e77a75c644811cd0ca74e130eaffccc99f90d",
+      "content_bytes": 6049,
+      "word_count": 554,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Connectors"
+        },
+        {
+          "level": 2,
+          "text": "Available destinations"
+        },
+        {
+          "level": 3,
+          "text": "SIEM & observability"
+        },
+        {
+          "level": 3,
+          "text": "Cloud storage"
+        },
+        {
+          "level": 3,
+          "text": "Generic"
+        },
+        {
+          "level": 2,
+          "text": "Event shape"
+        },
+        {
+          "level": 3,
+          "text": "Decision fields"
+        },
+        {
+          "level": 3,
+          "text": "Event variants"
+        },
+        {
+          "level": 2,
+          "text": "Delivery"
+        }
+      ],
+      "api_paths": [
+        "//",
+        "//abliteration.ai/console",
+        "//docs.abliteration.ai/llms.txt",
+        "/Card",
+        "/CardGroup",
+        "/non-enforced",
+        "/policy-gateway/policy-logs/azure-blob",
+        "/policy-gateway/policy-logs/azure-monitor",
+        "/policy-gateway/policy-logs/backblaze-b2",
+        "/policy-gateway/policy-logs/cloudflare-r2",
+        "/policy-gateway/policy-logs/datadog",
+        "/policy-gateway/policy-logs/elastic",
+        "/policy-gateway/policy-logs/gcs",
+        "/policy-gateway/policy-logs/http",
+        "/policy-gateway/policy-logs/otel",
+        "/policy-gateway/policy-logs/s3",
+        "/policy-gateway/policy-logs/s3-compatible",
+        "/policy-gateway/policy-logs/splunk-hec",
+        "/update/delete."
+      ],
+      "symbols": [
+        "//",
+        "//abliteration.ai/console",
+        "//docs.abliteration.ai/llms.txt",
+        "/Card",
+        "/CardGroup",
+        "/non-enforced",
+        "/policy-gateway/policy-logs/azure-blob",
+        "/policy-gateway/policy-logs/azure-monitor",
+        "/policy-gateway/policy-logs/backblaze-b2",
+        "/policy-gateway/policy-logs/cloudflare-r2",
+        "/policy-gateway/policy-logs/datadog",
+        "/policy-gateway/policy-logs/elastic",
+        "/policy-gateway/policy-logs/gcs",
+        "/policy-gateway/policy-logs/http",
+        "/policy-gateway/policy-logs/otel",
+        "/policy-gateway/policy-logs/s3",
+        "/policy-gateway/policy-logs/s3-compatible",
+        "/policy-gateway/policy-logs/splunk-hec",
+        "/update/delete.",
+        "abliterated-model"
+      ],
+      "search_text": "Connectors Stream Policy Gateway events to your SIEM, log pipeline, or data lake. Thirteen destinations available. Connectors Available destinations SIEM & observability Cloud storage Generic Event shape Decision fields Event variants Delivery // //abliteration.ai/console //docs.abliteration.ai/llms.txt /Card /CardGroup /non-enforced /policy-gateway/policy-logs/azure-blob /policy-gateway/policy-logs/azure-monitor /policy-gateway/policy-logs/backblaze-b2 /policy-gateway/policy-logs/cloudflare-r2 /policy-gateway/policy-logs/datadog /policy-gateway/policy-logs/elastic /policy-gateway/policy-logs/gcs /policy-gateway/policy-logs/http /policy-gateway/policy-logs/otel /policy-gateway/policy-logs/s3 /policy-gateway/policy-logs/s3-compatible /policy-gateway/policy-logs/splunk-hec /update/delete. abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-7ce4bbf9212cff43",
+      "title": "Integration",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/integration.md",
+      "summary": "Wire Policy Gateway into your request flow and read policy decisions on the client.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:bebac1da1ee85b9d86f4ff1234e8e4955d2784ef2c1391e137966dbc2babd9e2",
+      "content_bytes": 1410,
+      "word_count": 199,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Integration"
+        },
+        {
+          "level": 2,
+          "text": "Proxy the request"
+        },
+        {
+          "level": 2,
+          "text": "Reading decisions on the client"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai/policy/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/api/policy-endpoints",
+        "/capabilities/streaming-policy-metadata",
+        "/policy-gateway/connectors",
+        "/v1"
+      ],
+      "symbols": [
+        "//api.abliteration.ai/policy/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/api/policy-endpoints",
+        "/capabilities/streaming-policy-metadata",
+        "/policy-gateway/connectors",
+        "/v1",
+        "ABLIT_KEY"
+      ],
+      "search_text": "Integration Wire Policy Gateway into your request flow and read policy decisions on the client. Integration Proxy the request Reading decisions on the client //api.abliteration.ai/policy/v1 //docs.abliteration.ai/llms.txt /api/policy-endpoints /capabilities/streaming-policy-metadata /policy-gateway/connectors /v1 ABLIT_KEY"
+    },
+    {
+      "source_id": "abliteration-doc-d97e7492342c999d",
+      "title": "Onboarding",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/onboarding.md",
+      "summary": "Set up your first policy, project, and scoped key on Policy Gateway in six steps.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:58fa47cda2f5d286cd4a8735dd2f0cc07b1646e63accdc4fac935245e755c3e2",
+      "content_bytes": 3622,
+      "word_count": 378,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Onboarding"
+        },
+        {
+          "level": 2,
+          "text": "1. Create a project"
+        },
+        {
+          "level": 2,
+          "text": "2. Write a policy"
+        },
+        {
+          "level": 2,
+          "text": "3. Link policy to project"
+        },
+        {
+          "level": 2,
+          "text": "4. Issue a scoped API key"
+        },
+        {
+          "level": 2,
+          "text": "5. Send traffic through the policy surface"
+        },
+        {
+          "level": 2,
+          "text": "6. Observe, then enforce"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/console",
+        "//api.abliteration.ai/api/policy-gateway/projects/proj_support_bot",
+        "//api.abliteration.ai/policy/chat/completions",
+        "//docs.abliteration.ai/llms.txt",
+        "/api/policy-endpoints",
+        "/json",
+        "/policy-gateway/connectors",
+        "/policy/*",
+        "/refuse",
+        "/v1/*"
+      ],
+      "symbols": [
+        "//abliteration.ai/console",
+        "//api.abliteration.ai/api/policy-gateway/projects/proj_support_bot",
+        "//api.abliteration.ai/policy/chat/completions",
+        "//docs.abliteration.ai/llms.txt",
+        "/api/policy-endpoints",
+        "/json",
+        "/policy-gateway/connectors",
+        "/policy/*",
+        "/refuse",
+        "/v1/*",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Onboarding Set up your first policy, project, and scoped key on Policy Gateway in six steps. Onboarding 1. Create a project 2. Write a policy 3. Link policy to project 4. Issue a scoped API key 5. Send traffic through the policy surface 6. Observe, then enforce //abliteration.ai/console //api.abliteration.ai/api/policy-gateway/projects/proj_support_bot //api.abliteration.ai/policy/chat/completions //docs.abliteration.ai/llms.txt /api/policy-endpoints /json /policy-gateway/connectors /policy/* /refuse /v1/* ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-14f261d8110cca74",
+      "title": "Policy Gateway overview",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/overview.md",
+      "summary": "Policy Gateway is abliteration.ai's governance layer — rules, rollout modes, and audit events for every request.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:649e76d4fa4c73a1ac85b7f82892890046777dc9453f9480d6da145a97e8f98a",
+      "content_bytes": 6396,
+      "word_count": 631,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Policy Gateway overview"
+        },
+        {
+          "level": 2,
+          "text": "Plans"
+        },
+        {
+          "level": 2,
+          "text": "What a policy decides"
+        },
+        {
+          "level": 2,
+          "text": "What a rule looks at"
+        },
+        {
+          "level": 2,
+          "text": "Rollout modes"
+        },
+        {
+          "level": 2,
+          "text": "Auto-rollback"
+        },
+        {
+          "level": 2,
+          "text": "Data classification"
+        },
+        {
+          "level": 2,
+          "text": "Caveats"
+        },
+        {
+          "level": 2,
+          "text": "Next"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/pricing",
+        "//docs.abliteration.ai/llms.txt",
+        "/100",
+        "/Card",
+        "/CardGroup",
+        "/Note",
+        "/a",
+        "/api/policy-endpoints",
+        "/capabilities/streaming-policy-metadata",
+        "/category.",
+        "/policy-gateway/connectors",
+        "/policy-gateway/onboarding",
+        "/policy/"
+      ],
+      "symbols": [
+        "//abliteration.ai/pricing",
+        "//docs.abliteration.ai/llms.txt",
+        "/100",
+        "/Card",
+        "/CardGroup",
+        "/Note",
+        "/a",
+        "/api/policy-endpoints",
+        "/capabilities/streaming-policy-metadata",
+        "/category.",
+        "/policy-gateway/connectors",
+        "/policy-gateway/onboarding",
+        "/policy/"
+      ],
+      "search_text": "Policy Gateway overview Policy Gateway is abliteration.ai's governance layer — rules, rollout modes, and audit events for every request. Policy Gateway overview Plans What a policy decides What a rule looks at Rollout modes Auto-rollback Data classification Caveats Next //abliteration.ai/pricing //docs.abliteration.ai/llms.txt /100 /Card /CardGroup /Note /a /api/policy-endpoints /capabilities/streaming-policy-metadata /category. /policy-gateway/connectors /policy-gateway/onboarding /policy/"
+    },
+    {
+      "source_id": "abliteration-doc-1e0aaa8be684d280",
+      "title": "Azure Blob Storage",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/policy-logs/azure-blob.md",
+      "summary": "Archive Policy Gateway events in an Azure Blob Storage container.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:063742cd42995cf2a5578187a3b08c100297cf041d099bf25eded086ff8cc830",
+      "content_bytes": 1208,
+      "word_count": 122,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Azure Blob Storage"
+        },
+        {
+          "level": 2,
+          "text": "Configure"
+        },
+        {
+          "level": 2,
+          "text": "Object layout"
+        }
+      ],
+      "api_paths": [
+        "//",
+        "//docs.abliteration.ai/llms.txt",
+        "/policy-gateway/",
+        "/policy-gateway/connectors"
+      ],
+      "symbols": [
+        "//",
+        "//docs.abliteration.ai/llms.txt",
+        "/policy-gateway/",
+        "/policy-gateway/connectors"
+      ],
+      "search_text": "Azure Blob Storage Archive Policy Gateway events in an Azure Blob Storage container. Azure Blob Storage Configure Object layout // //docs.abliteration.ai/llms.txt /policy-gateway/ /policy-gateway/connectors"
+    },
+    {
+      "source_id": "abliteration-doc-9d46d7fa09a5dc23",
+      "title": "Azure Monitor",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/policy-logs/azure-monitor.md",
+      "summary": "Send Policy Gateway events to an Azure Log Analytics workspace via the Data Collector API.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:2c243806d3a221ad27ccf9b6e79bbe817a2da0260d836855206792e5f4c1545e",
+      "content_bytes": 1818,
+      "word_count": 199,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Azure Monitor"
+        },
+        {
+          "level": 2,
+          "text": "Configure"
+        },
+        {
+          "level": 2,
+          "text": "Event shape"
+        },
+        {
+          "level": 2,
+          "text": "Query"
+        }
+      ],
+      "api_paths": [
+        "//",
+        "//docs.abliteration.ai/llms.txt",
+        "/api/logs",
+        "/policy-gateway/connectors"
+      ],
+      "symbols": [
+        "//",
+        "//docs.abliteration.ai/llms.txt",
+        "/api/logs",
+        "/policy-gateway/connectors",
+        "abliterated-model"
+      ],
+      "search_text": "Azure Monitor Send Policy Gateway events to an Azure Log Analytics workspace via the Data Collector API. Azure Monitor Configure Event shape Query // //docs.abliteration.ai/llms.txt /api/logs /policy-gateway/connectors abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-9c7c25db2d3e8e0b",
+      "title": "Backblaze B2",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/policy-logs/backblaze-b2.md",
+      "summary": "Archive Policy Gateway events in a Backblaze B2 bucket via the S3-compatible API.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:8eb77b0ea992e38182906b6b849f011607e15059c5cee90b61381658cc3c27cf",
+      "content_bytes": 1280,
+      "word_count": 129,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Backblaze B2"
+        },
+        {
+          "level": 2,
+          "text": "Configure"
+        },
+        {
+          "level": 2,
+          "text": "Object layout"
+        }
+      ],
+      "api_paths": [
+        "//",
+        "//docs.abliteration.ai/llms.txt",
+        "/policy-gateway/",
+        "/policy-gateway/connectors"
+      ],
+      "symbols": [
+        "//",
+        "//docs.abliteration.ai/llms.txt",
+        "/policy-gateway/",
+        "/policy-gateway/connectors"
+      ],
+      "search_text": "Backblaze B2 Archive Policy Gateway events in a Backblaze B2 bucket via the S3-compatible API. Backblaze B2 Configure Object layout // //docs.abliteration.ai/llms.txt /policy-gateway/ /policy-gateway/connectors"
+    },
+    {
+      "source_id": "abliteration-doc-a01d649e2956b281",
+      "title": "Cloudflare R2",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/policy-logs/cloudflare-r2.md",
+      "summary": "Archive Policy Gateway events in Cloudflare R2 with zero egress fees.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:d6d88aec797f105513481a61f3d37cf0e27f377d256b5c1b39beced0b336ee9a",
+      "content_bytes": 1309,
+      "word_count": 130,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Cloudflare R2"
+        },
+        {
+          "level": 2,
+          "text": "Configure"
+        },
+        {
+          "level": 2,
+          "text": "Object layout"
+        }
+      ],
+      "api_paths": [
+        "//",
+        "//docs.abliteration.ai/llms.txt",
+        "/policy-gateway/",
+        "/policy-gateway/connectors"
+      ],
+      "symbols": [
+        "//",
+        "//docs.abliteration.ai/llms.txt",
+        "/policy-gateway/",
+        "/policy-gateway/connectors"
+      ],
+      "search_text": "Cloudflare R2 Archive Policy Gateway events in Cloudflare R2 with zero egress fees. Cloudflare R2 Configure Object layout // //docs.abliteration.ai/llms.txt /policy-gateway/ /policy-gateway/connectors"
+    },
+    {
+      "source_id": "abliteration-doc-1eb141b2b7c9eaed",
+      "title": "Datadog Logs",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/policy-logs/datadog.md",
+      "summary": "Stream Policy Gateway events to Datadog Logs via the intake API.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:66d10b3d36d1b1305ad147fb9b59b58a79ab4ee0f2ab0b88c69c34ab78353d4d",
+      "content_bytes": 1829,
+      "word_count": 186,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Datadog Logs"
+        },
+        {
+          "level": 2,
+          "text": "Configure"
+        },
+        {
+          "level": 2,
+          "text": "Event shape"
+        },
+        {
+          "level": 2,
+          "text": "Verify"
+        },
+        {
+          "level": 2,
+          "text": "Build a monitor"
+        }
+      ],
+      "api_paths": [
+        "//docs.abliteration.ai/llms.txt",
+        "//http-intake.logs.",
+        "/api/v2/logs",
+        "/policy-gateway/connectors"
+      ],
+      "symbols": [
+        "//docs.abliteration.ai/llms.txt",
+        "//http-intake.logs.",
+        "/api/v2/logs",
+        "/policy-gateway/connectors",
+        "abliterated-model"
+      ],
+      "search_text": "Datadog Logs Stream Policy Gateway events to Datadog Logs via the intake API. Datadog Logs Configure Event shape Verify Build a monitor //docs.abliteration.ai/llms.txt //http-intake.logs. /api/v2/logs /policy-gateway/connectors abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-961559501826852b",
+      "title": "Elastic / OpenSearch",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/policy-logs/elastic.md",
+      "summary": "Index Policy Gateway events into Elasticsearch or Elastic Cloud via the Bulk API.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:5767d04cf69f1ffe8c9dbdeaf73b1c46a4f677945257e1ebee2a63bca46b9b3a",
+      "content_bytes": 2419,
+      "word_count": 217,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Elastic / OpenSearch"
+        },
+        {
+          "level": 2,
+          "text": "Configure"
+        },
+        {
+          "level": 2,
+          "text": "Event shape"
+        },
+        {
+          "level": 2,
+          "text": "Index template"
+        },
+        {
+          "level": 2,
+          "text": "Verify"
+        }
+      ],
+      "api_paths": [
+        "//",
+        "//docs.abliteration.ai/llms.txt",
+        "/_search",
+        "/policy-gateway/connectors"
+      ],
+      "symbols": [
+        "//",
+        "//docs.abliteration.ai/llms.txt",
+        "/_search",
+        "/policy-gateway/connectors",
+        "abliterated-model"
+      ],
+      "search_text": "Elastic / OpenSearch Index Policy Gateway events into Elasticsearch or Elastic Cloud via the Bulk API. Elastic / OpenSearch Configure Event shape Index template Verify // //docs.abliteration.ai/llms.txt /_search /policy-gateway/connectors abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-a14ae5d997aeddc1",
+      "title": "Google Cloud Storage",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/policy-logs/gcs.md",
+      "summary": "Archive Policy Gateway events in Google Cloud Storage via S3-compatible HMAC keys.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:1a386dfdf85b92d97e6a6f397a3c991afa6ae7497ac6d269a82c479b781fed44",
+      "content_bytes": 1386,
+      "word_count": 148,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Google Cloud Storage"
+        },
+        {
+          "level": 2,
+          "text": "Configure"
+        },
+        {
+          "level": 2,
+          "text": "Object layout"
+        },
+        {
+          "level": 2,
+          "text": "Query with BigQuery"
+        }
+      ],
+      "api_paths": [
+        "//",
+        "//cloud.google.com/bigquery/docs/external-data-cloud-storage",
+        "//docs.abliteration.ai/llms.txt",
+        "/policy-gateway/",
+        "/policy-gateway/connectors"
+      ],
+      "symbols": [
+        "//",
+        "//cloud.google.com/bigquery/docs/external-data-cloud-storage",
+        "//docs.abliteration.ai/llms.txt",
+        "/policy-gateway/",
+        "/policy-gateway/connectors"
+      ],
+      "search_text": "Google Cloud Storage Archive Policy Gateway events in Google Cloud Storage via S3-compatible HMAC keys. Google Cloud Storage Configure Object layout Query with BigQuery // //cloud.google.com/bigquery/docs/external-data-cloud-storage //docs.abliteration.ai/llms.txt /policy-gateway/ /policy-gateway/connectors"
+    },
+    {
+      "source_id": "abliteration-doc-a5c6aef1bafcec1d",
+      "title": "HTTP Webhook",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/policy-logs/http.md",
+      "summary": "POST Policy Gateway events as NDJSON to any HTTPS endpoint — Slack, PagerDuty, internal services, Zapier.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:e92df7399da417a76c91700e5f4f5ba922e8255f26d67702cbb08226491aa59f",
+      "content_bytes": 1899,
+      "word_count": 168,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "HTTP Webhook"
+        },
+        {
+          "level": 2,
+          "text": "Configure"
+        },
+        {
+          "level": 2,
+          "text": "Request body"
+        }
+      ],
+      "api_paths": [
+        "//docs.abliteration.ai/llms.txt",
+        "//hooks.example.com/policy-events",
+        "/policy-gateway/connectors",
+        "/staging."
+      ],
+      "symbols": [
+        "//docs.abliteration.ai/llms.txt",
+        "//hooks.example.com/policy-events",
+        "/policy-gateway/connectors",
+        "/staging.",
+        "abliterated-model"
+      ],
+      "search_text": "HTTP Webhook POST Policy Gateway events as NDJSON to any HTTPS endpoint — Slack, PagerDuty, internal services, Zapier. HTTP Webhook Configure Request body //docs.abliteration.ai/llms.txt //hooks.example.com/policy-events /policy-gateway/connectors /staging. abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-bb3ad65ba45ca52c",
+      "title": "OpenTelemetry",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/policy-logs/otel.md",
+      "summary": "Export Policy Gateway events as OTLP log records over HTTP or gRPC to any OpenTelemetry collector.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:7cc57a7408778bb0cd3487f8b693d96b6c3e9e315847f52ea1268dcececb440c",
+      "content_bytes": 3614,
+      "word_count": 265,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "OpenTelemetry"
+        },
+        {
+          "level": 2,
+          "text": "OTLP / HTTP"
+        },
+        {
+          "level": 2,
+          "text": "OTLP / gRPC"
+        },
+        {
+          "level": 2,
+          "text": "Mapping"
+        },
+        {
+          "level": 2,
+          "text": "Verify"
+        }
+      ],
+      "api_paths": [
+        "//collector:4318/v1/logs",
+        "//docs.abliteration.ai/llms.txt",
+        "/HTTP",
+        "/gRPC",
+        "/policy-gateway/connectors"
+      ],
+      "symbols": [
+        "//collector:4318/v1/logs",
+        "//docs.abliteration.ai/llms.txt",
+        "/HTTP",
+        "/gRPC",
+        "/policy-gateway/connectors"
+      ],
+      "search_text": "OpenTelemetry Export Policy Gateway events as OTLP log records over HTTP or gRPC to any OpenTelemetry collector. OpenTelemetry OTLP / HTTP OTLP / gRPC Mapping Verify //collector:4318/v1/logs //docs.abliteration.ai/llms.txt /HTTP /gRPC /policy-gateway/connectors"
+    },
+    {
+      "source_id": "abliteration-doc-d35de3028784b058",
+      "title": "S3-Compatible",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/policy-logs/s3-compatible.md",
+      "summary": "Archive Policy Gateway events in any S3-protocol storage — MinIO, Wasabi, DigitalOcean Spaces.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:37c08a04ff8092f7f7022ecdd6dcb2496921f837f478f72d079b0ff24d9762ac",
+      "content_bytes": 1707,
+      "word_count": 175,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "S3-Compatible"
+        },
+        {
+          "level": 2,
+          "text": "Configure"
+        },
+        {
+          "level": 2,
+          "text": "Object layout"
+        }
+      ],
+      "api_paths": [
+        "//",
+        "//docs.abliteration.ai/llms.txt",
+        "//minio.internal:9000",
+        "/policy-gateway/",
+        "/policy-gateway/connectors",
+        "/policy-gateway/policy-logs/backblaze-b2",
+        "/policy-gateway/policy-logs/cloudflare-r2",
+        "/policy-gateway/policy-logs/gcs",
+        "/policy-gateway/policy-logs/s3"
+      ],
+      "symbols": [
+        "//",
+        "//docs.abliteration.ai/llms.txt",
+        "//minio.internal:9000",
+        "/policy-gateway/",
+        "/policy-gateway/connectors",
+        "/policy-gateway/policy-logs/backblaze-b2",
+        "/policy-gateway/policy-logs/cloudflare-r2",
+        "/policy-gateway/policy-logs/gcs",
+        "/policy-gateway/policy-logs/s3"
+      ],
+      "search_text": "S3-Compatible Archive Policy Gateway events in any S3-protocol storage — MinIO, Wasabi, DigitalOcean Spaces. S3-Compatible Configure Object layout // //docs.abliteration.ai/llms.txt //minio.internal:9000 /policy-gateway/ /policy-gateway/connectors /policy-gateway/policy-logs/backblaze-b2 /policy-gateway/policy-logs/cloudflare-r2 /policy-gateway/policy-logs/gcs /policy-gateway/policy-logs/s3"
+    },
+    {
+      "source_id": "abliteration-doc-8f0b9a3d3cd3c8ff",
+      "title": "Amazon S3",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/policy-logs/s3.md",
+      "summary": "Archive Policy Gateway events in an Amazon S3 bucket as JSON objects for long-term retention.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:b74d1fb7125731e409be06ede0c8c708eda7f30aa5ed2eb4982d870f0f6c8f61",
+      "content_bytes": 1879,
+      "word_count": 209,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Amazon S3"
+        },
+        {
+          "level": 2,
+          "text": "Configure"
+        },
+        {
+          "level": 2,
+          "text": "Object layout"
+        },
+        {
+          "level": 2,
+          "text": "Query with Athena"
+        }
+      ],
+      "api_paths": [
+        "//",
+        "//docs.abliteration.ai/llms.txt",
+        "/policy-gateway/",
+        "/policy-gateway/connectors"
+      ],
+      "symbols": [
+        "//",
+        "//docs.abliteration.ai/llms.txt",
+        "/policy-gateway/",
+        "/policy-gateway/connectors"
+      ],
+      "search_text": "Amazon S3 Archive Policy Gateway events in an Amazon S3 bucket as JSON objects for long-term retention. Amazon S3 Configure Object layout Query with Athena // //docs.abliteration.ai/llms.txt /policy-gateway/ /policy-gateway/connectors"
+    },
+    {
+      "source_id": "abliteration-doc-fb00ed975e39f3d0",
+      "title": "Splunk HEC",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/policy-logs/splunk-hec.md",
+      "summary": "Stream Policy Gateway events to Splunk via HTTP Event Collector.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:169ace5a98e0000b1d2a92458f27768c0da28de6833cc0825cdc11c62f721373",
+      "content_bytes": 1887,
+      "word_count": 179,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Splunk HEC"
+        },
+        {
+          "level": 2,
+          "text": "Configure"
+        },
+        {
+          "level": 2,
+          "text": "Event shape"
+        },
+        {
+          "level": 2,
+          "text": "Verify"
+        },
+        {
+          "level": 2,
+          "text": "Troubleshooting"
+        }
+      ],
+      "api_paths": [
+        "//",
+        "//docs.abliteration.ai/llms.txt",
+        "/policy-gateway/connectors",
+        "/services/collector/event"
+      ],
+      "symbols": [
+        "//",
+        "//docs.abliteration.ai/llms.txt",
+        "/policy-gateway/connectors",
+        "/services/collector/event",
+        "abliterated-model"
+      ],
+      "search_text": "Splunk HEC Stream Policy Gateway events to Splunk via HTTP Event Collector. Splunk HEC Configure Event shape Verify Troubleshooting // //docs.abliteration.ai/llms.txt /policy-gateway/connectors /services/collector/event abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-b809012912ada16b",
+      "title": "Security",
+      "canonical_locator": "https://docs.abliteration.ai/policy-gateway/security.md",
+      "summary": "How Policy Gateway handles your data — retention, encryption, access control.",
+      "category": "policy-gateway",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:e9d4af0c26b26d4faf429f4d17af4d5eccc12365e051e46de7141075a9bed5ec",
+      "content_bytes": 1549,
+      "word_count": 217,
+      "last_modified": "Tue, 01 Sep 2026 04:55:57 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Security"
+        },
+        {
+          "level": 2,
+          "text": "Data retention"
+        },
+        {
+          "level": 2,
+          "text": "Encryption"
+        },
+        {
+          "level": 2,
+          "text": "Access control"
+        }
+      ],
+      "api_paths": [
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/Sub",
+        "/policy-gateway/connectors"
+      ],
+      "symbols": [
+        "//docs.abliteration.ai/llms.txt",
+        "/Note",
+        "/Sub",
+        "/policy-gateway/connectors"
+      ],
+      "search_text": "Security How Policy Gateway handles your data — retention, encryption, access control. Security Data retention Encryption Access control //docs.abliteration.ai/llms.txt /Note /Sub /policy-gateway/connectors"
+    },
+    {
+      "source_id": "abliteration-doc-03666eab5bf8a3a0",
+      "title": "Pricing",
+      "canonical_locator": "https://docs.abliteration.ai/pricing.md",
+      "summary": "Per-token API pricing for abliteration.ai models. Input and output are billed at a flat per-model rate; cached input (prompt-cache reads) is billed at 10%.",
+      "category": "getting-started-reference",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:f6982931d4ae0f92c8d3c62aa3496c814975fa7d22afb1743a6359565a740b67",
+      "content_bytes": 2141,
+      "word_count": 313,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Pricing"
+        },
+        {
+          "level": 2,
+          "text": "Per-token rates"
+        },
+        {
+          "level": 2,
+          "text": "Prompt caching"
+        },
+        {
+          "level": 2,
+          "text": "Billing and balance"
+        },
+        {
+          "level": 2,
+          "text": "Subscriptions and credit packs"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/pricing",
+        "//docs.abliteration.ai/llms.txt",
+        "/models"
+      ],
+      "symbols": [
+        "//abliteration.ai/pricing",
+        "//docs.abliteration.ai/llms.txt",
+        "/models",
+        "abliterated-model",
+        "abliterated-model-large",
+        "abliterated-model-large-v2"
+      ],
+      "search_text": "Pricing Per-token API pricing for abliteration.ai models. Input and output are billed at a flat per-model rate; cached input (prompt-cache reads) is billed at 10%. Pricing Per-token rates Prompt caching Billing and balance Subscriptions and credit packs //abliteration.ai/pricing //docs.abliteration.ai/llms.txt /models abliterated-model abliterated-model-large abliterated-model-large-v2"
+    },
+    {
+      "source_id": "abliteration-doc-e695a2a74976f913",
+      "title": "abliteration.ai quickstart",
+      "canonical_locator": "https://docs.abliteration.ai/quickstart.md",
+      "summary": "Get your first abliteration.ai request working in under a minute — grab a key, hit /v1/chat/completions, stream tokens.",
+      "category": "getting-started-reference",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:98870e5371624ffe5f51ec54581eb0c7acc86c62f8366f4ff33c6952f545a6c2",
+      "content_bytes": 2304,
+      "word_count": 293,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "abliteration.ai quickstart"
+        },
+        {
+          "level": 2,
+          "text": "1. Get an API key"
+        },
+        {
+          "level": 2,
+          "text": "2. Make a request"
+        },
+        {
+          "level": 2,
+          "text": "3. Stream tokens"
+        },
+        {
+          "level": 2,
+          "text": "Next steps"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/console",
+        "//api.abliteration.ai/v1",
+        "//api.abliteration.ai/v1/chat/completions",
+        "//docs.abliteration.ai/llms.txt",
+        "/CodeGroup",
+        "/api/introduction",
+        "/authentication",
+        "/capabilities/streaming",
+        "/json",
+        "/models",
+        "/policy-gateway/overview",
+        "/v1/chat/completions"
+      ],
+      "symbols": [
+        "//abliteration.ai/console",
+        "//api.abliteration.ai/v1",
+        "//api.abliteration.ai/v1/chat/completions",
+        "//docs.abliteration.ai/llms.txt",
+        "/CodeGroup",
+        "/api/introduction",
+        "/authentication",
+        "/capabilities/streaming",
+        "/json",
+        "/models",
+        "/policy-gateway/overview",
+        "/v1/chat/completions",
+        "ABLIT_KEY",
+        "YOUR_API_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "abliteration.ai quickstart Get your first abliteration.ai request working in under a minute — grab a key, hit /v1/chat/completions, stream tokens. abliteration.ai quickstart 1. Get an API key 2. Make a request 3. Stream tokens Next steps //abliteration.ai/console //api.abliteration.ai/v1 //api.abliteration.ai/v1/chat/completions //docs.abliteration.ai/llms.txt /CodeGroup /api/introduction /authentication /capabilities/streaming /json /models /policy-gateway/overview /v1/chat/completions ABLIT_KEY YOUR_API_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-af2f99267681b01a",
+      "title": "Rate limits",
+      "canonical_locator": "https://docs.abliteration.ai/rate-limits.md",
+      "summary": "Request and token rate limits for the abliteration.ai API. Your limits are set by your tier — the higher of your subscription plan and the spend tier you earn from lifetime usage.",
+      "category": "getting-started-reference",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:afa71130187d05e8445b4704feac5be2b8749f8f561f857bd979098a7fa4d740",
+      "content_bytes": 12205,
+      "word_count": 1324,
+      "last_modified": "Tue, 01 Sep 2026 04:55:58 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "Rate limits"
+        },
+        {
+          "level": 2,
+          "text": "How limits are measured"
+        },
+        {
+          "level": 2,
+          "text": "Tiers"
+        },
+        {
+          "level": 2,
+          "text": "Limits by tier"
+        },
+        {
+          "level": 2,
+          "text": "Rate limit headers"
+        },
+        {
+          "level": 2,
+          "text": "When you hit a limit"
+        },
+        {
+          "level": 2,
+          "text": "Handle a 429"
+        },
+        {
+          "level": 2,
+          "text": "Reduce rate-limit errors"
+        }
+      ],
+      "api_paths": [
+        "//abliteration.ai/console/limits",
+        "//abliteration.ai/pricing",
+        "//ai.pydantic.dev/models/openai/",
+        "//api.abliteration.ai",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/Accordion",
+        "/AccordionGroup",
+        "/CodeGroup",
+        "/day",
+        "/pricing",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/responses"
+      ],
+      "symbols": [
+        "//abliteration.ai/console/limits",
+        "//abliteration.ai/pricing",
+        "//ai.pydantic.dev/models/openai/",
+        "//api.abliteration.ai",
+        "//api.abliteration.ai/v1",
+        "//docs.abliteration.ai/llms.txt",
+        "/Accordion",
+        "/AccordionGroup",
+        "/CodeGroup",
+        "/day",
+        "/pricing",
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/responses",
+        "ABLIT_KEY",
+        "abliterated-model"
+      ],
+      "search_text": "Rate limits Request and token rate limits for the abliteration.ai API. Your limits are set by your tier — the higher of your subscription plan and the spend tier you earn from lifetime usage. Rate limits How limits are measured Tiers Limits by tier Rate limit headers When you hit a limit Handle a 429 Reduce rate-limit errors //abliteration.ai/console/limits //abliteration.ai/pricing //ai.pydantic.dev/models/openai/ //api.abliteration.ai //api.abliteration.ai/v1 //docs.abliteration.ai/llms.txt /Accordion /AccordionGroup /CodeGroup /day /pricing /v1/chat/completions /v1/messages /v1/responses ABLIT_KEY abliterated-model"
+    },
+    {
+      "source_id": "abliteration-doc-c05fd738b62c867b",
+      "title": "What is abliteration?",
+      "canonical_locator": "https://docs.abliteration.ai/what-is-abliteration.md",
+      "summary": "Abliteration is a weight-modification technique that removes the refusal direction from an open-weight LLM, producing an unrestricted model that responds to prompts the original would refuse.",
+      "category": "getting-started-reference",
+      "status": 200,
+      "content_type": "text/markdown",
+      "content_digest": "sha256:5e6c8901020be81e75550833c0fb82e73327af8a64569d31997734b591bcf142",
+      "content_bytes": 4770,
+      "word_count": 634,
+      "last_modified": "Tue, 01 Sep 2026 04:55:56 GMT",
+      "etag": "",
+      "headings": [
+        {
+          "level": 1,
+          "text": "What is abliteration?"
+        },
+        {
+          "level": 2,
+          "text": "How it works"
+        },
+        {
+          "level": 2,
+          "text": "How abliteration differs from related techniques"
+        },
+        {
+          "level": 2,
+          "text": "Origin"
+        },
+        {
+          "level": 2,
+          "text": "How abliteration.ai uses this"
+        },
+        {
+          "level": 2,
+          "text": "What this means for your application"
+        },
+        {
+          "level": 2,
+          "text": "Further reading"
+        }
+      ],
+      "api_paths": [
+        "//api.abliteration.ai",
+        "//arxiv.org/abs/2406.11717",
+        "//docs.abliteration.ai/llms.txt",
+        "//huggingface.co/blog/mlabonne/abliteration",
+        "/api/anthropic-compatibility",
+        "/api/openai-compatibility",
+        "/models",
+        "/policy-gateway/overview"
+      ],
+      "symbols": [
+        "//api.abliteration.ai",
+        "//arxiv.org/abs/2406.11717",
+        "//docs.abliteration.ai/llms.txt",
+        "//huggingface.co/blog/mlabonne/abliteration",
+        "/api/anthropic-compatibility",
+        "/api/openai-compatibility",
+        "/models",
+        "/policy-gateway/overview",
+        "abliterated-model",
+        "abliterated-model-large",
+        "abliterated-model-large-v2"
+      ],
+      "search_text": "What is abliteration? Abliteration is a weight-modification technique that removes the refusal direction from an open-weight LLM, producing an unrestricted model that responds to prompts the original would refuse. What is abliteration? How it works How abliteration differs from related techniques Origin How abliteration.ai uses this What this means for your application Further reading //api.abliteration.ai //arxiv.org/abs/2406.11717 //docs.abliteration.ai/llms.txt //huggingface.co/blog/mlabonne/abliteration /api/anthropic-compatibility /api/openai-compatibility /models /policy-gateway/overview abliterated-model abliterated-model-large abliterated-model-large-v2"
+    }
+  ]
+}

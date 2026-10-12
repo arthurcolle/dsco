@@ -1,0 +1,13 @@
+#!/bin/sh
+# Run DSCO with its fixed restricted tool profile.
+# The runtime exposes only: Bash, curl_raw, ssh_command.
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -x "$script_dir/../dsco" ]; then
+    binary="$script_dir/../dsco"
+else
+    binary=dsco
+fi
+
+exec env DSCO_TOOL_PROFILE=restricted "$binary" "$@"
