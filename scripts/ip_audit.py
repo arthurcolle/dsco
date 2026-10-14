@@ -23,6 +23,7 @@ RULES = {
     "ownership_claim": r"(?:design|interpretation|implementation|intellectual property) (?:is|are) ours|patent.pending|proprietary",
     "business_claim": r"production[ -](?:ready|grade)|audit[ -]grade|pilot[ -]ready|state.of.the.art|(?:billion|70B)[ -]?(?:node|scale)",
     "third_party_notice": r"copyright|SPDX-License-Identifier|see LICENSE|GNU General Public License",
+    "unverified_origin_assurance": r"not a copy of any proprietary ontology|rather than copied proprietary schema|(?:interpretation|design|implementation) (?:is|are) ours",
 }
 PATTERNS = {name: re.compile(pattern, re.I) for name, pattern in RULES.items()}
 COMBINED = re.compile("|".join(f"(?P<{name}>{pattern})" for name, pattern in RULES.items()), re.I)
@@ -188,13 +189,13 @@ def check(root: Path) -> int:
         path = root / relative
         if not path.is_file() or path.is_symlink() or path.stat().st_size > LIMIT:
             continue
-        if Path(relative).parts[0] not in PRODUCT_ROOTS and relative != "README.md":
+        if Path(relative).parts[0] not in PRODUCT_ROOTS and len(Path(relative).parts) != 1:
             continue
         if PATTERNS["restricted_lineage"].search(relative) or PATTERNS["private_source"].search(relative):
             failed.append(f"{relative}: restricted file name")
         data = path.read_bytes()
         candidates = findings(data)
-        for name in ("restricted_lineage", "private_source"):
+        for name in ("restricted_lineage", "private_source", "unverified_origin_assurance"):
             for line in candidates.get(name, []):
                 failed.append(f"{relative}:{line}: {name}")
         if data[:4] == b"PK\x03\x04":
@@ -204,7 +205,7 @@ def check(root: Path) -> int:
                     failed.append(f"{relative}: archive exceeds inspection limit")
                 for member, matched in members.items():
                     if isinstance(matched, dict):
-                        for name in ("restricted_lineage", "private_source"):
+                        for name in ("restricted_lineage", "private_source", "unverified_origin_assurance"):
                             if name in matched:
                                 failed.append(f"{relative}:{member}: {name}")
             except (zipfile.BadZipFile, RuntimeError, OSError) as error:

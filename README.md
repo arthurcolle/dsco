@@ -113,9 +113,9 @@ and no mandatory hosted control plane.
 
 ## At a glance
 
-| Property | Current value |
+| Property | Recorded snapshot (verify before use) |
 |---|---:|
-| Version | `1.1.0` candidate (not yet tagged or published) |
+| Version | `1.1.0` release exists; subsequent working-tree changes are unversioned |
 | Runtime | Native C, default build standard `c2y` |
 | Source size | ~199K LOC across top-level `src/*.c` + `include/*.h` |
 | Source files | 136 `.c` / 138 `.h` top-level |
@@ -128,7 +128,8 @@ and no mandatory hosted control plane.
 | Portable lane | Cosmopolitan/APE `dsco.distributed.systems` via `make cosmo` |
 | License | MIT |
 
-Counts are ground-truthed against the source tree. After changing tool
+Inventory figures above include historical snapshots and are not a live count or
+performance acceptance. Verify them against the current tree. After changing tool
 registrations, external integration cache, headers, constants, env usage, or
 tracked repo layout, run `make docs` and commit the generated docs.
 

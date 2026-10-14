@@ -49,6 +49,12 @@ class IPDocumentationCheckTests(unittest.TestCase):
         self.write("docs/lingo/REDACTED_TERM_SOURCE_MAP.md", "")
         self.assertEqual(self.run_check().returncode, 1)
 
+    def test_root_service_cannot_assert_unverified_independent_origin(self):
+        self.write("service.py", 'note = "It is not a copy of any proprietary ontology."\n', tracked=True)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unverified_origin_assurance", result.stderr)
+
     def test_archived_private_reference_fails_without_extracting_files(self):
         archive = self.root / "docs/package.zip"
         archive.parent.mkdir()

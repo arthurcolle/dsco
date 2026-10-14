@@ -3,8 +3,8 @@
 Repo-scoped briefing for coding agents (agents.md v1.1 hierarchical scope).
 
 ## What this is
-dsco: a local-first agentic CLI in pure C (current checkout, top-level runtime:
-~199K LOC across 136 `.c` files and 138 headers; 140 files in `src/`).
+dsco: a local-first agentic CLI with a native C runtime. Determine source counts
+from the current tree rather than copying historical inventory figures.
 Overmind Soul architecture: Wings (autonomy) + Talons (competition) + Immune System (safety).
 
 ## Map (load details on demand — do not bulk-read)
@@ -13,7 +13,7 @@ Overmind Soul architecture: Wings (autonomy) + Talons (competition) + Immune Sys
   `mcp_server.c` (MCP server mode), `supervisor.c`/`swarm` (orchestration)
 - `include/` — headers; `tools.h` defines `tool_def_t` and the execute-for-tier gate
 - `.workspace/` — strategy docs; `harness-parity/` is the active roadmap (00_MASTER.md)
-- `doctrine/` — 80 governance doctrines; `memory/sessions/` — session logs
+- `doctrine/` — governance documents; `memory/sessions/` — session logs
 - `docs/` — ARCHITECTURE.md, API_REFERENCE.md, C_MODULE_REFERENCE.md
 
 ## Build & test
