@@ -1600,7 +1600,11 @@ static-analysis: clang-tidy cppcheck
 check-version:
 	./scripts/check_version_consistency.sh
 
-docs:
+.PHONY: ip-check
+ip-check:
+	python3 scripts/ip_audit.py --check
+
+docs: ip-check
 	./scripts/gen_api_reference.sh
 	./scripts/gen_tool_catalog.sh
 	python3 scripts/index_constants_env.py --root .
@@ -1610,7 +1614,7 @@ docs:
 claude-release-check:
 	python3 scripts/sync_claude_release_family.py
 
-docs-check: claude-release-check
+docs-check: claude-release-check ip-check
 	./scripts/gen_api_reference.sh --check
 	./scripts/gen_tool_catalog.sh --check
 	python3 scripts/index_constants_env.py --root . --check

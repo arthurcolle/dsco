@@ -6,16 +6,16 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 
 ## Summary
 
-- Total covered files: 5298
+- Total covered files: 5297
 
 | Category | Files |
 |---|---:|
 | Root project files | 34 |
 | Repository policy and CI | 18 |
-| Documentation | 3378 |
+| Documentation | 3375 |
 | Runtime source and headers | 723 |
-| Tests | 422 |
-| Scripts and tooling | 151 |
+| Tests | 423 |
+| Scripts and tooling | 152 |
 | Generated data assets | 28 |
 | Provider metadata | 17 |
 | Web surface | 19 |
@@ -4360,6 +4360,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `tests/test_interop_reliability.py`
 - `tests/test_interop_signals.c`
 - `tests/test_invoke_tool_tier.py`
+- `tests/test_ip_audit.py`
 - `tests/test_ipc_target_recovery.py`
 - `tests/test_ipc_task_fencing.py`
 - `tests/test_jev_compaction.c`
@@ -4712,6 +4713,7 @@ This manifest is generated from `git ls-files` plus the coverage generator/outpu
 - `scripts/hn_c_validate.py`
 - `scripts/index_constants_env.py`
 - `scripts/install_atomic.sh`
+- `scripts/ip_audit.py`
 - `scripts/jev_loop.py`
 - `scripts/jina_tiny_rerank.py`
 - `scripts/lingo_release_worker.py`

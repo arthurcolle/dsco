@@ -25,6 +25,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check documentation attribution
+        run: python3 scripts/ip_audit.py --check
+
       - uses: ./.github/actions/setup-native
 
       - name: Check generated docs

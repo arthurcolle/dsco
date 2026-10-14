@@ -43,6 +43,21 @@ Overmind Soul architecture: Wings (autonomy) + Talons (competition) + Immune Sys
 4. Every tool-call path must route through `tools_execute_for_tier()` (governance gate).
 5. Verify claims against disk: counts in identity docs drift; `ls | wc -l` beats memory.
 
+## Intellectual property and documentation
+- Describe this repository from inspected source and reproducible checks. Do not invent
+  third-party ancestry, endorsements, equivalence, implementation details or founder history.
+- Access to private notes, OCR, screenshots, source or research does not establish ownership,
+  authenticity, a license, permission to publish or authorization to derive product claims.
+- Keep third-party code, licenses and attribution distinct from local implementation. A Git
+  author, repository location, successful test or model-generated explanation does not prove
+  exclusive ownership or independent development. Preserve notices; record unknown provenance.
+- Cite public primary sources for external facts. Label proposals, synthetic examples,
+  estimates and measured behavior explicitly. Never promote them into production guarantees.
+- Write only documentation needed for the requested change. Keep private source summaries,
+  inventories, local paths and sensitive review evidence out of product docs and release archives.
+- Run `make ip-check` before documentation changes or publication. A passing pattern check
+  is a regression safeguard, not ownership clearance. Historical objects require separate review.
+
 ## Outcome-ownership directive
 - Treat each user objective as a contract to reach a verified terminal state, not as a request
   for plans, suggestions, or partial progress.

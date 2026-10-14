@@ -47,6 +47,9 @@ jobs:
           cache: npm
           cache-dependency-path: npm/dsco/package.json
 
+      - name: Check documentation attribution
+        run: python3 scripts/ip_audit.py --check
+
       - name: Validate tag, changelog, and package metadata
         id: meta
         run: |
