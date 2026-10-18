@@ -44,7 +44,7 @@ static const mcp_toolset_t k_toolsets[] = {
              "grep_files,run_command,dsco-python-3x,python,jq,http_request,persistent_directive,standing_directive,value_ledger"},
     {"terminal", "surface,kitty_remote,kitten,pty_session,buffer,buffer_view,native_window,ui_trace"},
     {"buffers", "buffer,buffer_view"},
-    {"desktop", "desktop,computer,view_image,ui_render,native_window"},
+    {"desktop", "desktop,app_control,computer,view_image,ui_render,native_window"},
     {"browser", "browser,browser_session"},
     {"ast", "ast_*,code_index,code_search,call_graph,dependency_graph,"
             "symbol_def,symbol_refs,inspect_file,api_outline"},

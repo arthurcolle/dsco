@@ -31,6 +31,8 @@
 #include "goal.h"
 #include "process_capture.h"
 #include "desktop_macos.h"
+#include "app_control.h"
+#include "computer_screen.h"
 #include "surface_registry.h"
 #include "buffer_store.h"
 #include "buffer_view.h"
@@ -7717,6 +7719,18 @@ static void cu_display_size(int *w, int *h) {
 #endif
 }
 
+/* The model works in screenshot pixels; CGEvent works in display points. On
+ * Linux the screenshot is unscaled, so both spaces are the same. */
+static void cu_space(computer_space_t *space) {
+    int w = 0, h = 0;
+    cu_display_size(&w, &h);
+#ifdef __APPLE__
+    computer_space_current(w, h, space);
+#else
+    computer_space_fit(w, h, 1 << 20, 1 << 20, space);
+#endif
+}
+
 /* Parse a "coordinate":[x,y] array (or fall back to x/y scalar fields). */
 static bool cu_get_coord(const char *input, int *x, int *y) {
     char *raw = json_get_raw(input, "coordinate");
@@ -7734,51 +7748,47 @@ static bool cu_get_coord(const char *input, int *x, int *y) {
     return false;
 }
 
-/* Emit a PNG to the agent's image pickup file so it is attached to the next
- * turn (same mechanism as view_image). */
+/* Screenshot-space coordinate from input, converted to display points. */
+static bool cu_get_point(const char *input, const computer_space_t *space, int *x, int *y) {
+    int sx, sy;
+    if (!cu_get_coord(input, &sx, &sy)) return false;
+    computer_space_to_display(space, sx, sy, x, y);
+    return true;
+}
+
+/* Attach an image to the tool result (same mechanism as view_image). */
 static bool cu_emit_image(const char *path) {
+#ifdef __APPLE__
+    return tool_content_add_image_file(path, "image/jpeg");
+#else
     return tool_content_add_image_file(path, "image/png");
+#endif
 }
 
 /* A unique checked capture; an old file can never satisfy a failed capture. */
 static bool cu_screenshot(char *path_out, size_t path_len) {
-    int w = 0, h = 0;
-    cu_display_size(&w, &h);
 #ifdef __APPLE__
-    if (!CGPreflightScreenCaptureAccess()) return false;
-#endif
+    computer_space_t space;
+    cu_space(&space);
+    return computer_screen_capture(&space, path_out, path_len);
+#else
     char path[] = "/tmp/dsco_capture_XXXXXX";
     int fd = mkstemp(path);
     if (fd < 0) return false;
     close(fd);
     process_capture_t capture;
-#ifdef __APPLE__
-    char *argv[] = {"/usr/sbin/screencapture", "-x", "-t", "png", "-D", "1", path, NULL};
-    bool ok = process_capture(argv[0], argv, 5000, 1024, &capture);
-#else
     char *argv[] = {"/usr/bin/scrot", "-o", path, NULL};
     bool ok = process_capture(argv[0], argv, 5000, 1024, &capture);
-#endif
     process_capture_free(&capture);
-#ifdef __APPLE__
-    if (ok && w > 0 && h > 0) {
-        char width[24], height[24];
-        snprintf(width, sizeof(width), "%d", w); snprintf(height, sizeof(height), "%d", h);
-        char *resize[] = {"/usr/bin/sips", "-z", height, width, path, NULL};
-        ok = process_capture(resize[0], resize, 5000, 1024, &capture);
-        process_capture_free(&capture);
-    }
-#endif
-    struct stat st;
     unsigned char magic[8] = {0};
     FILE *f = ok ? fopen(path, "rb") : NULL;
     if (f) { ok = fread(magic, 1, 8, f) == 8; fclose(f); }
     else ok = false;
-    ok = ok && !memcmp(magic, "\211PNG\r\n\032\n", 8) &&
-         !stat(path, &st) && st.st_size > 8 && strlen(path) < path_len;
+    ok = ok && !memcmp(magic, "\211PNG\r\n\032\n", 8) && strlen(path) < path_len;
     if (!ok) { unlink(path); return false; }
     snprintf(path_out, path_len, "%s", path);
     return true;
+#endif
 }
 
 #ifdef __APPLE__
@@ -7957,7 +7967,8 @@ static bool cu_type_text(const char *text) {
     return true;
 }
 
-static void cu_scroll(const char *dir, int amount) {
+static void cu_scroll(const char *dir, int amount, const int *at) {
+    if (at) CGWarpMouseCursorPosition(CGPointMake((double)at[0], (double)at[1]));
     int dy = 0, dx = 0;
     if (!strcasecmp(dir, "up"))
         dy = amount;
@@ -7980,12 +7991,13 @@ static bool tool_computer_impl(const char *input, char *result, size_t rlen) {
         snprintf(result, rlen,
                  "missing: action (screenshot|cursor_position|mouse_move|"
                  "left_click|right_click|middle_click|double_click|triple_click|"
-                 "left_click_drag|key|type|scroll|wait)");
+                 "left_click_drag|key|type|scroll|wait|zoom)");
         return false;
     }
 
-    int w = 0, h = 0;
-    cu_display_size(&w, &h);
+    computer_space_t space;
+    cu_space(&space);
+    int w = space.display_w, h = space.display_h;
     bool ok = true;
     bool want_shot = !strcmp(action, "screenshot") || json_get_bool(input, "screenshot", true);
     char scratch[1024] __attribute__((unused));
@@ -7994,7 +8006,7 @@ static bool tool_computer_impl(const char *input, char *result, size_t rlen) {
 
 #ifdef __APPLE__
     if (strcmp(action, "screenshot") && strcmp(action, "cursor_position") &&
-        strcmp(action, "wait") && !CGPreflightPostEventAccess()) {
+        strcmp(action, "wait") && strcmp(action, "zoom") && !CGPreflightPostEventAccess()) {
         snprintf(result, rlen, "{\"ok\":false,\"error\":\"accessibility_permission_required\",\"permission_prompted\":false}");
         free(action);
         return false;
@@ -8005,23 +8017,50 @@ static bool tool_computer_impl(const char *input, char *result, size_t rlen) {
         CGEventRef e = CGEventCreate(NULL);
         CGPoint p = CGEventGetLocation(e);
         CFRelease(e);
-        snprintf(result, rlen, "{\"x\":%d,\"y\":%d,\"display\":[%d,%d]}", (int)p.x, (int)p.y, w, h);
+        int sx, sy;
+        computer_space_to_shot(&space, (int)p.x, (int)p.y, &sx, &sy);
+        snprintf(result, rlen, "{\"x\":%d,\"y\":%d,\"screenshot_size\":[%d,%d],\"display_point\":[%d,%d],\"display\":[%d,%d]}",
+                 sx, sy, space.shot_w, space.shot_h, (int)p.x, (int)p.y, w, h);
         free(action);
         return true; /* no screenshot needed */
+    } else if (!strcmp(action, "zoom")) {
+        char *region = json_get_raw(input, "region");
+        int x1, y1, x2, y2, zw = 0, zh = 0;
+        bool parsed = region && sscanf(region, " [ %d , %d , %d , %d ]", &x1, &y1, &x2, &y2) == 4;
+        free(region);
+        char zoom[64];
+        if (!parsed) {
+            snprintf(result, rlen, "{\"ok\":false,\"error\":\"zoom needs region [x1,y1,x2,y2] in screenshot pixels\"}");
+            free(action);
+            return false;
+        }
+        if (!computer_screen_zoom(&space, x1, y1, x2, y2, zoom, sizeof(zoom), &zw, &zh)) {
+            snprintf(result, rlen, "{\"ok\":false,\"error\":\"zoom capture failed (check screen-recording permission)\"}");
+            free(action);
+            return false;
+        }
+        bool attached = cu_emit_image(zoom);
+        unlink(zoom);
+        snprintf(result, rlen, "{\"ok\":%s,\"action\":\"zoom\",\"region\":[%d,%d,%d,%d],\"image_size\":[%d,%d],"
+                 "\"note\":\"Native-resolution view of that screenshot region. Click using screenshot "
+                 "coordinates: x1 + zx*(x2-x1)/%d, y1 + zy*(y2-y1)/%d.\"}",
+                 attached ? "true" : "false", x1, y1, x2, y2, zw, zh, zw, zh);
+        free(action);
+        return attached;
     } else if (!strcmp(action, "mouse_move")) {
-        int x, y;
-        if (!cu_get_coord(input, &x, &y)) {
+        int px, py;
+        if (!cu_get_point(input, &space, &px, &py)) {
             snprintf(result, rlen, "mouse_move needs coordinate [x,y]");
             free(action);
             return false;
         }
-        CGWarpMouseCursorPosition(CGPointMake(x, y));
-        cu_post_mouse(kCGEventMouseMoved, x, y, kCGMouseButtonLeft, 0);
+        CGWarpMouseCursorPosition(CGPointMake(px, py));
+        cu_post_mouse(kCGEventMouseMoved, px, py, kCGMouseButtonLeft, 0);
     } else if (!strcmp(action, "left_click") || !strcmp(action, "right_click") ||
                !strcmp(action, "middle_click") || !strcmp(action, "double_click") ||
                !strcmp(action, "triple_click")) {
         int x, y;
-        if (!cu_get_coord(input, &x, &y)) {
+        if (!cu_get_point(input, &space, &x, &y)) {
             CGEventRef e = CGEventCreate(NULL);
             CGPoint p = CGEventGetLocation(e);
             CFRelease(e);
@@ -8035,20 +8074,24 @@ static bool tool_computer_impl(const char *input, char *result, size_t rlen) {
         cu_click(x, y, btn, clicks);
     } else if (!strcmp(action, "left_click_drag")) {
         int sx, sy;
-        if (!cu_get_coord(input, &sx, &sy)) {
+        if (!cu_get_point(input, &space, &sx, &sy)) {
             snprintf(result, rlen, "drag needs start coordinate [x,y]");
             free(action);
             return false;
         }
-        int ex = json_get_int(input, "x2", sx), ey = json_get_int(input, "y2", sy);
+        int tx = -1, ty = -1, ex = sx, ey = sy;
         char *to = json_get_raw(input, "to");
-        if (to) {
-            sscanf(to, " [ %d , %d ]", &ex, &ey);
-            free(to);
-        }
+        if (to && sscanf(to, " [ %d , %d ]", &tx, &ty) == 2) computer_space_to_display(&space, tx, ty, &ex, &ey);
+        free(to);
+        /* Apps track drags through intermediate events, not one jump. */
         CGWarpMouseCursorPosition(CGPointMake(sx, sy));
         cu_post_mouse(kCGEventLeftMouseDown, sx, sy, kCGMouseButtonLeft, 1);
-        cu_post_mouse(kCGEventLeftMouseDragged, ex, ey, kCGMouseButtonLeft, 1);
+        usleep(30000);
+        for (int step = 1; step <= 12; step++) {
+            cu_post_mouse(kCGEventLeftMouseDragged, sx + (ex - sx) * step / 12, sy + (ey - sy) * step / 12,
+                          kCGMouseButtonLeft, 1);
+            usleep(12000);
+        }
         cu_post_mouse(kCGEventLeftMouseUp, ex, ey, kCGMouseButtonLeft, 1);
     } else if (!strcmp(action, "key")) {
         char *text = json_get_str(input, "text");
@@ -8075,7 +8118,8 @@ static bool tool_computer_impl(const char *input, char *result, size_t rlen) {
     } else if (!strcmp(action, "scroll")) {
         char *dir = json_get_str(input, "scroll_direction");
         int amt = json_get_int(input, "scroll_amount", 3);
-        cu_scroll(dir ? dir : "down", amt);
+        int at[2];
+        cu_scroll(dir ? dir : "down", amt, cu_get_point(input, &space, &at[0], &at[1]) ? at : NULL);
         free(dir);
     } else if (!strcmp(action, "wait")) {
         int ms = json_get_int(input, "duration", 1000);
@@ -8206,11 +8250,16 @@ static bool tool_computer_impl(const char *input, char *result, size_t rlen) {
                 snprintf(result, rlen, "error: image content capacity exceeded");
                 free(action); return false;
             }
-            snprintf(result, rlen,
-                     "{\"action\":\"%s\",\"display\":[%d,%d],\"screenshot_attached\":true,"
-                     "\"note\":\"Fresh main-display screenshot attached. "
-                     "Coordinates are in display points.\"}",
-                     action, w, h);
+            if (result[0]) {
+                size_t used = strlen(result);
+                const char *extra = ",\"screenshot_attached\":true}";
+                if (used && result[used - 1] == '}' && used + strlen(extra) < rlen)
+                    strcpy(result + used - 1, extra);
+            } else snprintf(result, rlen,
+                     "{\"action\":\"%s\",\"screenshot_size\":[%d,%d],\"display\":[%d,%d],\"screenshot_attached\":true,"
+                     "\"note\":\"Fresh main-display screenshot attached. Give coordinates in this "
+                     "screenshot's pixels; they are scaled to the display. Use zoom for small text.\"}",
+                     action, space.shot_w, space.shot_h, w, h);
         } else if (result[0] == '\0' || !strcmp(action, "screenshot")) {
             snprintf(result, rlen,
                      "{\"action\":\"%s\",\"error\":\"screen capture failed "
@@ -36282,6 +36331,8 @@ static const tool_def_t s_tools[] = {
      .input_schema_json = PTY_SESSION_SCHEMA, .execute = tool_pty_session, .core = true},
     {.name = "desktop", .description = DESKTOP_DESCRIPTION,
      .input_schema_json = DESKTOP_SCHEMA, .execute = tool_desktop, .core = true},
+    {.name = "app_control", .description = APP_CONTROL_DESCRIPTION,
+     .input_schema_json = APP_CONTROL_SCHEMA, .execute = tool_app_control, .core = true},
     {.name = "browser_session", .description = BROWSER_SESSION_DESCRIPTION,
      .input_schema_json = BROWSER_SESSION_SCHEMA, .execute = tool_browser_session, .core = true},
     {.name = "kitty_remote",
@@ -39062,16 +39113,21 @@ static const tool_def_t s_tools[] = {
      * ══════════════════════════════════════════════════════════════════════ */
     {.name = "computer",
      .description =
+         "Drives the user's real pointer and keyboard; prefer app_control, which operates a "
+         "target app in the background without taking over the cursor or focus. "
          "Control the local desktop like a human: screenshot, mouse_move, left_click, right_click, "
          "middle_click, double_click, triple_click, left_click_drag, key (combos like cmd+a), "
-         "type, scroll, cursor_position, wait. Coordinates are display points [x,y]; a fresh "
-         "screenshot is attached after each action so you can see the result.",
+         "type, scroll, cursor_position, wait, zoom. Coordinates are pixels [x,y] in the attached "
+         "screenshot (scaled to the display automatically, including high-resolution displays); a fresh "
+         "screenshot is attached after each action so you can see the result. zoom returns a "
+         "native-resolution crop of region [x1,y1,x2,y2] for reading small UI.",
      .input_schema_json =
          "{\"type\":\"object\",\"properties\":{\"action\":{\"type\":\"string\",\"description\":"
          "\"screenshot|cursor_position|mouse_move|left_click|right_click|middle_click|double_click|"
-         "triple_click|left_click_drag|key|type|scroll|wait\"},\"coordinate\":{\"type\":\"array\","
-         "\"items\":{\"type\":\"integer\"},\"description\":\"[x,y] in display "
-         "points\"},\"to\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"},\"description\":\"["
+         "triple_click|left_click_drag|key|type|scroll|wait|zoom\"},\"coordinate\":{\"type\":\"array\","
+         "\"items\":{\"type\":\"integer\"},\"description\":\"[x,y] in screenshot "
+         "pixels\"},\"region\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"},"
+         "\"description\":\"zoom: [x1,y1,x2,y2] in screenshot pixels\"},\"to\":{\"type\":\"array\",\"items\":{\"type\":\"integer\"},\"description\":\"["
          "x,y] drag destination\"},\"text\":{\"type\":\"string\",\"description\":\"text to type, "
          "or key combo for "
          "action=key\"},\"scroll_direction\":{\"type\":\"string\",\"description\":\"up|down|left|"
