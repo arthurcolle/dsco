@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Inventory local provenance risks without transmitting or quoting source material."""
+"""Inventory local provenance risks without transmitting or quoting source material.
+
+Restricted terms are never stored in this repository in clear text:
+  * scripts/ip_audit_restricted.sha256 (override: DSCO_IP_AUDIT_HASHES) holds a
+    `salt <hex>` line and `<rule> <sha256>` lines, sha256("<salt>:<normalized term>");
+    generate lines with `--hash-terms RULE < terms.txt`.
+  * an optional private regex file (DSCO_IP_AUDIT_PATTERNS, default
+    ~/.dsco/ip_audit_patterns.txt), one `[rule:] regex` per line.
+"""
 from __future__ import annotations
 
 import argparse
@@ -16,18 +24,119 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 LIMIT = 16 * 1024 * 1024
+# Public rules. Restricted lineage/private-source terms are not listed here:
+# they come from salted SHA-256 hashes committed in HASHES_FILE (matched against
+# normalized word n-grams) and from an optional private local patterns file.
 RULES = {
-    "restricted_lineage": r"sec[ _-]?db|\bsecview\b|\bsecexpr\b|\bslang\b",
-    "private_source": r"REDACTED_TERM|IMG_2[123]\d\d\.(?:md|txt)|REDACTED_TERM|lingo/corpus-index\.json",
+    "restricted_lineage": r"(?!x)x",
+    "private_source": r"IMG_2[123]\d\d\.(?:md|txt)|lingo/corpus-index\.json",
     "derivation_claim": r"(?:copied|adapted|borrowed|derived) from|inspired by|inheritance is direct",
     "ownership_claim": r"(?:design|interpretation|implementation|intellectual property) (?:is|are) ours|patent.pending|proprietary",
     "business_claim": r"production[ -](?:ready|grade)|audit[ -]grade|pilot[ -]ready|state.of.the.art|(?:billion|70B)[ -]?(?:node|scale)",
     "third_party_notice": r"copyright|SPDX-License-Identifier|see LICENSE|GNU General Public License",
     "unverified_origin_assurance": r"not a copy of any proprietary ontology|rather than copied proprietary schema|(?:interpretation|design|implementation) (?:is|are) ours",
 }
+RESTRICTED_RULES = ("restricted_lineage", "private_source")
+HASH_RULES = RESTRICTED_RULES + ("path_only",)
+HASHES_FILE = Path(os.environ.get("DSCO_IP_AUDIT_HASHES") or Path(__file__).resolve().with_name("ip_audit_restricted.sha256"))
+PRIVATE_PATTERNS_FILE = Path(os.environ.get("DSCO_IP_AUDIT_PATTERNS") or Path.home() / ".dsco" / "ip_audit_patterns.txt")
+MAX_NGRAM = 4
+TOKEN = re.compile(r"[a-z0-9]+")
+
+
+def normalize_term(term: str) -> str:
+    """Lowercase alphanumeric words joined by single spaces ("Foo_Bar-db" -> "foo bar db")."""
+    return " ".join(TOKEN.findall(term.lower()))
+
+
+def term_hash(salt: str, term: str) -> str:
+    return hashlib.sha256(f"{salt}:{normalize_term(term)}".encode()).hexdigest()
+
+
+def load_hashes(path: Path) -> tuple[str, dict]:
+    """Parse `salt <hex>` plus `<rule> <sha256>` lines. Missing file -> no hashed terms."""
+    salt, hashes = "", {}
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return salt, hashes
+    for raw in lines:
+        parts = raw.split("#", 1)[0].split()
+        if len(parts) != 2:
+            continue
+        if parts[0] == "salt":
+            salt = parts[1]
+        elif parts[0] in HASH_RULES and re.fullmatch(r"[0-9a-f]{64}", parts[1]):
+            hashes[parts[1]] = parts[0]
+    return salt, (hashes if salt else {})
+
+
+def load_private_patterns(path: Path) -> dict:
+    """Optional local file: `[rule:] regex` per line, rule defaults to private_source."""
+    extra = collections.defaultdict(list)
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return extra
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        rule, sep, pattern = line.partition(":")
+        if sep and rule.strip() in RESTRICTED_RULES:
+            line = pattern.strip()
+        else:
+            rule = "private_source"
+        try:
+            re.compile(line)
+        except re.error:
+            print(f"ip_audit: ignoring invalid private pattern on a line of {path}", file=sys.stderr)
+            continue
+        extra[rule.strip()].append(line)
+    return extra
+
+
+SALT, HASHED_TERMS = load_hashes(HASHES_FILE)
+PRIVATE_PATTERNS = load_private_patterns(PRIVATE_PATTERNS_FILE)
+for _rule, _patterns in PRIVATE_PATTERNS.items():
+    RULES[_rule] = "|".join([RULES[_rule], *_patterns])
 PATTERNS = {name: re.compile(pattern, re.I) for name, pattern in RULES.items()}
 COMBINED = re.compile("|".join(f"(?P<{name}>{pattern})" for name, pattern in RULES.items()), re.I)
-KEYWORDS = ("REDACTED_TERM", "REDACTED_TERM", "REDACTED_TERM", "REDACTED_TERM", "REDACTED_TERM", "REDACTED_TERM", "restricted-term", "idaes", "img_2", "wavefront", "corpus-index", "copied", "adapted", "borrowed", "derived", "inspired", "inheritance", "ours", "patent", "proprietary", "production", "audit", "pilot", "state", "billion", "70b", "copyright", "license")
+KEYWORDS = ("img_2", "corpus-index", "copied", "adapted", "borrowed", "derived", "inspired", "inheritance", "ours", "patent", "proprietary", "production", "audit", "pilot", "state", "billion", "70b", "copyright", "license")
+_NGRAM_CACHE: dict = {}
+
+
+def hashed_hits(text: str) -> list:
+    """(offset, rule) for every word n-gram whose salted hash is restricted."""
+    if not HASHED_TERMS:
+        return []
+    tokens = [(m.start(), m.end(), m.group()) for m in TOKEN.finditer(text.lower())]
+    hits = []
+    for index, (start, _end, word) in enumerate(tokens):
+        gram = word
+        for width in range(1, MAX_NGRAM + 1):
+            if width > 1:
+                if index + width > len(tokens):
+                    break
+                previous_end = tokens[index + width - 2][1]
+                next_start, _, next_word = tokens[index + width - 1]
+                if next_start - previous_end > 2:
+                    break
+                gram = f"{gram} {next_word}"
+            rule = _NGRAM_CACHE.get(gram, 0)
+            if rule == 0:
+                rule = HASHED_TERMS.get(hashlib.sha256(f"{SALT}:{gram}".encode()).hexdigest())
+                _NGRAM_CACHE[gram] = rule
+            if rule:
+                hits.append((start, rule))
+    return hits
+
+
+def restricted_name(path: str, *, include_path_only: bool = False) -> bool:
+    if PATTERNS["restricted_lineage"].search(path) or PATTERNS["private_source"].search(path):
+        return True
+    return any(rule in RESTRICTED_RULES or include_path_only for _, rule in hashed_hits(path))
+
 DEPENDENCY_PARTS = {".venv", "venv", "site-packages", "node_modules", ".mypy_cache", ".cache", "__pycache__"}
 PRIVATE_NAMES = re.compile(r"(?:^\.env(?:\.|$)|secrets|credentials|\.pem$|\.key$|^embedded_key\.gen\.h$|^cstring_key\.gen\.h$)", re.I)
 PRODUCT_ROOTS = {"docs", "demos", "prompts", "examples", "lingo", "src", "include", "npm", "web", "design", "research", "reports", "assets", "proposals", "doctrine", "config", "schemas", "data"}
@@ -46,12 +155,17 @@ def findings(data: bytes) -> dict:
         return {}
     text = data.decode("utf-8", "replace")
     lowered = text.lower()
-    if not any(keyword in lowered for keyword in KEYWORDS):
-        return {}
     hits = collections.defaultdict(list)
-    for match in COMBINED.finditer(text):
-        if len(hits[match.lastgroup]) < 40:
-            hits[match.lastgroup].append(match.start())
+    for offset, rule in hashed_hits(text):
+        if rule in RESTRICTED_RULES and len(hits[rule]) < 40:
+            hits[rule].append(offset)
+    if PRIVATE_PATTERNS or any(keyword in lowered for keyword in KEYWORDS):
+        for match in COMBINED.finditer(text):
+            if len(hits[match.lastgroup]) < 40:
+                hits[match.lastgroup].append(match.start())
+    hits = {name: offsets for name, offsets in hits.items() if offsets}
+    if not hits:
+        return {}
     locations = collections.defaultdict(set)
     previous = 0
     line = 1
@@ -171,7 +285,8 @@ def history(root: Path, output: Path) -> None:
         archive_hits = archive_findings(data) if data[:4] == b"PK\x03\x04" and length <= LIMIT else {}
         restricted = {name: lines for name, lines in matches.items() if name in {"restricted_lineage", "private_source"}}
         restricted_members = {name: found for name, found in archive_hits.items() if isinstance(found, dict) and ("restricted_lineage" in found or "private_source" in found)}
-        if restricted or restricted_members or re.search(rb"REDACTED_TERM|idaes|corpus-index", path, re.I):
+        path_text = path.decode("utf-8", "surrogateescape")
+        if restricted or restricted_members or "corpus-index" in path_text.lower() or restricted_name(path_text, include_path_only=True):
             risky.append({"path": path.decode("utf-8", "surrogateescape"), "object": object_id.decode(), "bytes": length, "findings": restricted, "archive_members": restricted_members})
     process.stdin.close()
     if process.wait() != 0:
@@ -191,7 +306,7 @@ def check(root: Path) -> int:
             continue
         if Path(relative).parts[0] not in PRODUCT_ROOTS and len(Path(relative).parts) != 1:
             continue
-        if PATTERNS["restricted_lineage"].search(relative) or PATTERNS["private_source"].search(relative):
+        if restricted_name(relative):
             failed.append(f"{relative}: restricted file name")
         data = path.read_bytes()
         candidates = findings(data)
@@ -216,13 +331,33 @@ def check(root: Path) -> int:
     return int(bool(failed))
 
 
+def hash_terms(rule: str) -> int:
+    """Read restricted terms from stdin and print committable hash lines (never the terms)."""
+    salt = SALT
+    if not salt:
+        print("ip_audit: no salt in hashes file; add a `salt <hex>` line first", file=sys.stderr)
+        return 2
+    for raw in sys.stdin:
+        term = normalize_term(raw)
+        if term:
+            if len(term.split()) > MAX_NGRAM:
+                print(f"ip_audit: skipping a term longer than {MAX_NGRAM} words", file=sys.stderr)
+                continue
+            print(f"{rule} {term_hash(salt, term)}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
+    parser.add_argument("--hash-terms", choices=HASH_RULES, metavar="RULE",
+                        help="read terms on stdin, print salted hash lines for HASHES_FILE")
     parser.add_argument("--audit", type=Path)
     parser.add_argument("--history", type=Path)
     parser.add_argument("--check", action="store_true")
     arguments = parser.parse_args()
+    if arguments.hash_terms:
+        return hash_terms(arguments.hash_terms)
     root = arguments.root.resolve()
     if arguments.audit:
         audit(root, arguments.audit.resolve())
