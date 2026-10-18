@@ -2,6 +2,7 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 
+#include <stdatomic.h>
 #include "swarm.h"
 #include "swarm_lifecycle.h"
 #include "swarm_reactor.h"
@@ -570,8 +571,13 @@ void swarm_destroy(swarm_t *s) {
 
 /* ── Post-spawn hook: register child with kqueue + bitset ─────────────── */
 
+/* Result files live in one per-PID directory, so run ids must be unique
+ * across every swarm_t in the process, not just within one instance. */
+static _Atomic unsigned long long g_swarm_run_seq;
+
 static void post_spawn_register(swarm_t *s, int child_id) {
-    s->children[child_id].run_id = ++s->next_run_id;
+    s->next_run_id = atomic_fetch_add(&g_swarm_run_seq, 1) + 1;
+    s->children[child_id].run_id = s->next_run_id;
     bitset_set(&s->active, child_id);
     swarm_stream_event(&s->children[child_id], "worker.start", NULL, NULL, 0);
     /* Hatch a companion pet for this background agent. Seeded by the task so

@@ -34,9 +34,9 @@
  * Budget-adaptive: full=48, mid=31, low=20, critical=12. */
 #define TOOL_REGISTER_CAP       48
 #define TOOL_REG_ALWAYS         16   /* execution, disclosure, context controls, loop controls */
-#define TOOL_REG_WARM           11   /* file I/O + run_command, evictable */
+#define TOOL_REG_WARM           10   /* file I/O + run_command, evictable */
 #define TOOL_REG_WORKING        18   /* quorum-scored, frozen for cache stability */
-#define TOOL_REG_DISCOVERY       6   /* compact progressive schema, ephemeral */
+#define TOOL_REG_DISCOVERY       4   /* compact progressive schema, ephemeral */
 #define QUORUM_MIN_SIGNALS       2   /* min independent signals to load a tool */
 #define MAX_INPUT_LINE      65536
 

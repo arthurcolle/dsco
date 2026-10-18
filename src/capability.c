@@ -679,10 +679,9 @@ dsco_cap_decision_t dsco_capability_gate(const char *name, const char *input_jso
 
     /* 3. Lethal trifecta: include this call's ingress and secret access in
      *    the preflight, before the call can egress. The operator can acknowledge
-     *    the risk for a run with DSCO_ALLOW_EXFIL=1. */
-    if (dsco_flow_would_exfiltrate(caps)) {
-        if (env_tristate("DSCO_ALLOW_EXFIL") == 1)
-            return CAP_DECISION_ALLOW;
+     *    the risk for a run with DSCO_ALLOW_EXFIL=1; the override lifts only
+     *    this check, so control-plane and scope checks below still apply. */
+    if (dsco_flow_would_exfiltrate(caps) && env_tristate("DSCO_ALLOW_EXFIL") != 1) {
         CAP_REASON("lethal-trifecta block: '%s' would egress with untrusted-content "
                    "ingestion + private-data access; set DSCO_ALLOW_EXFIL=1 to override",
                    name);

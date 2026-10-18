@@ -32463,7 +32463,14 @@ static bool tool_kill_shell(const char *input, char *result, size_t rlen) {
         jbuf_append(&mapped, "{\"action\":\"cancel\",");
         jbuf_append(&mapped, input + 1);
         bool ok = shell_jobs_execute(mapped.data, result, rlen);
-        jbuf_free(&mapped); return ok;
+        jbuf_free(&mapped);
+        /* Same success contract as the legacy in-process shell path. */
+        size_t used = strlen(result);
+        if (ok && result[0] == '{' && !strstr(result, "\"ok\":") && used + 10 < rlen) {
+            memmove(result + 10, result + 1, used);
+            memcpy(result + 1, "\"ok\":true,", 10);
+        }
+        return ok;
     }
     free(durable_id);
     char *shell_id = json_get_str(input, "shell_id");
