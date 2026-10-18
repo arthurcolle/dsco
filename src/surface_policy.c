@@ -21,7 +21,8 @@ bool surface_policy_caps(const char *name, const char *json, unsigned *caps) {
     bool browser = eq(name, "browser_session");
     bool buffer = eq(name, "buffer"), buffer_view = eq(name, "buffer_view");
     bool native_window = eq(name, "native_window");
-    if (!(kitty || kitten || surface || pty || desktop || computer || browser || buffer || buffer_view || native_window)) return false;
+    bool app_control = eq(name, "app_control");
+    if (!(kitty || kitten || surface || pty || desktop || computer || browser || buffer || buffer_view || native_window || app_control)) return false;
     char *action = json_get_str(json ? json : "{}", kitty || kitten ? "command" : "action");
     unsigned c = CAP_FS_READ;
     if (native_window) {
@@ -78,11 +79,25 @@ bool surface_policy_caps(const char *name, const char *json, unsigned *caps) {
             eq(action, "quick-access-terminal") || eq(action, "kitten"))
             c |= CAP_NET | CAP_FS_WRITE;
     } else if (computer) {
-        bool observation = eq(action, "screenshot") || eq(action, "cursor_position") || eq(action, "wait");
+        bool observation = eq(action, "screenshot") || eq(action, "zoom") ||
+                           eq(action, "cursor_position") || eq(action, "wait");
         if (!observation) c |= CAP_EXEC | CAP_NET | CAP_FS_WRITE;
-        if (eq(action, "screenshot") || (!eq(action, "cursor_position") &&
+        if (eq(action, "screenshot") || eq(action, "zoom") || (!eq(action, "cursor_position") &&
             json_get_bool(json ? json : "{}", "screenshot", true)))
             c |= CAP_SECRETS | CAP_UNTRUSTED_IN;
+    } else if (app_control) {
+        /* Accessibility text of another app is untrusted input. Window pixels
+         * may show secrets. Vision find sends those pixels to TypeSafe. */
+        if (!eq(action, "apps")) c |= CAP_UNTRUSTED_IN;
+        if (eq(action, "screenshot") || (eq(action, "observe") && json_get_bool(json ? json : "{}", "screenshot", false)))
+            c |= CAP_SECRETS;
+        const char *key = getenv("TYPESAFE_API_KEY"), *vision = getenv("DSCO_VISION_GROUND");
+        if (eq(action, "find") && json_get_bool(json ? json : "{}", "vision", true) && key && *key &&
+            !(vision && !strcmp(vision, "0")))
+            c |= CAP_SECRETS | CAP_NET;
+        if (eq(action, "press") || eq(action, "set_value") || eq(action, "focus") ||
+            eq(action, "type") || eq(action, "key") || eq(action, "menu"))
+            c |= CAP_EXEC | CAP_FS_WRITE;
     } else if (desktop) {
         if (eq(action, "snapshot")) c |= CAP_UNTRUSTED_IN;
         else if (!(eq(action, "status") || eq(action, "list") || eq(action, "inspect"))) c |= CAP_EXEC;

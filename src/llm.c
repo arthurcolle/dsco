@@ -355,7 +355,7 @@ const tool_metric_t *tool_metrics_get(tool_metrics_t *m, const char *name) {
  * Check both read and write paths so even an existing entry cannot be replayed. */
 static bool tool_cache_eligible(const char *tool, const char *input) {
     static const char *const dynamic[] = {
-        "surface", "buffer", "buffer_view", "pty_session", "desktop", "browser_session", "computer",
+        "surface", "buffer", "buffer_view", "pty_session", "desktop", "browser_session", "computer", "app_control",
         "kitty_remote", "kitten", "view_image", "browser", NULL
     };
     if (!tool || !*tool)
