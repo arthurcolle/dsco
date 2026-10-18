@@ -20,8 +20,13 @@ BUILD_DIR ?= build
 # CI-safe defaults: allow override via env for reproducible builds.
 # Newest C standard the toolchain accepts: recent Apple clang knows c2y, but
 # CI's gcc-13/clang-18 only know c23/c2x — probe once at parse time.
-DSCO_STD ?= $(shell for s in c2y c23 c2x c11; do \
+# Simply expanded so the probe runs once, not per recipe (a recursive `?=`
+# re-ran it for every compile and an intermittent probe failure under -j left
+# `-std=` empty).
+ifeq ($(origin DSCO_STD),undefined)
+DSCO_STD := $(shell for s in c2y c23 c2x c11; do \
 	if $(CC) -std=$$s -x c -c /dev/null -o /dev/null 2>/dev/null; then echo $$s; break; fi; done)
+endif
 DSCO_ARCH ?= native
 # clang/gcc reject -march=arm64 (the CI matrix passes arch names, not ISA
 # levels); arm64 targets get default codegen instead.
