@@ -111,7 +111,7 @@ int dsco_remote_cli(int argc, char **argv) {
                         "  dsco remote <peer> <command...>   run a command on <peer>\n"
                         "  dsco remote <peer>                open an interactive shell\n"
                         "  dsco fleet                        list peers + reachability\n"
-                        "\nexample: dsco remote matrix uname -a\n");
+                        "\nexample: dsco remote gpu-peer uname -a\n");
         return 2;
     }
 

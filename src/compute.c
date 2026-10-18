@@ -89,7 +89,7 @@ static char *wrap_exec_result(int code, const char *raw) {
 
 /* ══════════════════════════════════════════════════════════════════════════
  * BACKEND: "fleet"  — run a command on a ~/bridge/fleet peer over SSH
- *   config:  {"peer":"matrix"}
+ *   config:  {"peer":"gpu-peer"}
  *   invoke:  method advisory, params.cmd → {"exit":N,"stdout":"…"}
  * ══════════════════════════════════════════════════════════════════════════ */
 typedef struct {
@@ -440,7 +440,7 @@ int dsco_compute_cli(int argc, char **argv) {
                         "  dsco compute [--on KIND] [--peer PEER] [--need gpu|heavy] <task…>\n"
                         "\nexamples:\n"
                         "  dsco compute uname -a                 (local)\n"
-                        "  dsco compute --peer matrix nproc      (fleet)\n"
+                        "  dsco compute --peer gpu-peer nproc    (fleet)\n"
                         "  dsco compute --on modal '{\"x\":1}'     (serverless)\n");
         return 2;
     }

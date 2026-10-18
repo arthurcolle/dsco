@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DSCO_BIN="${DSCO_BIN:-}"
-MODAL_ENDPOINT_URL="${MODAL_ENDPOINT_URL:-https://arthurcolle--ep-agent-server.us-west.modal.direct}"
+MODAL_ENDPOINT_URL="${MODAL_ENDPOINT_URL:?set MODAL_ENDPOINT_URL to your Modal agent-server endpoint}"
 MODAL_MODEL="${MODAL_MODEL:-zai-org/GLM-5.2-FP8}"
 TOKEN_FILE="${MODAL_PROXY_TOKEN_FILE:-/tmp/modal_proxy_token.json}"
 TOOLS_API_TIMEOUT="${TOOLS_API_TIMEOUT:-20}"

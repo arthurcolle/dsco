@@ -145,7 +145,7 @@ int main(void) {
     char summary[1024], ctx_key[80];
     const char *turns =
         "We decided to build the seat_take module. The take rate is 12.5%. "
-        "The fleet has five cloud nodes. ufo is saturated at load 13. "
+        "The fleet has five cloud nodes. node-3 is saturated at load 13. "
         "We will revisit pricing next week. The weather is nice today.";
     /* trust the Noul stub: make everything keep-worthy (p=0.9) then verify
      * summary + context key + receipt are produced. */
