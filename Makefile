@@ -89,7 +89,7 @@ COSMO_TARGET ?= dsco.distributed.systems
 COSMO_LEGACY_TARGET ?= dsco.com
 COSMOCC_VERSION ?= 4.0.2
 
-SRC_NAMES = main.c worldsim.c agent.c llm.c codex_tool_bridge.c input_budget.c tools.c tool_effects.c execution_layer.c execution_kernel.c execution_events.c event_stream.c provider_events.c stream_diagnostics.c execution_recovery.c headless_accounting.c inference_cost.c json_util.c ast.c swarm.c worker_runtime.c swarm_progress.c swarm_scale.c swarm_hierarchy.c swarm_accounting.c swarm_telemetry.c machine_society.c swarm_daemon.c tui.c tui_swarm_dock.c native_window_layout.c native_windows.c native_session_details.c native_startup_card.c native_factory.c native_task_service.c native_workbench.c native_window_tool.c native_ui.c native_ui_json.c pixel_tui.c pixel_tui_perf.c pixel_fx.c pixel_hdr.c native_kinetic.c ui_motion.c kitty_graphics.c presentation_blocks.c native_table_blocks.c presentation_json.c transcript_view.c rich_text.c font_compat.c kitty_tools.c kitty_agent_windows.c process_capture.c tool_content.c tool_grounding.c surface_policy.c surface_registry.c surface_cli.c buffer_store.c buffer_view.c buffer_textedit.c buffer_cli.c ide_cli.c buffer_ui.c pty_session.c desktop_macos.c app_control.c vision_ground.c computer_screen.c browser_session.c env_config.c \
+SRC_NAMES = main.c worldsim.c agent.c llm.c codex_tool_bridge.c input_budget.c tools.c tool_effects.c execution_layer.c execution_kernel.c execution_events.c event_stream.c provider_events.c stream_diagnostics.c execution_recovery.c headless_accounting.c inference_cost.c json_util.c ast.c swarm.c worker_runtime.c swarm_progress.c swarm_scale.c swarm_hierarchy.c swarm_accounting.c swarm_telemetry.c machine_society.c swarm_daemon.c tui.c tui_swarm_dock.c native_window_layout.c native_windows.c native_session_details.c native_startup_card.c native_factory.c native_task_service.c native_workbench.c native_window_tool.c native_ui.c native_ui_json.c pixel_tui.c pixel_tui_perf.c pixel_fx.c pixel_hdr.c native_kinetic.c ui_motion.c kitty_graphics.c presentation_blocks.c native_table_blocks.c presentation_json.c transcript_view.c rich_text.c font_compat.c kitty_tools.c kitty_agent_windows.c process_capture.c tool_content.c tool_grounding.c surface_policy.c surface_registry.c surface_cli.c buffer_store.c buffer_view.c buffer_textedit.c buffer_cli.c ide_cli.c buffer_ui.c pty_session.c desktop_macos.c app_control.c vision_ground.c computer_screen.c context_mask.c browser_session.c env_config.c \
 	px_backend.c px_theme.c native_composer.c native_display.c native_masthead.c compositor_parity.c compositor_stream_bench.c native_buffer_editor.c native_trace.c native_trace_ui.c \
 	edit_diff.c code_edit.c skill_lifecycle.c fuzzy_match.c critical_stamp.c dsco_c.c config_surface.c work_result.c work_unit.c work_algebra.c work_dispatch.c execution_plan.c env_sense.c result_spill.c md.c rtf.c baseline.c chronicle.c agent_event.c callbacks.c setup.c crypto.c eval.c pipeline.c plugin.c kitty_banner.c \
 			semantic.c hlc.c ipc.c mcp.c mcp_response.c mcp_stream.c cancel_wait.c mcp_diagnostics.c mcp_server.c mcp_names.c provider_profiles.c abliteration.c provider.c provider_responses.c provider_transport.c integrations.c error.c trace.c instrumenter.c structured_process.c task_profile.c \
@@ -1357,6 +1357,12 @@ test_app_control_live: $(TARGET)
 .PHONY: test_computer_live
 test_computer_live: $(TARGET)
 	python3 tests/test_computer_live.py --binary ./$(TARGET)
+
+.PHONY: test-context-mask
+test-context-mask:
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(ASAN_UBSAN_CFLAGS) -ffunction-sections -fdata-sections $(if $(filter Darwin,$(shell uname -s)),-Xlinker -dead_strip,-Xlinker --gc-sections) -o $(BUILD_DIR)/test_context_mask tests/test_context_mask.c src/context_mask.c src/env_config.c src/llm.c src/tool_integrity_index.c src/context_archive.c src/json_util.c src/json_fast.c -lcurl -lm
+	$(BUILD_DIR)/test_context_mask
 
 test_dynamic_tool_cache:
 	@mkdir -p $(BUILD_DIR)

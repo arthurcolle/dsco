@@ -1,3 +1,4 @@
+#include "context_mask.h"
 #include "request_context.h"
 #include "compact_policy.h"
 #include "input_budget.h"
@@ -41,6 +42,25 @@ static bool archive_step(conversation_t *conv, session_state_t *session, int kee
     return json_get_bool(result, "changed", false);
 }
 
+/* Cheap first resort: mask old observations in place (no message removal, no
+ * integrity scan). keep_results < 0 masks only surplus tool screenshots. */
+static bool mask_step(conversation_t *conv, session_state_t *session, int keep_results) {
+    if (!session || !session->compact_enabled) return false;
+    context_mask_policy_t policy = context_mask_default_policy();
+    if (keep_results < 0) policy.keep_results = INT_MAX;
+    else if (keep_results < policy.keep_results) policy.keep_results = keep_results;
+    context_mask_stats_t stats;
+    if (!context_mask_observations(conv, &policy, &stats)) return false;
+    char detail[256];
+    snprintf(detail, sizeof(detail),
+             "{\"results_masked\":%d,\"images_masked\":%d,\"inputs_masked\":%d,\"store_failures\":%d,"
+             "\"bytes_before\":%zu,\"bytes_after\":%zu}",
+             stats.results_masked, stats.images_masked, stats.inputs_masked, stats.store_failures,
+             stats.bytes_before, stats.bytes_after);
+    chronicle_event("context.mask", NULL, NULL, NULL, "runtime", "mask", detail, "product_telemetry");
+    return true;
+}
+
 bool request_context_archive(conversation_t *conv, session_state_t *session, int keep) {
     bool ok;
     return archive_step(conv,session,keep,&ok);
@@ -55,6 +75,8 @@ char *request_context_build(provider_t *provider, conversation_t *conv,
     int archive_attempts = 0, archive_passes = 0;
     bool wire_target_triggered = false, archive_ok = true;
     const char *archive_stop = "pressure_satisfied";
+    bool masked_results = false;
+    mask_step(conv, session, -1); /* bound screenshots every turn */
     for (;;) {
         char *request = provider
             ? provider->build_request(provider, conv, session, max_tokens, key)
@@ -75,6 +97,13 @@ char *request_context_build(provider_t *provider, conversation_t *conv,
         bool wire_pressure = wire_target > 0 && wire > wire_target;
         wire_target_triggered |= wire_pressure;
         bool tried_archive = false;
+        if (!masked_results && (token_pressure || wire_pressure)) {
+            masked_results = true; /* one batch per request keeps the cached prefix stable */
+            if (mask_step(conv, session, INT_MAX - 1)) {
+                free(request);
+                continue;
+            }
+        }
         if (archive_ok && (token_pressure || wire_pressure) && raw <= previous && wire <= previous_wire &&
             (raw < previous || wire < previous_wire)) {
             previous = raw;
