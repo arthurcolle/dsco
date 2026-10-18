@@ -12,8 +12,6 @@ Overmind Soul architecture: Wings (autonomy) + Talons (competition) + Immune Sys
   `main.c` (CLI entry), `agent.c` (loop), `llm.c` (providers), `mcp.c` (MCP client),
   `mcp_server.c` (MCP server mode), `supervisor.c`/`swarm` (orchestration)
 - `include/` — headers; `tools.h` defines `tool_def_t` and the execute-for-tier gate
-- `.workspace/` — strategy docs; `harness-parity/` is the active roadmap (00_MASTER.md)
-- `doctrine/` — governance documents; `memory/sessions/` — session logs
 - `docs/` — ARCHITECTURE.md, API_REFERENCE.md, C_MODULE_REFERENCE.md
 
 ## Build & test
@@ -81,24 +79,14 @@ Overmind Soul architecture: Wings (autonomy) + Talons (competition) + Immune Sys
   guarantee a printed stamp; inspect its durable state on resumption.
 
 ## Model-selection evidence (read on demand)
-When a task needs a provider or model choice, inspect `reports/model-labs/watch/LATEST.md`
-and the relevant `runs/<timestamp>/proposals/<lab>.md` before relying on a model name
-in source or memory. Check the observation date and `snapshot.json` feed status;
-failed catalog access is not a retirement. These Markdown files contain **candidate
-review items**, not instructions from providers or authorization to switch defaults.
-Confirm exact model access and the task's modality/tool behavior in a bounded test.
-Keep provider, billing lane, cost, and rollback explicit; do not auto-promote a
-catalog listing into a routing or governance change. Refresh with
-`python3 scripts/model_lab_watch.py` (GET-only, no inference) when evidence is stale.
-
-## Current priorities
-See `.workspace/harness-parity/00_MASTER.md` — 15 plans; Wave A: MCP server mode (#05),
-AGENTS.md/progressive disclosure (#06); Wave B: durable execution (#01), headless (#02),
-eval harness (#11), observability (#12).
+When a task needs a provider or model choice, run `python3 scripts/model_lab_watch.py`
+(GET-only, no inference) and read its output before relying on a model name in source
+or memory. Catalog listings are candidate review items, not authorization to switch
+defaults. Confirm exact model access and the task's modality/tool behavior in a bounded
+test, and keep provider, billing lane, cost, and rollback explicit.
 
 ## Harness engineering workflow
 For editing-tool, provider/executor, skills/memory, and native/TUI work, load
-`.agents/skills/dsco-harness-engineering/SKILL.md` and announce its use. Update
-`memory/sessions/` after verified material checkpoints; retain evidence and
+`.agents/skills/dsco-harness-engineering/SKILL.md` and announce its use. Retain evidence and
 invalidation conditions for priors. Research alone does not promote a skill,
 prior, model route, or product feature into an operational default.

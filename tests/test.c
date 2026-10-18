@@ -103,8 +103,23 @@ static int tests_passed = 0;
 static int tests_failed = 0;
 static mcp_registry_t test_mcp_registry;
 
+/* Effectful tools refuse to dispatch without a durable Chronicle intent, so
+ * every test starts with the suite's isolated Chronicle running. Tests that
+ * exercise Chronicle itself stop it first and point it elsewhere. */
+static void test_suite_chronicle_ensure(void) {
+    static char root[96];
+    if (chronicle_ready()) return;
+    if (!root[0]) snprintf(root, sizeof(root), "/tmp/dsco_test_chronicle_%d", (int)getpid());
+    const char *dir = getenv("DSCO_CHRONICLE_DIR");
+    if (dir && dir[0] && strcmp(dir, root) != 0) return;
+    setenv("DSCO_CHRONICLE_DIR", root, 1);
+    (void)chronicle_start(&(chronicle_start_opts_t){.provider = "test", .model = "test",
+                                                    .mode = "test", .instance_id = "test-suite"});
+}
+
 #define TEST(name)                                                                                 \
     do {                                                                                           \
+        test_suite_chronicle_ensure();                                                             \
         tests_run++;                                                                               \
         fprintf(stderr, "  test %-40s ", name);                                                    \
     } while (0)

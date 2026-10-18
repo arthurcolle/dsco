@@ -58,7 +58,7 @@ terminal-only — the model never sees them; they migrate later.
 | Immune System | The tool-call permission gate in `tools.c` (stages G1–G10): killswitch, budget, approval, protected-file checks | **tool gate** | wired |
 | Immune surface / self-surgery | The gate's own source files, write-protected without external auth | **protected files** / **protected-file write** | wired |
 | `DSCO_IMMUNE_SURGERY_AUTH` | Env var authorizing writes to protected files; printed to the model inside denial strings | **`DSCO_PROTECTED_WRITE_AUTH`** (accept both during migration) | wired |
-| Overmind / Triad / "Overmind Soul" | 127 markdown files in `~/.dsco/workspace/doctrine/` describing a three-layer organism; quoted as scripture in headers and the system prompt | **architecture notes (historical)** — archive | fiction as an organism; the ~6 useful invariants fit on one page |
+| Overmind / Triad / "Overmind Soul" | private architecture notes describing a three-layer organism; quoted as scripture in headers and the system prompt | **architecture notes (historical)** — archive | fiction as an organism; the ~6 useful invariants fit on one page |
 | Wings / Talons (labels) | Labels sorting modules into "creative" (avian, pheromone) vs "disciplined" (ooda, killswitch) halves | drop the labels | ceremonial |
 | `wings_talons_status` (tool) | Reports gate/signal state | **`gate_status`** | wired |
 | Talons engine (`talons.c/.h`) | In-memory goal tracker: goals with priority/retries/deps, per-strategy success weights, N-way race helper | **goal tracker** | wired |
