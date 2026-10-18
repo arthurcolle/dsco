@@ -205,8 +205,27 @@ def get_provider_key(provider: str) -> Optional[str]:
 # first block is the Claude Code identity string.
 CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 ANTHROPIC_OAUTH_BETA = "oauth-2025-04-20"
-# OAuth client IDs are public identifiers; the refresh token remains secret.
-ANTHROPIC_OAUTH_CLIENT_ID = "REDACTED_OAUTH_CLIENT"  # gitleaks:allow
+# OAuth client IDs are operator-supplied (environment or ~/.dsco/oauth_clients.json,
+# override path with DSCO_OAUTH_CLIENTS_FILE); nothing is hardcoded here.
+_OAUTH_CLIENTS_FILE = Path(os.environ.get("DSCO_OAUTH_CLIENTS_FILE")
+                           or (Path.home() / ".dsco" / "oauth_clients.json"))
+
+
+def _oauth_client_value(name: str) -> Optional[str]:
+    """Resolve an OAuth client value from env, then the local JSON file. Never logged."""
+    val = os.environ.get(name)
+    if val:
+        return val
+    try:
+        data = json.loads(_OAUTH_CLIENTS_FILE.read_text())
+    except (OSError, ValueError):
+        data = {}
+    val = data.get(name) if isinstance(data, dict) else None
+    if isinstance(val, str) and val:
+        return val
+    log.warning(f"{name} is not configured; set it in the environment or "
+                f"~/.dsco/oauth_clients.json (see .env.example)")
+    return None
 
 
 def _load_claude_oauth_raw() -> Optional[dict]:
@@ -261,11 +280,14 @@ def _refresh_claude_oauth(creds: dict) -> Optional[dict]:
     refresh = creds.get("refreshToken")
     if not refresh:
         return None
+    client_id = _oauth_client_value("DSCO_CLAUDE_CODE_OAUTH_CLIENT_ID")
+    if not client_id:
+        return None
     try:
         resp = httpx.post(
             "https://console.anthropic.com/v1/oauth/token",
             json={"grant_type": "refresh_token", "refresh_token": refresh,
-                  "client_id": ANTHROPIC_OAUTH_CLIENT_ID},
+                  "client_id": client_id},
             timeout=15)
     except Exception as e:
         log.warning(f"Claude OAuth refresh error: {e}")
@@ -332,7 +354,6 @@ def anthropic_system(is_oauth: bool, system_text: str):
 # API (chatgpt.com/backend-api/codex/responses), not the public /v1 API.
 OPENAI_CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
 OPENAI_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
-OPENAI_OAUTH_CLIENT_ID = "REDACTED_OAUTH_CLIENT"
 _CODEX_AUTH_PATH = Path.home() / ".codex" / "auth.json"
 
 
@@ -365,11 +386,14 @@ def _refresh_openai_oauth(data: dict) -> Optional[dict]:
     refresh = (data.get("tokens") or {}).get("refresh_token")
     if not refresh:
         return None
+    client_id = _oauth_client_value("DSCO_CHATGPT_OAUTH_CLIENT_ID")
+    if not client_id:
+        return None
     try:
         resp = httpx.post(
             OPENAI_OAUTH_TOKEN_URL,
             json={"grant_type": "refresh_token", "refresh_token": refresh,
-                  "client_id": OPENAI_OAUTH_CLIENT_ID, "scope": "openid profile email"},
+                  "client_id": client_id, "scope": "openid profile email"},
             timeout=15)
     except Exception as e:
         log.warning(f"OpenAI OAuth refresh error: {e}")

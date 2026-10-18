@@ -18,6 +18,7 @@
 #endif
 
 #include "swarm_progress.h"
+#include "oauth_clients.h"
 #include "provider.h"
 #include "provider_transport.h"
 #include "provider_responses.h"
@@ -600,11 +601,8 @@ static void provider_build_claude_code_service_name(char *out, size_t out_len) {
     snprintf(out, out_len, "Claude Code%s-credentials%s", oauth_suffix, dir_suffix);
 }
 
-#ifdef DSCO_USE_OBF_SECRETS
-#define CLAUDE_CODE_OAUTH_CLIENT_ID dsco_secret("CLAUDE_CODE_OAUTH_CLIENT_ID")
-#else
-#define CLAUDE_CODE_OAUTH_CLIENT_ID "REDACTED_OAUTH_CLIENT"
-#endif
+/* Client id is operator-supplied: DSCO_CLAUDE_CODE_OAUTH_CLIENT_ID or
+ * ~/.dsco/oauth_clients.json (see include/oauth_clients.h). */
 #define CLAUDE_CODE_OAUTH_SCOPES                                                                   \
     "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 #define CLAUDE_CODE_OAUTH_EXPIRY_BUFFER_MS (5LL * 60LL * 1000LL)
@@ -1555,9 +1553,10 @@ static bool provider_refresh_claude_code_oauth_bundle(claude_code_oauth_bundle_t
     const char *token_url = getenv("DSCO_CLAUDE_CODE_OAUTH_TOKEN_URL");
     if (!token_url || !token_url[0])
         token_url = CLAUDE_CODE_OAUTH_TOKEN_URL;
-    const char *client_id = getenv("DSCO_CLAUDE_CODE_OAUTH_CLIENT_ID");
-    if (!client_id || !client_id[0])
-        client_id = CLAUDE_CODE_OAUTH_CLIENT_ID;
+    const char *client_id =
+        dsco_oauth_client_value("DSCO_CLAUDE_CODE_OAUTH_CLIENT_ID", "Claude Code OAuth client id");
+    if (!client_id)
+        return false;
     const char *scopes = getenv("DSCO_CLAUDE_CODE_OAUTH_SCOPES");
 
     dsco_http_global_init();

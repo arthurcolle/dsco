@@ -120,6 +120,24 @@ def resolve_ts_const_refs(items: list[str], consts: dict[str, str]) -> list[str]
     return resolved
 
 
+def configured_oauth_client(name: str) -> str:
+    """OAuth client ids are operator-supplied (env or ~/.dsco/oauth_clients.json)."""
+    import json
+    import os
+
+    val = os.environ.get(name)
+    if not val:
+        path = Path(os.environ.get("DSCO_OAUTH_CLIENTS_FILE")
+                    or Path.home() / ".dsco" / "oauth_clients.json")
+        try:
+            val = json.loads(path.read_text()).get(name)
+        except (OSError, ValueError, AttributeError):
+            val = None
+    if not val:
+        raise Drift(f"{name} is not configured (env or ~/.dsco/oauth_clients.json)")
+    return val
+
+
 def c_define_str(text: str, name: str, path: Path) -> str:
     """Extract a (possibly line-continued) C string #define's concatenated literal.
 
@@ -257,7 +275,7 @@ def main() -> int:
                 "base64 Anthropic OAuth client id",
             )
         ).decode(),
-        lambda: c_define_str(provider_c, "CLAUDE_CODE_OAUTH_CLIENT_ID", DSCO_PROVIDER_C),
+        lambda: configured_oauth_client("DSCO_CLAUDE_CODE_OAUTH_CLIENT_ID"),
     )
 
     try:

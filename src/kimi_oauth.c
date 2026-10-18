@@ -3,6 +3,7 @@
 #endif
 
 #include "kimi_oauth.h"
+#include "oauth_clients.h"
 #include "config.h"
 #include "http_pool.h"
 #include "json_util.h"
@@ -20,7 +21,6 @@
 
 #define KIMI_TOKEN_MAX 8192
 #define KIMI_REFRESH_SKEW_S 120
-#define KIMI_OAUTH_CLIENT_ID "REDACTED_OAUTH_CLIENT"
 #define KIMI_OAUTH_HOST "https://auth.kimi.com"
 
 static char g_token[KIMI_TOKEN_MAX];
@@ -260,9 +260,10 @@ static char *kimi_token_url(char *out, size_t len) {
 static char *kimi_http_refresh(const char *refresh_token) {
     if (!refresh_token || !refresh_token[0])
         return NULL;
-    const char *client_id = getenv("DSCO_KIMI_CODE_OAUTH_CLIENT_ID");
-    if (!client_id || !client_id[0])
-        client_id = KIMI_OAUTH_CLIENT_ID;
+    const char *client_id =
+        dsco_oauth_client_value("DSCO_KIMI_CODE_OAUTH_CLIENT_ID", "Kimi Code OAuth client id");
+    if (!client_id)
+        return NULL;
 
     CURL *curl = curl_easy_init();
     if (!curl)

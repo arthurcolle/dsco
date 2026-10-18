@@ -1,4 +1,5 @@
 #include "swarm_progress.h"
+#include "oauth_clients.h"
 #include "event_stream.h"
 #include "provider_events.h"
 #include "llm.h"
@@ -35,12 +36,10 @@
 
 #define CLAUDE_CODE_VERSION_FALLBACK CLAUDE_CODE_OAUTH_COMPAT_VERSION
 #ifdef DSCO_USE_OBF_SECRETS
-/* Hardened build: resolve the client-impersonation billing salt and OAuth beta
- * set from the encrypted secrets table so they never appear in __cstring. */
-#define CLAUDE_CODE_BILLING_SALT dsco_secret("CLAUDE_CODE_BILLING_SALT")
+/* Hardened build: resolve the OAuth beta set from the encrypted secrets
+ * table so it never appears in __cstring. */
 #define CLAUDE_CODE_OAUTH_BETAS  dsco_secret("CLAUDE_CODE_OAUTH_BETAS")
 #else
-#define CLAUDE_CODE_BILLING_SALT "REDACTED_BILLING_SALT"
 #define CLAUDE_CODE_OAUTH_BETAS                                                                 \
     "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,"                  \
     "thinking-token-count-2026-05-13,context-management-2025-06-27,"                          \
@@ -3423,9 +3422,16 @@ static void build_claude_code_billing_header(conversation_t *c, char *out, size_
     }
     sampled[3] = '\0';
 
+    /* The billing salt is operator-supplied (DSCO_CLAUDE_CODE_BILLING_SALT or
+     * ~/.dsco/oauth_clients.json); without it no billing header is emitted. */
+    const char *billing_salt =
+        dsco_oauth_client_value("DSCO_CLAUDE_CODE_BILLING_SALT", "Claude Code billing salt");
+    if (!billing_salt)
+        return;
+
     const char *version = claude_code_version();
-    char fingerprint_input[128];
-    snprintf(fingerprint_input, sizeof(fingerprint_input), "%s%s%s", CLAUDE_CODE_BILLING_SALT,
+    char fingerprint_input[DSCO_OAUTH_CLIENT_VALUE_MAX + 128];
+    snprintf(fingerprint_input, sizeof(fingerprint_input), "%s%s%s", billing_salt,
              sampled, version);
     char version_hex[65];
     sha256_hex((const uint8_t *)fingerprint_input, strlen(fingerprint_input), version_hex);

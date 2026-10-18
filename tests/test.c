@@ -2054,7 +2054,7 @@ static void test_build_request_ex_for_credential_includes_billing_header(void) {
     char *hdr = strstr(req, "x-anthropic-billing-header");
     char *prompt = strstr(req, prompt_prefix);
     ASSERT(hdr != NULL, "billing header should be present");
-    ASSERT(strstr(req, "cc_version=2.1.37.0d9;") != NULL,
+    ASSERT(strstr(req, "cc_version=2.1.37.ad4;") != NULL,
            "billing header should include deterministic cc_version");
     ASSERT(strstr(req, "cch=fa690;") != NULL,
            "billing header should include cch from first user message");
@@ -25730,6 +25730,12 @@ static void test_swarm_task_efforts_are_independent(void) {
 int main(void) {
     fprintf(stderr, "\n\033[1m\033[36mdsco test suite — MAGNUM COQ EDITION\033[0m\n\n");
     setenv("DSCO_DISABLE_CLAUDE_CODE_OAUTH_DISCOVERY", "1", 1);
+    /* OAuth client values are operator-supplied; pin synthetic ones so the
+     * billing-header fixtures are deterministic and need no private config. */
+    setenv("DSCO_CLAUDE_CODE_BILLING_SALT", "dsco-test-salt", 1);
+    setenv("DSCO_CLAUDE_CODE_OAUTH_CLIENT_ID", "test-claude-code-client", 1);
+    setenv("DSCO_CHATGPT_OAUTH_CLIENT_ID", "test-chatgpt-client", 1);
+    setenv("DSCO_KIMI_CODE_OAUTH_CLIENT_ID", "test-kimi-client", 1);
     /* Ambient Claude Code OAuth credentials leak into provider-routing tests
      * and flip credential-expectation assertions. Scrub both token forms. */
     unsetenv("CLAUDE_CODE_OAUTH_TOKEN");

@@ -1,5 +1,6 @@
 /* Native ChatGPT-subscription OAuth (Codex-compatible PKCE flow). */
 #include "openai_oauth.h"
+#include "oauth_clients.h"
 #include "http_pool.h"
 
 #include "crypto.h"
@@ -25,12 +26,8 @@
 #define OAI_OAUTH_ISSUER       "https://auth.openai.com"
 #define OAI_OAUTH_AUTHORIZE    "https://auth.openai.com/oauth/authorize"
 #define OAI_OAUTH_TOKEN_URL    "https://auth.openai.com/oauth/token"
-#ifdef DSCO_USE_OBF_SECRETS
-const char *dsco_secret(const char *key); /* impl: src/embedded_data.c */
-#define OAI_OAUTH_CLIENT_ID    dsco_secret("OAI_OAUTH_CLIENT_ID")
-#else
-#define OAI_OAUTH_CLIENT_ID    "REDACTED_OAUTH_CLIENT"
-#endif
+/* Client id is operator-supplied: DSCO_CHATGPT_OAUTH_CLIENT_ID or
+ * ~/.dsco/oauth_clients.json (see include/oauth_clients.h). */
 #define OAI_OAUTH_REDIRECT     "http://localhost:1455/auth/callback"
 #define OAI_OAUTH_PORT         1455
 #define OAI_OAUTH_SCOPE        "openid profile email offline_access"
@@ -387,7 +384,10 @@ bool openai_oauth_refresh(openai_oauth_bundle_t *bundle) {
         return false;
     if (bundle->source == OPENAI_OAUTH_SOURCE_ENV)
         return false;
-    const char *client_id = oai_env("DSCO_CHATGPT_OAUTH_CLIENT_ID", OAI_OAUTH_CLIENT_ID);
+    const char *client_id =
+        dsco_oauth_client_value("DSCO_CHATGPT_OAUTH_CLIENT_ID", "ChatGPT OAuth client id");
+    if (!client_id)
+        return false;
     const char *token_url = oai_env("DSCO_CHATGPT_OAUTH_TOKEN_URL", OAI_OAUTH_TOKEN_URL);
 
     CURL *esc = curl_easy_init();
@@ -587,7 +587,10 @@ static char *oai_wait_for_callback(int listen_fd, char *state_out, size_t state_
 }
 
 int openai_oauth_login(void) {
-    const char *client_id = oai_env("DSCO_CHATGPT_OAUTH_CLIENT_ID", OAI_OAUTH_CLIENT_ID);
+    const char *client_id =
+        dsco_oauth_client_value("DSCO_CHATGPT_OAUTH_CLIENT_ID", "ChatGPT OAuth client id");
+    if (!client_id)
+        return 1;
     const char *authorize = oai_env("DSCO_CHATGPT_OAUTH_AUTHORIZE_URL", OAI_OAUTH_AUTHORIZE);
     const char *token_url = oai_env("DSCO_CHATGPT_OAUTH_TOKEN_URL", OAI_OAUTH_TOKEN_URL);
 

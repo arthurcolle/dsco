@@ -264,3 +264,6 @@ include/lingo_chimera.gen.h
 # Packaged zip duplicates of committed docs bundles
 /docs/*.zip
 image_index.sqlite3
+
+# operator-supplied OAuth client values (never commit)
+oauth_clients.json
