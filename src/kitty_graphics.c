@@ -10,6 +10,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -292,40 +293,63 @@ bool kitty_graphics_known_unsupported(void) {
  * (kitty, ghostty, wezterm, konsole, iTerm2 ≥ 3.6, …) acknowledge the APC
  * with `_G…;OK` before answering DA1; everything answers DA1, so a DA1 reply
  * without the acknowledgement is a definitive "no" rather than a timeout.
- * The result is cached for the process — the tty's identity cannot change. */
+ * Conclusive results are cached for the most recently probed TTY. */
 #define KITTY_PROBE_IMAGE_ID 0x4B505251u /* "KPRQ" */
 #define KITTY_PROBE_TIMEOUT_MS 400
 
+/* Require a complete, exact acknowledgement. An unrelated APC, an image ID
+ * with the same decimal prefix, or a separate ;OK must not select a backend. */
+static bool kitty_probe_ack(const char *buf) {
+    char expected[64];
+    snprintf(expected, sizeof(expected), "\033_Gi=%u;OK\033\\",
+             KITTY_PROBE_IMAGE_ID);
+    return strstr(buf, expected) != NULL;
+}
+
+static bool kitty_probe_da1(const char *buf) {
+    for (const char *p = buf; (p = strstr(p, "\033[?")); p++) {
+        const char *end = p + 3;
+        for (; isdigit((unsigned char)*end) || *end == ';'; end++) {}
+        if (end > p + 3 && *end == 'c') return true;
+    }
+    return false;
+}
+
 static int kitty_probe_run(FILE *out) {
     int wfd = fileno(out);
-    if (wfd < 0 || !isatty(wfd)) return 0;
+    if (wfd < 0 || !isatty(wfd)) return -1;
 
-    /* Replies arrive on terminal input, which may not be `out`. */
-    int rfd = open("/dev/tty", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
-    bool close_rfd = rfd >= 0;
-    if (rfd < 0) {
-        if (!isatty(STDIN_FILENO)) return 0;
-        rfd = STDIN_FILENO;
+    /* The response belongs to the TTY we wrote to, not necessarily the
+     * process's controlling TTY or stdin. Open it separately for polling. */
+    char path[1024];
+    if (ttyname_r(wfd, path, sizeof(path)) != 0) return -1;
+    int rfd = open(path, O_RDONLY | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+    if (rfd < 0) return -1;
+    struct stat input, output;
+    if (fstat(rfd, &input) != 0 || fstat(wfd, &output) != 0 ||
+        input.st_dev != output.st_dev || input.st_ino != output.st_ino ||
+        input.st_rdev != output.st_rdev) {
+        close(rfd);
+        return -1;
     }
 
     struct termios saved, raw;
-    bool restore = tcgetattr(rfd, &saved) == 0;
-    if (restore) {
-        raw = saved;
-        raw.c_lflag &= (tcflag_t)~(ICANON | ECHO);
-        raw.c_cc[VMIN] = 0;
-        raw.c_cc[VTIME] = 0;
-        tcsetattr(rfd, TCSANOW, &raw);
+    if (tcgetattr(rfd, &saved) != 0) {
+        close(rfd);
+        return -1;
+    }
+    raw = saved;
+    raw.c_lflag &= (tcflag_t)~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 0;
+    raw.c_cc[VTIME] = 0;
+    if (tcsetattr(rfd, TCSANOW, &raw) != 0) {
+        close(rfd);
+        return -1;
     }
 
-    /* Only probe once no-echo raw mode is actually engaged. Without it the
-     * terminal echoes the DA1 reply straight to the screen as literal
-     * "^[[?64;…c" — worse than skipping the probe entirely (we fall back to
-     * the environment hint). */
-    int result = 0;
-    if (restore && kitty_graphics_emit_query(out, KITTY_PROBE_IMAGE_ID) &&
-        fflush(out) == 0) {
-        char buf[512];
+    int result = -1;
+    if (kitty_graphics_emit_query(out, KITTY_PROBE_IMAGE_ID) && fflush(out) == 0) {
+        char buf[512] = {0};
         size_t len = 0;
         int elapsed = 0;
         while (elapsed < KITTY_PROBE_TIMEOUT_MS && len < sizeof(buf) - 1) {
@@ -339,40 +363,41 @@ static int kitty_probe_run(FILE *out) {
             if (n <= 0) continue;
             len += (size_t)n;
             buf[len] = '\0';
-            char idtag[32];
-            snprintf(idtag, sizeof(idtag), "i=%u", KITTY_PROBE_IMAGE_ID);
-            const char *apc = strstr(buf, "\033_G");
-            if (apc && strstr(apc, idtag) && strstr(apc, ";OK"))
-                result = 1;
-            /* DA1 closes the handshake either way. Keep draining until it
-             * arrives even after the APC acknowledgement: breaking early
-             * restores echo while the DA1 reply is still in flight, and it
-             * then leaks into the session as literal "^[[?64;…c" input. */
-            const char *da1 = strstr(buf, "\033[?");
-            if (da1 && strchr(da1, 'c')) break;
+            /* Drain through DA1 even after the graphics reply so replies
+             * don't leak as echoed terminal input when we restore mode. */
+            if (kitty_probe_da1(buf)) {
+                result = kitty_probe_ack(buf) ? 1 : 0;
+                break;
+            }
         }
+        if (result < 0 && kitty_probe_ack(buf)) result = 1;
     }
 
-    if (restore) {
-        /* Discard any reply tail that arrived but wasn't consumed (e.g. a DA1
-         * delayed behind a terminal modal dialog past the timeout). TCSAFLUSH
-         * + TCIFLUSH ensures it can't leak once echo is restored. */
-        tcsetattr(rfd, TCSAFLUSH, &saved);
-        tcflush(rfd, TCIFLUSH);
-    }
-    if (close_rfd) close(rfd);
+    tcsetattr(rfd, TCSAFLUSH, &saved);
+    close(rfd);
     return result;
 }
 
 bool kitty_graphics_probe(FILE *out) {
+    static struct stat cached_tty;
     static int cached = -1;
-    if (cached < 0) {
-        if (env_false("DSCO_KITTY_PROBE"))
-            cached = 0;
-        else
-            cached = kitty_probe_run(out);
+    struct stat tty;
+    if (!out || env_false("DSCO_KITTY_PROBE") ||
+        !isatty(fileno(out)) || fstat(fileno(out), &tty) != 0) return false;
+    if (cached >= 0 && tty.st_dev == cached_tty.st_dev &&
+        tty.st_ino == cached_tty.st_ino && tty.st_rdev == cached_tty.st_rdev)
+        return cached == 1;
+    int result = kitty_probe_run(out);
+    if (result >= 0) {
+        cached = result;
+        cached_tty = tty;
     }
-    return cached == 1;
+    return result == 1;
+}
+
+bool kitty_graphics_probe_requested(void) {
+    const char *probe = getenv("DSCO_KITTY_PROBE");
+    return env_true("DSCO_KITTY_PROBE") || (probe && !strcasecmp(probe, "force"));
 }
 
 bool kitty_graphics_available(FILE *out) {
@@ -389,8 +414,7 @@ bool kitty_graphics_available(FILE *out) {
      * leak), that reply lands on the screen as garbage. Probing is only safe
      * and only useful on terminals that might answer; skip it where we
      * already know the answer is no. DSCO_KITTY_PROBE=force overrides. */
-    if (!env_true("DSCO_KITTY_PROBE") &&
-        kitty_graphics_known_unsupported())
+    if (!kitty_graphics_probe_requested() && kitty_graphics_known_unsupported())
         return false;
     return kitty_graphics_probe(out);
 }

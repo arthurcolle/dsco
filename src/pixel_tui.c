@@ -5629,13 +5629,15 @@ bool pixel_tui_available(FILE *out) {
      * Piped input must keep the cell/line path even if stderr is a Kitty TTY.
      * An explicit preference wins over auto selection. Auto uses only a
      * positive graphics-host hint, avoiding an unsolicited probe on unknown
-     * terminals; explicit --native/DSCO_PIXEL_TUI=1 may use the normal probe. */
+     * terminals; explicit --native/DSCO_PIXEL_TUI=1 may use the normal probe. An
+     * explicitly requested probe has the same meaning for both surfaces. */
     if (!isatty(STDIN_FILENO) || env_false("DSCO_PIXEL_TUI"))
         return false;
     const char *mode = getenv("DSCO_PIXEL_TUI");
     if (mode && *mode && !env_true("DSCO_PIXEL_TUI") && strcasecmp(mode, "auto"))
         return false;
-    if (!env_true("DSCO_PIXEL_TUI") && !kitty_graphics_environment_hint())
+    if (!env_true("DSCO_PIXEL_TUI") && !kitty_graphics_environment_hint() &&
+        !kitty_graphics_probe_requested())
         return false;
     return kitty_graphics_available(out);
 }
