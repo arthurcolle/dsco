@@ -70,10 +70,12 @@ bool kitty_graphics_select_frame(FILE *out, uint32_t image_id,
 bool kitty_graphics_environment_hint(void);
 
 /* Active handshake on the tty behind `out`: sends the graphics query paired
- * with DA1 and reads the acknowledgement, so terminals absent from the env
- * allowlist (iTerm2 ≥ 3.6, konsole, …) are detected by proof rather than by
- * name. Result is cached per process. DSCO_KITTY_PROBE=0 disables. */
+ * with DA1 and reads the acknowledgement so unlisted terminals can be detected by proof.
+ * Conclusive results are cached by TTY. DSCO_KITTY_PROBE=0 disables. */
 bool kitty_graphics_probe(FILE *out);
+
+/* True when the operator explicitly opted into active probing. */
+bool kitty_graphics_probe_requested(void);
 
 /* Env hint, or — when the hint is silent on an interactive tty — the active
  * probe. DSCO_KITTY_GRAPHICS=0 forces false, =1/force forces true. */

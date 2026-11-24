@@ -228,7 +228,21 @@ static void test_environment_hint(void) {
     else unsetenv("KITTY_WINDOW_ID");
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    /* The Python PTY test supplies independent terminal endpoints. */
+    if (argc > 1) {
+        FILE *not_tty = tmpfile();
+        if (!not_tty || kitty_graphics_probe(not_tty)) return 2;
+        fclose(not_tty);
+        for (int i = 1; i < argc; i++) {
+            FILE *tty = fopen(argv[i], "w");
+            if (!tty) return 2;
+            printf("%d\n", kitty_graphics_available(tty));
+            fflush(stdout);
+            fclose(tty);
+        }
+        return 0;
+    }
     test_lengths();
     test_chunk_framing();
     test_query();
