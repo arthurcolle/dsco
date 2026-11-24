@@ -2453,7 +2453,7 @@ Function-like declarations: 0
 
 ## `kitty_graphics.h`
 
-Function-like declarations: 11
+Function-like declarations: 12
 
 ### Declarations
 
@@ -2464,6 +2464,7 @@ Function-like declarations: 11
 - `bool kitty_graphics_select_frame(FILE *out, uint32_t image_id, uint32_t frame, kitty_graphics_send_stats_t *stats);`
 - `bool kitty_graphics_environment_hint(void);`
 - `bool kitty_graphics_probe(FILE *out);`
+- `bool kitty_graphics_probe_requested(void);`
 - `bool kitty_graphics_available(FILE *out);`
 - `bool kitty_graphics_known_unsupported(void);`
 - `bool kitty_graphics_emit_query(FILE *out, uint32_t image_id);`
